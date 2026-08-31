@@ -1,0 +1,67 @@
+/**
+ * Safe environment lookup for API keys and configurations
+ */
+export function getEnv(key: string, fallback?: string): string | undefined {
+  if (typeof process !== "undefined" && process.env && process.env[key]) {
+    return process.env[key];
+  }
+  if (typeof globalThis !== "undefined" && (globalThis as any)[key]) {
+    return (globalThis as any)[key];
+  }
+  return fallback;
+}
+
+export type ProviderEnv = Record<string, string>;
+
+export function getApiKey(provider: string, explicitKey?: string, env?: ProviderEnv): string | undefined {
+  if (explicitKey) return explicitKey;
+  // ProviderEnv override takes precedence (pi inspiration, SDK-light)
+  if (env) {
+    const upper = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+    if (env[upper]) return env[upper];
+    // google aliases
+    if (provider.toLowerCase().startsWith("google") || provider.toLowerCase() === "gemini") {
+      if (env["GEMINI_API_KEY"]) return env["GEMINI_API_KEY"];
+      if (env["GOOGLE_API_KEY"]) return env["GOOGLE_API_KEY"];
+    }
+  }
+
+  switch (provider.toLowerCase()) {
+    case "google":
+    case "gemini":
+      return (
+        getEnv("GEMINI_API_KEY") ||
+        getEnv("GOOGLE_API_KEY") ||
+        getEnv("GOOGLE_GENAI_API_KEY")
+      );
+    case "opencode":
+    case "opencode-zen":
+    case "opencode-go":
+      return (
+        getEnv("OPENCODE_API_KEY") ||
+        getEnv("OPENCODE_ZEN_API_KEY") ||
+        getEnv("OPENCODE_GO_API_KEY")
+      );
+    case "openrouter":
+      return getEnv("OPENROUTER_API_KEY");
+    case "openai":
+      return getEnv("OPENAI_API_KEY");
+    case "anthropic":
+      return getEnv("ANTHROPIC_API_KEY");
+    default:
+      return getEnv(`${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`);
+  }
+}
+
+export function getProviderEnvValue(key: string, env?: ProviderEnv): string | undefined {
+  if (env && env[key]) return env[key];
+  return getEnv(key);
+}
+
+export function getModel(fallback = "google/gemini-3.6-flash"): string {
+  return getEnv("MODEL") || getEnv("MODEL_NAME") || fallback;
+}
+
+export function getSubModel(fallback?: string): string | undefined {
+  return getEnv("SUB_AGENT_MODEL") || fallback;
+}

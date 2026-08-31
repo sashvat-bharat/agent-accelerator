@@ -1,0 +1,24 @@
+{
+  "name": "agent-accelerator",
+  "version": "1.0.0",
+  "description": "Lightweight, high-performance TypeScript SDK providing a unified AI provider layer with complete JSON data exposure and prompt caching optimization.",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test/"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.0"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

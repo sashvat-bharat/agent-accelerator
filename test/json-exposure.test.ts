@@ -1,0 +1,70 @@
+import { describe, it, expect } from "bun:test";
+import { AgentResponse } from "../src/index.ts";
+
+describe("Complete JSON Data Exposure", () => {
+  it("should expose all request, response, usage, and execution details in JSON", () => {
+    const response = new AgentResponse({
+      text: "The weather in Delhi is Sunny and 21°C.",
+      thinking: "User asked for weather in Delhi. Called get_weather.",
+      thoughtSignature: "sig_abc_123",
+      toolCalls: [
+        {
+          id: "call_1",
+          name: "get_weather",
+          arguments: { city: "Delhi" },
+        },
+      ],
+      toolResults: [
+        {
+          id: "call_1",
+          name: "get_weather",
+          result: { city: "Delhi", temperature: 21, condition: "Sunny" },
+          durationMs: 42,
+        },
+      ],
+      usage: {
+        inputTokens: 120,
+        outputTokens: 35,
+        totalTokens: 155,
+        cachedTokens: 80,
+        cacheReadTokens: 80,
+        thinkingTokens: 15,
+      },
+      responseId: "resp_998877",
+      model: "gemini-3.5-flash-lite",
+      provider: "google",
+      finishReason: "STOP",
+      durationMs: 350,
+      raw: {
+        request: {
+          url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: { contents: [] },
+        },
+        response: {
+          status: 200,
+          statusText: "OK",
+          headers: { "content-type": "application/json" },
+          body: { candidates: [] },
+        },
+      },
+      turns: 2,
+    });
+
+    const json = response.toJSON();
+
+    expect(json.text).toBe("The weather in Delhi is Sunny and 21°C.");
+    expect(json.thinking).toBe("User asked for weather in Delhi. Called get_weather.");
+    expect(json.thoughtSignature).toBe("sig_abc_123");
+    expect(json.toolCalls?.length).toBe(1);
+    expect(json.toolResults?.length).toBe(1);
+    expect(json.usage.cachedTokens).toBe(80);
+    expect(json.usage.thinkingTokens).toBe(15);
+    expect(json.model).toBe("gemini-3.5-flash-lite");
+    expect(json.provider).toBe("google");
+    expect(json.raw.request.url).toContain("generativelanguage.googleapis.com");
+    expect(json.raw.response?.status).toBe(200);
+    expect(json.turns).toBe(2);
+  });
+});
