@@ -137,6 +137,26 @@ function renderFooter(): string {
   return `\x1b[35m${renderFooterStats()}  •  ${agent.modelStringOrSpec}\x1b[0m`;
 }
 
+function saveSessionForResume() {
+  try {
+    const file = path.join(process.cwd(), ".session.json");
+    const data = {
+      sessionId: agent.sessionId,
+      model: agent.modelStringOrSpec,
+      subAgentModel: agent.subagentModel,
+      thinkingLevel: (agent as any).thinkingConfig?.level,
+      cache: agent.cacheConfig,
+      serviceTier: agent.serviceTier,
+      headers: agent.customHeaders,
+      cachedContentId: (agent.context as any).cachedContentId,
+      context: { systemPrompt: agent.context.systemPrompt, messages: agent.context.messages, thoughtSignatures: (agent.context as any).thoughtSignatures },
+      totals,
+    };
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+  } catch {}
+}
+
 // ---------- Chat loop ----------
 async function main() {
   console.log(`\x1b[1mAgent Accelerator — Interactive Chat + SubAgents\x1b[0m`);
@@ -205,6 +225,7 @@ async function main() {
 
       const result = await stream.result();
       updateTotals(result.usage);
+      saveSessionForResume();
       // Single purple line, non-repeating — like pi but condensed: stats + model once
       const thinkingPart = (agent as any).thinkingConfig?.level ? ` • ${(agent as any).thinkingConfig.level}` : "";
       const singleLine = `${renderFooterStats()}  •  ${result.provider}/${result.model}${thinkingPart}  ${result.durationMs}ms  ${result.finishReason || ""}`;
@@ -216,6 +237,7 @@ async function main() {
     }
   } finally {
     rl.close();
+    saveSessionForResume();
     // Final raw summary like multi_agent does
     console.log("\n===============================================================================");
     console.log("  SESSION SUMMARY (RAW JSON)");
