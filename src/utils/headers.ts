@@ -9,16 +9,16 @@ function clampSessionId(key?: string): string | undefined {
   return chars.slice(0, OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH).join("");
 }
 
-function getPiUserAgent(): string {
+function getAgentAccelUserAgent(): string {
   try {
-    // match pi's pi-user-agent.ts: pi (platform release; arch)
+    // match agent-accel's agent-accel-user-agent.ts: agent-accel (platform release; arch)
     // use node:os if available, else fallback
     const os = (globalThis as any).process?.getBuiltinModule?.("node:os") ?? null;
     if (os) {
-      return `pi (${os.platform()} ${os.release()}; ${os.arch()})`;
+      return `agent-accel (${os.platform()} ${os.release()}; ${os.arch()})`;
     }
   } catch {}
-  return "pi (linux; x64)";
+  return "agent-accel (linux; x64)";
 }
 
 export function buildSessionHeaders(
@@ -37,26 +37,26 @@ export function buildSessionHeaders(
 
   if (sessionId) {
     if (provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") {
-      // pi's provider-attribution.ts: getSessionHeaders for opencode → x-opencode-session + x-opencode-client: pi
-      // Keep x-session-id for backward compat (test expects it) — opencode accepts both, pi only needs x-opencode-session
+      // agent-accel's provider-attribution.ts: getSessionHeaders for opencode → x-opencode-session + x-opencode-client: agent-accel
+      // Keep x-session-id for backward compat (test expects it) — opencode accepts both, agent-accel only needs x-opencode-session
       headers["x-opencode-session"] = sessionId;
       headers["x-session-id"] = sessionId;
-      headers["x-opencode-client"] = "pi";
-      headers["User-Agent"] = getPiUserAgent();
+      headers["x-opencode-client"] = "agent-accel";
+      headers["User-Agent"] = getAgentAccelUserAgent();
     } else if (provider === "openrouter") {
       headers["x-session-id"] = sessionId;
-      headers["HTTP-Referer"] = "https://agent-accelerator.dev";
+      headers["HTTP-Referer"] = "https://sashvat.com";
       headers["X-Title"] = "Agent Accelerator";
     } else {
       headers["x-session-id"] = sessionId;
     }
   }
 
-  // pi also sets x-opencode-client via getPiUserAgent for opencode — ensure it persists even without sessionId
+  // agent-accel also sets x-opencode-client via getAgentAccelUserAgent for opencode — ensure it persists even without sessionId
   if ((provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") && !headers["x-opencode-client"]) {
-    // Even without sessionId, pi still advertises client for attribution (helps opencode allow free models)
-    headers["x-opencode-client"] = "pi";
-    headers["User-Agent"] = getPiUserAgent();
+    // Even without sessionId, agent-accel still advertises client for attribution (helps opencode allow free models)
+    headers["x-opencode-client"] = "agent-accel";
+    headers["User-Agent"] = getAgentAccelUserAgent();
   }
 
   return headers;

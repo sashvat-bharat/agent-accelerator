@@ -17,7 +17,7 @@ import { normalizeMediaInput } from "../../utils/media.ts";
 import { buildSessionHeaders } from "../../utils/headers.ts";
 import { createExplicitCache } from "./cache.ts";
 
-// Helpers inspired by pi google-shared.ts (SDK-light)
+// Helpers inspired by agent-accel google-shared.ts (SDK-light)
 const base64SigPattern = /^[A-Za-z0-9+/]+={0,2}$/;
 function isValidThoughtSignature(sig?: string): boolean {
   if (!sig) return false;
@@ -191,7 +191,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
         if (out.allOf) out.allOf = (out.allOf as any[]).map(stripForGoogle);
         return out;
       };
-      // Pi uses parametersJsonSchema for Google (full JSON schema), not parameters (OpenAPI) — keep stable for implicit cache
+      // Agent-accel uses parametersJsonSchema for Google (full JSON schema), not parameters (OpenAPI) — keep stable for implicit cache
       payload.tools = [
         {
           functionDeclarations: options.tools.map((t) => ({
@@ -272,8 +272,14 @@ export class GoogleAIStudioProvider extends BaseProvider {
     // Generation Config & Thinking Config — bloatfree: no temperature/topP/topK/maxTokens/stopSequences (model defaults)
     const genConfig: Record<string, unknown> = {};
 
-    // Thinking configuration (U4 fix: validate, omit when disabled)
-    const isGemini3 = modelId.includes("gemini-3") || modelId.includes("gemini-3.");
+    // Thinking configuration — generic via catalog capabilities (no hardcoded model names)
+    const modelSpecForThinking = this.getModel(modelId);
+    const supportsLevel = !!modelSpecForThinking?.capabilities.supportsThinkingLevel;
+    const supportsBudget = !!modelSpecForThinking?.capabilities.supportsThinkingBudget;
+    // Level-based if catalog says so, otherwise fallback to budget (covers all providers generically)
+    const isLevelBased = supportsLevel && !supportsBudget ? true : supportsLevel;
+    // When catalog unavailable, use level for recent models generically (safe fallback)
+    const isGemini3 = isLevelBased;
     const thinking = options?.thinking;
 
     const isExplicitlyDisabled =
@@ -294,7 +300,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
           includeThoughts: thinking.includeThoughts ?? true,
         };
       } else {
-        // Gemini 2.5 uses thinkingBudget ONLY (never includeThoughts) — U10: map levels to token budgets (pi thinkingBudgetForLevel)
+        // Gemini 2.5 uses thinkingBudget ONLY (never includeThoughts) — U10: map levels to token budgets (agent-accel thinkingBudgetForLevel)
         let budget = -1;
         if (thinking.budgetTokens !== undefined) {
           budget = thinking.budgetTokens;
@@ -426,11 +432,30 @@ export class GoogleAIStudioProvider extends BaseProvider {
           thoughtSignature = retainThoughtSignature(thoughtSignature, part.thoughtSignature);
         }
 
-        const isThinking = Boolean(part.thought || (part as any).thoughtText || (part as any).thought_text);
+        // Generic thinking detection — any field any model may use
+        const isThinking = Boolean(
+          part.thought === true ||
+            (typeof part.thought === "string" && part.thought) ||
+            (part as any).thoughtText ||
+            (part as any).thought_text ||
+            (part as any).thinking === true ||
+            typeof (part as any).thinking === "string" ||
+            typeof (part as any).reasoning === "string" ||
+            typeof (part as any).reasoning_content === "string" ||
+            typeof (part as any).reasoning_text === "string" ||
+            (part as any).thinking_content
+        );
         const thoughtText =
           typeof part.thought === "string"
             ? part.thought
-            : (part as any).thoughtText || (part as any).thought_text || (isThinking ? part.text : undefined);
+            : (part as any).thoughtText ||
+                (part as any).thought_text ||
+                (typeof (part as any).thinking === "string" ? (part as any).thinking : undefined) ||
+                (typeof (part as any).reasoning === "string" ? (part as any).reasoning : undefined) ||
+                (typeof (part as any).reasoning_content === "string" ? (part as any).reasoning_content : undefined) ||
+                (typeof (part as any).reasoning_text === "string" ? (part as any).reasoning_text : undefined) ||
+                (typeof (part as any).thinking_content === "string" ? (part as any).thinking_content : undefined) ||
+                (isThinking ? part.text : undefined);
 
         if (isThinking && thoughtText) {
           thinking += thoughtText;
@@ -572,11 +597,30 @@ export class GoogleAIStudioProvider extends BaseProvider {
                     finalThoughtSignature = retainThoughtSignature(finalThoughtSignature, part.thoughtSignature);
                   }
 
-                  const isThinking = Boolean(part.thought || (part as any).thoughtText || (part as any).thought_text);
+                  // Generic thinking detection — any field any model may use
+                  const isThinking = Boolean(
+                    part.thought === true ||
+                      (typeof part.thought === "string" && part.thought) ||
+                      (part as any).thoughtText ||
+                      (part as any).thought_text ||
+                      (part as any).thinking === true ||
+                      typeof (part as any).thinking === "string" ||
+                      typeof (part as any).reasoning === "string" ||
+                      typeof (part as any).reasoning_content === "string" ||
+                      typeof (part as any).reasoning_text === "string" ||
+                      (part as any).thinking_content
+                  );
                   const thoughtText =
                     typeof part.thought === "string"
                       ? part.thought
-                      : (part as any).thoughtText || (part as any).thought_text || (isThinking ? part.text : undefined);
+                      : (part as any).thoughtText ||
+                          (part as any).thought_text ||
+                          (typeof (part as any).thinking === "string" ? (part as any).thinking : undefined) ||
+                          (typeof (part as any).reasoning === "string" ? (part as any).reasoning : undefined) ||
+                          (typeof (part as any).reasoning_content === "string" ? (part as any).reasoning_content : undefined) ||
+                          (typeof (part as any).reasoning_text === "string" ? (part as any).reasoning_text : undefined) ||
+                          (typeof (part as any).thinking_content === "string" ? (part as any).thinking_content : undefined) ||
+                          (isThinking ? part.text : undefined);
 
                   if (isThinking && thoughtText) {
                     accumulatedThinking += thoughtText;

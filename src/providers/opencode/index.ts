@@ -107,7 +107,7 @@ export class OpenCodeProvider extends BaseProvider {
       }));
       if (options.toolChoice) (payload as any).tool_choice = options.toolChoice;
     }
-    // pi: prompt_cache_key + retention for openai-responses opencode
+    // agent-accel: prompt_cache_key + retention for openai-responses opencode
     const retention = options?.cache?.retention;
     const sessionId = options?.sessionId || options?.cache?.sessionId;
     if (sessionId && retention) {
@@ -426,7 +426,16 @@ export class OpenCodeProvider extends BaseProvider {
       const choice = responseJson.choices?.[0];
       const message = choice?.message;
       text = message?.content || "";
-      thinking = message?.reasoning_content || message?.reasoning || message?.reasoning_text || undefined;
+      // Generic thinking — any field any model may use
+      if (typeof message?.reasoning === "string" && message.reasoning) thinking = message.reasoning;
+      else if (typeof message?.reasoning_content === "string" && message.reasoning_content) thinking = message.reasoning_content;
+      else if (typeof message?.reasoning_text === "string" && message.reasoning_text) thinking = message.reasoning_text;
+      else if (typeof (message as any)?.thinking === "string" && (message as any).thinking) thinking = (message as any).thinking;
+      else if (typeof (message as any)?.thought === "string" && (message as any).thought) thinking = (message as any).thought;
+      else if (Array.isArray((message as any)?.reasoning_details)) {
+        const parts = (message as any).reasoning_details.map((r: any) => r.text || r.content || "").filter(Boolean);
+        if (parts.length) thinking = parts.join("");
+      }
       if (message?.tool_calls && Array.isArray(message.tool_calls)) {
         for (const tc of message.tool_calls) {
           let args = {};
@@ -563,7 +572,7 @@ export class OpenCodeProvider extends BaseProvider {
                 finalResponseId = chunkJson.id;
               }
 
-              // Handle openai-responses streaming — generic (pi uses response.output_text.delta etc.)
+              // Handle openai-responses streaming — generic (agent-accel uses response.output_text.delta etc.)
               if (chunkJson.type === "response.output_text.delta") {
                 const textDelta = typeof chunkJson.delta === "string" ? chunkJson.delta : chunkJson.delta?.text || "";
                 if (textDelta) {
@@ -651,8 +660,18 @@ export class OpenCodeProvider extends BaseProvider {
 
               const delta = choice?.delta;
               if (delta) {
-                const thinkingDelta =
-                  delta.reasoning_content || delta.reasoning || delta.reasoning_text;
+                // Thinking — 100% generic (any field any model may use)
+                let thinkingDelta: string | undefined;
+                if (typeof delta.reasoning === "string" && delta.reasoning) thinkingDelta = delta.reasoning;
+                else if (typeof delta.reasoning_content === "string" && delta.reasoning_content) thinkingDelta = delta.reasoning_content;
+                else if (typeof delta.reasoning_text === "string" && delta.reasoning_text) thinkingDelta = delta.reasoning_text;
+                else if (typeof (delta as any).thinking === "string" && (delta as any).thinking) thinkingDelta = (delta as any).thinking;
+                else if (typeof (delta as any).thought === "string" && (delta as any).thought) thinkingDelta = (delta as any).thought;
+                else if (typeof (delta as any).thinking_content === "string" && (delta as any).thinking_content) thinkingDelta = (delta as any).thinking_content;
+                else if (Array.isArray((delta as any).reasoning_details)) {
+                  const parts = (delta as any).reasoning_details.map((r: any) => r.text || r.content || "").filter(Boolean);
+                  if (parts.length) thinkingDelta = parts.join("");
+                }
                 if (thinkingDelta) {
                   accumulatedThinking += thinkingDelta;
                   eventStream.push({

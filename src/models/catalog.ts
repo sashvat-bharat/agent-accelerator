@@ -135,7 +135,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
     }
   }
 
-  // Global fallback — iterate all providers (for unprefixed like "gemini-3.5-flash")
+  // Global fallback — iterate all providers (for unprefixed model ids)
   for (const [p, providerData] of Object.entries(catalogData as any)) {
     const models = (providerData as any).models;
     if (!models) continue;
@@ -165,8 +165,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
 
 // ---------------------------------------------------------------------------
 // Battle-tested helpers for total context length & co.
-// Opencode total context length is limit.context (e.g. hy3-free: 190000)
-// Google gemini-3.5-flash: 1048576, etc.
+// Total context length is limit.context via catalog (generic, no hardcoded ids)
 // ---------------------------------------------------------------------------
 export function getContextWindow(provider: string, modelId: string, fallback = 128000): number {
   const spec = getModelFromCatalog(provider, modelId);

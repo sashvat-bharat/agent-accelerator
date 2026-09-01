@@ -177,7 +177,21 @@ export class Agent {
   ): Promise<AgentResponse> & AssistantMessageEventStream {
     const isStream = options?.stream === true;
     if (isStream) {
-      return this.stream(prompt, options) as any;
+      const hasCallbacks = !!(options?.onDelta || options?.onThinkingDelta || options?.onEvent);
+      const s = this.stream(prompt, options) as any;
+      if (hasCallbacks) {
+        // Make `await agent.run(..., {stream:true, onDelta})` resolve to final response
+        // while still streaming via callbacks. The returned value stays iterable/on-able.
+        const resultPromise = s.result();
+        const hybrid: any = resultPromise;
+        hybrid[Symbol.asyncIterator] = s[Symbol.asyncIterator].bind(s);
+        hybrid.on = s.on.bind(s);
+        hybrid.off = s.off.bind(s);
+        hybrid.result = s.result.bind(s);
+        // also expose push/end/fail for compat, though not needed by caller
+        return hybrid;
+      }
+      return s;
     }
 
     const resolved = resolveModel(this.modelStringOrSpec);
@@ -222,6 +236,12 @@ export class Agent {
 
     if (isStream) {
       const stream = this.stream(prompt, runOpts);
+      // If callbacks are used, proxy them through string stream as well
+      if (runOpts.onDelta || runOpts.onThinkingDelta || runOpts.onEvent) {
+        if (runOpts.onEvent) stream.on("*", runOpts.onEvent as any);
+        if (runOpts.onDelta) stream.on("text_delta", (e: any) => runOpts.onDelta!(e.delta!, e));
+        if (runOpts.onThinkingDelta) stream.on("thinking_delta", (e: any) => runOpts.onThinkingDelta!(e.thinkingDelta!, e));
+      }
       const stringStream: any = {
         [Symbol.asyncIterator]: async function* () {
           for await (const chunk of stream) {
@@ -233,6 +253,10 @@ export class Agent {
         result: () => stream.result(),
         on: (evt: string, fn: any) => stream.on(evt, fn),
       };
+      // Make await work (resolves to AgentResponse)
+      const resultPromise = stream.result();
+      (stringStream as any).then = (res: any, rej: any) => resultPromise.then(res, rej);
+      (stringStream as any).catch = (rej: any) => resultPromise.catch(rej);
       return stringStream;
     }
 
@@ -267,7 +291,61 @@ export class Agent {
       maxTurns: this.maxTurns,
     };
 
-    return streamAgentLoop(loopConfig);
+    const s = streamAgentLoop(loopConfig);
+    // Wire one-liner callbacks so `stream:true` + onDelta is enough — no manual for-await needed
+    if (options?.wrapThinking) {
+      // Auto-wrap reasoning as <think>\n...\n</think>\n\n — no manual isThinking needed
+      let started = false;
+      let ended = false;
+      const userOnThinking = options.onThinkingDelta;
+      const userOnDelta = options.onDelta;
+      const userOnEvent = options.onEvent;
+      if (userOnEvent) s.on("*", userOnEvent as any);
+      if (userOnThinking || userOnDelta) {
+        s.on("thinking_delta", (e: any) => {
+          if (!started) {
+            started = true;
+            const tag = "<think>\n";
+            if (userOnThinking) userOnThinking(tag, e);
+            else if (userOnDelta) userOnDelta(tag, e as any);
+          }
+          if (userOnThinking) userOnThinking(e.thinkingDelta!, e);
+          else if (userOnDelta) userOnDelta(e.thinkingDelta!, e as any);
+        });
+        s.on("text_delta", (e: any) => {
+          if (started && !ended) {
+            ended = true;
+            const close = "\n</think>\n\n";
+            if (userOnThinking) userOnThinking(close, e);
+            else if (userOnDelta) userOnDelta(close, e as any);
+          }
+          if (userOnDelta) userOnDelta(e.delta!, e);
+          else if (userOnThinking) userOnThinking(e.delta!, e as any);
+        });
+        s.on("done", () => {
+          if (started && !ended) {
+            ended = true;
+            const close = "\n</think>\n\n";
+            if (userOnThinking) userOnThinking(close, { type: "done" } as any);
+            else if (userOnDelta) userOnDelta(close, { type: "done" } as any);
+          }
+        });
+      } else {
+        // No callbacks but wrapThinking true — still emit tags as events for manual iteration
+        s.on("thinking_delta", (e: any) => {
+          if (!started) { started = true; s.push({ type: "thinking_delta", thinkingDelta: "<think>\n" } as any); }
+        });
+        s.on("text_delta", (e: any) => {
+          if (started && !ended) { ended = true; s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any); }
+        });
+        if (userOnEvent) s.on("*", userOnEvent as any);
+      }
+    } else {
+      if (options?.onEvent) s.on("*", options.onEvent as any);
+      if (options?.onDelta) s.on("text_delta", (e: any) => options.onDelta!(e.delta!, e));
+      if (options?.onThinkingDelta) s.on("thinking_delta", (e: any) => options.onThinkingDelta!(e.thinkingDelta!, e));
+    }
+    return s;
   }
 }
 

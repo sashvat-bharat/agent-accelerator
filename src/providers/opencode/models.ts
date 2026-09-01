@@ -3,13 +3,13 @@ import { getModelsForProvider } from "../../models/catalog.ts";
 
 /**
  * @deprecated Hardcoded fallback — battle-tested source is models.dev catalog.
- * Opencode total context length now from catalog limit.context (e.g. hy3-free: 190000, via getModelFromCatalog).
+ * Total context length now from catalog limit.context via getModelFromCatalog.
  */
 const FALLBACK: ModelSpec[] = [
   {
-    id: "hy3-free",
+    id: "default-free",
     provider: "opencode",
-    name: "OpenCode HY3 Free",
+    name: "Default Free",
     contextWindow: 128000,
     maxOutputTokens: 8192,
     limit: { context: 190000, output: 64000 },
@@ -24,9 +24,9 @@ const FALLBACK: ModelSpec[] = [
     },
   },
   {
-    id: "glm-5.2",
+    id: "default-model",
     provider: "opencode",
-    name: "GLM 5.2",
+    name: "Default Model",
     contextWindow: 128000,
     maxOutputTokens: 8192,
     limit: { context: 128000, output: 8192 },

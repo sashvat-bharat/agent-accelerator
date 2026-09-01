@@ -1,6 +1,6 @@
 /**
  * Battle-tested cache helper — single source for 80-90% hit rate
- * Based on pi: openai-prompt-cache.ts + applyAnthropicCacheControl
+ * Based on agent-accel: openai-prompt-cache.ts + applyAnthropicCacheControl
  * - First turn already cache-optimized: system + tools + first user get cache_control
  * - Stable sessionId (64 clamp) + prompt_cache_key ensures affinity
  * - 4 breakpoint cap (Anthropic limit)

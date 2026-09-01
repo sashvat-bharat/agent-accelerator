@@ -53,7 +53,7 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
 
 /**
  * Recursively removes $schema/$defs/definitions but preserves additionalProperties when explicitly set (S4 fix)
- * S10: resolves $ref against $defs before stripping (pi typebox-helpers inline)
+ * S10: resolves $ref against $defs before stripping (agent-accel typebox-helpers inline)
  */
 export function cleanJsonSchema(schema: any, rootDefs?: Record<string, any>): Record<string, unknown> {
   if (typeof schema !== "object" || schema === null) {

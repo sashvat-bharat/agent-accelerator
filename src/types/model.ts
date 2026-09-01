@@ -113,7 +113,7 @@ export interface ModelSpec {
   name: string;
   description?: string;
   family?: string;
-  api?: string; // pi-style: openai-completions | openai-responses | anthropic-messages | google-generative-ai etc.
+  api?: string; // agent-accel-style: openai-completions | openai-responses | anthropic-messages | google-generative-ai etc.
   /** @deprecated alias for limit.context */
   contextWindow: number;
   /** @deprecated alias for limit.output */

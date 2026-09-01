@@ -2,25 +2,30 @@ import { Agent, tool, z } from "agent-accelerator";
 
 const get_status = tool({
   name: "get_status",
-  description: "Checks user authentication status in database.",
-  input: z.object({username: z.string()}),
-  execute: async ({ username }) => {
-    if (username === "Akshat Dwivedi") {
-      return "Valid username. Welcome to Home, Sir!";
-    }
-    return "Invalid username";
-  },
+  description: "Check user authentication status.",
+  input: z.object({ username: z.string() }),
+  execute: async ({ username }) => username === "Akshat Dwivedi"
+    ? "Valid username. Welcome home, Sir!"
+    : "Invalid username",
 });
 
 const agent = new Agent({
-  name: "Authentication Agent",
-  instructions: "You are a precise function-calling assistant. When asked to verify users, call get_status.",
+  name: "Auth Agent",
+  instructions: "Verify users via get_status. Be concise.",
   model: process.env.MODEL,
-  tools: {get_status},
-  ThinkingLevel: "low",
+  tools: { get_status },
+  ThinkingLevel: "medium",
 });
 
-const response = await agent.ask("Check the status for username: Akshat Dwivedi");
-console.log("Response:", response.text);
-console.log("Tool Calls:", response.toolCalls);
-console.log("Usage:", response.usage);
+console.log("→ Checking Akshat Dwivedi...\n");
+
+const response = await agent.run("Check status for username: Akshat Dwivedi", {
+  stream: true,
+  wrapThinking: true,
+  onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
+  onDelta: (d) => process.stdout.write(d),
+});
+
+console.log("\n" + "─".repeat(40));
+console.log(`Tool: ${response.toolResults?.[0]?.name} → ${JSON.stringify(response.toolResults?.[0]?.result)}`);
+console.log(`Duration: ${response.durationMs}ms • Tokens: ↑${response.usage.inputTokens} ↓${response.usage.outputTokens}`);

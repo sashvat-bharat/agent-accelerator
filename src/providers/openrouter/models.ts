@@ -6,9 +6,9 @@ import { getModelsForProvider } from "../../models/catalog.ts";
  */
 const FALLBACK: ModelSpec[] = [
   {
-    id: "z-ai/glm-5.2:free",
+    id: "example/scope-model:free",
     provider: "openrouter",
-    name: "GLM 5.2 (Free)",
+    name: "Example Scope Model (Free)",
     contextWindow: 128000,
     maxOutputTokens: 8192,
     limit: { context: 256000, output: 230400 },

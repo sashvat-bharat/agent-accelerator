@@ -36,4 +36,12 @@ export interface AgentRunOptions {
   sessionId?: string;
   additionalContext?: string;
   headers?: Record<string, string>;
+  /** Called for each text delta as it streams (only when stream:true). */
+  onDelta?: (delta: string, event: import("./response.ts").StreamEvent) => void;
+  /** Called for each thinking/reasoning delta (only when stream:true). */
+  onThinkingDelta?: (delta: string, event: import("./response.ts").StreamEvent) => void;
+  /** Called for every stream event (text_delta, thinking_delta, tool_call_complete, subagent_complete, etc.). */
+  onEvent?: (event: import("./response.ts").StreamEvent) => void;
+  /** When true, wraps reasoning stream as <think>\n...\n</think>\n\n — no manual isThinking needed. */
+  wrapThinking?: boolean;
 }

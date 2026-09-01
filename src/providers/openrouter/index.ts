@@ -158,8 +158,12 @@ export class OpenRouterProvider extends BaseProvider {
       }
     }
 
-    // Reasoning / Thinking support
+    // Reasoning / Thinking — catalog-aware (toggle vs effort)
     if (options?.thinking?.enabled !== false && options?.thinking?.level && options.thinking.level !== "none") {
+      const spec = this.getModel(modelId);
+      const caps = spec?.capabilities;
+      const hasToggle = !!caps?.supportsReasoningToggle;
+      const hasEffort = !!caps?.supportsReasoningEffort;
       const level = options.thinking.level;
       const effort =
         level === "minimal" || level === "low"
@@ -167,9 +171,16 @@ export class OpenRouterProvider extends BaseProvider {
           : level === "medium" || level === "dynamic"
           ? "medium"
           : "high";
-      payload.reasoning = {
-        effort,
-      };
+      if (hasToggle && !hasEffort) {
+        // models with toggle-only reasoning (reasoning_options: [{type:"toggle"}]) — use enabled:true
+        payload.reasoning = { enabled: true } as any;
+        // OpenRouter also accepts exclude:false to force reasoning channel
+        (payload as any).include_reasoning = true;
+      } else if (hasEffort || !spec) {
+        payload.reasoning = { effort } as any;
+      } else if (caps?.supportsThinking) {
+        payload.reasoning = { effort } as any;
+      }
     }
 
     // ServiceTier — bloatfree DX6: only flex|priority (standard is default)
@@ -282,11 +293,17 @@ export class OpenRouterProvider extends BaseProvider {
     const choice = responseJson.choices?.[0];
     const message = choice?.message;
     const text = message?.content || "";
-    const thinking =
-      message?.reasoning ||
-      message?.reasoning_content ||
-      message?.reasoning_text ||
-      undefined;
+    // Generic thinking extraction — any field any model may use
+    let thinking: string | undefined;
+    if (typeof message?.reasoning === "string" && message.reasoning) thinking = message.reasoning;
+    else if (typeof message?.reasoning_content === "string" && message.reasoning_content) thinking = message.reasoning_content;
+    else if (typeof message?.reasoning_text === "string" && message.reasoning_text) thinking = message.reasoning_text;
+    else if (typeof (message as any)?.thinking === "string" && (message as any).thinking) thinking = (message as any).thinking;
+    else if (typeof (message as any)?.thought === "string" && (message as any).thought) thinking = (message as any).thought;
+    else if (Array.isArray((message as any)?.reasoning_details)) {
+      const parts = (message as any).reasoning_details.map((r: any) => r.text || r.content || "").filter(Boolean);
+      if (parts.length) thinking = parts.join("");
+    }
 
     const toolCalls: ToolCallRecord[] = [];
     if (message?.tool_calls && Array.isArray(message.tool_calls)) {
@@ -415,9 +432,18 @@ export class OpenRouterProvider extends BaseProvider {
 
               const delta = choice?.delta;
               if (delta) {
-                // Thinking / Reasoning delta
-                const thinkingDelta =
-                  delta.reasoning || delta.reasoning_content || delta.reasoning_text;
+                // Thinking / Reasoning delta — 100% generic (any model may use any field)
+                let thinkingDelta: string | undefined;
+                if (typeof delta.reasoning === "string" && delta.reasoning) thinkingDelta = delta.reasoning;
+                else if (typeof delta.reasoning_content === "string" && delta.reasoning_content) thinkingDelta = delta.reasoning_content;
+                else if (typeof delta.reasoning_text === "string" && delta.reasoning_text) thinkingDelta = delta.reasoning_text;
+                else if (typeof (delta as any).thinking === "string" && (delta as any).thinking) thinkingDelta = (delta as any).thinking;
+                else if (typeof (delta as any).thought === "string" && (delta as any).thought) thinkingDelta = (delta as any).thought;
+                else if (typeof (delta as any).thinking_content === "string" && (delta as any).thinking_content) thinkingDelta = (delta as any).thinking_content;
+                else if (Array.isArray((delta as any).reasoning_details)) {
+                  const parts = (delta as any).reasoning_details.map((r: any) => r.text || r.content || r.data || "").filter(Boolean);
+                  if (parts.length) thinkingDelta = parts.join("");
+                }
                 if (thinkingDelta) {
                   accumulatedThinking += thinkingDelta;
                   eventStream.push({

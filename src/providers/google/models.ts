@@ -3,14 +3,14 @@ import { getModelsForProvider } from "../../models/catalog.ts";
 
 /**
  * @deprecated Hardcoded fallback — battle-tested source is models.dev catalog.
- * This export is now a dynamic view: if catalog has google models, use it; else fallback.
- * Total context length comes from catalog limit.context (e.g. gemini-3.5-flash: 1048576).
+ * This export is now a dynamic view: if catalog has provider models, use it; else fallback.
+ * Total context length comes from catalog limit.context.
  */
 const FALLBACK: ModelSpec[] = [
   {
-    id: "gemini-3.5-flash",
+    id: "default-flash",
     provider: "google",
-    name: "Gemini 3.5 Flash",
+    name: "Default Flash",
     contextWindow: 1048576,
     maxOutputTokens: 65536,
     limit: { context: 1048576, output: 65536 },
@@ -29,9 +29,9 @@ const FALLBACK: ModelSpec[] = [
     pricing: { inputPerMillion: 0.1, outputPerMillion: 0.4, cacheReadPerMillion: 0.025 },
   },
   {
-    id: "gemini-3.5-flash-lite",
+    id: "default-flash-lite",
     provider: "google",
-    name: "Gemini 3.5 Flash Lite",
+    name: "Default Flash Lite",
     contextWindow: 1048576,
     maxOutputTokens: 65536,
     limit: { context: 1048576, output: 65536 },

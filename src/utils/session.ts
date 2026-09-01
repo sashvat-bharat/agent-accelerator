@@ -8,7 +8,7 @@ function clampSessionId(id: string): string {
 }
 
 /**
- * Creates or formats a unique session ID for prompt caching affinity (clamped to 64 chars like pi)
+ * Creates or formats a unique session ID for prompt caching affinity (clamped to 64 chars like agent-accel)
  */
 export function createSessionId(prefix = "accel"): string {
   let id: string;

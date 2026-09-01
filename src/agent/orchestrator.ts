@@ -10,7 +10,7 @@ export interface DynamicSubagentTask {
   role?: string;
   instructions: string;
   task: string;
-  /** Optional per-subagent model override; if omitted inherits parent SubAgentModel (pi parity). */
+  /** Optional per-subagent model override; if omitted inherits parent SubAgentModel (agent-accel parity). */
   model?: string;
 }
 
@@ -98,7 +98,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             model: z
               .string()
               .optional()
-              .describe("Optional model override for this sub-agent (e.g. google/gemini-3.5-flash). If omitted inherits parent SubAgentModel"),
+              .describe("Optional model override for this sub-agent (e.g. google/model-id). If omitted inherits parent SubAgentModel"),
           })
         )
         .describe("Array of sub-agents to spawn — each gets a personalized prompt, inherits parent SubAgentModel if model not specified"),
@@ -129,7 +129,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           seenNames.add(deduped);
           const subagentName = deduped;
 
-          // Resolve model — per-task model optional, else inherit SubAgentModel (pi parity)
+          // Resolve model — per-task model optional, else inherit SubAgentModel (agent-accel parity)
           const parentModelStrRaw: any = (parentAgent.subagentModel as any) || (parentAgent.modelStringOrSpec as any);
           const parentModelStr = typeof parentModelStrRaw === "string" ? parentModelStrRaw : (parentModelStrRaw?.model ?? parentModelStrRaw?.id ?? String(parentModelStrRaw));
           let chosenModel: any = (t as any).model || parentModelStr;

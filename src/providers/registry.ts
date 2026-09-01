@@ -45,7 +45,7 @@ export interface ResolvedModel {
 }
 
 /**
- * Resolves a model string (e.g. "google/gemini-3.5-flash-lite", "opencode-zen/hy3-free", "openrouter/...")
+ * Resolves a model string (e.g. "google/model-id", "opencode/model-id", "openrouter/scope/model:variant")
  * or ModelSpec into provider instance and model ID
  * Now uses models.dev catalog (src/data/models.dev.json) as single source of truth for
  * context-length, pricing, thinking levels, modalities etc. — whatever model user passes is validated here.
@@ -104,7 +104,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
       const spec = p.getModel(remainingModel) || tryCatalogLookup("openrouter", remainingModel);
       return { provider: p, modelId: remainingModel, modelSpec: spec as ModelSpec };
     }
-    // For scoped OpenRouter models like "z-ai/glm-5.2:free" without openrouter prefix,
+    // For scoped OpenRouter models like "scope/model:variant" without openrouter prefix,
     if (parts.length === 2 && modelStr.includes(":")) {
       const p = getProvider("openrouter");
       const spec = p.getModel(modelStr) || tryCatalogLookup("openrouter", modelStr);
@@ -126,7 +126,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
   }
 
   // Fallback to openrouter (keeps SDK lightweight, not per-model hardcoded — catalog is source of truth)
-  // Note: gemini-*, hy3, etc. are handled by catalog lookup above, not manual ifs (generic)
+  // Note: all models are handled by catalog lookup above, not manual ifs (generic)
   const p = getProvider("openrouter");
   return { provider: p, modelId: modelStr, modelSpec: p.getModel(modelStr) };
 }

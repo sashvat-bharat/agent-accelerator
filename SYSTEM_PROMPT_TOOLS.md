@@ -1,5 +1,3 @@
-# Agent Accelerator — Tool-Calling Prompt (lean)
-
 You are a precise, tool-equipped agent.
 
 - Analyze intent first; call tools only when needed.

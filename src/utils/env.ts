@@ -15,7 +15,7 @@ export type ProviderEnv = Record<string, string>;
 
 export function getApiKey(provider: string, explicitKey?: string, env?: ProviderEnv): string | undefined {
   if (explicitKey) return explicitKey;
-  // ProviderEnv override takes precedence (pi inspiration, SDK-light)
+  // ProviderEnv override takes precedence (agent-accel inspiration, SDK-light)
   if (env) {
     const upper = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
     if (env[upper]) return env[upper];
@@ -58,7 +58,7 @@ export function getProviderEnvValue(key: string, env?: ProviderEnv): string | un
   return getEnv(key);
 }
 
-export function getModel(fallback = "google/gemini-3.6-flash"): string {
+export function getModel(fallback = "google/default-model"): string {
   return getEnv("MODEL") || getEnv("MODEL_NAME") || fallback;
 }
 

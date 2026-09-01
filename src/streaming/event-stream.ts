@@ -32,7 +32,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     if (event.type === "error") {
       this.error = (event.error instanceof Error ? event.error : new Error(String(event.error))) ?? new Error("Unknown error in stream");
       // Reject final result but don't finish iterator yet — let iterators receive error event then fail
-      // Still deliver error event to listeners/consumers before marking finished? Keep consistent with pi: error terminates stream
+      // Still deliver error event to listeners/consumers before marking finished? Keep consistent with agent-accel: error terminates stream
       try { this.rejectFinalResult(this.error); } catch {}
     }
 
