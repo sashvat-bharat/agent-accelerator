@@ -2,7 +2,8 @@
 node_modules
 
 references/
-*.session.json
+*.json
+*.jsonl
 
 # output
 out

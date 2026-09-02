@@ -11,6 +11,7 @@ import { runAgentLoop, streamAgentLoop } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
 import { tool } from "../tools/tool.ts";
+import { validateModelThinking } from "../models/catalog.ts";
 
 export class Agent {
   readonly name: string;
@@ -195,6 +196,10 @@ export class Agent {
     }
 
     const resolved = resolveModel(this.modelStringOrSpec);
+    const effectiveLevel = (options as any)?.ThinkingLevel || (options as any)?.thinkingLevel || this.thinkingConfig?.level;
+    if (effectiveLevel) {
+      validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
+    }
     this.prepareTurn(prompt, options);
 
     const providerOptions = {
@@ -268,6 +273,10 @@ export class Agent {
     options?: AgentRunOptions
   ): AssistantMessageEventStream {
     const resolved = resolveModel(this.modelStringOrSpec);
+    const effectiveLevel = (options as any)?.ThinkingLevel || (options as any)?.thinkingLevel || this.thinkingConfig?.level;
+    if (effectiveLevel) {
+      validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
+    }
     this.prepareTurn(prompt, options);
 
     const providerOptions = {
@@ -352,10 +361,25 @@ export class Agent {
 export function normalizeThinking(config: AgentConfig): ThinkingConfig | undefined {
   // DX4: only ThinkingLevel flag, values: none, dynamic, minimal, low, medium, high, xhigh
   const rawLevel = (config as any).ThinkingLevel ?? (config as any).thinkingLevel ?? (config as any).thinking_level;
-  // Also support legacy raw?.level for internal migration but type only exposes ThinkingLevel
   const level = rawLevel as ThinkingLevel | undefined;
 
   if (!level) return undefined;
+
+  // Validate model thinking from catalog if model is configured
+  if (config.model) {
+    try {
+      const rawModel: any = (config.model as any)?.model ? (config.model as any).model : config.model;
+      const modelStr = typeof rawModel === "string" ? rawModel : rawModel?.id || "";
+      const provStr = typeof rawModel === "object" && rawModel?.provider ? rawModel.provider : modelStr.includes("/") ? modelStr.split("/")[0] : "";
+      const actualModelId = modelStr.includes("/") ? modelStr.split("/").slice(1).join("/") : modelStr;
+      if (actualModelId) {
+        validateModelThinking(provStr || "opencode", actualModelId, level);
+      }
+    } catch (e) {
+      throw e;
+    }
+  }
+
   if (level === "none") {
     return { enabled: false, level: "none", budgetTokens: 0 };
   }

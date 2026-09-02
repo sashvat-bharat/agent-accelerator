@@ -1,12 +1,11 @@
 /**
- * Unified Chat — interactive + session-persistent (merged from session-chat.ts)
- *  ↑ = input  ↓ = output  R = cacheRead  CH = hit%  pct%/window (auto)
+ * Unified Chat — interactive + session-persistent (JSONL, merged from session-chat.ts)
+ *  ↑ = input  ↓ = output  CR = cacheRead  CW = cacheWrite  CH = hit%  pct%/window (auto)
  *  Works cross-provider (google / opencode / openrouter) — same Agent code.
- *  - Resumes .session.json if exists (or SESSION_ID / --session-file)
- *  - Proves cache is header-based (x-opencode-session / x-session-id)
+ *  File is JSONL like demo-session.jsonl — every turn is one line, not daunting.
  *
  *  Run: bun run examples/chat.ts
- *  Also: bun run examples/chat.ts --session-file ./my.json
+ *  Also: bun run examples/chat.ts --session-file ./my.jsonl
  *        SESSION_ID=accel-... bun run examples/chat.ts
  */
 
@@ -16,16 +15,19 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "agent-accelerator";
 import { getProvider } from "agent-accelerator";
-import { getContextWindow as getCatalogContextWindow } from "../src/models/catalog.ts";
+import { getContextWindow as getCatalogContextWindow, getModelThinkingInfo, validateModelThinking } from "../src/models/catalog.ts";
 import { buildSessionHeaders } from "../src/utils/headers.ts";
 
-// ---------- Session file handling (merged from session-chat.ts) ----------
-const DEFAULT_SESSION_FILE = path.join(process.cwd(), ".session.json");
+// ---------- Session file handling — JSONL (like demo-session.jsonl) ----------
+const DEFAULT_SESSION_FILE = path.join(process.cwd(), ".session.jsonl");
 const ENV_SESSION_FILE = process.env.SESSION_FILE ?? process.env.SESSION_PATH;
 const ARG_SESSION_FILE =
   process.argv.find((a) => a.startsWith("--session-file="))?.split("=")[1] ??
   (process.argv.includes("--session-file") ? process.argv[process.argv.indexOf("--session-file") + 1] : undefined);
 const SESSION_FILE = ARG_SESSION_FILE ?? ENV_SESSION_FILE ?? DEFAULT_SESSION_FILE;
+
+// Legacy .session.json still supported for reading
+const LEGACY_FILE = path.join(process.cwd(), ".session.json");
 
 type PersistedSession = {
   sessionId: string;
@@ -52,26 +54,65 @@ function loadSession(): PersistedSession | null {
       headers: process.env.SESSION_HEADERS ? JSON.parse(process.env.SESSION_HEADERS) : undefined,
     };
   }
-  if (fs.existsSync(SESSION_FILE)) {
+
+  // Try JSONL first, then legacy JSON
+  const tryFile = (file: string): PersistedSession | null => {
+    if (!fs.existsSync(file)) return null;
     try {
-      const data = JSON.parse(fs.readFileSync(SESSION_FILE, "utf8")) as PersistedSession;
-      console.log(`\x1b[90m→ Resumed ${SESSION_FILE} (${data.sessionId.slice(0, 16)}… — ${data.context?.messages?.length ?? 0} msgs) → cache hit expected\x1b[0m`);
-      try {
-        const h = buildSessionHeaders(
-          data.model?.startsWith("google") ? "google" : data.model?.startsWith("openrouter") ? "openrouter" : "opencode",
-          data.cache as any, data.headers, data.sessionId
-        );
-        console.log(`\x1b[90m  headers: ${JSON.stringify(h)}\x1b[0m`);
-        if (data.cachedContentId) console.log(`\x1b[90m  cachedContentId: ${data.cachedContentId}\x1b[0m`);
-      } catch {}
-      return data;
+      const raw = fs.readFileSync(file, "utf8");
+      // JSONL detection: multiple lines starting with {"type":
+      if (raw.trim().startsWith('{"type"')) {
+        const lines = raw.split("\n").filter(Boolean);
+        let sessionId = "";
+        let model = "";
+        let subAgentModel: string | undefined;
+        let thinkingLevel: string | undefined;
+        let cache: any;
+        let serviceTier: string | undefined;
+        let headers: any;
+        let cachedContentId: string | undefined;
+        let systemPrompt: string | undefined;
+        const messages: any[] = [];
+        let totals: any;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === "session") {
+              sessionId = obj.id ?? obj.sessionId ?? sessionId;
+              model = obj.model ?? model;
+              subAgentModel = obj.subAgentModel ?? subAgentModel;
+              thinkingLevel = obj.thinkingLevel ?? thinkingLevel;
+              cache = obj.cache ?? cache;
+              serviceTier = obj.serviceTier ?? serviceTier;
+              headers = obj.headers ?? headers;
+              cachedContentId = obj.cachedContentId ?? cachedContentId;
+            } else if (obj.type === "model_change") { model = obj.modelId ?? obj.model ?? model; }
+            else if (obj.type === "thinking_level_change") { thinkingLevel = obj.thinkingLevel; }
+            else if (obj.type === "message") { if (obj.message) messages.push(obj.message); }
+            else if (obj.type === "totals") { totals = obj.totals ?? obj; cachedContentId = obj.cachedContentId ?? cachedContentId; cache = obj.cache ?? cache; }
+            else if (obj.type === "context") { if (obj.systemPrompt) systemPrompt = obj.systemPrompt; if (Array.isArray(obj.messages)) messages.push(...obj.messages); }
+          } catch {}
+        }
+        // Fallback: if no type:message lines but file is single JSON object
+        if (messages.length === 0) {
+          try { const single = JSON.parse(raw); if (single.context?.messages) return single as PersistedSession; } catch {}
+        }
+        if (!sessionId && messages.length === 0) return null;
+        console.log(`\x1b[90m→ Resumed ${file} (${sessionId.slice(0, 16)}… — ${messages.length} msgs) → cache hit expected\x1b[0m`);
+        return { sessionId: sessionId || `accel-${Date.now()}`, model: model || process.env.MODEL!, subAgentModel, thinkingLevel, cache, serviceTier, headers, cachedContentId, context: { systemPrompt, messages }, totals };
+      } else {
+        // Legacy single JSON
+        const data = JSON.parse(raw) as PersistedSession;
+        console.log(`\x1b[90m→ Resumed ${file} (${data.sessionId.slice(0, 16)}… — ${data.context?.messages?.length ?? 0} msgs) → cache hit expected\x1b[0m`);
+        return data;
+      }
     } catch (e) {
-      console.log(`\x1b[90m→ Failed to load ${SESSION_FILE}: ${e} — starting fresh\x1b[0m`);
+      console.log(`\x1b[90m→ Failed to load ${file}: ${e} — starting fresh\x1b[0m`);
+      return null;
     }
-  } else {
-    console.log(`\x1b[90m→ No session at ${SESSION_FILE} — starting fresh\x1b[0m`);
-  }
-  return null;
+  };
+
+  return tryFile(SESSION_FILE) ?? tryFile(LEGACY_FILE) ?? (() => { console.log(`\x1b[90m→ No session at ${SESSION_FILE} — starting fresh\x1b[0m`); return null; })();
 }
 
 function loadPrompt(): string {
@@ -92,13 +133,37 @@ const formatContextWindow = formatTokens;
 
 // ---------- Load & create agent (with resume) ----------
 const saved = loadSession();
+const resolvedModelName = saved?.model ?? process.env.MODEL ?? "opencode/model-id";
+const initialProv = (resolvedModelName.includes("/") ? resolvedModelName.split("/")[0] : "opencode") || "opencode";
+const initialModelId = (resolvedModelName.includes("/") ? resolvedModelName.split("/").slice(1).join("/") : resolvedModelName) || resolvedModelName;
+const initialModelInfo = getModelThinkingInfo(initialProv, initialModelId);
+
+let initialThinkingLevel: string = (saved?.thinkingLevel as any) ?? (process.env.THINKING_LEVEL as any);
+
+if (!initialThinkingLevel) {
+  if (initialModelInfo.supportsThinking && !initialModelInfo.supportsDisable) {
+    initialThinkingLevel = initialModelInfo.allowedLevels[0] || "low";
+  } else {
+    initialThinkingLevel = "none";
+  }
+} else {
+  try {
+    validateModelThinking(initialProv, initialModelId, initialThinkingLevel);
+  } catch (err: any) {
+    console.log(`\x1b[31merror: ${err.message}\x1b[0m`);
+    initialThinkingLevel = initialModelInfo.supportsThinking && !initialModelInfo.supportsDisable
+      ? (initialModelInfo.allowedLevels[0] || "low")
+      : "none";
+    console.log(`\x1b[32m→ Auto-selected thinking level "${initialThinkingLevel}" for ${initialModelId}\x1b[0m`);
+  }
+}
 
 const agent = new Agent({
   name: "Chat Orchestrator",
   instructions: loadPrompt(),
-  model: saved?.model ?? process.env.MODEL,
+  model: resolvedModelName,
   SubAgentModel: saved?.subAgentModel ?? process.env.SUB_AGENT_MODEL,
-  ThinkingLevel: (saved?.thinkingLevel as any) ?? (process.env.THINKING_LEVEL as any) ?? "medium",
+  ThinkingLevel: initialThinkingLevel as any,
   EnableSubagents: true,
   ServiceTier: (saved?.serviceTier as any) ?? (process.env.SERVICE_TIER as any) ?? undefined,
   cache: (saved?.cache as any) ?? { retention: "short" as const },
@@ -175,9 +240,8 @@ function renderFooterStats(): string {
   const parts: string[] = [];
   if (totals.input) parts.push(`↑${formatTokens(totals.input)}`);
   if (totals.output) parts.push(`↓${formatTokens(totals.output)}`);
-  if (totals.cacheRead) parts.push(`R${formatTokens(totals.cacheRead)}`);
-  else if (totals.reasoning) parts.push(`R${formatTokens(totals.reasoning)}`);
-  if (totals.cacheWrite) parts.push(`W${formatTokens(totals.cacheWrite)}`);
+  if (totals.cacheRead) parts.push(`CR${formatTokens(totals.cacheRead)}`);
+  if (totals.cacheWrite) parts.push(`CW${formatTokens(totals.cacheWrite)}`);
   if (lastCacheHitRate !== undefined) parts.push(`CH${lastCacheHitRate.toFixed(1)}%`);
   else if (totals.input > 0) parts.push(`CH${((totals.cacheRead / totals.input) * 100).toFixed(1)}%`);
   if (totals.cost) parts.push(`$${totals.cost.toFixed(3)}`);
@@ -190,20 +254,36 @@ function renderFooterStats(): string {
 function saveSession() {
   try {
     fs.mkdirSync(path.dirname(SESSION_FILE), { recursive: true });
-    fs.writeFileSync(SESSION_FILE, JSON.stringify({
-      sessionId: agent.sessionId, model: agent.modelStringOrSpec, subAgentModel: agent.subagentModel,
-      thinkingLevel: (agent as any).thinkingConfig?.level, cache: agent.cacheConfig, serviceTier: agent.serviceTier,
-      headers: agent.customHeaders, cachedContentId: (agent.context as any).cachedContentId,
-      context: { systemPrompt: agent.context.systemPrompt, messages: agent.context.messages, thoughtSignatures: (agent.context as any).thoughtSignatures },
-      totals,
-    }, null, 2));
+    const lines: string[] = [];
+    const currentLevel = (agent as any).thinkingConfig?.level ?? "none";
+    lines.push(JSON.stringify({
+      type: "session",
+      id: agent.sessionId,
+      model: agent.modelStringOrSpec,
+      subAgentModel: agent.subagentModel,
+      thinkingLevel: currentLevel,
+      cache: agent.cacheConfig,
+      serviceTier: agent.serviceTier,
+      headers: agent.customHeaders,
+      cachedContentId: (agent.context as any).cachedContentId,
+      timestamp: new Date().toISOString(),
+      cwd: process.cwd(),
+    }));
+    lines.push(JSON.stringify({ type: "model_change", modelId: agent.modelStringOrSpec, provider: (agent.modelStringOrSpec as string).split("/")[0] ?? "unknown" }));
+    lines.push(JSON.stringify({ type: "thinking_level_change", thinkingLevel: currentLevel }));
+    for (const msg of agent.context.messages) {
+      lines.push(JSON.stringify({ type: "message", id: `msg_${Math.random().toString(36).slice(2, 9)}`, timestamp: new Date().toISOString(), message: msg }));
+    }
+    lines.push(JSON.stringify({ type: "totals", totals, cache: agent.cacheConfig, cachedContentId: (agent.context as any).cachedContentId }));
+    fs.writeFileSync(SESSION_FILE, lines.join("\n") + "\n");
   } catch {}
 }
 
 // ---------- Chat loop ----------
+const activeThinking = (agent as any).thinkingConfig?.level ?? initialThinkingLevel;
 console.log(`\n Agent Accelerator — Chat (persistent)  •  ${agent.modelStringOrSpec}  •  ${agent.sessionId.slice(0, 12)}… ${saved ? "(resumed)" : "(new)"}`);
-console.log(` Context: ${formatContextWindow(getContextWindow())} • wrapThinking: <think> enabled • File: ${SESSION_FILE}`);
-console.log(` Commands: /clear /stats /save /exit\n`);
+console.log(` Context: ${formatContextWindow(getContextWindow())} • Thinking: ${activeThinking} • File: ${SESSION_FILE} (JSONL)`);
+console.log(` Commands: /model <id>  /level <lvl>  /stats  /clear  /save  /help  /exit\n`);
 
 const rl = readline.createInterface({ input: stdin, output: stdout });
 
@@ -211,37 +291,150 @@ while (true) {
   const q = (await rl.question("\x1b[36mYou>\x1b[0m ")).trim();
   if (!q) continue;
   if (["/exit", "/quit", "/q"].includes(q)) break;
-  if (["/clear", "/reset"].includes(q)) {
+
+  if (q.startsWith("/model")) {
+    const nextModel = q.slice(6).trim();
+    if (nextModel) {
+      const prov = (nextModel.includes("/") ? nextModel.split("/")[0] : "opencode") || "opencode";
+      const modelId = (nextModel.includes("/") ? nextModel.split("/").slice(1).join("/") : nextModel) || nextModel;
+      const currentLevel = (agent as any).thinkingConfig?.level;
+      if (currentLevel && currentLevel !== "none") {
+        try {
+          validateModelThinking(prov, modelId, currentLevel);
+        } catch (e: any) {
+          console.log(`\x1b[33m⚠ Warning: current thinking level "${currentLevel}" is not valid for ${nextModel}.\x1b[0m`);
+          console.log(`\x1b[90m${e.message}\x1b[0m`);
+          const info = getModelThinkingInfo(prov, modelId);
+          if (info.allowedLevels.length > 0) {
+            const fallbackLevel = info.allowedLevels[0];
+            (agent as any).thinkingConfig = { enabled: fallbackLevel !== "none", level: fallbackLevel as any };
+            console.log(`\x1b[32m→ Auto-adjusted thinking level to "${fallbackLevel}" for ${nextModel}\x1b[0m`);
+          } else if (!info.supportsThinking) {
+            (agent as any).thinkingConfig = { enabled: false, level: "none", budgetTokens: 0 };
+            console.log(`\x1b[32m→ Auto-adjusted thinking level to "none" (model does not think)\x1b[0m`);
+          }
+        }
+      }
+      (agent as any).modelStringOrSpec = nextModel;
+      saveSession();
+      console.log(`\x1b[32m✔ Switched model to: ${nextModel}\x1b[0m`);
+    } else {
+      console.log(`Current model: ${agent.modelStringOrSpec}`);
+    }
+    continue;
+  }
+
+  if (q.startsWith("/level") || q.startsWith("/thinking")) {
+    const nextLevel = q.split(" ")[1]?.trim() as any;
+    const currentModelStr = (agent.modelStringOrSpec as string) || "";
+    const prov = (currentModelStr.includes("/") ? currentModelStr.split("/")[0] : "opencode") || "opencode";
+    const modelId = (currentModelStr.includes("/") ? currentModelStr.split("/").slice(1).join("/") : currentModelStr) || currentModelStr;
+
+    if (nextLevel) {
+      try {
+        validateModelThinking(prov, modelId, nextLevel);
+
+        if (nextLevel === "none") {
+          (agent as any).thinkingConfig = { enabled: false, level: "none", budgetTokens: 0 };
+        } else if (nextLevel === "dynamic") {
+          (agent as any).thinkingConfig = { enabled: true, level: "dynamic", budgetTokens: -1 };
+        } else {
+          (agent as any).thinkingConfig = { enabled: true, level: nextLevel };
+        }
+        saveSession();
+        console.log(`\x1b[32m✔ Switched thinking level to: ${nextLevel}\x1b[0m`);
+      } catch (err: any) {
+        console.log(`\x1b[31m✖ ${err.message}\x1b[0m`);
+      }
+    } else {
+      const info = getModelThinkingInfo(prov, modelId);
+      console.log(`Current thinking level: ${(agent as any).thinkingConfig?.level ?? "none"}`);
+      console.log(`\x1b[90m${info.description}\x1b[0m`);
+    }
+    continue;
+  }
+
+  if (q.startsWith("/tier")) {
+    const tier = q.split(" ")[1]?.trim() as any;
+    if (["flex", "priority", "standard"].includes(tier)) {
+      (agent as any).serviceTier = tier === "standard" ? undefined : tier;
+      saveSession();
+      console.log(`\x1b[32m✔ Switched service tier to: ${tier}\x1b[0m`);
+    } else {
+      console.log(`Usage: /tier <standard | flex | priority>`);
+    }
+    continue;
+  }
+
+  if (q.startsWith("/cache")) {
+    const ret = q.split(" ")[1]?.trim() as any;
+    if (["short", "medium", "long"].includes(ret)) {
+      (agent as any).cacheConfig = { ...(agent.cacheConfig || {}), retention: ret };
+      saveSession();
+      console.log(`\x1b[32m✔ Switched cache retention to: ${ret}\x1b[0m`);
+    } else {
+      console.log(`Usage: /cache <short | medium | long>`);
+    }
+    continue;
+  }
+
+  if (["/clear", "/reset"].includes(q) || q.startsWith("/clear") || q.startsWith("/reset")) {
     const hard = q.includes("--hard");
     agent.reset();
     totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: 0 };
     lastCacheHitRate = undefined;
     console.log(hard ? "— cleared (hard, session rotated) —" : "— cleared —");
-    if (hard) (agent as any).sessionId = undefined;
+    if (hard) (agent as any).sessionId = `accel-${Date.now()}`;
+    saveSession();
     continue;
   }
+
+  if (q === "/help") {
+    console.log(`\x1b[33mAvailable Commands:\x1b[0m`);
+    console.log(`  /model <id>       Switch active model (e.g. /model opencode/gpt-5.4)`);
+    console.log(`  /level <lvl>      Set thinking level (none, minimal, low, medium, high, xhigh, dynamic)`);
+    console.log(`  /tier <tier>      Set service tier (standard, flex, priority)`);
+    console.log(`  /cache <ret>      Set cache retention (short, medium, long)`);
+    console.log(`  /stats            Show token totals, cache stats, and context usage`);
+    console.log(`  /clear [--hard]   Reset conversation history`);
+    console.log(`  /save             Save current state to ${SESSION_FILE}`);
+    console.log(`  /exit, /quit      Exit chat session\n`);
+    continue;
+  }
+
   if (q === "/stats") {
     console.log(`\x1b[35m${renderFooterStats()} • ${agent.modelStringOrSpec}\x1b[0m`);
     console.log(`Messages: ${agent.context.messages.length} • Window: ${formatContextWindow(getContextWindow())} • File: ${SESSION_FILE}`);
     continue;
   }
-  if (q === "/save") { saveSession(); console.log(`\x1b[90m→ Saved to ${SESSION_FILE}\x1b[0m`); continue; }
+  if (q === "/save") { saveSession(); console.log(`\x1b[90m→ Saved to ${SESSION_FILE} (${agent.context.messages.length} turns, JSONL)\x1b[0m`); continue; }
 
-  const res = await agent.run(q, {
-    stream: true,
-    wrapThinking: true,
-    onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
-    onDelta: (d) => process.stdout.write(d),
-    onEvent: (e) => {
-      if (e.type === "subagent_complete") console.log(`\n\x1b[90m↳ ${e.subagent!.name} done (${e.subagent!.usage.totalTokens} tok)\x1b[0m`);
-    },
-  });
+  let res: any;
+  try {
+    res = await agent.run(q, {
+      stream: true,
+      wrapThinking: true,
+      onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
+      onDelta: (d) => process.stdout.write(d),
+      onEvent: (e) => {
+        if (e.type === "subagent_complete") console.log(`\n\x1b[90m↳ ${e.subagent!.name} done (${e.subagent!.usage.totalTokens} tok)\x1b[0m`);
+      },
+    });
+  } catch (e: any) {
+    console.log(`\n\x1b[31m✖ ${e.message}\x1b[0m`);
+    if (String(e.message).includes("503") || String(e.message).includes("Upstream")) {
+      console.log(`\x1b[90m  Provider endpoint is temporarily unavailable. Try again or switch model:\x1b[0m`);
+      console.log(`\x1b[90m  /model openrouter/model-id or /model opencode/model-id\x1b[0m`);
+    }
+    console.log("");
+    continue;
+  }
 
   updateTotals(res.usage);
   saveSession();
   const lvl = (agent as any).thinkingConfig?.level ? ` • ${(agent as any).thinkingConfig.level}` : "";
   console.log(`\n\x1b[35m${renderFooterStats()} • ${res.provider}/${res.model}${lvl} ${res.durationMs}ms ${res.finishReason ?? ""}\x1b[0m`);
-  if (res.subagents?.length) console.log(`\x1b[90m  subagents: ${res.subagents.map(s => `${s.name}:${s.isError ? "ERR" : "ok"}`).join(", ")}\x1b[0m`);
+  if (res.subagents?.length) console.log(`\x1b[90m  subagents: ${res.subagents.map((s: any) => `${s.name}:${s.isError ? "ERR" : "ok"}`).join(", ")}\x1b[0m`);
   console.log("");
 }
 

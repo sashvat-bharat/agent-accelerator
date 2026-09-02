@@ -22,10 +22,11 @@ console.log(`Cache Efficiency: ${usage.cachedTokens} / ${usage.inputTokens}`);
 ## Key Capabilities
 
 * **Zero-Leak Observability:** Access complete raw JSON, HTTP wire logs, provider reasoning traces, and thought signatures (`thoughtSignature`).
-* **Cache-First Architecture:** Automatic routing for Google explicit `cachedContents`, OpenCode session pinning, and Anthropic-style ephemeral breakpoints.
-* **Unified Model Catalog:** Single source of truth driven by `models.dev` (`7,400+` models). Automatic context window verification and dynamic truncation without manual drift.
+* **Cache-First Architecture:** Automatic routing for Google explicit `cachedContents`, OpenCode session pinning, and Anthropic-style ephemeral breakpoints across both `/chat/completions` and `/responses` APIs.
+* **Unified Model Catalog & Preflight Validation:** Single source of truth driven by `models.dev` (`7,400+` models). Automatic context limits and preflight reasoning validation (`validateModelThinking`) that fails fast with available options if an unsupported thinking mode is selected.
 * **First-Class Sub-Agents:** Native parallel dispatch (`spawn_subagents`) with structured XML reconciliation (`<SUB-AGENTS-RESPONSE>`).
 * **Typed Tooling:** Automatic Zod-to-JSON Schema transpilation with parallel execution via `Promise.all`.
+* **Universal Responses & Completions Routing:** Seamless support for OpenAI Responses API models (e.g. `muse-spark`) and Completions API without changing application code.
 
 ---
 ## Architectural Comparison
@@ -180,6 +181,41 @@ Turn 2 (Warm Context)
 | **OpenCode / OpenRouter** | Ephemeral Breakpoints          | `cache_control` headers + `prompt_cache_key` | Yes                        |
 
 ---
+## Model Catalog & Thinking Validation
+
+Agent Accelerator uses `models.dev` as its catalog database to inspect model specs, pricing, context windows, and reasoning capabilities:
+
+```ts
+import { validateModelThinking, getModelThinkingInfo } from "agent-accelerator";
+
+// Inspect model thinking capabilities
+const info = getModelThinkingInfo("google", "gemini-3.7-flash");
+console.log(info.allowedLevels); // ["low", "medium", "high"]
+
+// Preflight validation (fails fast before network requests)
+validateModelThinking("google", "gemini-3.7-flash", "low"); // Valid!
+validateModelThinking("openai", "gpt-4o", "high"); // Throws Error: Model does not support thinking/reasoning
+```
+
+---
+## Interactive Chat CLI
+
+Try the fully persistent multi-turn chat CLI with subagent orchestration and live metrics:
+
+```bash
+bun run examples/chat.ts
+```
+
+Interactive commands during chat:
+* `/model <id>` — Switch model on the fly (auto-validates reasoning compatibility).
+* `/level <lvl>` — Switch reasoning level (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `dynamic`).
+* `/tier <tier>` — Switch service tier (`standard`, `flex`, `priority`).
+* `/cache <ret>` — Switch prompt cache retention (`short`, `medium`, `long`).
+* `/stats` — Show cumulative token usage, cache metrics (`CR`: Cache Read, `CW`: Cache Write, `CH`: Cache Hit rate), and total cost.
+* `/clear` — Reset context history.
+* `/save` — Manually checkpoint session to `.session.jsonl`.
+
+---
 ## API Reference
 
 ### `new Agent(options)`
@@ -206,7 +242,7 @@ Turn 2 (Warm Context)
 * **`text`**: Complete decoded output string.
 * **`thinking`**: Extracted reasoning tokens and trace.
 * **`thoughtSignature`**: Provider reasoning signatures (persisted automatically for Gemini 2.5/3.x).
-* **`toolCalls` / `toolResults**`: Structured logs of all tool interactions.
+* **`toolCalls` / `toolResults`**: Structured logs of all tool interactions.
 * **`subagents`**: Metadata array of sub-agent durations, tokens, and outputs.
 * **`usage`**: `{ inputTokens, outputTokens, cachedTokens, thinkingTokens, cost }`.
 * **`raw`**: Unmodified HTTP request and response envelopes `{ request, response }`.
@@ -224,14 +260,13 @@ src/
 ├── streaming/   # SSE parser and typed event stream emitters
 ├── tokens/      # Context window and token utilization counters
 └── utils/       # Cache control, wire headers, and session handlers
-
 ```
 
 ---
 ## Development & Testing
 
 ```bash
-npx tsc --noEmit --skipLibCheck # Typecheck
+bun run typecheck # Typecheck
 bun test # Run test suite
 bun run examples/chat.ts # Run interactive CLI session
 ```

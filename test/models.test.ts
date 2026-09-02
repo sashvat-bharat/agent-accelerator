@@ -40,4 +40,23 @@ describe("Model Resolution & Providers", () => {
     expect(openCode.model).toBe("opencode/hy3-free");
     expect(openCode.apiKey).toBe("OPENCODE_KEY");
   });
+
+  it("should validate thinking options against models.dev.json", () => {
+    const { validateModelThinking, getModelThinkingInfo } = require("../src/index.ts");
+    
+    // Model without reasoning (e.g. gpt-4o)
+    const gpt4oInfo = getModelThinkingInfo("openai", "gpt-4o");
+    expect(gpt4oInfo.supportsThinking).toBe(false);
+    expect(() => validateModelThinking("openai", "gpt-4o", "high")).toThrow(/does not support thinking\/reasoning/);
+    expect(() => validateModelThinking("openai", "gpt-4o", "none")).not.toThrow();
+
+    // Model with effort reasoning (e.g. gemini-3.7-flash)
+    const geminiInfo = getModelThinkingInfo("google", "gemini-3.7-flash");
+    expect(geminiInfo.supportsThinking).toBe(true);
+    expect(geminiInfo.allowedLevels).toContain("low");
+    expect(geminiInfo.allowedLevels).toContain("medium");
+    expect(geminiInfo.allowedLevels).toContain("high");
+    expect(() => validateModelThinking("google", "gemini-3.7-flash", "low")).not.toThrow();
+    expect(() => validateModelThinking("google", "gemini-3.7-flash", "unsupported_level_xyz")).toThrow(/Invalid thinking level/);
+  });
 });

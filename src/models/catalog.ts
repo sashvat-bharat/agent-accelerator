@@ -189,16 +189,136 @@ export function getModelPricing(provider: string, modelId: string) {
   return getModelFromCatalog(provider, modelId)?.pricing;
 }
 
-export function getReasoningOptions(provider: string, modelId: string) {
-  return getModelFromCatalog(provider, modelId)?.reasoning_options;
+export interface ModelThinkingInfo {
+  supportsThinking: boolean;
+  reasoningOptions?: any[];
+  allowedLevels: string[];
+  supportsDisable: boolean;
+  description: string;
 }
 
-export function supportsThinking(provider: string, modelId: string): boolean {
-  return !!getModelFromCatalog(provider, modelId)?.capabilities.supportsThinking;
+export function getModelThinkingInfo(provider: string, modelId: string): ModelThinkingInfo {
+  const spec = getModelFromCatalog(provider, modelId);
+  if (!spec) {
+    return {
+      supportsThinking: true,
+      allowedLevels: ["none", "minimal", "low", "medium", "high", "xhigh", "dynamic"],
+      supportsDisable: true,
+      description: "Model not found in catalog; generic thinking levels allowed.",
+    };
+  }
+
+  const supportsThinking = !!spec.reasoning || spec.capabilities.supportsThinking;
+  const reasoningOptions = spec.reasoning_options || [];
+
+  if (!supportsThinking) {
+    return {
+      supportsThinking: false,
+      reasoningOptions: [],
+      allowedLevels: ["none"],
+      supportsDisable: true,
+      description: `Model "${spec.id}" does not support thinking/reasoning.`,
+    };
+  }
+
+  // Model supports thinking — inspect reasoning_options from models.dev.json
+  const effortOpt: any = reasoningOptions.find((o: any) => o.type === "effort");
+  const toggleOpt: any = reasoningOptions.find((o: any) => o.type === "toggle");
+  const budgetOpt: any = reasoningOptions.find((o: any) => o.type === "budget_tokens");
+
+  const allowed = new Set<string>();
+
+  if (effortOpt && Array.isArray(effortOpt.values) && effortOpt.values.length > 0) {
+    for (const val of effortOpt.values) {
+      allowed.add(String(val).toLowerCase());
+    }
+  }
+
+  if (toggleOpt) {
+    allowed.add("none");
+    allowed.add("low");
+    allowed.add("medium");
+    allowed.add("high");
+    allowed.add("dynamic");
+    allowed.add("minimal");
+  }
+
+  if (budgetOpt) {
+    if (budgetOpt.min === undefined || budgetOpt.min <= 0) {
+      allowed.add("none");
+    }
+    allowed.add("dynamic");
+    allowed.add("minimal");
+    allowed.add("low");
+    allowed.add("medium");
+    allowed.add("high");
+    allowed.add("xhigh");
+  }
+
+  // Fixed reasoning model (no reasoning_options) e.g. DeepSeek-R1, QwQ-32B
+  if (reasoningOptions.length === 0) {
+    return {
+      supportsThinking: true,
+      reasoningOptions: [],
+      allowedLevels: [],
+      supportsDisable: false,
+      description: `Model "${spec.id}" is a fixed-reasoning model and does not support configurable thinking levels.`,
+    };
+  }
+
+  const allowedLevels = Array.from(allowed);
+  const supportsDisable = allowed.has("none") || !!toggleOpt || Boolean(budgetOpt && (budgetOpt.min === undefined || budgetOpt.min <= 0));
+
+  return {
+    supportsThinking: true,
+    reasoningOptions,
+    allowedLevels,
+    supportsDisable,
+    description: `Supported thinking levels for "${spec.id}": [${allowedLevels.map((l) => `"${l}"`).join(", ")}]`,
+  };
 }
 
-export function supportsCache(provider: string, modelId: string): boolean {
-  return !!getModelFromCatalog(provider, modelId)?.capabilities.supportsImplicitCaching;
+export function validateModelThinking(provider: string, modelId: string, requestedLevel?: ThinkingLevel | string): void {
+  if (!requestedLevel) return;
+  const level = String(requestedLevel).toLowerCase().trim();
+  const info = getModelThinkingInfo(provider, modelId);
+
+  if (!info.supportsThinking) {
+    if (level !== "none") {
+      throw new Error(
+        `Model "${modelId}" does not support thinking/reasoning.\n` +
+        `Available option for ${modelId}: thinking is not supported for this model (set ThinkingLevel: "none" or omit).`
+      );
+    }
+    return;
+  }
+
+  // Fixed reasoning model
+  if (info.allowedLevels.length === 0) {
+    if (level === "none") {
+      throw new Error(
+        `Model "${modelId}" is a fixed-reasoning model and cannot have thinking disabled ("none").\n` +
+        `Available option for ${modelId}: omit ThinkingLevel to use model default reasoning.`
+      );
+    }
+    return;
+  }
+
+  // If user requested "none" on a model that does not allow disabling
+  if (level === "none" && !info.supportsDisable) {
+    throw new Error(
+      `Model "${modelId}" requires thinking and does not support disabling it ("none").\n` +
+      `Available thinking options for ${modelId}: [${info.allowedLevels.map((l) => `"${l}"`).join(", ")}]`
+    );
+  }
+
+  // If level is not in allowed levels
+  if (!info.allowedLevels.includes(level)) {
+    throw new Error(
+      `Invalid thinking level "${requestedLevel}" for model "${modelId}".\n` +
+      `Available thinking options for ${modelId}: [${info.allowedLevels.map((l) => `"${l}"`).join(", ")}]`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

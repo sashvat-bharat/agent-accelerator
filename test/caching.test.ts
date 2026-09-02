@@ -21,6 +21,15 @@ describe("Caching & Session Affinity", () => {
     expect(headers["X-Title"]).toBe("Agent Accelerator");
   });
 
+  it("should generate proper session headers for OpenCode Responses API (x-client-request-id & session_id)", () => {
+    const sessionId = "session_12345";
+    const headers = buildSessionHeaders("opencode", { sessionId });
+    expect(headers["x-opencode-session"]).toBe(sessionId);
+    expect(headers["x-session-id"]).toBe(sessionId);
+    expect(headers["x-client-request-id"]).toBe(sessionId);
+    expect(headers["session_id"]).toBe(sessionId);
+  });
+
   it("should estimate tokens accurately", () => {
     const text = "Hello world! This is a test sentence for token counting.";
     const count = countTokens(text);

@@ -25,6 +25,17 @@ export {
   resolveModel,
   ModelProvider,
 } from "./providers/registry.ts";
+export {
+  getModelFromCatalog,
+  getModelThinkingInfo,
+  validateModelThinking,
+  getContextWindow,
+  getMaxOutputTokens,
+  getModelLimit,
+  getModelPricing,
+  getModelsForProvider,
+  listProviders,
+} from "./models/catalog.ts";
 export { BaseProvider } from "./providers/base.ts";
 export { GoogleAIStudioProvider } from "./providers/google/index.ts";
 export { OpenCodeProvider } from "./providers/opencode/index.ts";

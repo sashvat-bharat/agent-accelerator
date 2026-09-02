@@ -158,13 +158,17 @@ export class OpenRouterProvider extends BaseProvider {
       }
     }
 
-    // Reasoning / Thinking — catalog-aware (toggle vs effort)
-    if (options?.thinking?.enabled !== false && options?.thinking?.level && options.thinking.level !== "none") {
+    // Reasoning / Thinking — generic (explicitly handle none to turn off reasoning on reasoning models)
+    const level = options?.thinking?.level;
+    const isDisabled = options?.thinking?.enabled === false || (level as any) === "none";
+    if (isDisabled) {
+      payload.reasoning = { effort: "none" } as any;
+      return payload;
+    } else if (options?.thinking?.enabled !== false && level) {
       const spec = this.getModel(modelId);
       const caps = spec?.capabilities;
       const hasToggle = !!caps?.supportsReasoningToggle;
       const hasEffort = !!caps?.supportsReasoningEffort;
-      const level = options.thinking.level;
       const effort =
         level === "minimal" || level === "low"
           ? "low"
@@ -172,9 +176,7 @@ export class OpenRouterProvider extends BaseProvider {
           ? "medium"
           : "high";
       if (hasToggle && !hasEffort) {
-        // models with toggle-only reasoning (reasoning_options: [{type:"toggle"}]) — use enabled:true
         payload.reasoning = { enabled: true } as any;
-        // OpenRouter also accepts exclude:false to force reasoning channel
         (payload as any).include_reasoning = true;
       } else if (hasEffort || !spec) {
         payload.reasoning = { effort } as any;

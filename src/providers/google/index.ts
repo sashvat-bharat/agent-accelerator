@@ -321,11 +321,13 @@ export class GoogleAIStudioProvider extends BaseProvider {
         };
       }
     } else if (isExplicitlyDisabled) {
-      // Only emit disabled config when explicitly requested (omit otherwise)
-      if (!isGemini3) {
-        genConfig.thinkingConfig = { thinkingBudget: 0 };
+      if (isGemini3) {
+        genConfig.thinkingConfig = {
+          thinkingLevel: "OFF",
+          thinkingBudget: 0,
+        };
       } else {
-        genConfig.thinkingConfig = { thinkingLevel: "MINIMAL" };
+        genConfig.thinkingConfig = { thinkingBudget: 0 };
       }
     }
 

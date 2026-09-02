@@ -39,8 +39,15 @@ export class OpenCodeProvider extends BaseProvider {
     return rawId.replace(/^(opencode-zen\/|opencode-go\/|opencode\/)/, "");
   }
 
-  private isResponsesModel(modelId: string): boolean {
-    // Keep false for now — zen/v1 uses chat/completions for all models (scalable, generic).
+  private isResponsesModel(model: string | ModelSpec): boolean {
+    const rawId = typeof model === "string" ? model : (model as any).id;
+    const apiFromSpec = typeof model === "object" && (model as any).api ? (model as any).api : undefined;
+    if (apiFromSpec === "openai-responses") return true;
+    const clean = this.cleanModelId(rawId);
+    const spec = this.getModel(clean) ?? this.getModel(rawId);
+    if (spec?.api === "openai-responses" || (spec?.raw as any)?.provider?.api === "openai-responses") return true;
+    if (spec?.family?.startsWith("muse") || clean.includes("muse-") || clean.includes("muse_") || clean.startsWith("muse")) return true;
+    if (clean.includes("responses")) return true;
     return false;
   }
 
@@ -50,77 +57,164 @@ export class OpenCodeProvider extends BaseProvider {
     options?: ProviderRequestOptions,
     stream = false
   ): Record<string, unknown> {
-    // Kept for future scalability if opencode adds responses models — currently not used, we stay on chat/completions for all
     const input: any[] = [];
+    const modelSpecForCache = this.getModel(modelId);
+
+    // Developer or system instruction (developer role for reasoning models)
     if (context.systemPrompt) {
-      input.push({ role: "system", content: [{ type: "input_text", text: context.systemPrompt }] });
+      const isReasoning = modelSpecForCache?.reasoning || (options?.thinking?.enabled !== false && options?.thinking?.level !== "none");
+      const role = isReasoning ? "developer" : "system";
+      input.push({ role, content: context.systemPrompt });
     }
+
     for (const msg of context.messages) {
       if (typeof msg.content === "string") {
         if (msg.role === "assistant") {
-          input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: msg.content }] });
-        } else {
-          const role = msg.role === "tool" ? "user" : msg.role;
-          input.push({ role, content: [{ type: "input_text", text: msg.content }] });
-        }
-      } else if (Array.isArray(msg.content)) {
-        const textParts: any[] = (msg.content as any[]).filter((p: any) => p.type === "text" && p.text);
-        const toolCalls: any[] = (msg.content as any[]).filter((p: any) => p.type === "tool_call");
-        const toolResults: any[] = (msg.content as any[]).filter((p: any) => p.type === "tool_result");
-        if (textParts.length > 0) {
-          const combinedText = textParts.map((p: any) => p.text).join("\n");
-          if (msg.role === "assistant") {
-            input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: combinedText }] });
-          } else {
-            input.push({ role: msg.role as any, content: [{ type: "input_text", text: combinedText }] });
-          }
-        }
-        for (const part of toolCalls as any[]) {
           input.push({
-            type: "function_call",
-            call_id: (part as any).id,
-            name: (part as any).name,
-            arguments: typeof (part as any).arguments === "string" ? (part as any).arguments : JSON.stringify((part as any).arguments),
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: msg.content, annotations: [] }],
+            status: "completed",
           });
-        }
-        for (const part of toolResults as any[]) {
+        } else if (msg.role === "tool") {
           input.push({
             type: "function_call_output",
-            call_id: (part as any).id,
-            output: typeof (part as any).result === "string" ? (part as any).result : JSON.stringify((part as any).result),
+            call_id: (msg as any).tool_call_id || (msg as any).id || "call_0",
+            output: msg.content,
           });
+        } else {
+          input.push({
+            role: "user",
+            content: [{ type: "input_text", text: msg.content }],
+          });
+        }
+      } else if (Array.isArray(msg.content)) {
+        const textParts: any[] = msg.content.filter((p: any) => p.type === "text" && p.text);
+        const imageParts: any[] = msg.content.filter((p: any) => p.type === "image");
+        const toolCalls: any[] = msg.content.filter((p: any) => p.type === "tool_call");
+        const toolResults: any[] = msg.content.filter((p: any) => p.type === "tool_result");
+        const thinkingParts: any[] = msg.content.filter((p: any) => p.type === "thinking" && p.thinking);
+
+        if (msg.role === "assistant") {
+          for (const tp of thinkingParts) {
+            if (tp.thoughtSignature && tp.thoughtSignature.startsWith("{")) {
+              try {
+                input.push(JSON.parse(tp.thoughtSignature));
+              } catch {
+                input.push({ type: "reasoning", text: tp.thinking });
+              }
+            }
+          }
+          if (textParts.length > 0) {
+            const combinedText = textParts.map((p: any) => p.text).join("\n");
+            input.push({
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: combinedText, annotations: [] }],
+              status: "completed",
+            });
+          }
+          for (const tc of toolCalls) {
+            const [callId, itemId] = (tc.id || "").split("|");
+            input.push({
+              type: "function_call",
+              id: itemId && itemId.startsWith("fc_") ? itemId : undefined,
+              call_id: callId || tc.id,
+              name: tc.name,
+              arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments || {}),
+              status: "completed",
+            });
+          }
+        } else if (msg.role === "tool" || toolResults.length > 0) {
+          for (const tr of toolResults) {
+            const [callId] = (tr.id || "").split("|");
+            input.push({
+              type: "function_call_output",
+              call_id: callId || tr.id,
+              output: typeof tr.result === "string" ? tr.result : JSON.stringify(tr.result),
+            });
+          }
+        } else {
+          // User message
+          const userContent: any[] = [];
+          for (const tp of textParts) {
+            userContent.push({ type: "input_text", text: tp.text });
+          }
+          for (const ip of imageParts) {
+            userContent.push({
+              type: "input_image",
+              detail: "auto",
+              image_url: typeof ip.image === "string" && ip.image.startsWith("data:") ? ip.image : (ip.dataUrl || ""),
+            });
+          }
+          if (userContent.length > 0) {
+            input.push({ role: "user", content: userContent });
+          }
         }
       }
     }
+
     const payload: Record<string, unknown> = {
       model: modelId,
       input,
       stream,
       store: false,
     };
+
     if (options?.tools && options.tools.length > 0) {
       payload.tools = options.tools.map((t: any) => ({
         type: "function",
         name: t.name,
         description: t.description,
         parameters: t.parameters,
+        ...(t.strict !== undefined ? { strict: t.strict } : {}),
       }));
-      if (options.toolChoice) (payload as any).tool_choice = options.toolChoice;
+      if (options.toolChoice) payload.tool_choice = options.toolChoice;
     }
-    // agent-accel: prompt_cache_key + retention for openai-responses opencode
-    const retention = options?.cache?.retention;
+
+    // Prompt Caching for Responses API:
+    // Sets prompt_cache_key and retention for cache affinity and cache write/read hits
     const sessionId = options?.sessionId || options?.cache?.sessionId;
-    if (sessionId && retention) {
-      const clamp = (s: string) => Array.from(s).slice(0, 64).join("");
-      (payload as any).prompt_cache_key = clamp(sessionId);
-      if (retention === "long") (payload as any).prompt_cache_retention = "24h";
-      else if (retention === "medium") (payload as any).prompt_cache_retention = "1h";
+    const retention = options?.cache?.retention;
+    const supportsLong = modelSpecForCache?.capabilities.supportsLongCacheRetention ?? true;
+
+    if (sessionId && (retention as any) !== "none") {
+      const ck = clampCacheKey(sessionId);
+      if (ck) {
+        payload.prompt_cache_key = ck;
+        const pcr = getPromptCacheRetention(retention || "short", supportsLong);
+        if (pcr) payload.prompt_cache_retention = pcr;
+      }
     }
-    if (options?.thinking && (options.thinking as any).level && (options.thinking as any).level !== "none") {
-      const lvl = (options.thinking as any).level;
-      const effort = lvl === "minimal" ? "minimal" : lvl === "low" ? "low" : lvl === "medium" ? "medium" : lvl === "high" ? "high" : "xhigh";
-      (payload as any).reasoning = { effort, summary: "auto" };
-      (payload as any).include = ["reasoning.encrypted_content"];
+
+    // Only set explicit mode if retention is explicitly set to "none" on a model that supports explicit caching
+    if ((retention as any) === "none" && modelSpecForCache?.capabilities.supportsExplicitCaching) {
+      payload.prompt_cache_options = { mode: "explicit" };
+    }
+
+    // Thinking / reasoning — generic via catalog (toggle vs effort)
+    const canThink = modelSpecForCache ? modelSpecForCache.capabilities.supportsThinking !== false : true;
+    const levelResp = options?.thinking?.level;
+    const isDisabledResp = options?.thinking?.enabled === false || (levelResp as any) === "none";
+    if (isDisabledResp) {
+      payload.reasoning = { effort: "none" };
+      return payload;
+    } else if (canThink && levelResp) {
+      const hasToggle = Array.isArray((modelSpecForCache as any)?.reasoning_options) && (modelSpecForCache as any).reasoning_options.some((o: any) => o.type === "toggle");
+      const hasEffort = Array.isArray((modelSpecForCache as any)?.reasoning_options) && (modelSpecForCache as any).reasoning_options.some((o: any) => o.type === "effort");
+      if (hasToggle && !hasEffort) {
+        payload.reasoning = { enabled: true };
+        payload.include = ["reasoning.encrypted_content"];
+      } else {
+        const effort = levelResp === "minimal" ? "minimal" : levelResp === "low" ? "low" : levelResp === "medium" ? "medium" : levelResp === "high" ? "high" : "xhigh";
+        payload.reasoning = { effort, summary: "auto" };
+        payload.include = ["reasoning.encrypted_content"];
+      }
+    }
+
+    // ServiceTier parity (responses uses service_tier)
+    if (options?.serviceTier) {
+      payload.service_tier = options.serviceTier === "flex" ? "flex" : options.serviceTier === "priority" ? "priority" : undefined;
     }
     return payload;
   }
@@ -254,20 +348,28 @@ export class OpenCodeProvider extends BaseProvider {
       }
     }
 
-    // Thinking / reasoning format — generic via catalog (not per-model hardcoded)
+    // Thinking / reasoning — generic, explicitly handle "none" to disable even on reasoning-default models
     const modelSpecForThinking = this.getModel(modelId);
-    const canThink = modelSpecForThinking ? modelSpecForThinking.capabilities.supportsThinking !== false : true;
-    if (canThink && options?.thinking?.enabled !== false && options?.thinking?.level && options.thinking.level !== "none") {
-      const level = options.thinking.level;
+    const level = options?.thinking?.level;
+    const isDisabled = options?.thinking?.enabled === false || (level as any) === "none";
+    if (isDisabled) {
+      payload.reasoning_effort = "none";
+      const raw: any = (modelSpecForThinking as any)?.reasoning_options ?? [];
+      const hasToggle = Array.isArray(raw) && raw.some((o: any) => o.type === "toggle");
+      if (hasToggle) {
+        payload.thinking = { type: "disabled" };
+      }
+      return payload;
+    } else if (level) {
+      const canThink = modelSpecForThinking ? modelSpecForThinking.capabilities.supportsThinking !== false : true;
+      if (!canThink) return payload;
       const effort =
         level === "minimal" || level === "low"
           ? "low"
           : level === "medium" || level === "dynamic"
           ? "medium"
           : "high";
-      // Generic: use reasoning_effort for all; catalog decides if toggle vs effort
       payload.reasoning_effort = effort;
-      // For models whose catalog indicates toggle, also set thinking flag (generic fallback)
       const raw: any = (modelSpecForThinking as any)?.reasoning_options ?? [];
       const hasToggle = Array.isArray(raw) && raw.some((o: any) => o.type === "toggle");
       if (hasToggle) {
@@ -286,18 +388,33 @@ export class OpenCodeProvider extends BaseProvider {
     if (!usageData) {
       return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     }
-    const input = usageData.prompt_tokens ?? 0;
-    const output = usageData.completion_tokens ?? 0;
-    const total = usageData.total_tokens ?? input + output;
+    // Generic: handle both chat (prompt_tokens) and responses (input_tokens) styles
+    const input = usageData.prompt_tokens ?? usageData.input_tokens ?? usageData.promptTokens ?? 0;
+    const output = usageData.completion_tokens ?? usageData.output_tokens ?? usageData.completionTokens ?? 0;
+    const total = usageData.total_tokens ?? usageData.totalTokens ?? input + output;
     const cached =
       usageData.prompt_tokens_details?.cached_tokens ??
+      usageData.input_tokens_details?.cached_tokens ??
+      usageData.input_token_details?.cached_tokens ??
+      usageData.cache_read_tokens ??
       usageData.cached_tokens ??
+      usageData.cachedTokens ??
       0;
-    const cacheWrite = usageData.prompt_tokens_details?.cache_write_tokens ?? usageData.cache_write_tokens ?? 0;
+    const cacheWrite =
+      usageData.prompt_tokens_details?.cache_write_tokens ??
+      usageData.input_tokens_details?.cache_write_tokens ??
+      usageData.input_token_details?.cache_write_tokens ??
+      usageData.cache_write_tokens ??
+      usageData.cacheWriteTokens ??
+      0;
     const thinking =
       usageData.completion_tokens_details?.reasoning_tokens ??
+      usageData.output_tokens_details?.reasoning_tokens ??
       usageData.reasoning_tokens ??
+      usageData.reasoningTokens ??
       0;
+
+    const cost = usageData.total_cost !== undefined ? { totalCost: usageData.total_cost } : usageData.cost;
 
     return {
       inputTokens: input,
@@ -307,6 +424,7 @@ export class OpenCodeProvider extends BaseProvider {
       cacheReadTokens: cached,
       cacheWriteTokens: cacheWrite,
       thinkingTokens: thinking,
+      cost,
     };
   }
 
@@ -324,8 +442,8 @@ export class OpenCodeProvider extends BaseProvider {
     }
 
     const baseUrl = this.resolveBaseUrl(modelId, options?.baseUrl);
-    const isResponses = this.isResponsesModel(modelId);
-    const url = isResponses
+    let isResponses = this.isResponsesModel(model);
+    let url = isResponses
       ? `${baseUrl.replace(/\/$/, "")}/responses`
       : `${baseUrl.replace(/\/$/, "")}/chat/completions`;
     let payload: any = isResponses
@@ -354,13 +472,16 @@ export class OpenCodeProvider extends BaseProvider {
       signal: options?.signal,
     });
 
-    // Generic 500 retry: strip thinking/cache which often cause 500 on unsupported models (not per-model)
-    if (!response.ok && response.status === 500) {
+    // Retry on transient upstream errors (500, 502, 503, 529)
+    if (!response.ok && [500, 502, 503, 529].includes(response.status)) {
       try {
         const retryOptions: any = { ...options, thinking: { enabled: false, level: "none" }, cache: undefined };
-        const retryPayload = await this.buildPayload(modelId, context, retryOptions, false);
+        const retryPayload = isResponses
+          ? this.buildResponsesPayload(modelId, context, retryOptions, false)
+          : await this.buildPayload(modelId, context, retryOptions, false);
         payload = retryPayload;
         (raw.request as any).body = retryPayload;
+        if (response.status === 503) await new Promise(r => setTimeout(r, 800));
         response = await fetch(url, {
           method: "POST",
           headers,
@@ -369,13 +490,42 @@ export class OpenCodeProvider extends BaseProvider {
         });
       } catch {}
     }
+    // Fallback to alternative endpoint (chat <-> responses) if still 500
+    if (!response.ok && [500, 503].includes(response.status)) {
+      try {
+        const altIsResponses = !isResponses;
+        const altUrl = altIsResponses
+          ? `${baseUrl.replace(/\/$/, "")}/responses`
+          : `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+        const altOptions: any = { ...options, thinking: { enabled: false, level: "none" }, cache: undefined };
+        const altPayload = altIsResponses
+          ? this.buildResponsesPayload(modelId, context, altOptions, false)
+          : await this.buildPayload(modelId, context, altOptions, false);
+        const altRes = await fetch(altUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(altPayload),
+          signal: options?.signal,
+        });
+        if (altRes.ok) {
+          isResponses = altIsResponses;
+          url = altUrl;
+          payload = altPayload;
+          (raw.request as any).url = altUrl;
+          (raw.request as any).body = altPayload;
+          response = altRes;
+        }
+      } catch {}
+    }
 
     let responseJson: any;
     try {
       responseJson = await response.json();
     } catch {
       const t = await response.text().catch(() => "");
-      throw new Error(`OpenCode API error (${response.status} ${response.statusText}): ${t}`);
+      const isUpstream = t.includes("Upstream") || t.includes("unavailable");
+      const hint = isUpstream ? " — provider endpoint temporarily unavailable, try again or switch MODEL (e.g. openrouter/*)" : "";
+      throw new Error(`OpenCode API error (${response.status} ${response.statusText}): ${t}${hint}`);
     }
     raw.response = {
       status: response.status,
@@ -419,8 +569,8 @@ export class OpenCodeProvider extends BaseProvider {
       } else if (typeof output === "string") {
         text = output;
       }
-      // responses usage is {input_tokens, output_tokens, total_tokens} or prompt_tokens/completion_tokens
-      usage = this.extractUsage(responseJson.usage || { prompt_tokens: responseJson.usage?.input_tokens, completion_tokens: responseJson.usage?.output_tokens, total_tokens: responseJson.usage?.total_tokens });
+      // responses usage is {input_tokens, output_tokens, total_tokens, input_tokens_details}
+      usage = this.extractUsage(responseJson.usage);
       finishReason = responseJson.status === "completed" ? "stop" : responseJson.status || "stop";
     } else {
       const choice = responseJson.choices?.[0];
@@ -488,8 +638,8 @@ export class OpenCodeProvider extends BaseProvider {
         }
 
         const baseUrl = this.resolveBaseUrl(modelId, options?.baseUrl);
-        const isResponsesStream = this.isResponsesModel(modelId);
-        const url = isResponsesStream
+        let isResponsesStream = this.isResponsesModel(model);
+        let url = isResponsesStream
           ? `${baseUrl.replace(/\/$/, "")}/responses`
           : `${baseUrl.replace(/\/$/, "")}/chat/completions`;
         let payload: any = isResponsesStream
@@ -518,13 +668,17 @@ export class OpenCodeProvider extends BaseProvider {
           signal: options?.signal,
         });
 
-        // Generic 500 retry: strip thinking/cache
-        if (!response.ok && response.status === 500) {
+        // Retry on transient upstream errors (500, 502, 503, 529) — strip thinking/cache which often triggers provider errors
+        if (!response.ok && [500, 502, 503, 529].includes(response.status)) {
           try {
             const retryOptions: any = { ...options, thinking: { enabled: false, level: "none" }, cache: undefined };
-            const retryPayload = await this.buildPayload(modelId, context, retryOptions, true);
+            const retryPayload = isResponsesStream
+              ? this.buildResponsesPayload(modelId, context, retryOptions, true)
+              : await this.buildPayload(modelId, context, retryOptions, true);
             payload = retryPayload;
             (raw.request as any).body = retryPayload;
+            // brief backoff for 503
+            if (response.status === 503) await new Promise(r => setTimeout(r, 800));
             response = await fetch(url, {
               method: "POST",
               headers,
@@ -533,10 +687,39 @@ export class OpenCodeProvider extends BaseProvider {
             });
           } catch {}
         }
+        // Fallback to alternative endpoint if still 500
+        if (!response.ok && [500, 503].includes(response.status)) {
+          try {
+            const altIsResponses = !isResponsesStream;
+            const altUrl = altIsResponses
+              ? `${baseUrl.replace(/\/$/, "")}/responses`
+              : `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+            const altOptions: any = { ...options, thinking: { enabled: false, level: "none" }, cache: undefined };
+            const altPayload = altIsResponses
+              ? this.buildResponsesPayload(modelId, context, altOptions, true)
+              : await this.buildPayload(modelId, context, altOptions, true);
+            const altRes = await fetch(altUrl, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(altPayload),
+              signal: options?.signal,
+            });
+            if (altRes.ok) {
+              isResponsesStream = altIsResponses;
+              url = altUrl;
+              payload = altPayload;
+              (raw.request as any).url = altUrl;
+              (raw.request as any).body = altPayload;
+              response = altRes;
+            }
+          } catch {}
+        }
 
         if (!response.ok) {
           const errBody = await response.text();
-          throw new Error(`OpenCode stream error (${response.status} ${response.statusText}): ${errBody}`);
+          const isUpstream = errBody.includes("Upstream") || errBody.includes("unavailable");
+          const hint = isUpstream ? " — provider endpoint is temporarily unavailable (upstream). Try again in a few seconds or switch MODEL (e.g. openrouter/*)" : "";
+          throw new Error(`OpenCode stream error (${response.status} ${response.statusText}): ${errBody}${hint}`);
         }
 
         if (!response.body) {
@@ -621,10 +804,7 @@ export class OpenCodeProvider extends BaseProvider {
               if (chunkJson.type === "response.completed" || chunkJson.type === "response.done") {
                 if (chunkJson.response?.id) finalResponseId = chunkJson.response.id;
                 if (chunkJson.response?.usage) {
-                  const usageData = chunkJson.response.usage.input_tokens !== undefined
-                    ? { prompt_tokens: chunkJson.response.usage.input_tokens, completion_tokens: chunkJson.response.usage.output_tokens, total_tokens: chunkJson.response.usage.total_tokens }
-                    : chunkJson.response.usage;
-                  finalUsage = this.extractUsage(usageData);
+                  finalUsage = this.extractUsage(chunkJson.response.usage);
                   eventStream.push({ type: "usage", usage: finalUsage });
                 }
                 // Fallback: if no deltas were streamed, extract from completed output (common for responses)
@@ -646,10 +826,7 @@ export class OpenCodeProvider extends BaseProvider {
 
               if (chunkJson.usage) {
                 // Handle both completions usage and responses usage shapes
-                const usageData = chunkJson.usage.input_tokens !== undefined
-                  ? { prompt_tokens: chunkJson.usage.input_tokens, completion_tokens: chunkJson.usage.output_tokens, total_tokens: chunkJson.usage.total_tokens }
-                  : chunkJson.usage;
-                finalUsage = this.extractUsage(usageData);
+                finalUsage = this.extractUsage(chunkJson.usage);
                 eventStream.push({ type: "usage", usage: finalUsage });
               }
 

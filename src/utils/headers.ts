@@ -37,18 +37,22 @@ export function buildSessionHeaders(
 
   if (sessionId) {
     if (provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") {
-      // agent-accel's provider-attribution.ts: getSessionHeaders for opencode → x-opencode-session + x-opencode-client: agent-accel
-      // Keep x-session-id for backward compat (test expects it) — opencode accepts both, agent-accel only needs x-opencode-session
+      // OpenCode session affinity headers for completions and responses endpoints
       headers["x-opencode-session"] = sessionId;
       headers["x-session-id"] = sessionId;
+      headers["x-client-request-id"] = sessionId;
+      headers["session_id"] = sessionId;
       headers["x-opencode-client"] = "agent-accel";
       headers["User-Agent"] = getAgentAccelUserAgent();
     } else if (provider === "openrouter") {
       headers["x-session-id"] = sessionId;
+      headers["x-client-request-id"] = sessionId;
       headers["HTTP-Referer"] = "https://sashvat.com";
       headers["X-Title"] = "Agent Accelerator";
     } else {
       headers["x-session-id"] = sessionId;
+      headers["x-client-request-id"] = sessionId;
+      headers["session_id"] = sessionId;
     }
   }
 
