@@ -116,10 +116,10 @@ function loadSession(): PersistedSession | null {
 }
 
 function loadPrompt(): string {
-  for (const p of [path.join(process.cwd(), "SYSTEM_PROMPT_ORCHESTRATOR.md"), path.join(import.meta.dir, "../../SYSTEM_PROMPT_ORCHESTRATOR.md")]) {
+  for (const p of [path.join(process.cwd(), "SYSTEM_PROMPT_AGENT.md"), path.join(import.meta.dir, "../../SYSTEM_PROMPT_AGENT.md")]) {
     if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
   }
-  return "You are the Orchestrator — delegate complex tasks via spawn_subagents.";
+  return "You are an Agent — delegate complex tasks via spawn_subagents.";
 }
 
 function formatTokens(n: number): string {

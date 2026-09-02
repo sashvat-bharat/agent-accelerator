@@ -132,9 +132,9 @@ console.log(res.toolCalls, res.toolResults);
 import * as fs from "node:fs";
 import { Agent } from "agent-accelerator";
 
-const orchestrator = new Agent({
-  name: "Orchestrator",
-  instructions: fs.readFileSync("SYSTEM_PROMPT_ORCHESTRATOR.md", "utf8"),
+const agent = new Agent({
+  name: "Agent",
+  instructions: fs.readFileSync("SYSTEM_PROMPT_AGENT.md", "utf8"),
   model: process.env.MODEL,
   SubAgentModel: process.env.SUB_AGENT_MODEL,
   ThinkingLevel: "low",
@@ -143,7 +143,7 @@ const orchestrator = new Agent({
   maxTurns: 10,
 });
 
-const res = await orchestrator.run("Audit our authentication pipeline and generate a threat model", {
+const res = await agent.run("Audit our authentication pipeline and generate a threat model", {
   stream: true,
   wrapThinking: true,
   onDelta: d => process.stdout.write(d),
