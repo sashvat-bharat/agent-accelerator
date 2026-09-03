@@ -7,7 +7,7 @@ import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 // Provider identity — battle-tested: matches models.dev provider keys
 // Known first-class: google | opencode | openrouter, plus aliases. Allow string for future.
 // ---------------------------------------------------------------------------
-export type ProviderId = "google" | "opencode" | "opencode-zen" | "opencode-go" | "openrouter" | (string & {});
+export type ProviderId = "google" | "opencode" | "opencode-zen" | "opencode-go" | "openrouter" | "openai" | (string & {});
 
 // ---------------------------------------------------------------------------
 // Raw models.dev shapes — battle-tested, 1:1 with https://models.dev/api.json

@@ -18,39 +18,41 @@ export {
 } from "./agent/orchestrator.ts";
 export type { DynamicSubagentTask } from "./agent/orchestrator.ts";
 
-// Providers & Registry
+// Providers & Registry — unified multi-provider layer (OpenRouter-style, no 5% fee)
 export {
   getProvider,
-  registerProvider,
   resolveModel,
   ModelProvider,
+  ensureCustomProvider,
+  normalizeProviderPrefix,
 } from "./providers/registry.ts";
 export {
   getModelFromCatalog,
   getModelThinkingInfo,
   validateModelThinking,
-  getContextWindow,
-  getMaxOutputTokens,
-  getModelLimit,
-  getModelPricing,
   getModelsForProvider,
-  listProviders,
 } from "./models/catalog.ts";
 export { BaseProvider } from "./providers/base.ts";
 export { GoogleAIStudioProvider } from "./providers/google/index.ts";
 export { OpenCodeProvider } from "./providers/opencode/index.ts";
 export { OpenRouterProvider } from "./providers/openrouter/index.ts";
+export { OpenAIProvider } from "./providers/openai/index.ts";
+export {
+  OpenAICompatibleProvider,
+  createOpenAICompatibleProvider,
+  createCustomProvider,
+  CustomProvider,
+  createGenericModelSpec,
+} from "./providers/custom/index.ts";
+export type { CustomProviderOptions } from "./providers/custom/index.ts";
 export { GOOGLE_MODELS } from "./providers/google/models.ts";
 export { OPENCODE_MODELS } from "./providers/opencode/models.ts";
 export { OPENROUTER_MODELS } from "./providers/openrouter/models.ts";
+export { OPENAI_MODELS } from "./providers/openai/models.ts";
 
 // Caching & Token Counting (Google explicit: REST cachedContents per gemini-documentation/context-caching.md)
 export {
   createExplicitCache,
-  deleteExplicitCache,
-  getExplicitCache,
-  listExplicitCaches,
-  updateExplicitCache,
 } from "./providers/google/cache.ts";
 export {
   countTokens,

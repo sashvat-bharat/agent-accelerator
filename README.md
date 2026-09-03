@@ -56,6 +56,10 @@ GEMINI_API_KEY=your_gemini_key
 OPENCODE_API_KEY=your_opencode_key
 OPENROUTER_API_KEY=your_openrouter_key
 
+# OpenAI or any OpenAI cURL-compatible endpoint (Ollama, vLLM, Groq, Together, etc.)
+OPENAI_BASE_API_KEY=your_openai_or_custom_key   # or OPENAI_API_KEY
+OPENAI_BASE_URL=https://api.openai.com/v1       # or custom cURL endpoint (e.g. http://localhost:11434/v1)
+
 MODEL=opencode/hy3-free
 SUB_AGENT_MODEL=google/gemini-2.5-flash
 

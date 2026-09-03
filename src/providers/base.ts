@@ -44,14 +44,6 @@ export abstract class BaseProvider implements Provider {
     return dynamic.find((m) => m.id.endsWith(clean) || clean.endsWith(m.id));
   }
 
-  /**
-   * Battle-tested helper: get total context window for any model
-   */
-  getContextWindow(modelId: string, fallback = 128000): number {
-    const spec = this.getModel(modelId);
-    return spec?.limit?.context ?? spec?.contextWindow ?? fallback;
-  }
-
   abstract generate(
     model: string | ModelSpec,
     context: ProviderContext,

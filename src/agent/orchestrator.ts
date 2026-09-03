@@ -14,12 +14,6 @@ export interface DynamicSubagentTask {
   model?: string;
 }
 
-export interface SubagentExecutionResult {
-  xml: string;
-  subagents: SubAgentExecutionMetadata[];
-  toString(): string;
-}
-
 function sanitizeXmlTag(raw: string): string {
   let s = raw.toUpperCase().replace(/[^A-Z0-9_.-]/g, "_");
   if (!/^[A-Z_]/.test(s)) s = `AGENT_${s}`;

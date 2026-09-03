@@ -13,9 +13,8 @@ import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Agent } from "agent-accelerator";
-import { getProvider } from "agent-accelerator";
-import { getContextWindow as getCatalogContextWindow, getModelThinkingInfo, validateModelThinking } from "../src/models/catalog.ts";
+import { Agent, getProvider, resolveModel } from "agent-accelerator";
+import { getModelFromCatalog, getModelThinkingInfo, validateModelThinking } from "../src/models/catalog.ts";
 import { buildSessionHeaders } from "../src/utils/headers.ts";
 
 // ---------- Session file handling — JSONL (like demo-session.jsonl) ----------
@@ -134,8 +133,9 @@ const formatContextWindow = formatTokens;
 // ---------- Load & create agent (with resume) ----------
 const saved = loadSession();
 const resolvedModelName = saved?.model ?? process.env.MODEL ?? "opencode/model-id";
-const initialProv = (resolvedModelName.includes("/") ? resolvedModelName.split("/")[0] : "opencode") || "opencode";
-const initialModelId = (resolvedModelName.includes("/") ? resolvedModelName.split("/").slice(1).join("/") : resolvedModelName) || resolvedModelName;
+const resolved = resolveModel(resolvedModelName);
+const initialProv = resolved.provider.id;
+const initialModelId = resolved.modelId;
 const initialModelInfo = getModelThinkingInfo(initialProv, initialModelId);
 
 let initialThinkingLevel: string = (saved?.thinkingLevel as any) ?? (process.env.THINKING_LEVEL as any);
@@ -185,8 +185,9 @@ if (saved?.context?.messages?.length) {
 }
 
 try {
+  const resolvedCurrent = resolveModel(agent.modelStringOrSpec);
   const eff = buildSessionHeaders(
-    (agent.modelStringOrSpec as string).startsWith("google") ? "google" : (agent.modelStringOrSpec as string).startsWith("openrouter") ? "openrouter" : "opencode",
+    resolvedCurrent.provider.id,
     agent.cacheConfig as any, agent.customHeaders, agent.sessionId
   );
   console.log(`\x1b[90mEffective headers: ${JSON.stringify(eff)}\x1b[0m`);
@@ -200,11 +201,12 @@ function getContextWindow(): number {
     const m = agent.modelStringOrSpec as string;
     const prov = m.includes("/") ? m.split("/")[0]! : "opencode";
     const id = m.includes("/") ? m.split("/").slice(1).join("/") : m;
-    const cw = getCatalogContextWindow(prov, id);
-    if (cw) return cw;
+    const spec = getModelFromCatalog(prov, id);
+    if (spec?.limit?.context) return spec.limit.context;
+    if (spec?.contextWindow) return spec.contextWindow;
   } catch {}
   try {
-    for (const pid of ["google", "opencode", "openrouter"] as const) {
+    for (const pid of ["google", "opencode", "openrouter", "openai"] as const) {
       try {
         const p = getProvider(pid);
         const spec = p.getModel(agent.modelStringOrSpec as string);
@@ -288,15 +290,23 @@ console.log(` Commands: /model <id>  /level <lvl>  /stats  /clear  /save  /help 
 const rl = readline.createInterface({ input: stdin, output: stdout });
 
 while (true) {
-  const q = (await rl.question("\x1b[36mYou>\x1b[0m ")).trim();
+  let rawQ: string;
+  try {
+    rawQ = await rl.question("\x1b[36mYou>\x1b[0m ");
+  } catch {
+    break;
+  }
+  if (rawQ === undefined || rawQ === null) break;
+  const q = rawQ.trim();
   if (!q) continue;
   if (["/exit", "/quit", "/q"].includes(q)) break;
 
   if (q.startsWith("/model")) {
     const nextModel = q.slice(6).trim();
     if (nextModel) {
-      const prov = (nextModel.includes("/") ? nextModel.split("/")[0] : "opencode") || "opencode";
-      const modelId = (nextModel.includes("/") ? nextModel.split("/").slice(1).join("/") : nextModel) || nextModel;
+      const resolvedNext = resolveModel(nextModel);
+      const prov = resolvedNext.provider.id;
+      const modelId = resolvedNext.modelId;
       const currentLevel = (agent as any).thinkingConfig?.level;
       if (currentLevel && currentLevel !== "none") {
         try {
@@ -327,8 +337,9 @@ while (true) {
   if (q.startsWith("/level") || q.startsWith("/thinking")) {
     const nextLevel = q.split(" ")[1]?.trim() as any;
     const currentModelStr = (agent.modelStringOrSpec as string) || "";
-    const prov = (currentModelStr.includes("/") ? currentModelStr.split("/")[0] : "opencode") || "opencode";
-    const modelId = (currentModelStr.includes("/") ? currentModelStr.split("/").slice(1).join("/") : currentModelStr) || currentModelStr;
+    const resolvedCurrent = resolveModel(currentModelStr);
+    const prov = resolvedCurrent.provider.id;
+    const modelId = resolvedCurrent.modelId;
 
     if (nextLevel) {
       try {

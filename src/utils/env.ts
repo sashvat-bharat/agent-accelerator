@@ -24,6 +24,11 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
       if (env["GEMINI_API_KEY"]) return env["GEMINI_API_KEY"];
       if (env["GOOGLE_API_KEY"]) return env["GOOGLE_API_KEY"];
     }
+    // openai aliases
+    if (provider.toLowerCase() === "openai") {
+      if (env["OPENAI_BASE_API_KEY"]) return env["OPENAI_BASE_API_KEY"];
+      if (env["OPENAI_API_KEY"]) return env["OPENAI_API_KEY"];
+    }
   }
 
   switch (provider.toLowerCase()) {
@@ -45,17 +50,12 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
     case "openrouter":
       return getEnv("OPENROUTER_API_KEY");
     case "openai":
-      return getEnv("OPENAI_API_KEY");
+      return getEnv("OPENAI_BASE_API_KEY") || getEnv("OPENAI_API_KEY");
     case "anthropic":
       return getEnv("ANTHROPIC_API_KEY");
     default:
       return getEnv(`${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`);
   }
-}
-
-export function getProviderEnvValue(key: string, env?: ProviderEnv): string | undefined {
-  if (env && env[key]) return env[key];
-  return getEnv(key);
 }
 
 export function getModel(fallback = "google/default-model"): string {

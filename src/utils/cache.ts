@@ -139,10 +139,4 @@ export function applyAnthropicCacheControl(
   return bpCount;
 }
 
-/**
- * Tot context length via catalog — battle-tested
- */
-export function getTotalContextLengthFromSpec(spec?: ModelSpec, fallback = 128000): number {
-  if (!spec) return fallback;
-  return spec.limit?.context ?? spec.contextWindow ?? fallback;
-}
+

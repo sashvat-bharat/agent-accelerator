@@ -19,6 +19,7 @@ const PROVIDER_ALIASES: Record<string, string[]> = {
   "opencode-zen": ["opencode"],
   "opencode-go": ["opencode-go", "opencode"],
   openrouter: ["openrouter"],
+  openai: ["openai"],
 };
 
 function normalizeModelIdForLookup(modelId: string): string {
@@ -163,32 +164,6 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
   return undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Battle-tested helpers for total context length & co.
-// Total context length is limit.context via catalog (generic, no hardcoded ids)
-// ---------------------------------------------------------------------------
-export function getContextWindow(provider: string, modelId: string, fallback = 128000): number {
-  const spec = getModelFromCatalog(provider, modelId);
-  if (spec?.limit?.context) return spec.limit.context;
-  if (spec?.contextWindow) return spec.contextWindow;
-  return fallback;
-}
-
-export function getMaxOutputTokens(provider: string, modelId: string, fallback = 8192): number {
-  const spec = getModelFromCatalog(provider, modelId);
-  if (spec?.limit?.output) return spec.limit.output;
-  if (spec?.maxOutputTokens) return spec.maxOutputTokens;
-  return fallback;
-}
-
-export function getModelLimit(provider: string, modelId: string): ModelLimit | undefined {
-  return getModelFromCatalog(provider, modelId)?.limit;
-}
-
-export function getModelPricing(provider: string, modelId: string) {
-  return getModelFromCatalog(provider, modelId)?.pricing;
-}
-
 export interface ModelThinkingInfo {
   supportsThinking: boolean;
   reasoningOptions?: any[];
@@ -198,7 +173,7 @@ export interface ModelThinkingInfo {
 }
 
 export function getModelThinkingInfo(provider: string, modelId: string): ModelThinkingInfo {
-  const spec = getModelFromCatalog(provider, modelId);
+  const spec = getModelFromCatalog(provider, modelId) || getModelFromCatalog(modelId, modelId);
   if (!spec) {
     return {
       supportsThinking: true,
@@ -344,20 +319,4 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
   return out;
 }
 
-// Legacy helpers
-export function getProviderFromCatalog(provider: string): any | undefined {
-  return (catalogData as any)[provider] || (catalogData as any)[provider.toLowerCase()];
-}
-export function listProviders(): string[] {
-  return Object.keys(catalogData as any);
-}
-export function getCatalog() {
-  return catalogData as any;
-}
-export const catalog = catalogData as any;
 
-// Clear cache for testing
-export function __clearCatalogCache() {
-  lookupCache.clear();
-  providerModelsCache.clear();
-}
