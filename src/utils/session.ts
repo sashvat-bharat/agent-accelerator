@@ -1,11 +1,5 @@
 import { randomUUID as nodeRandomUUID } from "node:crypto";
-
-const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64;
-function clampSessionId(id: string): string {
-  const chars = Array.from(id);
-  if (chars.length <= OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH) return id;
-  return chars.slice(0, OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH).join("");
-}
+import { clampCacheKey } from "./cache.ts";
 
 /**
  * Creates or formats a unique session ID for prompt caching affinity (clamped to 64 chars like agent-accel)
@@ -22,5 +16,5 @@ export function createSessionId(prefix = "accel"): string {
     // Fallback — still clamp
     id = `${prefix}-${Math.random().toString(36).slice(2, 11)}-${Date.now().toString(36)}`;
   }
-  return clampSessionId(id);
+  return clampCacheKey(id) || id;
 }

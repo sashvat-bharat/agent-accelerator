@@ -1,10 +1,10 @@
 import type { Provider, ProviderId, ModelSpec } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
-import { GoogleAIStudioProvider } from "./google/index.ts";
-import { OpenCodeProvider } from "./opencode/index.ts";
-import { OpenRouterProvider } from "./openrouter/index.ts";
-import { OpenAIProvider } from "./openai/index.ts";
-import { OpenAICompatibleProvider } from "./custom/index.ts";
+import { GoogleAIStudioProvider } from "./google.ts";
+import { OpenCodeProvider } from "./opencode.ts";
+import { OpenRouterProvider } from "./openrouter.ts";
+import { OpenAIProvider } from "./openai.ts";
+import { OpenAICompatibleProvider } from "./custom.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
 import { getEnv } from "../utils/env.ts";
 

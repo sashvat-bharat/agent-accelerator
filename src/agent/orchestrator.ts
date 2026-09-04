@@ -89,13 +89,9 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             task: z
               .string()
               .describe("Specific research/task prompt for this sub-agent"),
-            model: z
-              .string()
-              .optional()
-              .describe("Optional model override for this sub-agent (e.g. google/model-id). If omitted inherits parent SubAgentModel"),
           })
         )
-        .describe("Array of sub-agents to spawn — each gets a personalized prompt, inherits parent SubAgentModel if model not specified"),
+        .describe("Array of sub-agents to spawn — each gets a personalized prompt and executes strictly on the configured SubAgentModel"),
     }),
     execute: async ({ tasks }, context) => {
       if (!tasks || tasks.length === 0) {
@@ -103,6 +99,13 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
       }
       if (context?.signal?.aborted) {
         throw new Error("Sub-agent spawning aborted");
+      }
+
+      if (!parentAgent.subagentModel) {
+        throw new Error(
+          "[Agent Accelerator] Cannot spawn sub-agents: SubAgentModel is not configured. " +
+          "Please specify SubAgentModel in Agent config or set the SUB_AGENT_MODEL environment variable."
+        );
       }
 
       const { Agent: AgentClass } = await import("./agent.ts");
@@ -123,10 +126,8 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           seenNames.add(deduped);
           const subagentName = deduped;
 
-          // Resolve model — per-task model optional, else inherit SubAgentModel (agent-accel parity)
-          const parentModelStrRaw: any = (parentAgent.subagentModel as any) || (parentAgent.modelStringOrSpec as any);
-          const parentModelStr = typeof parentModelStrRaw === "string" ? parentModelStrRaw : (parentModelStrRaw?.model ?? parentModelStrRaw?.id ?? String(parentModelStrRaw));
-          let chosenModel: any = (t as any).model || parentModelStr;
+          // Strictly use configured SubAgentModel (no LLM generation or fallback to parent model)
+          const chosenModel: any = parentAgent.subagentModel;
           // Normalize chosenModel to string|ModelSpec handling
           let chosenModelStrForProvider = typeof chosenModel === "string" ? chosenModel : (chosenModel as any)?.model ?? (chosenModel as any)?.id ?? String(chosenModel);
           let attemptedProvider = providerOf(chosenModelStrForProvider);
@@ -182,27 +183,14 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           };
 
           try {
-            let res: any;
-            try {
-              res = await runWithModel(chosenModel, apiKeyToUse, baseUrlToUse);
-            } catch (err: any) {
-              const msg = err?.message || String(err);
-              const isMissingKey = msg.includes("API key is missing") || msg.includes("apiKey") || msg.includes("No API key");
-              const mainModelRaw: any = parentAgent.modelStringOrSpec as any;
-              const mainModelStr: string = typeof mainModelRaw === "string" ? mainModelRaw : (mainModelRaw?.model ?? mainModelRaw?.id ?? String(mainModelRaw));
-              const chosenForCompare = typeof chosenModel === "string" ? chosenModel : (chosenModel as any)?.model ?? (chosenModel as any)?.id ?? String(chosenModel);
-              if (isMissingKey && chosenForCompare !== mainModelStr) {
-                // SubAgentModel missing key → fallback to main model (cross-provider inheritance)
-                res = await runWithModel(mainModelRaw, parentAgent.apiKey, parentAgent.baseUrl);
-                chosenModel = mainModelRaw;
-                chosenModelStrForProvider = mainModelStr;
-                attemptedProvider = providerOf(mainModelStr);
-              } else {
-                throw err;
-              }
-            }
+            const res: any = await runWithModel(chosenModel, apiKeyToUse, baseUrlToUse);
 
             const durationMs = Date.now() - startTime;
+            const rawText = (res as any).text;
+            const subagentText = typeof rawText === "string" && rawText.trim().length > 0
+              ? rawText
+              : `[Sub-agent ${subagentName} produced no output (empty response).]`;
+
             const metadata: SubAgentExecutionMetadata = {
               name: subagentName,
               role: t.role,
@@ -214,13 +202,13 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               turns: (res as any).turns,
               finishReason: (res as any).finishReason,
               responseId: (res as any).responseId,
-              text: (res as any).text,
+              text: subagentText,
               thinking: (res as any).thinking,
               toolCalls: (res as any).toolCalls,
               raw: (res as any).raw,
               isError: false,
             };
-            return { name: subagentName, text: (res as any).text, metadata };
+            return { name: subagentName, text: subagentText, metadata };
           } catch (err: any) {
             const durationMs = Date.now() - startTime;
             const errorMessage = err?.message || String(err);
@@ -229,7 +217,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               name: subagentName,
               role: t.role,
               task: t.task,
-              model: typeof chosenModel === "string" ? chosenModel : ((chosenModel as any)?.model ?? (chosenModel as any)?.id ?? (parentModelStr as string) ?? "unknown"),
+              model: typeof chosenModel === "string" ? chosenModel : ((chosenModel as any)?.model ?? (chosenModel as any)?.id ?? "unknown"),
               provider: prov,
               durationMs,
               usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },

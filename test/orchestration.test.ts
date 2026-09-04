@@ -30,12 +30,38 @@ describe("Multi-Agent Dynamic Orchestration & Metadata", () => {
       name: "Root_Orchestrator",
       model: "google/gemini-3.5-flash-lite",
       apiKey: "TEST_KEY",
+      SubAgentModel: "google/gemini-3.5-flash-lite",
       subagents: true,
     });
 
     expect(parentAgent.tools["spawn_subagents"]).toBeDefined();
     const toolDef = createSubagentSpawnTool(parentAgent);
     expect(toolDef.name).toBe("spawn_subagents");
+    // Ensure LLM cannot choose model (model property removed from schema)
+    const taskShape = (toolDef.input as any)?.shape?.tasks?.element?.shape ?? {};
+    expect(taskShape.model).toBeUndefined();
+    expect(taskShape.name).toBeDefined();
+    expect(taskShape.task).toBeDefined();
+    expect(taskShape.instructions).toBeDefined();
+  });
+
+  it("should strictly throw SubAgentModelError when EnableSubagents is true but SubAgentModel is missing", () => {
+    const { SubAgentModelError } = require("../src/index.ts");
+    const prevEnv = process.env.SUB_AGENT_MODEL;
+    delete process.env.SUB_AGENT_MODEL;
+
+    try {
+      expect(() => {
+        new Agent({
+          name: "Test_Orchestrator",
+          model: "google/gemini-3.8-flash",
+          apiKey: "TEST_KEY",
+          EnableSubagents: true,
+        });
+      }).toThrow(/SubAgentModel is required when EnableSubagents is true/);
+    } finally {
+      if (prevEnv) process.env.SUB_AGENT_MODEL = prevEnv;
+    }
   });
 
   it("should expose detailed sub-agent metadata breakdown in AgentResponse JSON", () => {

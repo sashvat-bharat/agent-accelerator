@@ -1,33 +1,336 @@
-import { BaseProvider } from "../base.ts";
-import { GOOGLE_MODELS } from "./models.ts";
+import { BaseProvider } from "./base.ts";
 import type {
   ProviderId,
   ModelSpec,
   ProviderRequestOptions,
   ProviderGenerateResult,
   ProviderRawData,
-} from "../../types/model.ts";
-import type { ProviderContext, Message, ContentPart } from "../../types/message.ts";
-import type { ToolCallRecord } from "../../types/tool.ts";
-import type { TokenUsage } from "../../types/core.ts";
-import { AssistantMessageEventStream } from "../../streaming/event-stream.ts";
-import { SSEParser } from "../../streaming/sse-parser.ts";
-import { getApiKey } from "../../utils/env.ts";
-import { normalizeMediaInput } from "../../utils/media.ts";
-import { buildSessionHeaders } from "../../utils/headers.ts";
-import { createExplicitCache } from "./cache.ts";
+} from "../types/model.ts";
+import type { ProviderContext, ContentPart } from "../types/message.ts";
+import type { ToolCallRecord } from "../types/tool.ts";
+import type { TokenUsage } from "../types/core.ts";
+import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { SSEParser } from "../streaming/sse-parser.ts";
+import { getApiKey } from "../utils/env.ts";
+import { normalizeMediaInput } from "../utils/media.ts";
+import { buildSessionHeaders } from "../utils/headers.ts";
+import { getModelsForProvider } from "../models/catalog.ts";
 
-// Helpers inspired by agent-accel google-shared.ts (SDK-light)
+// ============================================================================
+// Google AI Studio Provider Types
+// ============================================================================
+
+export type GoogleThinkingLevel = "OFF" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+
+export interface GoogleThinkingConfig {
+  thinkingLevel?: GoogleThinkingLevel;
+  includeThoughts?: boolean;
+}
+
+export type GoogleFunctionCallingMode = "AUTO" | "NONE" | "ANY";
+
+export interface GoogleFunctionCallingConfig {
+  mode: GoogleFunctionCallingMode;
+  allowedFunctionNames?: string[];
+}
+
+export interface GoogleToolConfig {
+  functionCallingConfig?: GoogleFunctionCallingConfig;
+}
+
+export interface GoogleFunctionDeclaration {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  parametersJsonSchema?: Record<string, unknown>;
+}
+
+export interface GoogleTool {
+  functionDeclarations: GoogleFunctionDeclaration[];
+}
+
+export interface GoogleBlob {
+  mimeType: string;
+  data: string;
+}
+
+export interface GooglePart {
+  text?: string;
+  thought?: boolean;
+  thoughtSignature?: string;
+  inlineData?: GoogleBlob;
+  functionCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    id?: string;
+  };
+  functionResponse?: {
+    name: string;
+    response: Record<string, unknown>;
+    id?: string;
+  };
+}
+
+export interface GoogleContent {
+  role: "user" | "model";
+  parts: GooglePart[];
+}
+
+export interface GoogleSystemInstruction {
+  parts: Array<{ text: string }>;
+}
+
+export interface GoogleGenerationConfig {
+  thinkingConfig?: GoogleThinkingConfig;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxOutputTokens?: number;
+  candidateCount?: number;
+  stopSequences?: string[];
+}
+
+export interface GoogleGenerateContentRequest {
+  contents: GoogleContent[];
+  systemInstruction?: GoogleSystemInstruction;
+  tools?: GoogleTool[];
+  toolConfig?: GoogleToolConfig;
+  cachedContent?: string;
+  generationConfig?: GoogleGenerationConfig;
+}
+
+export interface GoogleUsageMetadata {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  totalTokenCount?: number;
+  cachedContentTokenCount?: number;
+  thoughtsTokenCount?: number;
+}
+
+export interface GoogleCandidate {
+  content?: {
+    parts?: GooglePart[];
+    role?: string;
+  };
+  finishReason?: string;
+  index?: number;
+  safetyRatings?: unknown[];
+}
+
+export interface GoogleGenerateContentResponse {
+  candidates?: GoogleCandidate[];
+  usageMetadata?: GoogleUsageMetadata;
+  responseId?: string;
+  modelVersion?: string;
+}
+
+export interface CreateExplicitCacheOptions {
+  model: string;
+  systemInstruction?: string;
+  contents?: Array<{
+    role?: string;
+    parts: Array<Record<string, unknown>>;
+  }>;
+  tools?: Array<Record<string, unknown>>;
+  toolConfig?: Record<string, unknown>;
+  displayName?: string;
+  ttlSeconds?: number;
+  /** ISO string or Date for explicit expireTime (overrides ttl) */
+  expireTime?: string | Date;
+  apiKey?: string;
+  baseUrl?: string;
+}
+
+export interface CachedContentMetadata {
+  name: string; // cachedContents/...
+  displayName?: string;
+  model: string;
+  createTime: string;
+  updateTime: string;
+  expireTime: string;
+  usageMetadata?: {
+    totalTokenCount?: number;
+  };
+}
+
+// ============================================================================
+// Google Thought Signatures & Schema Sanitization Helpers
+// ============================================================================
+
 const base64SigPattern = /^[A-Za-z0-9+/]+={0,2}$/;
-function isValidThoughtSignature(sig?: string): boolean {
+
+export function isValidThoughtSignature(sig?: string): boolean {
   if (!sig) return false;
   if (sig.length % 4 !== 0) return false;
   return base64SigPattern.test(sig);
 }
-function retainThoughtSignature(existing?: string, incoming?: string): string | undefined {
+
+export function retainThoughtSignature(existing?: string, incoming?: string): string | undefined {
   if (typeof incoming === "string" && incoming.length > 0) return incoming;
   return existing;
 }
+
+/**
+ * Google uses OpenAPI 3.0 Schema and strictly rejects JSON Schema keywords
+ * such as $schema, $defs, definitions, and additionalProperties.
+ */
+export function stripSchemaForGoogle(schema: any): any {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    if (Array.isArray(schema)) return schema.map(stripSchemaForGoogle);
+    return schema;
+  }
+  const { $schema, $defs, definitions, additionalProperties, ...rest } = schema as any;
+  const out: any = { ...rest };
+  if (out.properties && typeof out.properties === "object") {
+    const cleaned: any = {};
+    for (const [k, v] of Object.entries(out.properties)) {
+      cleaned[k] = stripSchemaForGoogle(v);
+    }
+    out.properties = cleaned;
+  }
+  if (out.items) out.items = stripSchemaForGoogle(out.items);
+  if (out.anyOf) out.anyOf = (out.anyOf as any[]).map(stripSchemaForGoogle);
+  if (out.oneOf) out.oneOf = (out.oneOf as any[]).map(stripSchemaForGoogle);
+  if (out.allOf) out.allOf = (out.allOf as any[]).map(stripSchemaForGoogle);
+  return out;
+}
+
+// ============================================================================
+// Explicit Context Caching (Google cachedContents API)
+// ============================================================================
+
+/**
+ * Creates an explicit cached content object using Google Gemini's cachedContents API.
+ * REST: POST https://generativelanguage.googleapis.com/v1beta/cachedContents?key=...
+ * Docs: gemini-documentation/context-caching.md
+ */
+export async function createExplicitCache(
+  options: CreateExplicitCacheOptions
+): Promise<CachedContentMetadata> {
+  const apiKey = getApiKey("google", options.apiKey);
+  if (!apiKey) {
+    throw new Error("API key is required to create explicit cache (GEMINI_API_KEY)");
+  }
+
+  const baseUrl = options.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+  const ttl = options.expireTime
+    ? undefined
+    : options.ttlSeconds
+      ? `${options.ttlSeconds}s`
+      : "3600s";
+
+  let modelName = options.model;
+  if (!modelName.startsWith("models/")) {
+    modelName = `models/${modelName.replace(/^google\//, "")}`;
+  }
+
+  const payload: Record<string, unknown> = {
+    model: modelName,
+    contents: options.contents ?? [],
+    ...(ttl ? { ttl } : {}),
+    ...(options.expireTime
+      ? { expireTime: options.expireTime instanceof Date ? options.expireTime.toISOString() : options.expireTime }
+      : {}),
+  };
+
+  if (options.displayName) {
+    payload.displayName = options.displayName;
+    (payload as any).display_name = options.displayName;
+  }
+
+  if (options.systemInstruction) {
+    payload.systemInstruction = {
+      parts: [{ text: options.systemInstruction }],
+    };
+    (payload as any).system_instruction = payload.systemInstruction;
+  }
+
+  if (options.tools && options.tools.length > 0) {
+    payload.tools = options.tools;
+  }
+
+  if (options.toolConfig) {
+    payload.toolConfig = options.toolConfig;
+    (payload as any).tool_config = options.toolConfig;
+  }
+
+  const url = `${baseUrl}/cachedContents?key=${apiKey}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(
+      `Failed to create explicit cache (${response.status} ${response.statusText}): ${errorBody}`
+    );
+  }
+
+  return (await response.json()) as CachedContentMetadata;
+}
+
+// ============================================================================
+// Google Models Fallback & Catalog dynamic view
+// ============================================================================
+
+const FALLBACK_MODELS: ModelSpec[] = [
+  {
+    id: "gemini-3.5-flash-lite",
+    provider: "google",
+    name: "Gemini 3.5 Flash Lite",
+    contextWindow: 1048576,
+    maxOutputTokens: 65536,
+    limit: { context: 1048576, output: 65536 },
+    cost: { input: 0.075, output: 0.3, cache_read: 0.01875 },
+    modalities: { input: ["text", "image", "audio", "video"], output: ["text"] },
+    capabilities: {
+      supportsThinking: true,
+      supportsThinkingLevel: true,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: true,
+      supportsLongCacheRetention: true,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image", "audio", "video"],
+    },
+    pricing: { inputPerMillion: 0.075, outputPerMillion: 0.3, cacheReadPerMillion: 0.01875 },
+  },
+  {
+    id: "gemini-3.7-flash",
+    provider: "google",
+    name: "Gemini 3.7 Flash",
+    contextWindow: 1048576,
+    maxOutputTokens: 65536,
+    limit: { context: 1048576, output: 65536 },
+    cost: { input: 0.1, output: 0.4, cache_read: 0.025 },
+    modalities: { input: ["text", "image", "audio", "video"], output: ["text"] },
+    capabilities: {
+      supportsThinking: true,
+      supportsThinkingLevel: true,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: true,
+      supportsLongCacheRetention: true,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image", "audio", "video"],
+    },
+    pricing: { inputPerMillion: 0.1, outputPerMillion: 0.4, cacheReadPerMillion: 0.025 },
+  },
+];
+
+const dynamicGoogleModels = getModelsForProvider("google").filter(
+  (m) => !m.id.toLowerCase().includes("gemini-2") && !m.id.toLowerCase().includes("gemini-1")
+);
+export const GOOGLE_MODELS: ModelSpec[] =
+  dynamicGoogleModels.length > 0 ? dynamicGoogleModels : FALLBACK_MODELS;
+
+// ============================================================================
+// Google AI Studio Provider Implementation
+// ============================================================================
 
 export class GoogleAIStudioProvider extends BaseProvider {
   readonly id: ProviderId = "google";
@@ -38,20 +341,27 @@ export class GoogleAIStudioProvider extends BaseProvider {
 
   private cleanModelId(model: string | ModelSpec): string {
     const rawId = typeof model === "string" ? model : model.id;
-    return rawId.replace(/^(google\/|models\/)/, "");
+    const clean = rawId.replace(/^(google\/|models\/)/, "");
+    if (clean.toLowerCase().includes("gemini-2") || clean.toLowerCase().includes("gemini-1")) {
+      throw new Error(
+        `Gemini 2.x and 1.x models are not supported by the Google Provider. ` +
+        `Only Gemini 3.x series models are supported (e.g. 'gemini-3.5-flash-lite', 'gemini-3.7-flash').`
+      );
+    }
+    return clean;
   }
 
-  private async convertContentPart(part: ContentPart): Promise<Record<string, unknown> | null> {
+  private async convertContentPart(part: ContentPart): Promise<GooglePart | null> {
     switch (part.type) {
-      case "text":
+      case "text": {
         if (!part.text && !part.thoughtSignature) return null;
-        // Validate signature (keep only valid base64)
         const sig = part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature) ? part.thoughtSignature : undefined;
         if (part.text) {
           return { text: part.text, ...(sig ? { thoughtSignature: sig } : {}) };
         }
         return sig ? { thoughtSignature: sig } : null;
-      case "thinking":
+      }
+      case "thinking": {
         if (!part.thinking && !part.thoughtSignature) return null;
         const tSig = part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature) ? part.thoughtSignature : undefined;
         return {
@@ -59,6 +369,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
           ...(part.thinking ? { text: part.thinking } : {}),
           ...(tSig ? { thoughtSignature: tSig } : {}),
         };
+      }
       case "image": {
         const norm = await normalizeMediaInput(part.image, part.mimeType);
         return {
@@ -98,9 +409,6 @@ export class GoogleAIStudioProvider extends BaseProvider {
         };
       }
       case "tool_result": {
-        // Handle image tool results: if result contains image data URL, extract
-        // For now, handle string output; multimodal handled in convertMessages not here.
-        // Keep SDK-light: just text output
         return {
           functionResponse: {
             name: part.name,
@@ -120,18 +428,17 @@ export class GoogleAIStudioProvider extends BaseProvider {
     modelId: string,
     context: ProviderContext,
     options?: ProviderRequestOptions
-  ): Promise<Record<string, unknown>> {
-    const contents: Array<Record<string, unknown>> = [];
+  ): Promise<GoogleGenerateContentRequest> {
+    const contents: GoogleContent[] = [];
 
     for (const msg of context.messages) {
-      const parts: Array<Record<string, unknown>> = [];
+      const parts: GooglePart[] = [];
 
       if (typeof msg.content === "string") {
         if (msg.content) {
           parts.push({ text: msg.content });
         }
       } else if (Array.isArray(msg.content)) {
-        // C10: parallelize media conversions instead of serial await
         const convertedParts = await Promise.all(msg.content.map((p) => this.convertContentPart(p)));
         for (const converted of convertedParts) {
           if (converted && Object.keys(converted).length > 0) {
@@ -140,16 +447,15 @@ export class GoogleAIStudioProvider extends BaseProvider {
         }
       }
 
-      // Preserve Gemini thought signature on message if present (validated)
-      if (msg.thoughtSignature && isValidThoughtSignature(msg.thoughtSignature) && parts.length > 0 && !(parts[0] as any)?.thoughtSignature) {
-        parts[0] = { ...(parts[0] as any), thoughtSignature: msg.thoughtSignature };
+      if (msg.thoughtSignature && isValidThoughtSignature(msg.thoughtSignature) && parts.length > 0 && !parts[0]?.thoughtSignature) {
+        parts[0] = { ...parts[0]!, thoughtSignature: msg.thoughtSignature };
       }
 
       if (parts.length > 0) {
         if (msg.role === "tool") {
           const lastContent = contents[contents.length - 1];
-          if (lastContent?.role === "user" && (lastContent.parts as any[])?.some((p: any) => p.functionResponse)) {
-            (lastContent.parts as any[]).push(...parts);
+          if (lastContent?.role === "user" && lastContent.parts?.some((p) => p.functionResponse)) {
+            lastContent.parts.push(...parts);
           } else {
             contents.push({ role: "user", parts });
           }
@@ -160,7 +466,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
       }
     }
 
-    const payload: Record<string, unknown> = {
+    const payload: GoogleGenerateContentRequest = {
       contents,
     };
 
@@ -171,47 +477,28 @@ export class GoogleAIStudioProvider extends BaseProvider {
       };
     }
 
-    // Tools — Google uses OpenAPI 3.0 Schema, does NOT support additionalProperties/$schema (strip for Google only)
+    // Tools — stripped for Google OpenAPI 3.0 schema compliance
     if (options?.tools && options.tools.length > 0) {
-      const stripForGoogle = (schema: any): any => {
-        if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
-          if (Array.isArray(schema)) return schema.map(stripForGoogle);
-          return schema;
-        }
-        const { $schema, $defs, definitions, additionalProperties, ...rest } = schema as any;
-        const out: any = { ...rest };
-        if (out.properties && typeof out.properties === "object") {
-          const cleaned: any = {};
-          for (const [k, v] of Object.entries(out.properties)) cleaned[k] = stripForGoogle(v);
-          out.properties = cleaned;
-        }
-        if (out.items) out.items = stripForGoogle(out.items);
-        if (out.anyOf) out.anyOf = (out.anyOf as any[]).map(stripForGoogle);
-        if (out.oneOf) out.oneOf = (out.oneOf as any[]).map(stripForGoogle);
-        if (out.allOf) out.allOf = (out.allOf as any[]).map(stripForGoogle);
-        return out;
-      };
-      // Agent-accel uses parametersJsonSchema for Google (full JSON schema), not parameters (OpenAPI) — keep stable for implicit cache
       payload.tools = [
         {
           functionDeclarations: options.tools.map((t) => ({
             name: t.name,
             description: t.description,
-            parametersJsonSchema: t.parameters ? stripForGoogle(t.parameters) : { type: "object", properties: {} },
+            parametersJsonSchema: t.parameters ? stripSchemaForGoogle(t.parameters) : { type: "object", properties: {} },
           })),
         },
       ];
 
       if (options.toolChoice) {
         if (typeof options.toolChoice === "string") {
-          const modeMap: Record<string, string> = {
+          const modeMap: Record<string, GoogleFunctionCallingMode> = {
             auto: "AUTO",
             none: "NONE",
             required: "ANY",
           };
           payload.toolConfig = {
             functionCallingConfig: {
-              mode: modeMap[options.toolChoice] || options.toolChoice,
+              mode: modeMap[options.toolChoice] || "AUTO",
             },
           };
         } else if (typeof options.toolChoice === "object" && (options.toolChoice as any).name) {
@@ -225,20 +512,21 @@ export class GoogleAIStudioProvider extends BaseProvider {
       }
     }
 
-    // Cache strategy: explicit iff user set cache.retention, else implicit (free, no storage cost)
-    // This fixes downgrade: previously always implicit, now respects cache: {retention:"long"}
-    let cachedContentId: string | undefined = (context as any).cachedContentId || context.cachedContentId || options?.cache?.cachedContentId;
-    const wantsExplicit = !!options?.cache?.retention; // explicit only when retention is set
+    // Explicit cache handling: retention set or cachedContentId specified
+    let cachedContentId: string | undefined =
+      (context as any).cachedContentId || context.cachedContentId || options?.cache?.cachedContentId;
+    const wantsExplicit = !!options?.cache?.retention;
+
     if (wantsExplicit && !cachedContentId) {
-      // Auto-create explicit cache for this session (once) — system+tools stable prefix
       try {
-        const ttlSeconds = options?.cache?.ttlSeconds ?? (options?.cache?.retention === "short" ? 300 : options?.cache?.retention === "medium" ? 3600 : 43200);
+        const ttlSeconds = options?.cache?.ttlSeconds ??
+          (options?.cache?.retention === "short" ? 300 : options?.cache?.retention === "medium" ? 3600 : 43200);
         const apiKeyForCache = getApiKey(this.id, options?.apiKey, options?.env);
-        if (apiKeyForCache && (context.systemPrompt || (payload.tools && (payload.tools as any[]).length > 0))) {
+        if (apiKeyForCache && (context.systemPrompt || (payload.tools && payload.tools.length > 0))) {
           const baseUrlForCache = options?.baseUrl || this.defaultBaseUrl;
           let modelName = modelId;
           if (!modelName.startsWith("models/")) modelName = `models/${modelName}`;
-          // Build minimal cached content: system + tools (stable prefix). Contents empty — history will be sent via contents+cachedContent
+
           const cached = await createExplicitCache({
             model: modelName,
             systemInstruction: context.systemPrompt,
@@ -258,6 +546,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
         // Fallback to implicit on failure
       }
     }
+
     if (cachedContentId) {
       payload.cachedContent = cachedContentId.startsWith("cachedContents/")
         ? cachedContentId
@@ -265,70 +554,31 @@ export class GoogleAIStudioProvider extends BaseProvider {
       delete payload.systemInstruction;
       delete payload.tools;
       delete payload.toolConfig;
-    } else if (!wantsExplicit) {
-      // Implicit: keep systemInstruction+tools stable for 2048/4096 prefix hit (no cachedContent)
     }
 
-    // Generation Config & Thinking Config — bloatfree: no temperature/topP/topK/maxTokens/stopSequences (model defaults)
-    const genConfig: Record<string, unknown> = {};
-
-    // Thinking configuration — generic via catalog capabilities (no hardcoded model names)
-    const modelSpecForThinking = this.getModel(modelId);
-    const supportsLevel = !!modelSpecForThinking?.capabilities.supportsThinkingLevel;
-    const supportsBudget = !!modelSpecForThinking?.capabilities.supportsThinkingBudget;
-    // Level-based if catalog says so, otherwise fallback to budget (covers all providers generically)
-    const isLevelBased = supportsLevel && !supportsBudget ? true : supportsLevel;
-    // When catalog unavailable, use level for recent models generically (safe fallback)
-    const isGemini3 = isLevelBased;
+    // Generation Config & Thinking Config (Gemini 3.x series uses thinkingLevel)
+    const genConfig: GoogleGenerationConfig = {};
     const thinking = options?.thinking;
 
     const isExplicitlyDisabled =
       thinking?.enabled === false ||
-      thinking?.level === "none" ||
-      thinking?.budgetTokens === 0;
+      thinking?.level === "none";
 
     if (!isExplicitlyDisabled && thinking) {
-      if (isGemini3) {
-        let levelStr = "LOW";
-        if (thinking.level === "minimal") levelStr = "MINIMAL";
-        else if (thinking.level === "medium") levelStr = "MEDIUM";
-        else if (thinking.level === "high" || thinking.level === "xhigh") levelStr = "HIGH";
-        else if (thinking.level === "low" || thinking.level === "dynamic") levelStr = "LOW";
+      let levelStr: GoogleThinkingLevel = "LOW";
+      if (thinking.level === "minimal") levelStr = "MINIMAL";
+      else if (thinking.level === "medium") levelStr = "MEDIUM";
+      else if (thinking.level === "high" || thinking.level === "xhigh") levelStr = "HIGH";
+      else if (thinking.level === "low" || thinking.level === "dynamic") levelStr = "LOW";
 
-        genConfig.thinkingConfig = {
-          thinkingLevel: levelStr,
-          includeThoughts: thinking.includeThoughts ?? true,
-        };
-      } else {
-        // Gemini 2.5 uses thinkingBudget ONLY (never includeThoughts) — U10: map levels to token budgets (agent-accel thinkingBudgetForLevel)
-        let budget = -1;
-        if (thinking.budgetTokens !== undefined) {
-          budget = thinking.budgetTokens;
-        } else if (thinking.level) {
-          const budgetMap: Record<string, number> = {
-            none: 0,
-            dynamic: -1,
-            minimal: 1024,
-            low: 4096,
-            medium: 8192,
-            high: 16384,
-            xhigh: 24576,
-          };
-          budget = budgetMap[thinking.level] ?? -1;
-        }
-        genConfig.thinkingConfig = {
-          thinkingBudget: budget,
-        };
-      }
+      genConfig.thinkingConfig = {
+        thinkingLevel: levelStr,
+        includeThoughts: thinking.includeThoughts ?? true,
+      };
     } else if (isExplicitlyDisabled) {
-      if (isGemini3) {
-        genConfig.thinkingConfig = {
-          thinkingLevel: "OFF",
-          thinkingBudget: 0,
-        };
-      } else {
-        genConfig.thinkingConfig = { thinkingBudget: 0 };
-      }
+      genConfig.thinkingConfig = {
+        thinkingLevel: "OFF",
+      };
     }
 
     if (Object.keys(genConfig).length > 0) {
@@ -338,7 +588,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
     return payload;
   }
 
-  private extractUsage(usageMetadata?: any): TokenUsage {
+  private extractUsage(usageMetadata?: GoogleUsageMetadata): TokenUsage {
     if (!usageMetadata) {
       return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     }
@@ -378,11 +628,15 @@ export class GoogleAIStudioProvider extends BaseProvider {
     const url = `${baseUrl}/models/${modelId}:generateContent?key=${apiKey}`;
     const payload = await this.buildPayload(modelId, context, options);
 
-    // Use unified session header helper (reads both sessionId and cache.sessionId)
-    const headers = buildSessionHeaders(this.id, options?.cache, {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    }, options?.sessionId);
+    const headers = buildSessionHeaders(
+      this.id,
+      options?.cache,
+      {
+        "Content-Type": "application/json",
+        ...options?.headers,
+      },
+      options?.sessionId
+    );
 
     const raw: ProviderRawData = {
       request: {
@@ -407,6 +661,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
       const text = await response.text().catch(() => "");
       throw new Error(`Google AI Studio error (${response.status} ${response.statusText}): ${text}`);
     }
+
     raw.response = {
       status: response.status,
       statusText: response.statusText,
@@ -434,7 +689,6 @@ export class GoogleAIStudioProvider extends BaseProvider {
           thoughtSignature = retainThoughtSignature(thoughtSignature, part.thoughtSignature);
         }
 
-        // Generic thinking detection — any field any model may use
         const isThinking = Boolean(
           part.thought === true ||
             (typeof part.thought === "string" && part.thought) ||
@@ -447,6 +701,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
             typeof (part as any).reasoning_text === "string" ||
             (part as any).thinking_content
         );
+
         const thoughtText =
           typeof part.thought === "string"
             ? part.thought
@@ -469,7 +724,9 @@ export class GoogleAIStudioProvider extends BaseProvider {
             id: callId,
             name: part.functionCall.name,
             arguments: part.functionCall.args || {},
-            thoughtSignature: part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature) ? part.thoughtSignature : retainThoughtSignature(undefined, thoughtSignature),
+            thoughtSignature: part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature)
+              ? part.thoughtSignature
+              : retainThoughtSignature(undefined, thoughtSignature),
           });
         }
       }
@@ -478,7 +735,6 @@ export class GoogleAIStudioProvider extends BaseProvider {
     const usage = this.extractUsage(responseJson.usageMetadata);
     const finishReason = candidate?.finishReason || "STOP";
     const responseId = responseJson.responseId;
-
     const finalText = text || (toolCalls.length === 0 && thinking ? thinking : "");
 
     return {
@@ -518,10 +774,15 @@ export class GoogleAIStudioProvider extends BaseProvider {
         const url = `${baseUrl}/models/${modelId}:streamGenerateContent?alt=sse&key=${apiKey}`;
         const payload = await this.buildPayload(modelId, context, options);
 
-        const headers = buildSessionHeaders(this.id, options?.cache, {
-          "Content-Type": "application/json",
-          ...options?.headers,
-        }, options?.sessionId);
+        const headers = buildSessionHeaders(
+          this.id,
+          options?.cache,
+          {
+            "Content-Type": "application/json",
+            ...options?.headers,
+          },
+          options?.sessionId
+        );
 
         const raw: ProviderRawData = {
           request: {
@@ -599,7 +860,6 @@ export class GoogleAIStudioProvider extends BaseProvider {
                     finalThoughtSignature = retainThoughtSignature(finalThoughtSignature, part.thoughtSignature);
                   }
 
-                  // Generic thinking detection — any field any model may use
                   const isThinking = Boolean(
                     part.thought === true ||
                       (typeof part.thought === "string" && part.thought) ||
@@ -612,6 +872,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
                       typeof (part as any).reasoning_text === "string" ||
                       (part as any).thinking_content
                   );
+
                   const thoughtText =
                     typeof part.thought === "string"
                       ? part.thought
@@ -639,14 +900,16 @@ export class GoogleAIStudioProvider extends BaseProvider {
                       partialText: accumulatedText,
                     });
                   } else if (part.functionCall) {
-                    const callId =
-                      part.functionCall.id ||
-                      `call_${Math.random().toString(36).slice(2, 9)}`;
+                    const callId = part.functionCall.id || `call_${Math.random().toString(36).slice(2, 9)}`;
                     const toolCall: ToolCallRecord = {
                       id: callId,
                       name: part.functionCall.name,
                       arguments: part.functionCall.args || {},
-                      thoughtSignature: part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature) ? part.thoughtSignature : finalThoughtSignature && isValidThoughtSignature(finalThoughtSignature) ? finalThoughtSignature : undefined,
+                      thoughtSignature: part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature)
+                        ? part.thoughtSignature
+                        : finalThoughtSignature && isValidThoughtSignature(finalThoughtSignature)
+                        ? finalThoughtSignature
+                        : undefined,
                     };
                     accumulatedToolCalls.push(toolCall);
                     eventStream.push({
@@ -656,7 +919,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
                   }
                 }
               }
-            } catch (err) {
+            } catch {
               // Ignore partial JSON parse errors in SSE frames
             }
           }
@@ -673,7 +936,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
           } catch {}
         }
 
-        const { AgentResponse } = await import("../../types/response.ts");
+        const { AgentResponse } = await import("../types/response.ts");
         const finalText = accumulatedText || (accumulatedToolCalls.length === 0 && accumulatedThinking ? accumulatedThinking : "");
         const finalAgentResponse = new AgentResponse({
           text: finalText,

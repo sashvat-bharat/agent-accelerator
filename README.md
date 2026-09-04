@@ -6,7 +6,7 @@
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: "opencode/hy3-free", // Switch seamlessly to google/gemini-2.5-flash or openrouter
+  model: "opencode/hy3-free", // Switch seamlessly to google/gemini-3.5-flash-lite or openrouter
   instructions: "You are a concise research engineer.",
   cache: { retention: "long" }, // Deterministic 80-90% cache hits on multi-turn runs
 });
@@ -61,7 +61,7 @@ OPENAI_BASE_API_KEY=your_openai_or_custom_key   # or OPENAI_API_KEY
 OPENAI_BASE_URL=https://api.openai.com/v1       # or custom cURL endpoint (e.g. http://localhost:11434/v1)
 
 MODEL=opencode/hy3-free
-SUB_AGENT_MODEL=google/gemini-2.5-flash
+SUB_AGENT_MODEL=google/gemini-3.5-flash-lite
 
 ```
 
@@ -185,20 +185,31 @@ Turn 2 (Warm Context)
 | **OpenCode / OpenRouter** | Ephemeral Breakpoints          | `cache_control` headers + `prompt_cache_key` | Yes                        |
 
 ---
-## Model Catalog & Thinking Validation
+## Model Catalog & Preflight Validation
 
 Agent Accelerator uses `models.dev` as its catalog database to inspect model specs, pricing, context windows, and reasoning capabilities:
 
 ```ts
-import { validateModelThinking, getModelThinkingInfo } from "agent-accelerator";
+import { validateModelThinking, getModelThinkingInfo, ThinkingLevelError } from "agent-accelerator";
 
 // Inspect model thinking capabilities
 const info = getModelThinkingInfo("google", "gemini-3.7-flash");
 console.log(info.allowedLevels); // ["low", "medium", "high"]
 
 // Preflight validation (fails fast before network requests)
-validateModelThinking("google", "gemini-3.7-flash", "low"); // Valid!
-validateModelThinking("openai", "gpt-4o", "high"); // Throws Error: Model does not support thinking/reasoning
+try {
+  validateModelThinking("google", "gemini-3.7-flash", "low"); // Valid!
+  validateModelThinking("openai", "gpt-4o", "high"); // Throws ThinkingLevelError with actionable remedy
+} catch (err) {
+  if (err instanceof ThinkingLevelError) {
+    console.error(`Invalid thinking mode for ${err.modelId}. Allowed:`, err.allowedLevels);
+  }
+}
+```
+
+To update the local catalog snapshot anytime to the latest upstream model specs and pricing:
+```bash
+bun run update-models
 ```
 
 ---
@@ -224,19 +235,19 @@ Interactive commands during chat:
 
 ### `new Agent(options)`
 
-| Parameter                                      | Type                                                             | Description                                                    |
-| ---------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------- |
-| `model`                                        | `string, ModelSpec, ModelProviderInstance`                       | e.g. `"google/model-id"` or `ModelProvider.GoogleGenAI(...)`   |
-| `instructions`                                 | `string`                                                         | System prompt — keep stable for cache                          |
-| `SubAgentModel`                                | `string, ModelSpec`                                              | Model for `spawn_subagents` (inherits `ThinkingLevel`/`cache`) |
-| `ThinkingLevel`                                | `"none", "dynamic", "minimal", "low", "medium", "high", "xhigh"` | Reasoning level (generic via catalog)                          |
-| `cache`                                        | `{ retention?: "short", "medium", "long", sessionId?: string }`  | `short=5m` `medium=1h` `long=12h`                              |
-| `ServiceTier`                                  | `"flex", "priority"`                                             | `standard` = default                                           |
-| `EnableSubagents`                              | `boolean`                                                        | Adds `spawn_subagents` tool                                    |
-| `CustomAgents`                                 | `Agent[]`                                                        | Exposed as tools                                               |
-| `tools` / `functions` / `skills`               | `ToolDefinition[]`                                               | Zod → JSON Schema, parallel `Promise.all`                      |
-| `maxTurns`                                     | `number`                                                         | Default `10`                                                   |
-| `sessionId` / `headers` / `apiKey` / `baseUrl` | `string`                                                         | Overrides                                                      |
+| Parameter                                      | Type                                                             | Description                                                                              |
+| ---------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `model`                                        | `string, ModelSpec, ModelProviderInstance`                       | e.g. `"google/model-id"` or `ModelProvider.GoogleGenAI(...)`                             |
+| `instructions`                                 | `string`                                                         | System prompt — keep stable for cache                                                    |
+| `SubAgentModel`                                | `string, ModelSpec`                                              | Strictly required if `EnableSubagents: true` (or via `SUB_AGENT_MODEL` env). Enforces model isolation. |
+| `ThinkingLevel`                                | `"none", "dynamic", "minimal", "low", "medium", "high", "xhigh"` | Reasoning level (generic via catalog preflight)                                          |
+| `cache`                                        | `{ retention?: "short", "medium", "long", sessionId?: string }`  | `short=5m` `medium=1h` `long=12h`                                                        |
+| `ServiceTier`                                  | `"flex", "priority"`                                             | `standard` = default                                                                     |
+| `EnableSubagents`                              | `boolean`                                                        | Adds `spawn_subagents` tool (strictly runs on `SubAgentModel`)                            |
+| `CustomAgents`                                 | `Agent[]`                                                        | Exposed as tools                                                                         |
+| `tools` / `functions`                          | `ToolDefinition[]`                                               | Zod → JSON Schema, parallel `Promise.all`                                                |
+| `maxTurns`                                     | `number`                                                         | Default `10`                                                                             |
+| `sessionId` / `headers` / `apiKey` / `baseUrl` | `string`                                                         | Overrides                                                                                |
 
 **`agent.run(prompt, opts)`** `stream?: boolean` `wrapThinking?: boolean` (`<think>…</think>` + blank line) `onDelta?` `onThinkingDelta?` `onEvent?` `signal?` `sessionId?` `additionalContext?`
 
@@ -245,7 +256,7 @@ Interactive commands during chat:
 
 * **`text`**: Complete decoded output string.
 * **`thinking`**: Extracted reasoning tokens and trace.
-* **`thoughtSignature`**: Provider reasoning signatures (persisted automatically for Gemini 2.5/3.x).
+* **`thoughtSignature`**: Provider reasoning signatures (persisted automatically for Gemini 3.x).
 * **`toolCalls` / `toolResults`**: Structured logs of all tool interactions.
 * **`subagents`**: Metadata array of sub-agent durations, tokens, and outputs.
 * **`usage`**: `{ inputTokens, outputTokens, cachedTokens, thinkingTokens, cost }`.
@@ -257,9 +268,9 @@ Interactive commands during chat:
 ```
 src/
 ├── agent/       # Agent context, main execution loop, and orchestrator
-├── providers/   # Provider adapters (Google, OpenCode, OpenRouter)
+├── providers/   # Single-file provider modules (google.ts, openai.ts, opencode.ts, openrouter.ts, custom.ts)
 ├── models/      # Catalog parser and context resolution
-├── data/        # models.dev database snapshot
+├── data/        # models.dev database snapshot (gitignored, updated via bun run update-models)
 ├── tools/       # Zod schemas, wrappers, and parallel executor
 ├── streaming/   # SSE parser and typed event stream emitters
 ├── tokens/      # Context window and token utilization counters
@@ -270,9 +281,12 @@ src/
 ## Development & Testing
 
 ```bash
-bun run typecheck # Typecheck
-bun test # Run test suite
-bun run examples/chat.ts # Run interactive CLI session
+bun run typecheck              # Typecheck
+bun test                       # Run test suite
+bun run update-models          # Refresh models.dev catalog snapshot
+bun run examples/chat.ts       # Run interactive CLI session
+bun run examples/multi_agent.ts# Run multi-agent orchestrator demo
+bun run examples/metadata.ts   # Full metadata & wire inspection demo
 ```
 
 ---

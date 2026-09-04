@@ -1,21 +1,221 @@
-import { BaseProvider } from "../base.ts";
-import { OPENCODE_MODELS } from "./models.ts";
+import { BaseProvider } from "./base.ts";
 import type {
   ProviderId,
   ModelSpec,
   ProviderRequestOptions,
   ProviderGenerateResult,
   ProviderRawData,
-} from "../../types/model.ts";
-import type { ProviderContext, Message, ContentPart } from "../../types/message.ts";
-import type { ToolCallRecord } from "../../types/tool.ts";
-import type { TokenUsage } from "../../types/core.ts";
-import { AssistantMessageEventStream } from "../../streaming/event-stream.ts";
-import { SSEParser } from "../../streaming/sse-parser.ts";
-import { getApiKey, getEnv } from "../../utils/env.ts";
-import { normalizeMediaInput } from "../../utils/media.ts";
-import { buildSessionHeaders } from "../../utils/headers.ts";
-import { applyAnthropicCacheControl, clampCacheKey, getPromptCacheRetention } from "../../utils/cache.ts";
+} from "../types/model.ts";
+import type { ProviderContext, ContentPart } from "../types/message.ts";
+import type { ToolCallRecord } from "../types/tool.ts";
+import type { TokenUsage } from "../types/core.ts";
+import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { SSEParser } from "../streaming/sse-parser.ts";
+import { getApiKey, getEnv } from "../utils/env.ts";
+import { normalizeMediaInput } from "../utils/media.ts";
+import { buildSessionHeaders } from "../utils/headers.ts";
+import { applyAnthropicCacheControl, clampCacheKey, getPromptCacheRetention } from "../utils/cache.ts";
+import { getModelsForProvider } from "../models/catalog.ts";
+
+// ============================================================================
+// OpenCode Provider Types (Chat & Responses API)
+// ============================================================================
+
+export type OpenCodePromptCacheRetention = "5m" | "1h" | "12h";
+
+export interface OpenCodeCacheControl {
+  type: "ephemeral";
+}
+
+export type OpenCodeReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
+
+export interface OpenCodeChatRequest {
+  model: string;
+  messages: any[];
+  tools?: any[];
+  tool_choice?: any;
+  stream?: boolean;
+  prompt_cache_key?: string;
+  prompt_cache_retention?: OpenCodePromptCacheRetention;
+  reasoning_effort?: OpenCodeReasoningEffort;
+  thinking?: {
+    type: "enabled" | "disabled";
+  };
+}
+
+export interface OpenCodeResponsesInputItem {
+  type?: string;
+  role?: string;
+  content?: any;
+  call_id?: string;
+  id?: string;
+  name?: string;
+  arguments?: string;
+  output?: string;
+  text?: string;
+  status?: string;
+}
+
+export interface OpenCodeResponsesRequest {
+  model: string;
+  input: OpenCodeResponsesInputItem[];
+  stream?: boolean;
+  store?: boolean;
+  tools?: any[];
+  tool_choice?: any;
+  prompt_cache_key?: string;
+  prompt_cache_retention?: OpenCodePromptCacheRetention;
+  prompt_cache_options?: { mode: string };
+  reasoning?: {
+    effort?: OpenCodeReasoningEffort;
+    enabled?: boolean;
+    summary?: string;
+  };
+  include?: string[];
+  service_tier?: string;
+}
+
+export interface OpenCodeUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
+  input_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
+  input_token_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+  };
+  output_tokens_details?: {
+    reasoning_tokens?: number;
+  };
+  cached_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoning_tokens?: number;
+  reasoningTokens?: number;
+  total_cost?: number;
+  cost?: {
+    totalCost?: number;
+  };
+}
+
+export interface OpenCodeChatResponse {
+  id: string;
+  choices: Array<{
+    index: number;
+    message: {
+      role: string;
+      content?: string;
+      tool_calls?: any[];
+      reasoning?: string;
+      reasoning_content?: string;
+      reasoning_text?: string;
+      thinking?: string;
+      thought?: string;
+    };
+    finish_reason: string;
+  }>;
+  usage?: OpenCodeUsage;
+}
+
+export interface OpenCodeResponsesOutputItem {
+  type: string;
+  content?: Array<{
+    type: string;
+    text?: string;
+  }>;
+  name?: string;
+  call_id?: string;
+  id?: string;
+  arguments?: string;
+  text?: string;
+}
+
+export interface OpenCodeResponsesResponse {
+  id: string;
+  status: string;
+  output?: OpenCodeResponsesOutputItem[] | string;
+  usage?: OpenCodeUsage;
+}
+
+// ============================================================================
+// OpenCode Models Fallback & Catalog dynamic view
+// ============================================================================
+
+const FALLBACK_MODELS: ModelSpec[] = [
+  {
+    id: "gpt-5.4",
+    provider: "opencode",
+    name: "GPT-5.4 (Zen)",
+    contextWindow: 1048576,
+    maxOutputTokens: 65536,
+    limit: { context: 1048576, output: 65536 },
+    cost: { input: 1.0, output: 5.0, cache_read: 0.1 },
+    modalities: { input: ["text", "image"], output: ["text"] },
+    capabilities: {
+      supportsThinking: true,
+      supportsThinkingLevel: true,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: true,
+      supportsLongCacheRetention: true,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image"],
+    },
+    pricing: { inputPerMillion: 1.0, outputPerMillion: 5.0, cacheReadPerMillion: 0.1 },
+  },
+  {
+    id: "muse-4.5",
+    provider: "opencode",
+    name: "Muse 4.5",
+    contextWindow: 1048576,
+    maxOutputTokens: 65536,
+    limit: { context: 1048576, output: 65536 },
+    cost: { input: 0.5, output: 2.0, cache_read: 0.05 },
+    modalities: { input: ["text", "image"], output: ["text"] },
+    capabilities: {
+      supportsThinking: true,
+      supportsThinkingLevel: true,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: true,
+      supportsLongCacheRetention: true,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image"],
+    },
+    pricing: { inputPerMillion: 0.5, outputPerMillion: 2.0, cacheReadPerMillion: 0.05 },
+  },
+];
+
+const dynamicOpenCodeModels = getModelsForProvider("opencode");
+export const OPENCODE_MODELS: ModelSpec[] =
+  dynamicOpenCodeModels.length > 2 ? dynamicOpenCodeModels : FALLBACK_MODELS;
+
+// ============================================================================
+// OpenCode Provider Implementation
+// ============================================================================
 
 export class OpenCodeProvider extends BaseProvider {
   readonly id: ProviderId = "opencode";
@@ -29,7 +229,6 @@ export class OpenCodeProvider extends BaseProvider {
     if (explicit) return explicit;
     const envUrl = getEnv("OPENCODE_BASE_URL");
     if (envUrl) return envUrl;
-    // U11: opencode-go models need go baseUrl
     if (modelId.includes("go") || modelId.startsWith("opencode-go")) return this.goBaseUrl;
     return this.defaultBaseUrl;
   }
@@ -60,7 +259,6 @@ export class OpenCodeProvider extends BaseProvider {
     const input: any[] = [];
     const modelSpecForCache = this.getModel(modelId);
 
-    // Developer or system instruction (developer role for reasoning models)
     if (context.systemPrompt) {
       const isReasoning = modelSpecForCache?.reasoning || (options?.thinking?.enabled !== false && options?.thinking?.level !== "none");
       const role = isReasoning ? "developer" : "system";
@@ -135,7 +333,6 @@ export class OpenCodeProvider extends BaseProvider {
             });
           }
         } else {
-          // User message
           const userContent: any[] = [];
           for (const tp of textParts) {
             userContent.push({ type: "input_text", text: tp.text });
@@ -172,8 +369,6 @@ export class OpenCodeProvider extends BaseProvider {
       if (options.toolChoice) payload.tool_choice = options.toolChoice;
     }
 
-    // Prompt Caching for Responses API:
-    // Sets prompt_cache_key and retention for cache affinity and cache write/read hits
     const sessionId = options?.sessionId || options?.cache?.sessionId;
     const retention = options?.cache?.retention;
     const supportsLong = modelSpecForCache?.capabilities.supportsLongCacheRetention ?? true;
@@ -187,12 +382,10 @@ export class OpenCodeProvider extends BaseProvider {
       }
     }
 
-    // Only set explicit mode if retention is explicitly set to "none" on a model that supports explicit caching
     if ((retention as any) === "none" && modelSpecForCache?.capabilities.supportsExplicitCaching) {
       payload.prompt_cache_options = { mode: "explicit" };
     }
 
-    // Thinking / reasoning — generic via catalog (toggle vs effort)
     const canThink = modelSpecForCache ? modelSpecForCache.capabilities.supportsThinking !== false : true;
     const levelResp = options?.thinking?.level;
     const isDisabledResp = options?.thinking?.enabled === false || (levelResp as any) === "none";
@@ -212,7 +405,6 @@ export class OpenCodeProvider extends BaseProvider {
       }
     }
 
-    // ServiceTier parity (responses uses service_tier)
     if (options?.serviceTier) {
       payload.service_tier = options.serviceTier === "flex" ? "flex" : options.serviceTier === "priority" ? "priority" : undefined;
     }
@@ -334,7 +526,7 @@ export class OpenCodeProvider extends BaseProvider {
       }
     }
 
-    // Battle-tested cache: 80-90% hit — first turn already marks system+tools+first user, second turn reuses prefix
+    // Prompt cache control for high hit rates
     const modelSpecForCache = this.getModel(modelId);
     const retention = options?.cache?.retention;
     applyAnthropicCacheControl(messages, payload.tools as any, retention, modelSpecForCache);
@@ -348,7 +540,7 @@ export class OpenCodeProvider extends BaseProvider {
       }
     }
 
-    // Thinking / reasoning — generic, explicitly handle "none" to disable even on reasoning-default models
+    // Thinking / reasoning
     const modelSpecForThinking = this.getModel(modelId);
     const level = options?.thinking?.level;
     const isDisabled = options?.thinking?.enabled === false || (level as any) === "none";
@@ -377,10 +569,6 @@ export class OpenCodeProvider extends BaseProvider {
       }
     }
 
-    // ServiceTier — bloatfree DX6: no temperature/topP/stopSequences (model defaults)
-    // OpenCode tier routing (if needed, via provider order not yet exposed, keep placeholder)
-    // No inference fields — standard is default
-
     return payload;
   }
 
@@ -388,7 +576,6 @@ export class OpenCodeProvider extends BaseProvider {
     if (!usageData) {
       return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     }
-    // Generic: handle both chat (prompt_tokens) and responses (input_tokens) styles
     const input = usageData.prompt_tokens ?? usageData.input_tokens ?? usageData.promptTokens ?? 0;
     const output = usageData.completion_tokens ?? usageData.output_tokens ?? usageData.completionTokens ?? 0;
     const total = usageData.total_tokens ?? usageData.totalTokens ?? input + output;
@@ -450,11 +637,16 @@ export class OpenCodeProvider extends BaseProvider {
       ? this.buildResponsesPayload(modelId, context, options, false)
       : await this.buildPayload(modelId, context, options, false);
 
-    const headers = buildSessionHeaders(this.id, options?.cache, {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      ...options?.headers,
-    }, options?.sessionId);
+    const headers = buildSessionHeaders(
+      this.id,
+      options?.cache,
+      {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        ...options?.headers,
+      },
+      options?.sessionId
+    );
 
     const raw: ProviderRawData = {
       request: {
@@ -472,7 +664,7 @@ export class OpenCodeProvider extends BaseProvider {
       signal: options?.signal,
     });
 
-    // Retry on transient upstream errors (500, 502, 503, 529)
+    // Retry on transient upstream errors
     if (!response.ok && [500, 502, 503, 529].includes(response.status)) {
       try {
         const retryOptions: any = { ...options, thinking: { enabled: false, level: "none" }, cache: undefined };
@@ -481,7 +673,7 @@ export class OpenCodeProvider extends BaseProvider {
           : await this.buildPayload(modelId, context, retryOptions, false);
         payload = retryPayload;
         (raw.request as any).body = retryPayload;
-        if (response.status === 503) await new Promise(r => setTimeout(r, 800));
+        if (response.status === 503) await new Promise((r) => setTimeout(r, 800));
         response = await fetch(url, {
           method: "POST",
           headers,
@@ -490,7 +682,7 @@ export class OpenCodeProvider extends BaseProvider {
         });
       } catch {}
     }
-    // Fallback to alternative endpoint (chat <-> responses) if still 500
+
     if (!response.ok && [500, 503].includes(response.status)) {
       try {
         const altIsResponses = !isResponses;
@@ -527,6 +719,7 @@ export class OpenCodeProvider extends BaseProvider {
       const hint = isUpstream ? " — provider endpoint temporarily unavailable, try again or switch MODEL (e.g. openrouter/*)" : "";
       throw new Error(`OpenCode API error (${response.status} ${response.statusText}): ${t}${hint}`);
     }
+
     raw.response = {
       status: response.status,
       statusText: response.statusText,
@@ -542,14 +735,12 @@ export class OpenCodeProvider extends BaseProvider {
 
     let text = "";
     let thinking: string | undefined;
-    let toolCalls: ToolCallRecord[] = [];
+    const toolCalls: ToolCallRecord[] = [];
     let finishReason = "stop";
     let responseId = responseJson.id;
     let usage: any;
 
-    // Handle both completions (choices) and responses (output) regardless of endpoint (robust)
     if (responseJson.output) {
-      // openai-responses format: output: [{type:"message", content:[{type:"output_text", text:"..."}]}, {type:"function_call", ...}]
       const output = responseJson.output;
       if (Array.isArray(output)) {
         for (const item of output) {
@@ -560,8 +751,17 @@ export class OpenCodeProvider extends BaseProvider {
             }
           } else if (item.type === "function_call") {
             let args: any = {};
-            try { args = typeof item.arguments === "string" ? JSON.parse(item.arguments) : item.arguments || {}; } catch { args = { raw: item.arguments }; }
-            toolCalls.push({ id: item.call_id || item.id || `call_${Math.random().toString(36).slice(2, 9)}`, name: item.name || "", arguments: args, rawArguments: item.arguments });
+            try {
+              args = typeof item.arguments === "string" ? JSON.parse(item.arguments) : item.arguments || {};
+            } catch {
+              args = { raw: item.arguments };
+            }
+            toolCalls.push({
+              id: item.call_id || item.id || `call_${Math.random().toString(36).slice(2, 9)}`,
+              name: item.name || "",
+              arguments: args,
+              rawArguments: item.arguments,
+            });
           } else if (item.type === "reasoning" && item.text) {
             thinking = (thinking || "") + item.text;
           }
@@ -569,14 +769,12 @@ export class OpenCodeProvider extends BaseProvider {
       } else if (typeof output === "string") {
         text = output;
       }
-      // responses usage is {input_tokens, output_tokens, total_tokens, input_tokens_details}
       usage = this.extractUsage(responseJson.usage);
       finishReason = responseJson.status === "completed" ? "stop" : responseJson.status || "stop";
     } else {
       const choice = responseJson.choices?.[0];
       const message = choice?.message;
       text = message?.content || "";
-      // Generic thinking — any field any model may use
       if (typeof message?.reasoning === "string" && message.reasoning) thinking = message.reasoning;
       else if (typeof message?.reasoning_content === "string" && message.reasoning_content) thinking = message.reasoning_content;
       else if (typeof message?.reasoning_text === "string" && message.reasoning_text) thinking = message.reasoning_text;
@@ -646,11 +844,16 @@ export class OpenCodeProvider extends BaseProvider {
           ? this.buildResponsesPayload(modelId, context, options, true)
           : await this.buildPayload(modelId, context, options, true);
 
-        const headers = buildSessionHeaders(this.id, options?.cache, {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          ...options?.headers,
-        }, options?.sessionId);
+        const headers = buildSessionHeaders(
+          this.id,
+          options?.cache,
+          {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            ...options?.headers,
+          },
+          options?.sessionId
+        );
 
         const raw: ProviderRawData = {
           request: {
@@ -668,7 +871,6 @@ export class OpenCodeProvider extends BaseProvider {
           signal: options?.signal,
         });
 
-        // Retry on transient upstream errors (500, 502, 503, 529) — strip thinking/cache which often triggers provider errors
         if (!response.ok && [500, 502, 503, 529].includes(response.status)) {
           try {
             const retryOptions: any = { ...options, thinking: { enabled: false, level: "none" }, cache: undefined };
@@ -677,8 +879,7 @@ export class OpenCodeProvider extends BaseProvider {
               : await this.buildPayload(modelId, context, retryOptions, true);
             payload = retryPayload;
             (raw.request as any).body = retryPayload;
-            // brief backoff for 503
-            if (response.status === 503) await new Promise(r => setTimeout(r, 800));
+            if (response.status === 503) await new Promise((r) => setTimeout(r, 800));
             response = await fetch(url, {
               method: "POST",
               headers,
@@ -687,7 +888,7 @@ export class OpenCodeProvider extends BaseProvider {
             });
           } catch {}
         }
-        // Fallback to alternative endpoint if still 500
+
         if (!response.ok && [500, 503].includes(response.status)) {
           try {
             const altIsResponses = !isResponsesStream;
@@ -755,7 +956,6 @@ export class OpenCodeProvider extends BaseProvider {
                 finalResponseId = chunkJson.id;
               }
 
-              // Handle openai-responses streaming — generic (agent-accel uses response.output_text.delta etc.)
               if (chunkJson.type === "response.output_text.delta") {
                 const textDelta = typeof chunkJson.delta === "string" ? chunkJson.delta : chunkJson.delta?.text || "";
                 if (textDelta) {
@@ -798,16 +998,12 @@ export class OpenCodeProvider extends BaseProvider {
                 }
                 continue;
               }
-              if (chunkJson.type === "response.function_call") {
-                continue;
-              }
               if (chunkJson.type === "response.completed" || chunkJson.type === "response.done") {
                 if (chunkJson.response?.id) finalResponseId = chunkJson.response.id;
                 if (chunkJson.response?.usage) {
                   finalUsage = this.extractUsage(chunkJson.response.usage);
                   eventStream.push({ type: "usage", usage: finalUsage });
                 }
-                // Fallback: if no deltas were streamed, extract from completed output (common for responses)
                 if (!accumulatedText && chunkJson.response?.output && Array.isArray(chunkJson.response.output)) {
                   for (const item of chunkJson.response.output) {
                     if (item.type === "message" && Array.isArray(item.content)) {
@@ -825,7 +1021,6 @@ export class OpenCodeProvider extends BaseProvider {
               }
 
               if (chunkJson.usage) {
-                // Handle both completions usage and responses usage shapes
                 finalUsage = this.extractUsage(chunkJson.usage);
                 eventStream.push({ type: "usage", usage: finalUsage });
               }
@@ -837,7 +1032,6 @@ export class OpenCodeProvider extends BaseProvider {
 
               const delta = choice?.delta;
               if (delta) {
-                // Thinking — 100% generic (any field any model may use)
                 let thinkingDelta: string | undefined;
                 if (typeof delta.reasoning === "string" && delta.reasoning) thinkingDelta = delta.reasoning;
                 else if (typeof delta.reasoning_content === "string" && delta.reasoning_content) thinkingDelta = delta.reasoning_content;
@@ -881,7 +1075,6 @@ export class OpenCodeProvider extends BaseProvider {
                       if (tc.id) entry.id = tc.id;
                       if (tc.function?.name && !entry.name) entry.name = tc.function.name;
                       else if (tc.function?.name && entry.name !== tc.function.name && !entry.name.includes(tc.function.name)) {
-                        // incremental chunk
                         entry.name += tc.function.name;
                       }
                       if (tc.function?.arguments) entry.args += tc.function.arguments;
@@ -889,9 +1082,7 @@ export class OpenCodeProvider extends BaseProvider {
                   }
                 }
               }
-            } catch {
-              // Ignore partial JSON parse errors
-            }
+            } catch {}
           }
         }
 
@@ -926,7 +1117,7 @@ export class OpenCodeProvider extends BaseProvider {
           });
         }
 
-        const { AgentResponse } = await import("../../types/response.ts");
+        const { AgentResponse } = await import("../types/response.ts");
         const finalAgentResponse = new AgentResponse({
           text: accumulatedText,
           thinking: accumulatedThinking.length > 0 ? accumulatedThinking : undefined,

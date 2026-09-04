@@ -1,4 +1,4 @@
-import type { Provider, ProviderRequestOptions } from "../types/model.ts";
+import type { Provider, ProviderRequestOptions, ModelSpec } from "../types/model.ts";
 import type { ToolDefinition, ToolCallRecord, ToolResultRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { AgentRunOptions } from "../types/agent.ts";
@@ -21,7 +21,44 @@ export interface AgentLoopConfig {
   maxTurns?: number;
 }
 
-function accumulateUsage(target: TokenUsage, source: TokenUsage): void {
+export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec): TokenUsage["cost"] {
+  if (usage.cost && usage.cost.totalCost !== undefined && usage.cost.totalCost > 0) {
+    return usage.cost;
+  }
+  if (!spec) return usage.cost;
+
+  const costData = spec.cost || {};
+  const pricingData = spec.pricing || {};
+  const inputPrice = pricingData.inputPerMillion ?? costData.input ?? 0;
+  const outputPrice = pricingData.outputPerMillion ?? costData.output ?? 0;
+  const cacheReadPrice = pricingData.cacheReadPerMillion ?? costData.cache_read ?? 0;
+  const cacheWritePrice = pricingData.cacheWritePerMillion ?? costData.cache_write ?? 0;
+
+  if (inputPrice === 0 && outputPrice === 0 && cacheReadPrice === 0 && cacheWritePrice === 0) {
+    return usage.cost;
+  }
+
+  const cachedTokens = usage.cachedTokens ?? usage.cacheReadTokens ?? 0;
+  const nonCachedInputTokens = Math.max(0, (usage.inputTokens || 0) - cachedTokens);
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
+  const outputTokens = usage.outputTokens ?? 0;
+
+  const inputCost = (nonCachedInputTokens / 1_000_000) * inputPrice;
+  const cacheReadCost = (cachedTokens / 1_000_000) * cacheReadPrice;
+  const cacheWriteCost = (cacheWriteTokens / 1_000_000) * cacheWritePrice;
+  const outputCost = (outputTokens / 1_000_000) * outputPrice;
+  const totalCost = inputCost + cacheReadCost + cacheWriteCost + outputCost;
+
+  return {
+    inputCost,
+    outputCost,
+    cacheReadCost,
+    cacheWriteCost,
+    totalCost,
+  };
+}
+
+function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpec): void {
   target.inputTokens += source.inputTokens || 0;
   target.outputTokens += source.outputTokens || 0;
   target.totalTokens += source.totalTokens || 0;
@@ -29,18 +66,20 @@ function accumulateUsage(target: TokenUsage, source: TokenUsage): void {
   target.cacheReadTokens = (target.cacheReadTokens ?? 0) + (source.cacheReadTokens ?? 0);
   target.cacheWriteTokens = (target.cacheWriteTokens ?? 0) + (source.cacheWriteTokens ?? 0);
   target.thinkingTokens = (target.thinkingTokens ?? 0) + (source.thinkingTokens ?? 0);
-  if (source.cost || target.cost) {
+
+  const sourceCost = computeCostFromPricing(source, spec);
+  if (sourceCost) {
+    source.cost = sourceCost;
+  }
+
+  if (sourceCost || target.cost) {
     target.cost = {
-      inputCost: (target.cost?.inputCost ?? 0) + (source.cost?.inputCost ?? 0),
-      outputCost: (target.cost?.outputCost ?? 0) + (source.cost?.outputCost ?? 0),
-      cacheReadCost: (target.cost?.cacheReadCost ?? 0) + (source.cost?.cacheReadCost ?? 0),
-      cacheWriteCost: (target.cost?.cacheWriteCost ?? 0) + (source.cost?.cacheWriteCost ?? 0),
-      totalCost: (target.cost?.totalCost ?? 0) + (source.cost?.totalCost ?? 0),
+      inputCost: (target.cost?.inputCost ?? 0) + (sourceCost?.inputCost ?? 0),
+      outputCost: (target.cost?.outputCost ?? 0) + (sourceCost?.outputCost ?? 0),
+      cacheReadCost: (target.cost?.cacheReadCost ?? 0) + (sourceCost?.cacheReadCost ?? 0),
+      cacheWriteCost: (target.cost?.cacheWriteCost ?? 0) + (sourceCost?.cacheWriteCost ?? 0),
+      totalCost: (target.cost?.totalCost ?? 0) + (sourceCost?.totalCost ?? 0),
     };
-    // Prune zero cost
-    if (target.cost.totalCost === 0 && !source.cost?.totalCost) {
-      // keep but allow undefined later — leave as is
-    }
   }
 }
 
@@ -132,14 +171,14 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       {
         systemPrompt: context.systemPrompt,
         messages: context.messages,
-        cachedContentId: (context as any).cachedContentId,
+        cachedContentId: context.cachedContentId,
       },
       providerOptions
     );
 
     finalResult = genResult;
 
-    accumulateUsage(accumulatedUsage, genResult.usage);
+    accumulateUsage(accumulatedUsage, genResult.usage, spec);
 
     // Record assistant turn in context
     context.addAssistantMessage(
@@ -172,7 +211,11 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       if (metas.length > 0) {
         allSubagents.push(...metas);
         for (const s of metas) {
-          accumulateUsage(accumulatedUsage, s.usage);
+          const subagentSpec = getModelFromCatalog(s.provider, s.model);
+          if (subagentSpec && (!s.usage?.cost || !s.usage.cost.totalCost)) {
+            s.usage.cost = computeCostFromPricing(s.usage, subagentSpec);
+          }
+          accumulateUsage(accumulatedUsage, s.usage, subagentSpec);
         }
       }
       sanitizedResults.push(sanitized);
@@ -270,7 +313,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           {
             systemPrompt: context.systemPrompt,
             messages: context.messages,
-            cachedContentId: (context as any).cachedContentId,
+            cachedContentId: context.cachedContentId,
           },
           providerOptions
         );
@@ -284,7 +327,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         const turnResponse = await innerStream.result();
         lastResponse = turnResponse;
 
-        accumulateUsage(accumulatedUsage, turnResponse.usage);
+        accumulateUsage(accumulatedUsage, turnResponse.usage, spec2);
 
         context.addAssistantMessage(
           turnResponse.text,
@@ -313,7 +356,11 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           if (metas.length > 0) {
             allSubagents.push(...metas);
             for (const s of metas) {
-              accumulateUsage(accumulatedUsage, s.usage);
+              const subagentSpec = getModelFromCatalog(s.provider, s.model);
+              if (subagentSpec && (!s.usage?.cost || !s.usage.cost.totalCost)) {
+                s.usage.cost = computeCostFromPricing(s.usage, subagentSpec);
+              }
+              accumulateUsage(accumulatedUsage, s.usage, subagentSpec);
               outerStream.push({
                 type: "subagent_complete",
                 subagent: s,

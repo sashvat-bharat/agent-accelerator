@@ -96,6 +96,33 @@ function mapModelSpec(provider: string, modelId: string, raw: any): ModelSpec {
   };
 }
 
+interface IndexEntry {
+  provider: ProviderId;
+  key: string;
+  raw: any;
+}
+
+let globalIndex: Map<string, IndexEntry> | null = null;
+
+function getGlobalIndex(): Map<string, IndexEntry> {
+  if (globalIndex) return globalIndex;
+  globalIndex = new Map();
+  for (const [p, providerData] of Object.entries(catalogData as Record<string, any>)) {
+    const models = (providerData as any)?.models;
+    if (!models) continue;
+    for (const [key, raw] of Object.entries(models as Record<string, any>)) {
+      const entry: IndexEntry = { provider: p as ProviderId, key, raw };
+      const lowerKey = key.toLowerCase();
+      if (!globalIndex.has(lowerKey)) globalIndex.set(lowerKey, entry);
+      const stripped = normalizeModelIdForLookup(key).toLowerCase();
+      if (!globalIndex.has(stripped)) globalIndex.set(stripped, entry);
+      const withSlash = `${p}/${stripped}`.toLowerCase();
+      if (!globalIndex.has(withSlash)) globalIndex.set(withSlash, entry);
+    }
+  }
+  return globalIndex;
+}
+
 // ---------------------------------------------------------------------------
 // Public: getModelFromCatalog — battle-tested, cached, alias-aware
 // ---------------------------------------------------------------------------
@@ -136,28 +163,15 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
     }
   }
 
-  // Global fallback — iterate all providers (for unprefixed model ids)
-  for (const [p, providerData] of Object.entries(catalogData as any)) {
-    const models = (providerData as any).models;
-    if (!models) continue;
-    if (models[modelId]) {
-      result = mapModelSpec(p as ProviderId, modelId, models[modelId]);
-      lookupCache.set(cacheKey, result);
-      return result;
-    }
-    const stripped = normalizeModelIdForLookup(modelId);
-    if (models[stripped]) {
-      result = mapModelSpec(p as ProviderId, stripped, models[stripped]);
-      lookupCache.set(cacheKey, result);
-      return result;
-    }
-    for (const [key, raw] of Object.entries(models as Record<string, any>)) {
-      if (key === stripped || normalizeModelIdForLookup(key) === stripped) {
-        result = mapModelSpec(p as ProviderId, key, raw as any);
-        lookupCache.set(cacheKey, result);
-        return result;
-      }
-    }
+  // Global O(1) fallback via indexed catalog
+  const index = getGlobalIndex();
+  const lowerModelId = modelId.toLowerCase();
+  const strippedLower = normalizeModelIdForLookup(modelId).toLowerCase();
+  const hit = index.get(lowerModelId) || index.get(strippedLower);
+  if (hit) {
+    result = mapModelSpec(hit.provider, hit.key, hit.raw);
+    lookupCache.set(cacheKey, result);
+    return result;
   }
 
   lookupCache.set(cacheKey, undefined);
@@ -253,6 +267,50 @@ export function getModelThinkingInfo(provider: string, modelId: string): ModelTh
   };
 }
 
+export class ThinkingLevelError extends Error {
+  readonly provider: string;
+  readonly modelId: string;
+  readonly requestedLevel: string;
+  readonly allowedLevels: string[];
+  readonly supportsThinking: boolean;
+
+  constructor(opts: {
+    provider: string;
+    modelId: string;
+    requestedLevel: string;
+    allowedLevels: string[];
+    supportsThinking: boolean;
+    reason: string;
+    remedy?: string;
+  }) {
+    const remedyLines = opts.remedy
+      ? `\n\n  \x1b[36m💡 How to fix:\x1b[0m\n    ${opts.remedy}`
+      : "";
+    const allowedLine = opts.allowedLevels.length > 0
+      ? `\n  \x1b[1mAllowed Levels:\x1b[0m  [${opts.allowedLevels.map((l) => `"${l}"`).join(", ")}]`
+      : "";
+
+    const formattedMessage =
+      `\x1b[31m[Agent Accelerator] ThinkingLevel Mismatch for "${opts.provider}/${opts.modelId}":\x1b[0m\n` +
+      `  \x1b[1mRequested Level:\x1b[0m "${opts.requestedLevel}"\n` +
+      `  \x1b[1mIssue:\x1b[0m           ${opts.reason}` +
+      allowedLine +
+      remedyLines;
+
+    super(formattedMessage);
+    this.name = "ThinkingLevelError";
+    this.provider = opts.provider;
+    this.modelId = opts.modelId;
+    this.requestedLevel = opts.requestedLevel;
+    this.allowedLevels = opts.allowedLevels;
+    this.supportsThinking = opts.supportsThinking;
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, ThinkingLevelError);
+    }
+  }
+}
+
 export function validateModelThinking(provider: string, modelId: string, requestedLevel?: ThinkingLevel | string): void {
   if (!requestedLevel) return;
   const level = String(requestedLevel).toLowerCase().trim();
@@ -260,10 +318,15 @@ export function validateModelThinking(provider: string, modelId: string, request
 
   if (!info.supportsThinking) {
     if (level !== "none") {
-      throw new Error(
-        `Model "${modelId}" does not support thinking/reasoning.\n` +
-        `Available option for ${modelId}: thinking is not supported for this model (set ThinkingLevel: "none" or omit).`
-      );
+      throw new ThinkingLevelError({
+        provider,
+        modelId,
+        requestedLevel: String(requestedLevel),
+        allowedLevels: [],
+        supportsThinking: false,
+        reason: `Model "${modelId}" does not support thinking/reasoning.`,
+        remedy: `Omit ThinkingLevel or set ThinkingLevel: "none".`,
+      });
     }
     return;
   }
@@ -271,28 +334,43 @@ export function validateModelThinking(provider: string, modelId: string, request
   // Fixed reasoning model
   if (info.allowedLevels.length === 0) {
     if (level === "none") {
-      throw new Error(
-        `Model "${modelId}" is a fixed-reasoning model and cannot have thinking disabled ("none").\n` +
-        `Available option for ${modelId}: omit ThinkingLevel to use model default reasoning.`
-      );
+      throw new ThinkingLevelError({
+        provider,
+        modelId,
+        requestedLevel: String(requestedLevel),
+        allowedLevels: [],
+        supportsThinking: true,
+        reason: `Model "${modelId}" is a fixed-reasoning model and cannot have thinking disabled ("none").`,
+        remedy: `Omit ThinkingLevel to use the model's default reasoning.`,
+      });
     }
     return;
   }
 
   // If user requested "none" on a model that does not allow disabling
   if (level === "none" && !info.supportsDisable) {
-    throw new Error(
-      `Model "${modelId}" requires thinking and does not support disabling it ("none").\n` +
-      `Available thinking options for ${modelId}: [${info.allowedLevels.map((l) => `"${l}"`).join(", ")}]`
-    );
+    throw new ThinkingLevelError({
+      provider,
+      modelId,
+      requestedLevel: String(requestedLevel),
+      allowedLevels: info.allowedLevels,
+      supportsThinking: true,
+      reason: `Model "${modelId}" requires thinking and does not support disabling it ("none").`,
+      remedy: `Set ThinkingLevel to one of: ${info.allowedLevels.map((l) => `"${l}"`).join(" | ")}, or omit ThinkingLevel to use the model default.`,
+    });
   }
 
   // If level is not in allowed levels
   if (!info.allowedLevels.includes(level)) {
-    throw new Error(
-      `Invalid thinking level "${requestedLevel}" for model "${modelId}".\n` +
-      `Available thinking options for ${modelId}: [${info.allowedLevels.map((l) => `"${l}"`).join(", ")}]`
-    );
+    throw new ThinkingLevelError({
+      provider,
+      modelId,
+      requestedLevel: String(requestedLevel),
+      allowedLevels: info.allowedLevels,
+      supportsThinking: true,
+      reason: `Invalid thinking level "${requestedLevel}" for model "${modelId}".`,
+      remedy: `Set ThinkingLevel to one of: ${info.allowedLevels.map((l) => `"${l}"`).join(" | ")}, or omit ThinkingLevel to use the model default.`,
+    });
   }
 }
 

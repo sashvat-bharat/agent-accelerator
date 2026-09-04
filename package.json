@@ -11,7 +11,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test test/"
+    "test": "bun test test/",
+    "update-models": "curl -sSL https://models.dev/api.json -o src/data/models.dev.json"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -2,8 +2,6 @@
 node_modules
 
 references/
-*.json
-*.jsonl
 
 # output
 out
@@ -36,3 +34,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# models.dev database snapshot (regenerate with bun run update-models)
+src/data/models.dev.json
+models.dev.json

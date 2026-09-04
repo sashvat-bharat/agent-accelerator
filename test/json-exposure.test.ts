@@ -67,4 +67,40 @@ describe("Complete JSON Data Exposure", () => {
     expect(json.raw.response?.status).toBe(200);
     expect(json.turns).toBe(2);
   });
+
+  it("should calculate real-time dollar costs accurately based on model pricing", async () => {
+    const { computeCostFromPricing } = await import("../src/agent/loop.ts");
+    const mockSpec: any = {
+      id: "test-model",
+      pricing: {
+        inputPerMillion: 1.0, // $1 per 1M uncached input tokens
+        outputPerMillion: 4.0, // $4 per 1M output tokens
+        cacheReadPerMillion: 0.1, // $0.10 per 1M cached input tokens
+        cacheWritePerMillion: 1.0,
+      },
+    };
+
+    const usage: any = {
+      inputTokens: 10000,
+      cachedTokens: 8000, // 8000 cached, 2000 non-cached
+      cacheReadTokens: 8000,
+      cacheWriteTokens: 0,
+      outputTokens: 500,
+    };
+
+    const cost = computeCostFromPricing(usage, mockSpec);
+    expect(cost).toBeDefined();
+
+    // 2,000 non-cached * ($1.0 / 1M) = $0.002
+    expect(cost?.inputCost).toBeCloseTo(0.002, 6);
+
+    // 8,000 cached * ($0.1 / 1M) = $0.0008
+    expect(cost?.cacheReadCost).toBeCloseTo(0.0008, 6);
+
+    // 500 output * ($4.0 / 1M) = $0.002
+    expect(cost?.outputCost).toBeCloseTo(0.002, 6);
+
+    // Total = 0.002 + 0.0008 + 0.002 = $0.0048
+    expect(cost?.totalCost).toBeCloseTo(0.0048, 6);
+  });
 });

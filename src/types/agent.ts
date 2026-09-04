@@ -5,7 +5,6 @@ import type {
   CacheConfig,
   ServiceTier,
 } from "./core.ts";
-import type { Skill } from "./skill.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
 import type { Agent } from "../agent/agent.ts";
 
@@ -19,7 +18,6 @@ export interface AgentConfig {
   baseUrl?: string;
   tools?: Record<string, ToolDefinition> | ToolDefinition[];
   functions?: ((...args: any[]) => any)[];
-  skills?: Skill[];
   CustomAgents?: (Agent | { name: string; description: string; agent: Agent })[];
   ThinkingLevel?: ThinkingLevel;
   cache?: CacheConfig;

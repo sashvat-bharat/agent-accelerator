@@ -1,21 +1,153 @@
-import { BaseProvider } from "../base.ts";
-import { OPENROUTER_MODELS } from "./models.ts";
+import { BaseProvider } from "./base.ts";
 import type {
   ProviderId,
   ModelSpec,
   ProviderRequestOptions,
   ProviderGenerateResult,
   ProviderRawData,
-} from "../../types/model.ts";
-import type { ProviderContext, Message, ContentPart } from "../../types/message.ts";
-import type { ToolCallRecord } from "../../types/tool.ts";
-import type { TokenUsage } from "../../types/core.ts";
-import { AssistantMessageEventStream } from "../../streaming/event-stream.ts";
-import { SSEParser } from "../../streaming/sse-parser.ts";
-import { getApiKey } from "../../utils/env.ts";
-import { normalizeMediaInput } from "../../utils/media.ts";
-import { buildSessionHeaders } from "../../utils/headers.ts";
-import { applyAnthropicCacheControl, clampCacheKey, getPromptCacheRetention } from "../../utils/cache.ts";
+} from "../types/model.ts";
+import type { ProviderContext, ContentPart } from "../types/message.ts";
+import type { ToolCallRecord } from "../types/tool.ts";
+import type { TokenUsage } from "../types/core.ts";
+import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { SSEParser } from "../streaming/sse-parser.ts";
+import { getApiKey } from "../utils/env.ts";
+import { normalizeMediaInput } from "../utils/media.ts";
+import { buildSessionHeaders } from "../utils/headers.ts";
+import { applyAnthropicCacheControl, clampCacheKey, getPromptCacheRetention } from "../utils/cache.ts";
+import { getModelsForProvider } from "../models/catalog.ts";
+
+// ============================================================================
+// OpenRouter Provider Types
+// ============================================================================
+
+export interface OpenRouterProviderRouting {
+  order?: string[];
+  allow_fallbacks?: boolean;
+  require_parameters?: boolean;
+  data_collection?: "allow" | "deny";
+}
+
+export interface OpenRouterReasoning {
+  effort?: "none" | "low" | "medium" | "high";
+  enabled?: boolean;
+  max_tokens?: number;
+}
+
+export interface OpenRouterParameters {
+  temperature?: number;
+  max_tokens?: number;
+  transforms?: string[];
+  models?: string[];
+  route?: "fallback";
+  provider?: OpenRouterProviderRouting;
+}
+
+export interface OpenRouterChatRequest {
+  model: string;
+  messages: any[];
+  tools?: any[];
+  tool_choice?: any;
+  stream?: boolean;
+  reasoning?: OpenRouterReasoning;
+  include_reasoning?: boolean;
+  prompt_cache_key?: string;
+  prompt_cache_retention?: string;
+  provider?: OpenRouterProviderRouting;
+}
+
+export interface OpenRouterUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+  };
+  cached_tokens?: number;
+  cache_write_tokens?: number;
+  reasoning_tokens?: number;
+  total_cost?: number;
+}
+
+export interface OpenRouterResponse {
+  id: string;
+  choices: Array<{
+    index: number;
+    message: {
+      role: string;
+      content?: string;
+      tool_calls?: any[];
+      reasoning?: string;
+      reasoning_content?: string;
+      reasoning_text?: string;
+      thinking?: string;
+      thought?: string;
+    };
+    finish_reason: string;
+  }>;
+  usage?: OpenRouterUsage;
+}
+
+// ============================================================================
+// OpenRouter Models Fallback & Catalog dynamic view
+// ============================================================================
+
+const FALLBACK_MODELS: ModelSpec[] = [
+  {
+    id: "anthropic/claude-3.7-sonnet",
+    provider: "openrouter",
+    name: "Claude 3.7 Sonnet (OpenRouter)",
+    contextWindow: 200000,
+    maxOutputTokens: 64000,
+    limit: { context: 200000, output: 64000 },
+    cost: { input: 3.0, output: 15.0, cache_read: 0.3 },
+    modalities: { input: ["text", "image"], output: ["text"] },
+    capabilities: {
+      supportsThinking: true,
+      supportsThinkingLevel: true,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: false,
+      supportsLongCacheRetention: true,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image"],
+    },
+    pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheReadPerMillion: 0.3 },
+  },
+  {
+    id: "openai/gpt-4o",
+    provider: "openrouter",
+    name: "GPT-4o (OpenRouter)",
+    contextWindow: 128000,
+    maxOutputTokens: 16384,
+    limit: { context: 128000, output: 16384 },
+    cost: { input: 2.5, output: 10.0, cache_read: 1.25 },
+    modalities: { input: ["text", "image"], output: ["text"] },
+    capabilities: {
+      supportsThinking: false,
+      supportsThinkingLevel: false,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: false,
+      supportsLongCacheRetention: false,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image"],
+    },
+    pricing: { inputPerMillion: 2.5, outputPerMillion: 10.0, cacheReadPerMillion: 1.25 },
+  },
+];
+
+const dynamicOpenRouterModels = getModelsForProvider("openrouter");
+export const OPENROUTER_MODELS: ModelSpec[] =
+  dynamicOpenRouterModels.length > 2 ? dynamicOpenRouterModels : FALLBACK_MODELS;
+
+// ============================================================================
+// OpenRouter Provider Implementation
+// ============================================================================
 
 export class OpenRouterProvider extends BaseProvider {
   readonly id: ProviderId = "openrouter";
@@ -64,7 +196,7 @@ export class OpenRouterProvider extends BaseProvider {
     context: ProviderContext,
     options?: ProviderRequestOptions,
     stream = false
-  ): Promise<Record<string, unknown>> {
+  ): Promise<OpenRouterChatRequest> {
     const messages: Array<Record<string, unknown>> = [];
 
     if (context.systemPrompt) {
@@ -122,7 +254,7 @@ export class OpenRouterProvider extends BaseProvider {
       }
     }
 
-    const payload: Record<string, unknown> = {
+    const payload: OpenRouterChatRequest = {
       model: modelId,
       messages,
       stream,
@@ -144,7 +276,7 @@ export class OpenRouterProvider extends BaseProvider {
       }
     }
 
-    // Battle-tested cache: 80-90% hit — first turn marks system+tools+first user, helper handles 4-cap + prompt key
+    // Prompt cache control for high hit rates
     const retention = options?.cache?.retention;
     const modelSpecForCache = this.getModel(modelId);
     applyAnthropicCacheControl(messages, payload.tools as any, retention, modelSpecForCache);
@@ -152,17 +284,17 @@ export class OpenRouterProvider extends BaseProvider {
     if (sessionId && retention) {
       const ck = clampCacheKey(sessionId);
       if (ck) {
-        (payload as any).prompt_cache_key = ck;
+        payload.prompt_cache_key = ck;
         const pcr = getPromptCacheRetention(retention, modelSpecForCache?.capabilities.supportsLongCacheRetention ?? true);
-        if (pcr) (payload as any).prompt_cache_retention = pcr;
+        if (pcr) payload.prompt_cache_retention = pcr;
       }
     }
 
-    // Reasoning / Thinking — generic (explicitly handle none to turn off reasoning on reasoning models)
+    // Reasoning / Thinking options
     const level = options?.thinking?.level;
     const isDisabled = options?.thinking?.enabled === false || (level as any) === "none";
     if (isDisabled) {
-      payload.reasoning = { effort: "none" } as any;
+      payload.reasoning = { effort: "none" };
       return payload;
     } else if (options?.thinking?.enabled !== false && level) {
       const spec = this.getModel(modelId);
@@ -176,16 +308,16 @@ export class OpenRouterProvider extends BaseProvider {
           ? "medium"
           : "high";
       if (hasToggle && !hasEffort) {
-        payload.reasoning = { enabled: true } as any;
-        (payload as any).include_reasoning = true;
+        payload.reasoning = { enabled: true };
+        payload.include_reasoning = true;
       } else if (hasEffort || !spec) {
-        payload.reasoning = { effort } as any;
+        payload.reasoning = { effort };
       } else if (caps?.supportsThinking) {
-        payload.reasoning = { effort } as any;
+        payload.reasoning = { effort };
       }
     }
 
-    // ServiceTier — bloatfree DX6: only flex|priority (standard is default)
+    // ServiceTier provider routing
     if (options?.serviceTier) {
       payload.provider = {
         order:
@@ -201,7 +333,7 @@ export class OpenRouterProvider extends BaseProvider {
     return payload;
   }
 
-  private extractUsage(usageData?: any): TokenUsage {
+  private extractUsage(usageData?: OpenRouterUsage): TokenUsage {
     if (!usageData) {
       return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     }
@@ -250,11 +382,16 @@ export class OpenRouterProvider extends BaseProvider {
     const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
     const payload = await this.buildPayload(modelId, context, options, false);
 
-    const headers = buildSessionHeaders(this.id, options?.cache, {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      ...options?.headers,
-    }, options?.sessionId);
+    const headers = buildSessionHeaders(
+      this.id,
+      options?.cache,
+      {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        ...options?.headers,
+      },
+      options?.sessionId
+    );
 
     const raw: ProviderRawData = {
       request: {
@@ -279,6 +416,7 @@ export class OpenRouterProvider extends BaseProvider {
       const t = await response.text().catch(() => "");
       throw new Error(`OpenRouter API error (${response.status} ${response.statusText}): ${t}`);
     }
+
     raw.response = {
       status: response.status,
       statusText: response.statusText,
@@ -295,7 +433,7 @@ export class OpenRouterProvider extends BaseProvider {
     const choice = responseJson.choices?.[0];
     const message = choice?.message;
     const text = message?.content || "";
-    // Generic thinking extraction — any field any model may use
+
     let thinking: string | undefined;
     if (typeof message?.reasoning === "string" && message.reasoning) thinking = message.reasoning;
     else if (typeof message?.reasoning_content === "string" && message.reasoning_content) thinking = message.reasoning_content;
@@ -362,11 +500,16 @@ export class OpenRouterProvider extends BaseProvider {
         const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
         const payload = await this.buildPayload(modelId, context, options, true);
 
-        const headers = buildSessionHeaders(this.id, options?.cache, {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          ...options?.headers,
-        }, options?.sessionId);
+        const headers = buildSessionHeaders(
+          this.id,
+          options?.cache,
+          {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            ...options?.headers,
+          },
+          options?.sessionId
+        );
 
         const raw: ProviderRawData = {
           request: {
@@ -434,7 +577,6 @@ export class OpenRouterProvider extends BaseProvider {
 
               const delta = choice?.delta;
               if (delta) {
-                // Thinking / Reasoning delta — 100% generic (any model may use any field)
                 let thinkingDelta: string | undefined;
                 if (typeof delta.reasoning === "string" && delta.reasoning) thinkingDelta = delta.reasoning;
                 else if (typeof delta.reasoning_content === "string" && delta.reasoning_content) thinkingDelta = delta.reasoning_content;
@@ -455,7 +597,6 @@ export class OpenRouterProvider extends BaseProvider {
                   });
                 }
 
-                // Text delta
                 if (delta.content) {
                   accumulatedText += delta.content;
                   eventStream.push({
@@ -465,7 +606,6 @@ export class OpenRouterProvider extends BaseProvider {
                   });
                 }
 
-                // Tool calls delta (S3 fix: don't duplicate name)
                 if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
                   for (const tc of delta.tool_calls) {
                     const idx = tc.index ?? 0;
@@ -480,7 +620,6 @@ export class OpenRouterProvider extends BaseProvider {
                       if (tc.id) entry.id = tc.id;
                       if (tc.function?.name && !entry.name) entry.name = tc.function.name;
                       else if (tc.function?.name && entry.name !== tc.function.name) {
-                        // Some providers send incremental name chunks — append only if incremental
                         if (tc.function.name.length < entry.name.length) {
                           // ignore duplicate
                         } else if (!entry.name.includes(tc.function.name)) {
@@ -498,7 +637,6 @@ export class OpenRouterProvider extends BaseProvider {
           }
         }
 
-        // Flush remaining buffer
         for (const msg of parser.flush()) {
           if (!msg.data || msg.data === "[DONE]") continue;
           try {
@@ -530,7 +668,7 @@ export class OpenRouterProvider extends BaseProvider {
           });
         }
 
-        const { AgentResponse } = await import("../../types/response.ts");
+        const { AgentResponse } = await import("../types/response.ts");
         const finalAgentResponse = new AgentResponse({
           text: accumulatedText,
           thinking: accumulatedThinking.length > 0 ? accumulatedThinking : undefined,

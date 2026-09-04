@@ -1,31 +1,305 @@
-import { BaseProvider } from "../base.ts";
-import { OPENAI_MODELS } from "./models.ts";
+import { BaseProvider } from "./base.ts";
 import type {
   ProviderId,
   ModelSpec,
   ProviderRequestOptions,
   ProviderGenerateResult,
   ProviderRawData,
-} from "../../types/model.ts";
-import type { ProviderContext, ContentPart } from "../../types/message.ts";
-import type { ToolCallRecord } from "../../types/tool.ts";
-import type { TokenUsage } from "../../types/core.ts";
-import { AssistantMessageEventStream } from "../../streaming/event-stream.ts";
-import { SSEParser } from "../../streaming/sse-parser.ts";
-import { getApiKey, getEnv } from "../../utils/env.ts";
-import { normalizeMediaInput } from "../../utils/media.ts";
-import { buildSessionHeaders } from "../../utils/headers.ts";
-import { clampCacheKey } from "../../utils/cache.ts";
+} from "../types/model.ts";
+import type { ProviderContext, ContentPart } from "../types/message.ts";
+import type { ToolCallRecord } from "../types/tool.ts";
+import type { TokenUsage } from "../types/core.ts";
+import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { SSEParser } from "../streaming/sse-parser.ts";
+import { getApiKey, getEnv } from "../utils/env.ts";
+import { normalizeMediaInput } from "../utils/media.ts";
+import { buildSessionHeaders } from "../utils/headers.ts";
+import { getModelsForProvider } from "../models/catalog.ts";
 
-// Gemini-via-OpenAI-compat thought signatures (https://ai.google.dev/gemini-api/docs/thought-signatures).
-// Google's OpenAI endpoint returns the signature at
-// `tool_calls[].extra_content.google.thought_signature` and REQUIRES it echoed
-// back verbatim on the next turn's assistant `tool_calls`, otherwise Turn 2+ with
-// tools fails with 400 `Function call is missing a thought_signature`.
-function extractGoogleThoughtSignature(obj: any): string | undefined {
+// ============================================================================
+// OpenAI Provider Types
+// ============================================================================
+
+export type OpenAIMessageRole = "system" | "user" | "assistant" | "tool" | "developer";
+
+export interface OpenAITextPart {
+  type: "text";
+  text: string;
+}
+
+export interface OpenAIImageUrlPart {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "auto" | "low" | "high";
+  };
+}
+
+export interface OpenAIInputAudioPart {
+  type: "input_audio";
+  input_audio: {
+    data: string;
+    format: "wav" | "mp3";
+  };
+}
+
+export interface OpenAIVideoUrlPart {
+  type: "video_url";
+  video_url: {
+    url: string;
+  };
+}
+
+export type OpenAIContentPart =
+  | OpenAITextPart
+  | OpenAIImageUrlPart
+  | OpenAIInputAudioPart
+  | OpenAIVideoUrlPart;
+
+export interface OpenAIToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+  extra_content?: {
+    google?: {
+      thought_signature?: string;
+    };
+  };
+}
+
+export interface OpenAIMessage {
+  role: OpenAIMessageRole;
+  content: string | OpenAIContentPart[] | null;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: OpenAIToolCall[];
+  reasoning_content?: string;
+}
+
+export interface OpenAIFunctionDefinition {
+  name: string;
+  description?: string;
+  parameters: Record<string, unknown>;
+  strict?: boolean;
+}
+
+export interface OpenAITool {
+  type: "function";
+  function: OpenAIFunctionDefinition;
+}
+
+export type OpenAIToolChoice =
+  | "auto"
+  | "none"
+  | "required"
+  | { type: "function"; function: { name: string } };
+
+export type OpenAIReasoningEffort = "none" | "low" | "medium" | "high";
+
+export type OpenAIServiceTier = "auto" | "default" | "flex" | "priority";
+
+export interface OpenAIChatCompletionRequest {
+  model: string;
+  messages: OpenAIMessage[];
+  tools?: OpenAITool[];
+  tool_choice?: OpenAIToolChoice;
+  stream?: boolean;
+  stream_options?: { include_usage?: boolean };
+  reasoning_effort?: OpenAIReasoningEffort;
+  max_completion_tokens?: number;
+  service_tier?: OpenAIServiceTier;
+  extra_body?: Record<string, unknown>;
+}
+
+export interface OpenAIUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+  };
+  cached_tokens?: number;
+  cache_write_tokens?: number;
+  reasoning_tokens?: number;
+  total_cost?: number;
+}
+
+export interface OpenAIChoice {
+  index: number;
+  message: {
+    role: string;
+    content?: string | null;
+    tool_calls?: OpenAIToolCall[];
+    reasoning?: string;
+    reasoning_content?: string;
+    reasoning_text?: string;
+    thinking?: string;
+    thought?: string;
+  };
+  finish_reason: string;
+}
+
+export interface OpenAIChatCompletionResponse {
+  id: string;
+  object: string;
+  created: number;
+  model: string;
+  choices: OpenAIChoice[];
+  usage?: OpenAIUsage;
+}
+
+export interface OpenAIDelta {
+  role?: string;
+  content?: string;
+  reasoning?: string;
+  reasoning_content?: string;
+  reasoning_text?: string;
+  thinking?: string;
+  thought?: string;
+  tool_calls?: Array<{
+    index?: number;
+    id?: string;
+    function?: {
+      name?: string;
+      arguments?: string;
+    };
+    extra_content?: {
+      google?: {
+        thought_signature?: string;
+      };
+    };
+  }>;
+}
+
+export interface OpenAIChunkChoice {
+  index: number;
+  delta: OpenAIDelta;
+  finish_reason?: string | null;
+}
+
+export interface OpenAIChatCompletionChunk {
+  id: string;
+  object: string;
+  created: number;
+  model: string;
+  choices: OpenAIChunkChoice[];
+  usage?: OpenAIUsage;
+}
+
+// ============================================================================
+// Helper: Google Thought Signatures via OpenAI-compat
+// ============================================================================
+
+export function extractGoogleThoughtSignature(obj: any): string | undefined {
   const sig = obj?.extra_content?.google?.thought_signature;
   return typeof sig === "string" && sig.length > 0 ? sig : undefined;
 }
+
+// ============================================================================
+// Models Fallback & Catalog Dynamic View
+// ============================================================================
+
+const FALLBACK_MODELS: ModelSpec[] = [
+  {
+    id: "gpt-4o",
+    provider: "openai",
+    name: "GPT-4o",
+    contextWindow: 128000,
+    maxOutputTokens: 16384,
+    limit: { context: 128000, output: 16384 },
+    cost: { input: 2.5, output: 10.0, cache_read: 1.25 },
+    modalities: { input: ["text", "image", "audio"], output: ["text"] },
+    capabilities: {
+      supportsThinking: false,
+      supportsThinkingLevel: false,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: false,
+      supportsLongCacheRetention: false,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image", "audio"],
+    },
+    pricing: { inputPerMillion: 2.5, outputPerMillion: 10.0, cacheReadPerMillion: 1.25 },
+  },
+  {
+    id: "gpt-4o-mini",
+    provider: "openai",
+    name: "GPT-4o mini",
+    contextWindow: 128000,
+    maxOutputTokens: 16384,
+    limit: { context: 128000, output: 16384 },
+    cost: { input: 0.15, output: 0.6, cache_read: 0.075 },
+    modalities: { input: ["text", "image", "audio"], output: ["text"] },
+    capabilities: {
+      supportsThinking: false,
+      supportsThinkingLevel: false,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: false,
+      supportsLongCacheRetention: false,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image", "audio"],
+    },
+    pricing: { inputPerMillion: 0.15, outputPerMillion: 0.6, cacheReadPerMillion: 0.075 },
+  },
+  {
+    id: "o1",
+    provider: "openai",
+    name: "o1",
+    contextWindow: 200000,
+    maxOutputTokens: 100000,
+    limit: { context: 200000, output: 100000 },
+    cost: { input: 15.0, output: 60.0, cache_read: 7.5 },
+    modalities: { input: ["text", "image"], output: ["text"] },
+    capabilities: {
+      supportsThinking: true,
+      supportsThinkingLevel: true,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: false,
+      supportsLongCacheRetention: false,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text", "image"],
+    },
+    pricing: { inputPerMillion: 15.0, outputPerMillion: 60.0, cacheReadPerMillion: 7.5 },
+  },
+  {
+    id: "o3-mini",
+    provider: "openai",
+    name: "o3-mini",
+    contextWindow: 200000,
+    maxOutputTokens: 100000,
+    limit: { context: 200000, output: 100000 },
+    cost: { input: 1.1, output: 4.4, cache_read: 0.55 },
+    modalities: { input: ["text"], output: ["text"] },
+    capabilities: {
+      supportsThinking: true,
+      supportsThinkingLevel: true,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: false,
+      supportsLongCacheRetention: false,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text"],
+    },
+    pricing: { inputPerMillion: 1.1, outputPerMillion: 4.4, cacheReadPerMillion: 0.55 },
+  },
+];
+
+const dynamicOpenAIModels = getModelsForProvider("openai");
+export const OPENAI_MODELS: ModelSpec[] =
+  dynamicOpenAIModels.length > 3 ? dynamicOpenAIModels : FALLBACK_MODELS;
+
+// ============================================================================
+// OpenAI Provider Implementation
+// ============================================================================
 
 export class OpenAIProvider extends BaseProvider {
   readonly id: ProviderId = "openai";
@@ -55,7 +329,7 @@ export class OpenAIProvider extends BaseProvider {
     return rawId.replace(/^(openai|models?)\//, "");
   }
 
-  protected async convertContentPart(part: ContentPart): Promise<Record<string, unknown>> {
+  protected async convertContentPart(part: ContentPart): Promise<OpenAIContentPart> {
     switch (part.type) {
       case "text":
         return { type: "text", text: part.text };
@@ -68,9 +342,9 @@ export class OpenAIProvider extends BaseProvider {
       }
       case "audio": {
         const norm = await normalizeMediaInput(part.audio, part.mimeType);
-        let format = norm.mimeType.split("/")[1] || "wav";
-        if (format === "x-wav") format = "wav";
-        if (format === "mpeg") format = "mp3";
+        let format: "wav" | "mp3" = "wav";
+        const sub = norm.mimeType.split("/")[1] || "";
+        if (sub === "mp3" || sub === "mpeg") format = "mp3";
         return {
           type: "input_audio",
           input_audio: { data: norm.base64Data, format },
@@ -93,8 +367,8 @@ export class OpenAIProvider extends BaseProvider {
     context: ProviderContext,
     options?: ProviderRequestOptions,
     stream = false
-  ): Promise<Record<string, unknown>> {
-    const messages: Array<Record<string, unknown>> = [];
+  ): Promise<OpenAIChatCompletionRequest> {
+    const messages: OpenAIMessage[] = [];
 
     // System message
     if (context.systemPrompt) {
@@ -107,20 +381,20 @@ export class OpenAIProvider extends BaseProvider {
     for (const msg of context.messages) {
       if (typeof msg.content === "string") {
         messages.push({
-          role: msg.role === "tool" ? "tool" : msg.role,
+          role: (msg.role === "tool" ? "tool" : msg.role) as OpenAIMessageRole,
           content: msg.content,
           ...(msg.name ? { name: msg.name } : {}),
           ...((msg as any).tool_call_id ? { tool_call_id: (msg as any).tool_call_id } : {}),
         });
       } else if (Array.isArray(msg.content)) {
-        const toolCalls: any[] = [];
-        const contentParts: any[] = [];
+        const toolCalls: OpenAIToolCall[] = [];
+        const contentParts: OpenAIContentPart[] = [];
         const toolResults: any[] = [];
         let assistantThinking: string | undefined;
 
         for (const part of msg.content) {
           if (part.type === "tool_call") {
-            const entry: Record<string, unknown> = {
+            const entry: OpenAIToolCall = {
               id: part.id,
               type: "function",
               function: {
@@ -128,7 +402,6 @@ export class OpenAIProvider extends BaseProvider {
                 arguments: typeof part.arguments === "string" ? part.arguments : JSON.stringify(part.arguments || {}),
               },
             };
-            // Replay Gemini thought signature verbatim (required for Turn 2+ tool use).
             const sig = (part as { thoughtSignature?: unknown }).thoughtSignature;
             if (typeof sig === "string" && sig.length > 0) {
               entry.extra_content = { google: { thought_signature: sig } };
@@ -144,10 +417,10 @@ export class OpenAIProvider extends BaseProvider {
         }
 
         if (msg.role === "assistant") {
-          const textPart = contentParts.find((p) => p.type === "text");
-          const assistantMsg: Record<string, unknown> = {
+          const textPart = contentParts.find((p) => p.type === "text") as OpenAITextPart | undefined;
+          const assistantMsg: OpenAIMessage = {
             role: "assistant",
-            content: textPart ? (textPart.text as string) : (contentParts.length > 0 ? contentParts : ""),
+            content: textPart ? textPart.text : (contentParts.length > 0 ? contentParts : ""),
           };
           if (toolCalls.length > 0) {
             assistantMsg.tool_calls = toolCalls;
@@ -165,18 +438,18 @@ export class OpenAIProvider extends BaseProvider {
             });
           }
         } else {
+          const firstPart = contentParts[0];
+          const textOnly = contentParts.length === 1 && firstPart?.type === "text" ? firstPart.text : contentParts;
           messages.push({
-            role: msg.role,
-            content: contentParts.length === 1 && contentParts[0].type === "text"
-              ? contentParts[0].text
-              : contentParts,
+            role: msg.role as OpenAIMessageRole,
+            content: textOnly,
             ...(msg.name ? { name: msg.name } : {}),
           });
         }
       }
     }
 
-    const payload: Record<string, unknown> = {
+    const payload: OpenAIChatCompletionRequest = {
       model: modelId,
       messages,
       stream,
@@ -198,27 +471,33 @@ export class OpenAIProvider extends BaseProvider {
         },
       }));
       if (options.toolChoice) {
-        payload.tool_choice = options.toolChoice;
+        payload.tool_choice = options.toolChoice as OpenAIToolChoice;
       }
     }
 
-    // Thinking / Reasoning effort
+    // Reasoning effort mapping from SDK ThinkingLevel
     const thinkingLevel = options?.thinking?.level;
     const isThinkingDisabled = options?.thinking?.enabled === false || thinkingLevel === "none";
 
     if (!isThinkingDisabled && thinkingLevel) {
-      payload.reasoning_effort = thinkingLevel;
+      if (thinkingLevel === "minimal" || thinkingLevel === "low") {
+        payload.reasoning_effort = "low";
+      } else if (thinkingLevel === "medium" || thinkingLevel === "dynamic") {
+        payload.reasoning_effort = "medium";
+      } else if (thinkingLevel === "high" || thinkingLevel === "xhigh") {
+        payload.reasoning_effort = "high";
+      }
       if (options?.thinking?.budgetTokens && options.thinking.budgetTokens > 0) {
         payload.max_completion_tokens = options.thinking.budgetTokens;
       }
     }
 
-    // Service Tier
+    // Service Tier mapping
     if (options?.serviceTier) {
       payload.service_tier = options.serviceTier;
     }
 
-    // Google OpenAI-compat explicit cache support (per openai-documentation.md)
+    // Google OpenAI-compat explicit cache support
     if (options?.cache?.cachedContentId) {
       payload.extra_body = {
         google: {
@@ -228,7 +507,7 @@ export class OpenAIProvider extends BaseProvider {
     }
     if ((options as any)?.extra_body) {
       payload.extra_body = {
-        ...((payload.extra_body as any) || {}),
+        ...(payload.extra_body || {}),
         ...(options as any).extra_body,
       };
     }
@@ -236,7 +515,7 @@ export class OpenAIProvider extends BaseProvider {
     return payload;
   }
 
-  protected extractUsage(usageData?: any): TokenUsage {
+  protected extractUsage(usageData?: OpenAIUsage): TokenUsage {
     if (!usageData) {
       return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     }
@@ -285,11 +564,16 @@ export class OpenAIProvider extends BaseProvider {
     const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
     const payload = await this.buildPayload(modelId, context, options, false);
 
-    const headers = buildSessionHeaders(this.id, options?.cache, {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      ...options?.headers,
-    }, options?.sessionId);
+    const headers = buildSessionHeaders(
+      this.id,
+      options?.cache,
+      {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        ...options?.headers,
+      },
+      options?.sessionId
+    );
 
     const raw: ProviderRawData = {
       request: {
@@ -332,7 +616,6 @@ export class OpenAIProvider extends BaseProvider {
     const message = choice?.message;
     const text = message?.content || "";
 
-    // Universal reasoning / thinking extraction (OpenAI o1/o3, DeepSeek, Groq, Ollama, vLLM, etc.)
     let thinking: string | undefined;
     if (typeof message?.reasoning === "string" && message.reasoning) thinking = message.reasoning;
     else if (typeof message?.reasoning_content === "string" && message.reasoning_content) thinking = message.reasoning_content;
@@ -398,11 +681,16 @@ export class OpenAIProvider extends BaseProvider {
         const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
         const payload = await this.buildPayload(modelId, context, options, true);
 
-        const headers = buildSessionHeaders(this.id, options?.cache, {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          ...options?.headers,
-        }, options?.sessionId);
+        const headers = buildSessionHeaders(
+          this.id,
+          options?.cache,
+          {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            ...options?.headers,
+          },
+          options?.sessionId
+        );
 
         const raw: ProviderRawData = {
           request: {
@@ -470,7 +758,6 @@ export class OpenAIProvider extends BaseProvider {
 
               const delta = choice?.delta;
               if (delta) {
-                // Universal reasoning / thinking delta
                 let thinkingDelta: string | undefined;
                 if (typeof delta.reasoning === "string" && delta.reasoning) thinkingDelta = delta.reasoning;
                 else if (typeof delta.reasoning_content === "string" && delta.reasoning_content) thinkingDelta = delta.reasoning_content;
@@ -487,7 +774,6 @@ export class OpenAIProvider extends BaseProvider {
                   });
                 }
 
-                // Text delta
                 if (delta.content) {
                   accumulatedText += delta.content;
                   eventStream.push({
@@ -497,7 +783,6 @@ export class OpenAIProvider extends BaseProvider {
                   });
                 }
 
-                // Tool calls delta (retain Gemini thought_signature when present)
                 if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
                   for (const tc of delta.tool_calls) {
                     const idx = tc.index ?? 0;
@@ -556,7 +841,7 @@ export class OpenAIProvider extends BaseProvider {
           });
         }
 
-        const { AgentResponse } = await import("../../types/response.ts");
+        const { AgentResponse } = await import("../types/response.ts");
         const finalAgentResponse = new AgentResponse({
           text: accumulatedText,
           thinking: accumulatedThinking.length > 0 ? accumulatedThinking : undefined,

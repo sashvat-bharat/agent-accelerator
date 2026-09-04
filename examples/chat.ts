@@ -218,17 +218,49 @@ function getContextWindow(): number {
   return 1_048_576;
 }
 
-function updateTotals(usage: any) {
+function formatCost(c: number): string {
+  if (!c || c <= 0) return "$0.00";
+  if (c < 0.0001) return `$${c.toFixed(6)}`;
+  if (c < 0.01) return `$${c.toFixed(4)}`;
+  if (c < 1.0) return `$${c.toFixed(3)}`;
+  return `$${c.toFixed(2)}`;
+}
+
+function updateTotals(usage: any, modelStr?: string): number {
   totals.input += usage.inputTokens ?? 0;
   totals.output += usage.outputTokens ?? 0;
   totals.cacheRead += usage.cachedTokens ?? usage.cacheReadTokens ?? 0;
   totals.cacheWrite += usage.cacheWriteTokens ?? 0;
   totals.reasoning += usage.thinkingTokens ?? 0;
-  if (usage.cost?.totalCost) totals.cost += usage.cost.totalCost;
+
+  // Realtime cost tracking with fallback catalog calculation
+  let turnCost = usage.cost?.totalCost ?? 0;
+  if (!turnCost && modelStr) {
+    const prov = modelStr.includes("/") ? modelStr.split("/")[0]! : "opencode";
+    const id = modelStr.includes("/") ? modelStr.split("/").slice(1).join("/") : modelStr;
+    const spec = getModelFromCatalog(prov, id);
+    if (spec?.pricing || spec?.cost) {
+      const inputP = spec.pricing?.inputPerMillion ?? spec.cost?.input ?? 0;
+      const outputP = spec.pricing?.outputPerMillion ?? spec.cost?.output ?? 0;
+      const crP = spec.pricing?.cacheReadPerMillion ?? spec.cost?.cache_read ?? 0;
+      const cwP = spec.pricing?.cacheWritePerMillion ?? spec.cost?.cache_write ?? 0;
+      const cr = usage.cachedTokens ?? usage.cacheReadTokens ?? 0;
+      const uncachedIn = Math.max(0, (usage.inputTokens ?? 0) - cr);
+      turnCost =
+        (uncachedIn / 1_000_000) * inputP +
+        (cr / 1_000_000) * crP +
+        ((usage.cacheWriteTokens ?? 0) / 1_000_000) * cwP +
+        ((usage.outputTokens ?? 0) / 1_000_000) * outputP;
+    }
+  }
+  totals.cost += turnCost;
+
   const latestInput = usage.inputTokens ?? 0;
   const latestRead = usage.cachedTokens ?? usage.cacheReadTokens ?? 0;
   if (latestInput > 0) lastCacheHitRate = (latestRead / latestInput) * 100;
   else if (latestRead > 0) lastCacheHitRate = 100;
+
+  return turnCost;
 }
 
 function contextPercent(): { pct: string; window: number } {
@@ -246,7 +278,7 @@ function renderFooterStats(): string {
   if (totals.cacheWrite) parts.push(`CW${formatTokens(totals.cacheWrite)}`);
   if (lastCacheHitRate !== undefined) parts.push(`CH${lastCacheHitRate.toFixed(1)}%`);
   else if (totals.input > 0) parts.push(`CH${((totals.cacheRead / totals.input) * 100).toFixed(1)}%`);
-  if (totals.cost) parts.push(`$${totals.cost.toFixed(3)}`);
+  parts.push(formatCost(totals.cost));
   const { pct, window } = contextPercent();
   const ctx = pct === "?" ? `?/${formatContextWindow(window)} (auto)` : `${pct}%/${formatContextWindow(window)} (auto)`;
   parts.push(ctx);
@@ -428,7 +460,11 @@ while (true) {
       onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
       onDelta: (d) => process.stdout.write(d),
       onEvent: (e) => {
-        if (e.type === "subagent_complete") console.log(`\n\x1b[90m↳ ${e.subagent!.name} done (${e.subagent!.usage.totalTokens} tok)\x1b[0m`);
+        if (e.type === "subagent_complete") {
+          const sCost = e.subagent!.usage?.cost?.totalCost ?? 0;
+          const sCostLabel = sCost > 0 ? ` • ${formatCost(sCost)}` : "";
+          console.log(`\n\x1b[90m↳ ${e.subagent!.name} done (${formatTokens(e.subagent!.usage.totalTokens)} tok${sCostLabel})\x1b[0m`);
+        }
       },
     });
   } catch (e: any) {
@@ -441,11 +477,14 @@ while (true) {
     continue;
   }
 
-  updateTotals(res.usage);
+  const turnCost = updateTotals(res.usage, agent.modelStringOrSpec);
   saveSession();
   const lvl = (agent as any).thinkingConfig?.level ? ` • ${(agent as any).thinkingConfig.level}` : "";
-  console.log(`\n\x1b[35m${renderFooterStats()} • ${res.provider}/${res.model}${lvl} ${res.durationMs}ms ${res.finishReason ?? ""}\x1b[0m`);
-  if (res.subagents?.length) console.log(`\x1b[90m  subagents: ${res.subagents.map((s: any) => `${s.name}:${s.isError ? "ERR" : "ok"}`).join(", ")}\x1b[0m`);
+  const costLabel = turnCost > 0 ? ` (+${formatCost(turnCost)})` : "";
+  console.log(`\n\x1b[35m${renderFooterStats()}${costLabel} • ${res.provider}/${res.model}${lvl} ${res.durationMs}ms ${res.finishReason ?? ""}\x1b[0m`);
+  if (res.subagents?.length) {
+    console.log(`\x1b[90m  subagents: ${res.subagents.map((s: any) => `${s.name}:${s.isError ? "ERR" : "ok"} (${formatCost(s.usage?.cost?.totalCost ?? 0)})`).join(", ")}\x1b[0m`);
+  }
   console.log("");
 }
 

@@ -1,7 +1,11 @@
-import { OpenAIProvider } from "../openai/index.ts";
-import type { ModelSpec, ProviderId } from "../../types/model.ts";
-import { getModelFromCatalog } from "../../models/catalog.ts";
-import { getApiKey, getEnv } from "../../utils/env.ts";
+import { OpenAIProvider } from "./openai.ts";
+import type { ModelSpec, ProviderId } from "../types/model.ts";
+import { getModelFromCatalog } from "../models/catalog.ts";
+import { getApiKey, getEnv } from "../utils/env.ts";
+
+// ============================================================================
+// Custom / OpenAI-Compatible Provider Types
+// ============================================================================
 
 export interface CustomProviderOptions {
   /** Human label, defaults to `${id} (OpenAI-compatible)` */
@@ -21,6 +25,10 @@ function normalizePrefix(prefix: string): string {
 function envPrefix(prefix: string): string {
   return normalizePrefix(prefix).toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
+
+// ============================================================================
+// Custom / OpenAI-Compatible Provider Implementation
+// ============================================================================
 
 /**
  * OpenAI-compatible provider for ANY third-party endpoint.
@@ -55,7 +63,6 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     if (opts?.defaultBaseUrl) {
       this.defaultBaseUrl = opts.defaultBaseUrl;
     }
-    // Empty list — resolution is catalog-first + generic fallback (see getModel).
     (this as any).models = [];
   }
 
@@ -67,7 +74,6 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
       getEnv(`${this.envName}_BASEURL`) ||
       getEnv(`${this.envName}_API_BASE`);
     if (prefixed) return prefixed;
-    // Single-endpoint escape hatch: bare MODEL_ID + OPENAI_BASE_URL
     const generic = getEnv("OPENAI_BASE_URL") || getEnv("OPENAI_API_BASE");
     if (generic) return generic;
     return this.defaultBaseUrl;

@@ -8,15 +8,33 @@ import type { ProviderContext } from "../types/message.ts";
  */
 export function estimateTokensFromText(text: string): number {
   if (!text || text.length === 0) return 0;
-  const words = text.trim().split(/\s+/).filter(Boolean).length;
   const chars = text.length;
-  // Detect code-heavy text (braces, semicolons, camelCase dense)
-  const codeMarkers = (text.match(/[{};=<>/\\]/g) || []).length;
+  let words = 0;
+  let inWord = false;
+  let codeMarkers = 0;
+
+  for (let i = 0; i < chars; i++) {
+    const code = text.charCodeAt(i);
+    // Whitespace: space(32), tab(9), LF(10), CR(13)
+    if (code === 32 || code === 9 || code === 10 || code === 13) {
+      if (inWord) {
+        words++;
+        inWord = false;
+      }
+    } else {
+      inWord = true;
+      // Code markers: { (123), } (125), ; (59), = (61), < (60), > (62), / (47), \ (92)
+      if (code === 123 || code === 125 || code === 59 || code === 61 || code === 60 || code === 62 || code === 47 || code === 92) {
+        codeMarkers++;
+      }
+    }
+  }
+  if (inWord) words++;
+
   const isCodeHeavy = codeMarkers > chars * 0.05;
   const charDivisor = isCodeHeavy ? 3.0 : 3.8;
   const wordFactor = isCodeHeavy ? 1.6 : 1.3;
-  const tokenEstimate = Math.ceil(Math.max(chars / charDivisor, words * wordFactor));
-  return tokenEstimate;
+  return Math.ceil(Math.max(chars / charDivisor, words * wordFactor));
 }
 
 export function estimateTokensFromPart(part: ContentPart): number {

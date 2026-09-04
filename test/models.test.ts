@@ -58,5 +58,19 @@ describe("Model Resolution & Providers", () => {
     expect(geminiInfo.allowedLevels).toContain("high");
     expect(() => validateModelThinking("google", "gemini-3.7-flash", "low")).not.toThrow();
     expect(() => validateModelThinking("google", "gemini-3.7-flash", "unsupported_level_xyz")).toThrow(/Invalid thinking level/);
+
+    const { ThinkingLevelError } = require("../src/index.ts");
+    try {
+      validateModelThinking("google", "gemini-3.8-flash", "none");
+      expect(true).toBe(false); // Should not reach here
+    } catch (e: any) {
+      expect(e).toBeInstanceOf(ThinkingLevelError);
+      expect(e).toBeInstanceOf(Error);
+      expect(e.modelId).toBe("gemini-3.8-flash");
+      expect(e.requestedLevel).toBe("none");
+      expect(e.allowedLevels).toEqual(["low", "medium", "high"]);
+      expect(e.message).toContain("requires thinking and does not support disabling it");
+      expect(e.message).toContain("How to fix:");
+    }
   });
 });

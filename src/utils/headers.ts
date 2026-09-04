@@ -1,13 +1,6 @@
 import type { ProviderId } from "../types/model.ts";
 import type { CacheConfig } from "../types/core.ts";
-
-const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64;
-function clampSessionId(key?: string): string | undefined {
-  if (!key) return undefined;
-  const chars = Array.from(key);
-  if (chars.length <= OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH) return key;
-  return chars.slice(0, OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH).join("");
-}
+import { clampCacheKey } from "./cache.ts";
 
 function getAgentAccelUserAgent(): string {
   try {
@@ -33,7 +26,7 @@ export function buildSessionHeaders(
   };
 
   const rawSessionId = explicitSessionId || cache?.sessionId;
-  const sessionId = clampSessionId(rawSessionId);
+  const sessionId = clampCacheKey(rawSessionId);
 
   if (sessionId) {
     if (provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") {

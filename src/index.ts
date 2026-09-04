@@ -1,14 +1,10 @@
 import { z } from "zod";
 
 // Core Agent & Tool Classes
-export { Agent } from "./agent/agent.ts";
+export { Agent, SubAgentModelError } from "./agent/agent.ts";
 export { tool, toStandardToolDeclarations } from "./tools/tool.ts";
 export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
 export { executeToolCalls } from "./tools/executor.ts";
-
-export { defineSkill } from "./skills/skill.ts";
-export { loadSkill } from "./skills/loader.ts";
-export { Skill } from "./types/skill.ts";
 
 // Multi-Agent Orchestration
 export {
@@ -31,29 +27,102 @@ export {
   getModelThinkingInfo,
   validateModelThinking,
   getModelsForProvider,
+  ThinkingLevelError,
 } from "./models/catalog.ts";
 export { BaseProvider } from "./providers/base.ts";
-export { GoogleAIStudioProvider } from "./providers/google/index.ts";
-export { OpenCodeProvider } from "./providers/opencode/index.ts";
-export { OpenRouterProvider } from "./providers/openrouter/index.ts";
-export { OpenAIProvider } from "./providers/openai/index.ts";
+
+// Provider Implementations & Models (Single ultra-clean modular files)
+export {
+  GoogleAIStudioProvider,
+  GOOGLE_MODELS,
+  createExplicitCache,
+  isValidThoughtSignature,
+  retainThoughtSignature,
+  stripSchemaForGoogle,
+} from "./providers/google.ts";
+export type {
+  GoogleGenerateContentRequest,
+  GoogleGenerateContentResponse,
+  GoogleContent,
+  GooglePart,
+  GoogleBlob,
+  GoogleFunctionDeclaration,
+  GoogleTool,
+  GoogleToolConfig,
+  GoogleThinkingConfig,
+  GoogleThinkingLevel,
+  GoogleGenerationConfig,
+  GoogleCandidate,
+  GoogleUsageMetadata,
+  CreateExplicitCacheOptions,
+  CachedContentMetadata,
+} from "./providers/google.ts";
+
+export {
+  OpenCodeProvider,
+  OPENCODE_MODELS,
+} from "./providers/opencode.ts";
+export type {
+  OpenCodeChatRequest,
+  OpenCodeResponsesRequest,
+  OpenCodeResponsesInputItem,
+  OpenCodeResponsesOutputItem,
+  OpenCodeChatResponse,
+  OpenCodeResponsesResponse,
+  OpenCodeUsage,
+  OpenCodePromptCacheRetention,
+  OpenCodeReasoningEffort,
+  OpenCodeCacheControl,
+} from "./providers/opencode.ts";
+
+export {
+  OpenRouterProvider,
+  OPENROUTER_MODELS,
+} from "./providers/openrouter.ts";
+export type {
+  OpenRouterChatRequest,
+  OpenRouterResponse,
+  OpenRouterUsage,
+  OpenRouterReasoning,
+  OpenRouterParameters,
+  OpenRouterProviderRouting,
+} from "./providers/openrouter.ts";
+
+export {
+  OpenAIProvider,
+  OPENAI_MODELS,
+  extractGoogleThoughtSignature,
+} from "./providers/openai.ts";
+export type {
+  OpenAIChatCompletionRequest,
+  OpenAIChatCompletionResponse,
+  OpenAIChatCompletionChunk,
+  OpenAIMessage,
+  OpenAIMessageRole,
+  OpenAIContentPart,
+  OpenAITextPart,
+  OpenAIImageUrlPart,
+  OpenAIInputAudioPart,
+  OpenAIVideoUrlPart,
+  OpenAITool,
+  OpenAIToolCall,
+  OpenAIToolChoice,
+  OpenAIReasoningEffort,
+  OpenAIServiceTier,
+  OpenAIUsage,
+  OpenAIChoice,
+  OpenAIDelta,
+  OpenAIChunkChoice,
+} from "./providers/openai.ts";
+
 export {
   OpenAICompatibleProvider,
   createOpenAICompatibleProvider,
   createCustomProvider,
   CustomProvider,
   createGenericModelSpec,
-} from "./providers/custom/index.ts";
-export type { CustomProviderOptions } from "./providers/custom/index.ts";
-export { GOOGLE_MODELS } from "./providers/google/models.ts";
-export { OPENCODE_MODELS } from "./providers/opencode/models.ts";
-export { OPENROUTER_MODELS } from "./providers/openrouter/models.ts";
-export { OPENAI_MODELS } from "./providers/openai/models.ts";
-
-// Caching & Token Counting (Google explicit: REST cachedContents per gemini-documentation/context-caching.md)
-export {
-  createExplicitCache,
-} from "./providers/google/cache.ts";
+} from "./providers/custom.ts";
+export type { CustomProviderOptions } from "./providers/custom.ts";
 export {
   countTokens,
   estimateTokensFromText,
@@ -131,11 +200,6 @@ export type {
   AgentConfig,
   AgentRunOptions,
 } from "./types/agent.ts";
-
-export type {
-  SkillDefinition,
-  SkillMetadata,
-} from "./types/skill.ts";
 
 export type {
   ModelProviderInstance,

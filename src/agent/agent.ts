@@ -13,6 +13,36 @@ import { getModel, getSubModel } from "../utils/env.ts";
 import { tool } from "../tools/tool.ts";
 import { validateModelThinking } from "../models/catalog.ts";
 
+export class SubAgentModelError extends Error {
+  readonly parentModel?: string;
+
+  constructor(parentModel?: string) {
+    const parentName = parentModel || "your main model";
+    const formatted =
+      `\x1b[31m[Agent Accelerator] Missing Configuration: SubAgentModel is required when EnableSubagents is true\x1b[0m\n` +
+      `  \x1b[1mMain Agent Model:\x1b[0m ${parentName}\n` +
+      `  \x1b[1mIssue:\x1b[0m            Sub-agent delegation was enabled (EnableSubagents: true), but no model was assigned for sub-agents.\n` +
+      `                    Sub-agents must never run on unverified models or default implicitly.\n\n` +
+      `  \x1b[36m💡 How to fix:\x1b[0m\n` +
+      `    1. Pass SubAgentModel in your Agent configuration:\n` +
+      `       const agent = new Agent({\n` +
+      `         model: "${parentName}",\n` +
+      `         EnableSubagents: true,\n` +
+      `         SubAgentModel: "provider/model-id", // Explicit sub-agent model\n` +
+      `       });\n\n` +
+      `    2. Or set the SUB_AGENT_MODEL environment variable in your .env or shell:\n` +
+      `       SUB_AGENT_MODEL="provider/model-id"`;
+
+    super(formatted);
+    this.name = "SubAgentModelError";
+    this.parentModel = parentModel;
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, SubAgentModelError);
+    }
+  }
+}
+
 export class Agent {
   readonly name: string;
   readonly description: string;
@@ -61,10 +91,7 @@ export class Agent {
 
     // DX4: single ThinkingLevel flag — also inherit from ModelProviderInstance if config.ThinkingLevel not set
     const mpThinking = (rawModel as any)?.thinkingLevel ?? (rawModel as any)?.thinking_level;
-    if (!((config as any).ThinkingLevel ?? (config as any).thinkingLevel) && mpThinking) {
-      (config as any).ThinkingLevel = mpThinking;
-    }
-    this.thinkingConfig = normalizeThinking(config);
+    this.thinkingConfig = normalizeThinking(config, mpThinking);
 
     // DX5: cache retention short|medium|long, undefined = no explicit
     this.cacheConfig = {
@@ -111,17 +138,6 @@ export class Agent {
       }
     }
 
-    if (config.skills && Array.isArray(config.skills)) {
-      for (const skill of config.skills) {
-        if (skill.instructions) {
-          this.instructions = `${this.instructions}\n\n# Skill: ${skill.name}\n${skill.instructions}`.trim();
-        }
-        for (const [toolName, toolDef] of Object.entries(skill.tools)) {
-          this.tools[toolName] = toolDef;
-        }
-      }
-    }
-
     // DX3: only CustomAgents (renamed from agents)
     const rawCustom = (config as any).CustomAgents ?? (config as any).customAgents;
     if (rawCustom && Array.isArray(rawCustom)) {
@@ -134,6 +150,11 @@ export class Agent {
     // DX8: only EnableSubagents (plus legacy subagents alias for test compat)
     const enableSubs = (config as any).EnableSubagents ?? (config as any).enableSubagents ?? (config as any).EnableSubAgents ?? (config as any).subagents ?? (config as any).subAgents;
     if (enableSubs === true) {
+      if (!this.subagentModel) {
+        throw new SubAgentModelError(
+          typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : (this.modelStringOrSpec as any)?.id
+        );
+      }
       const spawnTool = createSubagentSpawnTool(this);
       this.tools[spawnTool.name || "spawn_subagents"] = spawnTool;
     }
@@ -358,9 +379,9 @@ export class Agent {
   }
 }
 
-export function normalizeThinking(config: AgentConfig): ThinkingConfig | undefined {
+export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): ThinkingConfig | undefined {
   // DX4: only ThinkingLevel flag, values: none, dynamic, minimal, low, medium, high, xhigh
-  const rawLevel = (config as any).ThinkingLevel ?? (config as any).thinkingLevel ?? (config as any).thinking_level;
+  const rawLevel = (config as any).ThinkingLevel ?? (config as any).thinkingLevel ?? (config as any).thinking_level ?? fallbackLevel;
   const level = rawLevel as ThinkingLevel | undefined;
 
   if (!level) return undefined;

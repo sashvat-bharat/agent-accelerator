@@ -15,12 +15,22 @@ export class SSEParser {
     this.buffer += chunk;
     const messages: SSEMessage[] = [];
 
-    const lines = this.buffer.split(/\r?\n/);
-    // Keep the last partial line in the buffer
-    this.buffer = lines.pop() ?? "";
+    let start = 0;
+    while (start < this.buffer.length) {
+      const newlineIdx = this.buffer.indexOf("\n", start);
+      if (newlineIdx === -1) {
+        break;
+      }
 
-    for (const line of lines) {
-      if (line === "") {
+      let lineEnd = newlineIdx;
+      if (lineEnd > start && this.buffer.charCodeAt(lineEnd - 1) === 13) {
+        lineEnd--;
+      }
+
+      const line = this.buffer.slice(start, lineEnd);
+      start = newlineIdx + 1;
+
+      if (line.length === 0) {
         if (this.currentData.length > 0) {
           messages.push({
             id: this.currentId,
@@ -31,19 +41,22 @@ export class SSEParser {
           this.currentData = [];
           this.currentId = undefined;
         }
-      } else if (line.startsWith(":")) {
+      } else if (line.charCodeAt(0) === 58) {
         // Comment / ping
         continue;
       } else if (line.startsWith("data:")) {
-        const value = line.slice(5).trimStart();
-        this.currentData.push(value);
+        const val = line.slice(5);
+        this.currentData.push(val.startsWith(" ") ? val.slice(1) : val.trimStart());
       } else if (line.startsWith("event:")) {
-        this.currentEvent = line.slice(6).trim();
+        const val = line.slice(6);
+        this.currentEvent = (val.startsWith(" ") ? val.slice(1) : val).trim();
       } else if (line.startsWith("id:")) {
-        this.currentId = line.slice(3).trim();
+        const val = line.slice(3);
+        this.currentId = (val.startsWith(" ") ? val.slice(1) : val).trim();
       }
     }
 
+    this.buffer = this.buffer.slice(start);
     return messages;
   }
 
