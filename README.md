@@ -222,26 +222,25 @@ bun run examples/chat.ts
 ```
 
 Interactive commands during chat:
-* `/model <id>` — Switch model on the fly (auto-validates reasoning compatibility).
+* `/model "provider/model-id"` — Switch model on the fly in double quotes (e.g. `/model "opencode/ling-3.0-flash-fin-free"`).
 * `/level <lvl>` — Switch reasoning level (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `dynamic`).
-* `/tier <tier>` — Switch service tier (`standard`, `flex`, `priority`).
-* `/cache <ret>` — Switch prompt cache retention (`short`, `medium`, `long`).
-* `/stats` — Show cumulative token usage, cache metrics (`CR`: Cache Read, `CW`: Cache Write, `CH`: Cache Hit rate), and total cost.
-* `/clear` — Reset context history.
-* `/save` — Manually checkpoint session to `.session.jsonl`.
+* `/help` — Show available commands.
+* `/exit` / `/quit` — Exit chat session.
+
+Session state automatically persists to `.session.jsonl` after every turn and configuration change, resuming seamlessly on launch. Unified real-time telemetry (`↑in`, `↓out`, `CR`, `CW`, `CH%`, cost, context window utilization) is displayed on every turn.
 
 ---
 ## API Reference
 
 ### `new Agent(options)`
 
-| Parameter                                      | Type                                                             | Description                                                                              |
-| ---------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `model`                                        | `string, ModelSpec, ModelProviderInstance`                       | e.g. `"google/model-id"` or `ModelProvider.GoogleGenAI(...)`                             |
-| `instructions`                                 | `string`                                                         | System prompt — keep stable for cache                                                    |
-| `SubAgentModel`                                | `string, ModelSpec`                                              | Strictly required if `EnableSubagents: true` (or via `SUB_AGENT_MODEL` env). Enforces model isolation. |
-| `ThinkingLevel`                                | `"none", "dynamic", "minimal", "low", "medium", "high", "xhigh"` | Reasoning level (generic via catalog preflight)                                          |
-| `cache`                                        | `{ retention?: "short", "medium", "long", sessionId?: string }`  | `short=5m` `medium=1h` `long=12h`                                                        |
+| Parameter                                      | Type                                                                       | Description                                                                              |
+| ---------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `model`                                        | `string, ModelSpec, ModelProviderInstance`                                 | e.g. `"google/model-id"` or `ModelProvider.GoogleGenAI(...)`                             |
+| `instructions`                                 | `string`                                                                   | System prompt — keep stable for cache                                                    |
+| `SubAgentModel`                                | `string, ModelSpec`                                                        | Strictly required if `EnableSubagents: true` (or via `SUB_AGENT_MODEL` env). Enforces model isolation. |
+| `ThinkingLevel`                                | `"none", "dynamic", "minimal", "low", "medium", "high", "xhigh"`           | Reasoning level (generic via catalog preflight)                                          |
+| `cache`                                        | `{ retention?: "implicit", "short", "medium", "long", sessionId?: string }` | `"implicit"` ($0 storage fee prefix cache), `short=5m`, `medium=1h`, `long=12h`          |
 | `ServiceTier`                                  | `"flex", "priority"`                                             | `standard` = default                                                                     |
 | `EnableSubagents`                              | `boolean`                                                        | Adds `spawn_subagents` tool (strictly runs on `SubAgentModel`)                            |
 | `CustomAgents`                                 | `Agent[]`                                                        | Exposed as tools                                                                         |

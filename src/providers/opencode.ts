@@ -531,12 +531,14 @@ export class OpenCodeProvider extends BaseProvider {
     const retention = options?.cache?.retention;
     applyAnthropicCacheControl(messages, payload.tools as any, retention, modelSpecForCache);
     const sessionId = options?.sessionId || options?.cache?.sessionId;
-    if (sessionId && retention) {
+    if (sessionId) {
       const ck = clampCacheKey(sessionId);
       if (ck) {
         (payload as any).prompt_cache_key = ck;
-        const pcr = getPromptCacheRetention(retention, modelSpecForCache?.capabilities.supportsLongCacheRetention ?? true);
-        if (pcr) (payload as any).prompt_cache_retention = pcr;
+        if (retention && retention !== "implicit") {
+          const pcr = getPromptCacheRetention(retention, modelSpecForCache?.capabilities.supportsLongCacheRetention ?? true);
+          if (pcr) (payload as any).prompt_cache_retention = pcr;
+        }
       }
     }
 

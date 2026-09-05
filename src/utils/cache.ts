@@ -20,7 +20,7 @@ export function clampCacheKey(key?: string): string | undefined {
 }
 
 export function getCacheControlForRetention(retention?: CacheRetention, supportsLong = true) {
-  if (!retention) return undefined;
+  if (!retention || retention === "implicit") return undefined;
   // Anthropic: ttl undefined = 5m, ttl 1h for medium/long if supportsLong
   if (retention === "short") return { type: "ephemeral" as const };
   if (retention === "medium" || retention === "long") {
@@ -30,7 +30,7 @@ export function getCacheControlForRetention(retention?: CacheRetention, supports
 }
 
 export function getPromptCacheRetention(retention?: CacheRetention, supportsLong = true): "24h" | "1h" | undefined {
-  if (!retention) return undefined;
+  if (!retention || retention === "implicit") return undefined;
   if (retention === "long" && supportsLong) return "24h";
   if (retention === "medium" && supportsLong) return "1h";
   if (retention === "long") return "24h"; // fallback even if supportsLong false, provider may ignore
@@ -48,7 +48,7 @@ export function applyAnthropicCacheControl(
   retention?: CacheRetention,
   modelSpec?: ModelSpec
 ): number {
-  if (!retention) return 0;
+  if (!retention || retention === "implicit") return 0;
   const supportsLong = modelSpec?.capabilities.supportsLongCacheRetention ?? true;
   const canCache = modelSpec?.capabilities.supportsImplicitCaching ?? true;
   if (!canCache) return 0;

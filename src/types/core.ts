@@ -21,15 +21,19 @@ export interface ThinkingConfig {
 }
 
 /**
- * Cache retention - bloatfree: short (5m), medium (1h), long (12h)
- * If retention is undefined → no explicit caching enforced (implicit may still happen)
- * `none` removed — use undefined to disable explicit
+ * Cache retention:
+ * - "implicit": automatic prefix caching ($0.00 storage fee, session affinity preserved)
+ * - "short": 5 minutes explicit TTL
+ * - "medium": 1 hour explicit TTL
+ * - "long": 12 hours explicit TTL
+ * - undefined: no explicit caching enforced (implicit may still happen)
  */
-export type CacheRetention = "short" | "medium" | "long";
+export type CacheRetention = "implicit" | "short" | "medium" | "long";
 
 export interface CacheConfig {
   /**
    * Retention duration:
+   * - "implicit": automatic prefix caching ($0.00 storage fee, no explicit cloud cache entities created)
    * - "short": 5 minutes TTL
    * - "medium": 1 hour TTL
    * - "long": 12 hours TTL

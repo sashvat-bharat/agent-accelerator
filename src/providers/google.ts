@@ -515,7 +515,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
     // Explicit cache handling: retention set or cachedContentId specified
     let cachedContentId: string | undefined =
       (context as any).cachedContentId || context.cachedContentId || options?.cache?.cachedContentId;
-    const wantsExplicit = !!options?.cache?.retention;
+    const wantsExplicit = !!options?.cache?.retention && options?.cache?.retention !== "implicit";
 
     if (wantsExplicit && !cachedContentId) {
       try {
