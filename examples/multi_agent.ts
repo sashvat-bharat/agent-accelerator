@@ -1,10 +1,12 @@
+// Achieved ~99.3% of Cache Hit Rate!!
+
 import * as fs from "node:fs";
 import { Agent } from "agent-accelerator";
 
 let agent: Agent;
 try {
   agent = new Agent({
-    name: "Editorial Orchestrator",
+    name: "Editorial Lead",
     instructions: fs.readFileSync(new URL("../SYSTEM_PROMPT_AGENT.md", import.meta.url), "utf8"),
     model: process.env.MODEL,
     SubAgentModel: process.env.SUB_AGENT_MODEL,

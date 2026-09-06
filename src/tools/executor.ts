@@ -11,6 +11,7 @@ export interface ExecuteToolsOptions {
   agentName?: string;
   parallel?: boolean;
   signal?: AbortSignal;
+  sessionId?: string;
 }
 
 /**
@@ -19,7 +20,7 @@ export interface ExecuteToolsOptions {
 export async function executeToolCalls(
   options: ExecuteToolsOptions
 ): Promise<ToolResultRecord[]> {
-  const { tools, toolCalls, agentName, parallel = true, signal } = options;
+  const { tools, toolCalls, agentName, parallel = true, signal, sessionId } = options;
 
   const runSingle = async (call: ToolCallRecord): Promise<ToolResultRecord> => {
     const startTime = Date.now();
@@ -44,6 +45,7 @@ export async function executeToolCalls(
         toolCallId: call.id,
         agentName,
         signal,
+        sessionId,
       };
 
       // Validate input if Zod schema is provided

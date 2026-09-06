@@ -58,7 +58,7 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
   }
 }
 
-export function getModel(fallback = "google/default-model"): string {
+export function getModel(fallback?: string): string | undefined {
   return getEnv("MODEL") || getEnv("MODEL_NAME") || fallback;
 }
 

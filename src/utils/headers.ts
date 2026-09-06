@@ -42,11 +42,20 @@ export function buildSessionHeaders(
       headers["x-client-request-id"] = sessionId;
       headers["HTTP-Referer"] = "https://sashvat.com";
       headers["X-Title"] = "Agent Accelerator";
+    } else if (provider === "google") {
+      headers["x-goog-api-client"] = "agent-accel/1.0";
+      headers["x-session-id"] = sessionId;
+      headers["x-client-request-id"] = sessionId;
     } else {
       headers["x-session-id"] = sessionId;
       headers["x-client-request-id"] = sessionId;
       headers["session_id"] = sessionId;
     }
+  }
+
+  // Google client header attribution (always set for google provider)
+  if (provider === "google" && !headers["x-goog-api-client"]) {
+    headers["x-goog-api-client"] = "agent-accel/1.0";
   }
 
   // agent-accel also sets x-opencode-client via getAgentAccelUserAgent for opencode — ensure it persists even without sessionId

@@ -174,6 +174,8 @@ export interface ProviderGenerateResult {
   text: string;
   thinking?: string;
   thoughtSignature?: string;
+  thinkingSignature?: string;
+  textSignature?: string;
   toolCalls?: ToolCallRecord[];
   usage: TokenUsage;
   finishReason?: string;

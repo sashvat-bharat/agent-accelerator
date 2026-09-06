@@ -22,15 +22,20 @@ export class AgentContext {
     text: string,
     toolCalls?: ToolCallRecord[],
     thinking?: string,
-    thoughtSignature?: string
+    thoughtSignature?: string,
+    signatures?: { thinkingSignature?: string; textSignature?: string }
   ): void {
     const parts: ContentPart[] = [];
+    const hasToolCalls = Boolean(toolCalls && toolCalls.length > 0);
+
+    const thinkingSig = signatures?.thinkingSignature || (!hasToolCalls && !text ? thoughtSignature : undefined);
+    const textSig = signatures?.textSignature || (!hasToolCalls ? thoughtSignature : undefined);
 
     if (thinking) {
       parts.push({
         type: "thinking",
         thinking,
-        thoughtSignature,
+        thoughtSignature: thinkingSig,
       });
     }
 
@@ -38,10 +43,11 @@ export class AgentContext {
       parts.push({
         type: "text",
         text,
+        thoughtSignature: textSig,
       });
     }
 
-    if (toolCalls && toolCalls.length > 0) {
+    if (hasToolCalls && toolCalls) {
       for (const tc of toolCalls) {
         parts.push({
           type: "tool_call",
@@ -49,7 +55,7 @@ export class AgentContext {
           name: tc.name,
           arguments: tc.arguments,
           rawArguments: tc.rawArguments,
-          thoughtSignature: tc.thoughtSignature || thoughtSignature,
+          thoughtSignature: tc.thoughtSignature || (!thinkingSig && !textSig ? thoughtSignature : undefined),
         });
       }
     }

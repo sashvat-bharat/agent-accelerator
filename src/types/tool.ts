@@ -4,6 +4,7 @@ export interface ToolExecutionContext {
   toolCallId: string;
   agentName?: string;
   signal?: AbortSignal;
+  sessionId?: string;
 }
 
 export type ToolExecuteFn<TInput = any, TOutput = any> = (

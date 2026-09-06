@@ -21,12 +21,13 @@ console.log(`Cache Efficiency: ${usage.cachedTokens} / ${usage.inputTokens}`);
 ---
 ## Key Capabilities
 
-* **Zero-Leak Observability:** Access complete raw JSON, HTTP wire logs, provider reasoning traces, and thought signatures (`thoughtSignature`).
-* **Cache-First Architecture:** Automatic routing for Google explicit `cachedContents`, OpenCode session pinning, and Anthropic-style ephemeral breakpoints across both `/chat/completions` and `/responses` APIs.
+* **Zero-Leak Observability:** Access complete raw JSON, HTTP wire logs, provider reasoning traces, and thought signatures (`thoughtSignature`, `thinkingSignature`, `textSignature`).
+* **Cache-First Architecture:** Automatic routing for Google Gemini 3 prefix caching with thought-signature isolation, OpenRouter/OpenCode sticky `session_id` worker affinity, and Anthropic ephemeral breakpoints—achieving 50%–65%+ prompt cache hit rates.
+* **First-Class Sub-Agents (Pre-Defined & Dynamic):** Clean separation of concerns between tools (`tools: { ... }`) and dedicated sub-agents (`subagents: [researcher, critic]`), plus autonomous on-the-fly spawning (`EnableSubagents: true`) with full sub-agent telemetry rollups.
+* **Bulletproof Thinking Stream Extraction:** Cross-chunk rolling buffer prevents split tokens (e.g. `</th` + `ink>` or markdown headers) from leaking between `<think>` reasoning traces and final answer text.
 * **Unified Model Catalog & Preflight Validation:** Single source of truth driven by `models.dev` (`7,400+` models). Automatic context limits and preflight reasoning validation (`validateModelThinking`) that fails fast with available options if an unsupported thinking mode is selected.
-* **First-Class Sub-Agents:** Native parallel dispatch (`spawn_subagents`) with structured XML reconciliation (`<SUB-AGENTS-RESPONSE>`).
 * **Typed Tooling:** Automatic Zod-to-JSON Schema transpilation with parallel execution via `Promise.all`.
-* **Universal Responses & Completions Routing:** Seamless support for OpenAI Responses API models (e.g. `muse-spark`) and Completions API without changing application code.
+* **Universal Responses & Completions Routing:** Seamless support for OpenAI Responses API models (e.g. `muse-spark`) and standard Completions APIs without changing application code.
 
 ---
 ## Architectural Comparison
@@ -130,20 +131,73 @@ const res = await agent.run("Fetch metrics for cluster-a and cluster-b simultane
 console.log(res.toolCalls, res.toolResults);
 ```
 
-### 4. Multi-Agent Orchestration
+### 4. Multi-Agent Delegation
+
+Agent Accelerator provides two first-class paradigms for multi-agent workflows:
+
+#### 4a. Pre-Defined Sub-Agents (`SubAgent`)
+Create specialized sub-agents with dedicated models, personas, and optional stateless evaluation mode. Pre-defined sub-agents are automatically registered as callable tools on the parent agent:
 
 ```ts
-import * as fs from "node:fs";
+import { Agent, SubAgent, tool, z } from "agent-accelerator";
+
+// 1. Specialized sub-agents
+const researcher = new SubAgent({
+  name: "deep_researcher",
+  instructions: "You are an exhaustive research specialist. Investigate quantifiable technical metrics...",
+  model: "google/gemini-3.5-flash",
+  cache: { retention: "short" },
+});
+
+const critic = new SubAgent({
+  name: "adversarial_critic",
+  instructions: "You are a skeptical devil's advocate. Expose economic bottlenecks and failure points...",
+  model: "openrouter/inclusionai/ling-3.0-flash-fin:free",
+  stateless: true, // One-shot evaluation: does not persist history across turns
+  cache: { retention: "short" },
+});
+
+// 2. Lead Agent with clean separation: tools in `tools`, subagents in `subagents`
+const lead = new Agent({
+  name: "Editorial Lead",
+  instructions: "Delegate research to deep_researcher, then pass findings to adversarial_critic.",
+  model: "google/gemini-3.7-flash",
+  tools: {
+    get_brief: tool({
+      description: "Fetch topic briefing",
+      input: z.object({ topic: z.string() }),
+      execute: async ({ topic }) => ({ topic, status: "pilot phase" }),
+    }),
+  },
+  subagents: [researcher, critic], // Converted into callable tools: deep_researcher, adversarial_critic
+});
+
+const res = await lead.run("Commercial deployment of Solid-State Batteries in consumer EVs", {
+  stream: true,
+  wrapThinking: true,
+  onDelta: d => process.stdout.write(d),
+  onEvent: e => {
+    if (e.type === "subagent_complete") {
+      const s = e.subagent!;
+      console.log(`\n↳ [SubAgent Completed] ${s.name} (${s.durationMs}ms • ${s.provider}/${s.model})`);
+    }
+  },
+});
+```
+
+#### 4b. Dynamic On-the-Fly Spawning (`EnableSubagents: true`)
+When tasks are open-ended, the Lead Agent can autonomously author custom instructions and spawn parallel worker sub-agents at runtime:
+
+```ts
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  name: "Agent",
-  instructions: fs.readFileSync("SYSTEM_PROMPT_AGENT.md", "utf8"),
+  name: "Autonomous Architect",
+  instructions: "Decompose complex system queries and delegate to specialized sub-agents in parallel.",
   model: process.env.MODEL,
-  SubAgentModel: process.env.SUB_AGENT_MODEL,
-  ThinkingLevel: "low",
-  EnableSubagents: true,
-  cache: { retention: "long" },
+  SubAgentModel: process.env.SUB_AGENT_MODEL, // Strictly enforces isolated worker model
+  EnableSubagents: true, // Injects the `spawn_subagents` dynamic tool
+  cache: { retention: "short" },
   maxTurns: 10,
 });
 
@@ -178,11 +232,16 @@ Turn 2 (Warm Context)
   ↳ Cache Hit: 72% – 93%
 ```
 
-| Provider                  | Strategy                       | Mechanism                                    | Small Prompt Support       |
-| ------------------------- | ------------------------------ | -------------------------------------------- | -------------------------- |
-| **Google GenAI**          | Explicit (`retention: "long"`) | `POST /v1beta/cachedContents` (TTL: 12h)     | Yes                        |
-| **Google GenAI**          | Implicit (Default)             | In-memory prefix matching                    | Requires ≥2048–4096 tokens |
-| **OpenCode / OpenRouter** | Ephemeral Breakpoints          | `cache_control` headers + `prompt_cache_key` | Yes                        |
+| Provider                  | Strategy                       | Mechanism                                    | Minimum Token Gate | Verified Hit Rate |
+| ------------------------- | ------------------------------ | -------------------------------------------- | ------------------ | ----------------- |
+| **OpenRouter**            | Sticky Worker Affinity         | Payload `session_id` + Paged KV cache        | ~16–64 tokens      | **55% – 65%+**    |
+| **OpenCode**              | Sticky Session Routing         | Payload `session_id` + `x-opencode-session`  | ~16–64 tokens      | **45% – 50%+**    |
+| **Google GenAI (Gemini 3)**| Implicit Prefix Caching        | Thought Signature Isolation + Prefix Match   | ≥4,096 tokens      | **25% – 70%+**    |
+| **Google GenAI (Explicit)**| Dedicated Object (`"long"`)    | `POST /v1beta/cachedContents` (TTL: 1h–12h)  | ≥32,768 tokens     | **Cost Guaranteed** |
+| **Anthropic**             | Ephemeral Breakpoints          | `cache_control: { type: "ephemeral" }`       | ≥1,024 tokens      | **80% – 90%+**    |
+
+> **Prefix Caching Note on Google Gemini 3.x:**
+> Gemini 3 models (`gemini-3.7-flash`, `gemini-3.5-flash-lite`) architecturally require prompts to reach $\ge 4,096$ tokens before implicit caching engages. Agent Accelerator strictly isolates thought signatures (`thinkingSignature`, `textSignature`, `tc.thoughtSignature`) to ensure byte-for-byte prefix stability across turns without invalidating the KV cache. In production multi-agent runs starting with rich domain context, Gemini 3 achieves 65–75% hit rates. On OpenRouter/OpenCode, smaller block sizes (16–64 tokens) allow multi-turn agent loops to hit cache starting immediately on Turn 2.
 
 ---
 ## Model Catalog & Preflight Validation
@@ -215,7 +274,7 @@ bun run update-models
 ---
 ## Interactive Chat CLI
 
-Try the fully persistent multi-turn chat CLI with subagent orchestration and live metrics:
+Try the fully persistent multi-turn chat CLI with subagent delegation and live metrics:
 
 ```bash
 bun run examples/chat.ts
@@ -238,27 +297,39 @@ Session state automatically persists to `.session.jsonl` after every turn and co
 | ---------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `model`                                        | `string, ModelSpec, ModelProviderInstance`                                 | e.g. `"google/model-id"` or `ModelProvider.GoogleGenAI(...)`                             |
 | `instructions`                                 | `string`                                                                   | System prompt — keep stable for cache                                                    |
+| `subagents`                                    | `SubAgent[], Agent[]`                                                      | Pre-defined sub-agents registered as distinct callable tools                             |
+| `tools`                                        | `Record<string, ToolDefinition>, ToolDefinition[]`                         | Deterministic tools (Zod → JSON Schema, parallel `Promise.all`)                           |
+| `stateless`                                    | `boolean`                                                                  | Default `false`. When `true`, does not persist conversational history across turns        |
 | `SubAgentModel`                                | `string, ModelSpec`                                                        | Strictly required if `EnableSubagents: true` (or via `SUB_AGENT_MODEL` env). Enforces model isolation. |
 | `ThinkingLevel`                                | `"none", "dynamic", "minimal", "low", "medium", "high", "xhigh"`           | Reasoning level (generic via catalog preflight)                                          |
 | `cache`                                        | `{ retention?: "implicit", "short", "medium", "long", sessionId?: string }` | `"implicit"` ($0 storage fee prefix cache), `short=5m`, `medium=1h`, `long=12h`          |
 | `ServiceTier`                                  | `"flex", "priority"`                                             | `standard` = default                                                                     |
-| `EnableSubagents`                              | `boolean`                                                        | Adds `spawn_subagents` tool (strictly runs on `SubAgentModel`)                            |
-| `CustomAgents`                                 | `Agent[]`                                                        | Exposed as tools                                                                         |
-| `tools` / `functions`                          | `ToolDefinition[]`                                               | Zod → JSON Schema, parallel `Promise.all`                                                |
+| `EnableSubagents`                              | `boolean`                                                        | Adds `spawn_subagents` tool for dynamic runtime spawning (strictly runs on `SubAgentModel`)|
+| `CustomAgents`                                 | `Agent[]`                                                        | Exposed as tools (legacy alias)                                                          |
 | `maxTurns`                                     | `number`                                                         | Default `10`                                                                             |
 | `sessionId` / `headers` / `apiKey` / `baseUrl` | `string`                                                         | Overrides                                                                                |
 
 **`agent.run(prompt, opts)`** `stream?: boolean` `wrapThinking?: boolean` (`<think>…</think>` + blank line) `onDelta?` `onThinkingDelta?` `onEvent?` `signal?` `sessionId?` `additionalContext?`
 
 ---
+### `new SubAgent(options)`
+
+Extends `Agent` with defaults optimized for modular sub-agent pipelines:
+* Resolves `model` from `config.model ?? process.env.SUB_AGENT_MODEL ?? process.env.MODEL`. Strictly throws an actionable error if no model is provided (zero silent fallback models).
+* Defaults `cache` to `{ retention: "short" }` with child session affinity.
+* Exposes `.asTool(name?, desc?)` and `.toTool()` for fluent registration.
+
+---
 ### `AgentResponse` Properties
 
 * **`text`**: Complete decoded output string.
 * **`thinking`**: Extracted reasoning tokens and trace.
-* **`thoughtSignature`**: Provider reasoning signatures (persisted automatically for Gemini 3.x).
+* **`thoughtSignature`**: Provider reasoning signatures (persisted automatically for Gemini 3.x multi-turn replay).
+* **`thinkingSignature` / `textSignature`**: Part-level signatures preserved for KV cache stability.
 * **`toolCalls` / `toolResults`**: Structured logs of all tool interactions.
-* **`subagents`**: Metadata array of sub-agent durations, tokens, and outputs.
-* **`usage`**: `{ inputTokens, outputTokens, cachedTokens, thinkingTokens, cost }`.
+* **`subagents`**: Array of `SubAgentExecutionMetadata` (name, task, model, provider, durationMs, usage, cost, turns, text, thinking).
+* **`model` / `provider`**: Resolved model identifier and provider string.
+* **`usage`**: `{ inputTokens, outputTokens, cachedTokens, cacheReadTokens, thinkingTokens, cost }`.
 * **`raw`**: Unmodified HTTP request and response envelopes `{ request, response }`.
 
 ---
@@ -266,12 +337,12 @@ Session state automatically persists to `.session.jsonl` after every turn and co
 
 ```
 src/
-├── agent/       # Agent context, main execution loop, and orchestrator
+├── agent/       # Agent context, main execution loop, subagent class, and delegation tools
 ├── providers/   # Single-file provider modules (google.ts, openai.ts, opencode.ts, openrouter.ts, custom.ts)
 ├── models/      # Catalog parser and context resolution
 ├── data/        # models.dev database snapshot (gitignored, updated via bun run update-models)
 ├── tools/       # Zod schemas, wrappers, and parallel executor
-├── streaming/   # SSE parser and typed event stream emitters
+├── streaming/   # SSE parser and typed event stream emitters (cross-chunk rolling buffer)
 ├── tokens/      # Context window and token utilization counters
 └── utils/       # Cache control, wire headers, and session handlers
 ```
@@ -281,10 +352,11 @@ src/
 
 ```bash
 bun run typecheck              # Typecheck
-bun test                       # Run test suite
+bun test                       # Run full test suite (64 unit tests)
 bun run update-models          # Refresh models.dev catalog snapshot
+bun run examples/sub-agents.ts # Multi-agent research & critique pipeline with cache telemetry
 bun run examples/chat.ts       # Run interactive CLI session
-bun run examples/multi_agent.ts# Run multi-agent orchestrator demo
+bun run examples/multi_agent.ts# Run dynamic sub-agent delegation demo
 bun run examples/metadata.ts   # Full metadata & wire inspection demo
 ```
 

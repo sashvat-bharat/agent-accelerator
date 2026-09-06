@@ -2,7 +2,7 @@
  * Agent Accelerator - Interactive Chat CLI
  *
  * Ultra-clean, persistent multi-turn chat session with automatic .session.jsonl persistence,
- * subagent orchestration, streaming thought traces, and unified metadata & cost telemetry.
+ * subagent delegation, streaming thought traces, and unified metadata & cost telemetry.
  *
  * Run: bun run examples/chat.ts
  */
@@ -146,7 +146,7 @@ const initialModel = saved?.model ?? process.env.MODEL ?? "google/gemini-3.5-fla
 const initialThinking = (saved?.thinkingLevel as any) ?? (process.env.THINKING_LEVEL as any) ?? "medium";
 
 const agent = new Agent({
-  name: "Chat Orchestrator",
+  name: "Chat Agent",
   instructions: loadPrompt(),
   model: initialModel,
   SubAgentModel: saved?.subAgentModel ?? process.env.SUB_AGENT_MODEL,

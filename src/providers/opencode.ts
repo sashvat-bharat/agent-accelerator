@@ -41,6 +41,7 @@ export interface OpenCodeChatRequest {
   tools?: any[];
   tool_choice?: any;
   stream?: boolean;
+  stream_options?: { include_usage?: boolean };
   prompt_cache_key?: string;
   prompt_cache_retention?: OpenCodePromptCacheRetention;
   reasoning_effort?: OpenCodeReasoningEffort;
@@ -467,6 +468,8 @@ export class OpenCodeProvider extends BaseProvider {
         const toolCalls: any[] = [];
         const contentParts: any[] = [];
 
+        let assistantThinking: string | undefined;
+
         for (const part of msg.content) {
           if (part.type === "tool_call") {
             toolCalls.push({
@@ -486,6 +489,8 @@ export class OpenCodeProvider extends BaseProvider {
             });
           } else if (part.type === "text" && part.text) {
             contentParts.push({ type: "text", text: part.text });
+          } else if (part.type === "thinking" && part.thinking) {
+            assistantThinking = (assistantThinking ? assistantThinking + "\n" : "") + part.thinking;
           } else if (part.type !== "thinking") {
             const converted = await this.convertContentPart(part);
             if (converted) {
@@ -494,11 +499,13 @@ export class OpenCodeProvider extends BaseProvider {
           }
         }
 
-        if (contentParts.length > 0 || toolCalls.length > 0) {
+        if (contentParts.length > 0 || toolCalls.length > 0 || assistantThinking) {
+          const textOnly = contentParts.length === 1 && contentParts[0].type === "text" ? contentParts[0].text : (contentParts.length > 0 ? contentParts : undefined);
           messages.push({
             role: msg.role,
-            content: contentParts.length === 1 && contentParts[0].type === "text" ? contentParts[0].text : (contentParts.length > 0 ? contentParts : undefined),
+            content: textOnly ?? "",
             ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+            ...(assistantThinking ? { reasoning_content: assistantThinking } : {}),
           });
         }
       }
@@ -508,6 +515,7 @@ export class OpenCodeProvider extends BaseProvider {
       model: modelId,
       messages,
       stream,
+      ...(stream ? { stream_options: { include_usage: true } } : {}),
     };
 
     // Tools
@@ -529,11 +537,17 @@ export class OpenCodeProvider extends BaseProvider {
     // Prompt cache control for high hit rates
     const modelSpecForCache = this.getModel(modelId);
     const retention = options?.cache?.retention;
-    applyAnthropicCacheControl(messages, payload.tools as any, retention, modelSpecForCache);
+    const isAnthropicModel =
+      modelId.startsWith("anthropic/") ||
+      modelId.includes("claude");
+    if (isAnthropicModel) {
+      applyAnthropicCacheControl(messages, payload.tools as any, retention, modelSpecForCache);
+    }
     const sessionId = options?.sessionId || options?.cache?.sessionId;
     if (sessionId) {
       const ck = clampCacheKey(sessionId);
       if (ck) {
+        (payload as any).session_id = ck;
         (payload as any).prompt_cache_key = ck;
         if (retention && retention !== "implicit") {
           const pcr = getPromptCacheRetention(retention, modelSpecForCache?.capabilities.supportsLongCacheRetention ?? true);

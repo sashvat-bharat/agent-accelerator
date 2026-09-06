@@ -49,10 +49,12 @@ export interface OpenRouterChatRequest {
   tools?: any[];
   tool_choice?: any;
   stream?: boolean;
+  stream_options?: { include_usage?: boolean };
   reasoning?: OpenRouterReasoning;
   include_reasoning?: boolean;
   prompt_cache_key?: string;
   prompt_cache_retention?: string;
+  session_id?: string;
   provider?: OpenRouterProviderRouting;
 }
 
@@ -216,6 +218,7 @@ export class OpenRouterProvider extends BaseProvider {
       } else if (Array.isArray(msg.content)) {
         const toolCalls: any[] = [];
         const contentParts: any[] = [];
+        let assistantThinking: string | undefined;
 
         for (const part of msg.content) {
           if (part.type === "tool_call") {
@@ -236,6 +239,8 @@ export class OpenRouterProvider extends BaseProvider {
             });
           } else if (part.type === "text" && part.text) {
             contentParts.push({ type: "text", text: part.text });
+          } else if (part.type === "thinking" && part.thinking) {
+            assistantThinking = (assistantThinking ? assistantThinking + "\n" : "") + part.thinking;
           } else if (part.type !== "thinking") {
             const converted = await this.convertContentPart(part);
             if (converted) {
@@ -244,11 +249,13 @@ export class OpenRouterProvider extends BaseProvider {
           }
         }
 
-        if (contentParts.length > 0 || toolCalls.length > 0) {
+        if (contentParts.length > 0 || toolCalls.length > 0 || assistantThinking) {
+          const textOnly = contentParts.length === 1 && contentParts[0].type === "text" ? contentParts[0].text : (contentParts.length > 0 ? contentParts : undefined);
           messages.push({
             role: msg.role,
-            content: contentParts.length === 1 && contentParts[0].type === "text" ? contentParts[0].text : (contentParts.length > 0 ? contentParts : undefined),
+            content: textOnly ?? "",
             ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+            ...(assistantThinking ? { reasoning_content: assistantThinking } : {}),
           });
         }
       }
@@ -258,6 +265,7 @@ export class OpenRouterProvider extends BaseProvider {
       model: modelId,
       messages,
       stream,
+      ...(stream ? { stream_options: { include_usage: true } } : {}),
     };
 
     // Tools
@@ -279,14 +287,22 @@ export class OpenRouterProvider extends BaseProvider {
     // Prompt cache control for high hit rates
     const retention = options?.cache?.retention;
     const modelSpecForCache = this.getModel(modelId);
-    applyAnthropicCacheControl(messages, payload.tools as any, retention, modelSpecForCache);
+    const isAnthropicModel =
+      modelId.startsWith("anthropic/") ||
+      modelId.includes("claude");
+    if (isAnthropicModel) {
+      applyAnthropicCacheControl(messages, payload.tools as any, retention, modelSpecForCache);
+    }
     const sessionId = options?.sessionId || options?.cache?.sessionId;
-    if (sessionId && retention) {
+    if (sessionId) {
       const ck = clampCacheKey(sessionId);
       if (ck) {
-        payload.prompt_cache_key = ck;
-        const pcr = getPromptCacheRetention(retention, modelSpecForCache?.capabilities.supportsLongCacheRetention ?? true);
-        if (pcr) payload.prompt_cache_retention = pcr;
+        payload.session_id = ck;
+        if (retention) {
+          payload.prompt_cache_key = ck;
+          const pcr = getPromptCacheRetention(retention, modelSpecForCache?.capabilities.supportsLongCacheRetention ?? true);
+          if (pcr) payload.prompt_cache_retention = pcr;
+        }
       }
     }
 
@@ -466,9 +482,26 @@ export class OpenRouterProvider extends BaseProvider {
 
     const usage = this.extractUsage(responseJson.usage);
 
+    let finalText = text;
+    let finalThinking = thinking;
+    if (!finalText && toolCalls.length === 0 && thinking) {
+      if (thinking.includes("</think>")) {
+        const parts = thinking.split(/<\/(?:think|thought)>/i);
+        finalThinking = parts[0]!.replace(/<(?:think|thought)>/i, "").trim() || undefined;
+        finalText = parts.slice(1).join("").trim();
+      } else {
+        finalText = thinking;
+        finalThinking = undefined;
+      }
+    } else if (finalText && finalText.includes("<think>") && finalText.includes("</think>")) {
+      const parts = finalText.split(/<\/(?:think|thought)>/i);
+      finalThinking = (finalThinking ? finalThinking + "\n" : "") + parts[0]!.replace(/<(?:think|thought)>/i, "").trim();
+      finalText = parts.slice(1).join("").trim();
+    }
+
     return {
-      text,
-      thinking,
+      text: finalText,
+      thinking: finalThinking,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage,
       finishReason: choice?.finish_reason || "stop",
@@ -544,6 +577,9 @@ export class OpenRouterProvider extends BaseProvider {
 
         let accumulatedText = "";
         let accumulatedThinking = "";
+        let reasoningSwitchedToContent = false;
+        let rollingReasoningTail = "";
+        let inContentThinking = false;
         const toolCallsMap: Map<number, { id: string; name: string; args: string }> = new Map();
         let finalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finalFinishReason = "stop";
@@ -588,22 +624,136 @@ export class OpenRouterProvider extends BaseProvider {
                   const parts = (delta as any).reasoning_details.map((r: any) => r.text || r.content || r.data || "").filter(Boolean);
                   if (parts.length) thinkingDelta = parts.join("");
                 }
+
                 if (thinkingDelta) {
-                  accumulatedThinking += thinkingDelta;
-                  eventStream.push({
-                    type: "thinking_delta",
-                    thinkingDelta,
-                    partialThinking: accumulatedThinking,
-                  });
+                  if (reasoningSwitchedToContent) {
+                    accumulatedText += thinkingDelta;
+                    eventStream.push({
+                      type: "text_delta",
+                      delta: thinkingDelta,
+                      partialText: accumulatedText,
+                    });
+                  } else {
+                    const window = rollingReasoningTail + thinkingDelta;
+                    const thinkCloseMatch = window.match(/<\/(?:think|thought)>/i);
+
+                    if (thinkCloseMatch && thinkCloseMatch.index !== undefined) {
+                      const closeIndex = thinkCloseMatch.index;
+                      const closeEnd = closeIndex + thinkCloseMatch[0].length;
+                      const tailLen = rollingReasoningTail.length;
+
+                      const deltaBeforeTag = thinkingDelta.slice(0, Math.max(0, closeIndex - tailLen));
+                      if (deltaBeforeTag) {
+                        accumulatedThinking += deltaBeforeTag;
+                        eventStream.push({
+                          type: "thinking_delta",
+                          thinkingDelta: deltaBeforeTag,
+                          partialThinking: accumulatedThinking,
+                        });
+                      }
+
+                      reasoningSwitchedToContent = true;
+
+                      const deltaAfterTag = thinkingDelta.slice(Math.max(0, closeEnd - tailLen));
+                      if (deltaAfterTag) {
+                        accumulatedText += deltaAfterTag;
+                        eventStream.push({
+                          type: "text_delta",
+                          delta: deltaAfterTag,
+                          partialText: accumulatedText,
+                        });
+                      }
+                    } else if (
+                      accumulatedText.length === 0 &&
+                      ((accumulatedThinking.length === 0 && thinkingDelta.trimStart().match(/^(?:#{1,4}\s+|\*\*(?:Final Answer|Conclusion|Executive Summary|Executive Report|Report|Summary)\*\*)/i)) ||
+                        window.match(/(\n\s*(?:#{1,4}\s+|\*\*(?:Final Answer|Conclusion|Executive Summary|Executive Report|Report|Summary)\*\*))/i))
+                    ) {
+                      const headerMatch = window.match(/(\n\s*(?:#{1,4}\s+|\*\*(?:Final Answer|Conclusion|Executive Summary|Executive Report|Report|Summary)\*\*))/i);
+                      if (headerMatch && headerMatch.index !== undefined) {
+                        const matchStart = headerMatch.index;
+                        const firstSymbol = headerMatch[0].search(/[#*]/);
+                        const contentStartIndexInWindow = matchStart + (firstSymbol >= 0 ? firstSymbol : 0);
+                        const tailLen = rollingReasoningTail.length;
+
+                        const splitBeforeInDelta = Math.min(thinkingDelta.length, Math.max(0, matchStart - tailLen));
+                        const splitAfterInDelta = Math.min(thinkingDelta.length, Math.max(0, contentStartIndexInWindow - tailLen));
+
+                        const before = thinkingDelta.slice(0, splitBeforeInDelta);
+                        const after = thinkingDelta.slice(splitAfterInDelta);
+
+                        if (before) {
+                          accumulatedThinking += before;
+                          eventStream.push({
+                            type: "thinking_delta",
+                            thinkingDelta: before,
+                            partialThinking: accumulatedThinking,
+                          });
+                        }
+                        reasoningSwitchedToContent = true;
+                        if (after) {
+                          accumulatedText += after;
+                          eventStream.push({
+                            type: "text_delta",
+                            delta: after,
+                            partialText: accumulatedText,
+                          });
+                        }
+                      } else {
+                        reasoningSwitchedToContent = true;
+                        accumulatedText += thinkingDelta;
+                        eventStream.push({
+                          type: "text_delta",
+                          delta: thinkingDelta,
+                          partialText: accumulatedText,
+                        });
+                      }
+                    } else {
+                      accumulatedThinking += thinkingDelta;
+                      eventStream.push({
+                        type: "thinking_delta",
+                        thinkingDelta,
+                        partialThinking: accumulatedThinking,
+                      });
+                      rollingReasoningTail = (rollingReasoningTail + thinkingDelta).slice(-64);
+                    }
+                  }
                 }
 
                 if (delta.content) {
-                  accumulatedText += delta.content;
-                  eventStream.push({
-                    type: "text_delta",
-                    delta: delta.content,
-                    partialText: accumulatedText,
-                  });
+                  let textChunk = delta.content;
+                  if (!inContentThinking && textChunk.includes("<think>")) {
+                    const [before, after] = textChunk.split("<think>");
+                    if (before) {
+                      accumulatedText += before;
+                      eventStream.push({ type: "text_delta", delta: before, partialText: accumulatedText });
+                    }
+                    inContentThinking = true;
+                    textChunk = after || "";
+                  }
+                  if (inContentThinking) {
+                    if (textChunk.includes("</think>")) {
+                      const [thought, after] = textChunk.split("</think>");
+                      if (thought) {
+                        accumulatedThinking += thought;
+                        eventStream.push({ type: "thinking_delta", thinkingDelta: thought, partialThinking: accumulatedThinking });
+                      }
+                      inContentThinking = false;
+                      if (after) {
+                        accumulatedText += after;
+                        eventStream.push({ type: "text_delta", delta: after, partialText: accumulatedText });
+                      }
+                    } else if (textChunk) {
+                      accumulatedThinking += textChunk;
+                      eventStream.push({ type: "thinking_delta", thinkingDelta: textChunk, partialThinking: accumulatedThinking });
+                    }
+                  } else if (textChunk) {
+                    accumulatedText += textChunk;
+                    eventStream.push({
+                      type: "text_delta",
+                      delta: textChunk,
+                      partialText: accumulatedText,
+                    });
+                  }
                 }
 
                 if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
@@ -669,9 +819,21 @@ export class OpenRouterProvider extends BaseProvider {
         }
 
         const { AgentResponse } = await import("../types/response.ts");
+        let finalText = accumulatedText;
+        let finalThinking = accumulatedThinking.length > 0 ? accumulatedThinking : undefined;
+        if (!finalText && toolCalls.length === 0 && accumulatedThinking) {
+          if (accumulatedThinking.includes("</think>")) {
+            const parts = accumulatedThinking.split(/<\/(?:think|thought)>/i);
+            finalThinking = parts[0]!.replace(/<(?:think|thought)>/i, "").trim() || undefined;
+            finalText = parts.slice(1).join("").trim();
+          } else {
+            finalText = accumulatedThinking;
+            finalThinking = undefined;
+          }
+        }
         const finalAgentResponse = new AgentResponse({
-          text: accumulatedText,
-          thinking: accumulatedThinking.length > 0 ? accumulatedThinking : undefined,
+          text: finalText,
+          thinking: finalThinking,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           usage: finalUsage,
           responseId: finalResponseId,

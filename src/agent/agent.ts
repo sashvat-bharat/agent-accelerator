@@ -6,7 +6,7 @@ import { AgentResponse, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
-import { buildAgentTools, createSubagentSpawnTool } from "./orchestrator.ts";
+import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
 import { runAgentLoop, streamAgentLoop } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
@@ -59,6 +59,7 @@ export class Agent {
   readonly baseUrl?: string;
   readonly customHeaders?: Record<string, string>;
   readonly context: AgentContext;
+  readonly stateless: boolean;
 
   constructor(config: AgentConfig) {
     this.name = config.name || "Agent";
@@ -103,6 +104,7 @@ export class Agent {
 
     // DX6: ServiceTier only flex|priority
     this.serviceTier = config.ServiceTier;
+    this.stateless = config.stateless ?? false;
 
     // Tools registration
     if (config.tools) {
@@ -138,6 +140,15 @@ export class Agent {
       }
     }
 
+    // Dedicated SubAgents registration (subagents: [critique, researcher])
+    const rawSubagents = (config as any).subagents;
+    if (Array.isArray(rawSubagents)) {
+      const subagentTools = buildAgentTools(rawSubagents);
+      for (const [toolName, toolDef] of Object.entries(subagentTools)) {
+        this.tools[toolName] = toolDef;
+      }
+    }
+
     // DX3: only CustomAgents (renamed from agents)
     const rawCustom = (config as any).CustomAgents ?? (config as any).customAgents;
     if (rawCustom && Array.isArray(rawCustom)) {
@@ -147,8 +158,13 @@ export class Agent {
       }
     }
 
-    // DX8: only EnableSubagents (plus legacy subagents alias for test compat)
-    const enableSubs = (config as any).EnableSubagents ?? (config as any).enableSubagents ?? (config as any).EnableSubAgents ?? (config as any).subagents ?? (config as any).subAgents;
+    // DX8: Dynamic Subagents Spawning (EnableSubagents: true or subagents: true)
+    const enableSubs =
+      (config as any).EnableSubagents === true ||
+      (config as any).enableSubagents === true ||
+      (config as any).EnableSubAgents === true ||
+      rawSubagents === true ||
+      (config as any).subAgents === true;
     if (enableSubs === true) {
       if (!this.subagentModel) {
         throw new SubAgentModelError(
@@ -159,32 +175,54 @@ export class Agent {
       this.tools[spawnTool.name || "spawn_subagents"] = spawnTool;
     }
 
-    this.context = new AgentContext(this.instructions || undefined);
+    this.context = new AgentContext(this.getFullInstructions());
     if (initialCachedId) {
       this.context.cachedContentId = initialCachedId;
     }
+  }
+
+  private getFullInstructions(): string | undefined {
+    const base = this.instructions || "";
+    const isThinkingEnabled =
+      this.thinkingConfig?.enabled !== false &&
+      this.thinkingConfig?.level &&
+      this.thinkingConfig?.level !== "none";
+    if (isThinkingEnabled && !base.includes("[Reasoning Directive]")) {
+      const guidance =
+        "[Reasoning Directive]\n" +
+        "1. Use internal reasoning strictly for private planning and step-by-step thinking.\n" +
+        "2. Never attempt to execute tools or output final user deliverables inside reasoning.\n" +
+        "3. Once your reasoning is complete, output your final response or function calls directly in the standard response output.";
+      return base ? `${base}\n\n${guidance}` : guidance;
+    }
+    return base || undefined;
   }
 
   reset(): void {
     this.context.messages = [];
     this.context.thoughtSignatures = [];
     this.context.cachedContentId = (this.cacheConfig as any)?.cachedContentId;
-    this.context.systemPrompt = this.instructions || undefined;
+    this.context.systemPrompt = this.getFullInstructions();
   }
 
   private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions): void {
+    if (this.stateless) {
+      this.context.messages = [];
+      this.context.thoughtSignatures = [];
+    }
+    const fullInstructions = this.getFullInstructions();
     // C13: keep systemPrompt stable for Google implicit cache; additionalContext goes as user prefix, not system mutation
     if (options?.additionalContext) {
       // Preserve stable instructions as systemPrompt
-      this.context.systemPrompt = this.instructions || undefined;
+      this.context.systemPrompt = fullInstructions;
       const prefix = `[Additional Context]\n${options.additionalContext}\n\n`;
       if (typeof prompt === "string") {
         prompt = prefix + prompt;
       } else if (Array.isArray(prompt)) {
         prompt = [{ type: "text", text: prefix } as ContentPart, ...prompt];
       }
-    } else if (this.context.systemPrompt !== this.instructions) {
-      this.context.systemPrompt = this.instructions || undefined;
+    } else if (this.context.systemPrompt !== fullInstructions) {
+      this.context.systemPrompt = fullInstructions;
     }
     // C11: keep context cachedContentId in sync with cacheConfig if updated via options
     if (options?.headers && (this.cacheConfig as any)?.cachedContentId && !this.context.cachedContentId) {
@@ -228,7 +266,9 @@ export class Agent {
       baseUrl: this.baseUrl,
       headers: { ...(this.customHeaders ?? {}), ...(options?.headers ?? {}) },
       thinking: this.thinkingConfig,
-      cache: { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
+      cache: this.stateless
+        ? { sessionId: options?.sessionId || this.sessionId }
+        : { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
       serviceTier: this.serviceTier,
       sessionId: options?.sessionId || this.sessionId,
     };
@@ -244,7 +284,13 @@ export class Agent {
       maxTurns: this.maxTurns,
     };
 
-    const promise = runAgentLoop(loopConfig);
+    const promise = runAgentLoop(loopConfig).then((res) => {
+      if (this.stateless) {
+        this.context.messages = [];
+        this.context.thoughtSignatures = [];
+      }
+      return res;
+    });
     return promise as any;
   }
 
@@ -305,7 +351,9 @@ export class Agent {
       baseUrl: this.baseUrl,
       headers: { ...(this.customHeaders ?? {}), ...(options?.headers ?? {}) },
       thinking: this.thinkingConfig,
-      cache: { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
+      cache: this.stateless
+        ? { sessionId: options?.sessionId || this.sessionId }
+        : { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
       serviceTier: this.serviceTier,
       sessionId: options?.sessionId || this.sessionId,
     };
@@ -322,51 +370,101 @@ export class Agent {
     };
 
     const s = streamAgentLoop(loopConfig);
+    if (this.stateless) {
+      s.result().then(() => {
+        this.context.messages = [];
+        this.context.thoughtSignatures = [];
+      }).catch(() => {});
+    }
     // Wire one-liner callbacks so `stream:true` + onDelta is enough — no manual for-await needed
     if (options?.wrapThinking) {
-      // Auto-wrap reasoning as <think>\n...\n</think>\n\n — no manual isThinking needed
-      let started = false;
-      let ended = false;
+      // Auto-wrap reasoning as <think>\n...\n</think>\n\n per-turn — clean boundaries across multi-turn agent runs
+      let isThinking = false;
       const userOnThinking = options.onThinkingDelta;
       const userOnDelta = options.onDelta;
       const userOnEvent = options.onEvent;
       if (userOnEvent) s.on("*", userOnEvent as any);
+
+      const openThink = (e?: any) => {
+        if (!isThinking) {
+          isThinking = true;
+          const tag = "<think>\n";
+          if (userOnThinking) userOnThinking(tag, e);
+          else if (userOnDelta) userOnDelta(tag, e as any);
+        }
+      };
+
+      const closeThink = (e?: any) => {
+        if (isThinking) {
+          isThinking = false;
+          const close = "\n</think>\n\n";
+          if (userOnThinking) userOnThinking(close, e);
+          else if (userOnDelta) userOnDelta(close, e as any);
+        }
+      };
+
       if (userOnThinking || userOnDelta) {
         s.on("thinking_delta", (e: any) => {
-          if (!started) {
-            started = true;
-            const tag = "<think>\n";
-            if (userOnThinking) userOnThinking(tag, e);
-            else if (userOnDelta) userOnDelta(tag, e as any);
-          }
+          openThink(e);
           if (userOnThinking) userOnThinking(e.thinkingDelta!, e);
           else if (userOnDelta) userOnDelta(e.thinkingDelta!, e as any);
         });
         s.on("text_delta", (e: any) => {
-          if (started && !ended) {
-            ended = true;
-            const close = "\n</think>\n\n";
-            if (userOnThinking) userOnThinking(close, e);
-            else if (userOnDelta) userOnDelta(close, e as any);
-          }
+          closeThink(e);
           if (userOnDelta) userOnDelta(e.delta!, e);
           else if (userOnThinking) userOnThinking(e.delta!, e as any);
         });
-        s.on("done", () => {
-          if (started && !ended) {
-            ended = true;
-            const close = "\n</think>\n\n";
-            if (userOnThinking) userOnThinking(close, { type: "done" } as any);
-            else if (userOnDelta) userOnDelta(close, { type: "done" } as any);
-          }
+        // Close thinking tag and reset turn state before tool/subagent execution or results
+        s.on("tool_call_start" as any, (e: any) => closeThink(e));
+        s.on("tool_call_complete" as any, (e: any) => closeThink(e));
+        s.on("tool_result" as any, (e: any) => closeThink(e));
+        s.on("subagent_complete" as any, (e: any) => closeThink(e));
+        s.on("done", (e: any) => {
+          closeThink(e || ({ type: "done" } as any));
         });
       } else {
         // No callbacks but wrapThinking true — still emit tags as events for manual iteration
         s.on("thinking_delta", (e: any) => {
-          if (!started) { started = true; s.push({ type: "thinking_delta", thinkingDelta: "<think>\n" } as any); }
+          if (!isThinking) {
+            isThinking = true;
+            s.push({ type: "thinking_delta", thinkingDelta: "<think>\n" } as any);
+          }
         });
         s.on("text_delta", (e: any) => {
-          if (started && !ended) { ended = true; s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any); }
+          if (isThinking) {
+            isThinking = false;
+            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
+          }
+        });
+        s.on("tool_call_start" as any, () => {
+          if (isThinking) {
+            isThinking = false;
+            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
+          }
+        });
+        s.on("tool_call_complete" as any, () => {
+          if (isThinking) {
+            isThinking = false;
+            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
+          }
+        });
+        s.on("tool_result" as any, () => {
+          if (isThinking) {
+            isThinking = false;
+            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
+          }
+        });
+        s.on("subagent_complete" as any, () => {
+          if (isThinking) {
+            isThinking = false;
+            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
+          }
+        });
+        s.on("done", () => {
+          if (isThinking) {
+            isThinking = false;
+            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
+          }
         });
         if (userOnEvent) s.on("*", userOnEvent as any);
       }

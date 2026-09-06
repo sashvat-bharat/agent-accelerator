@@ -26,6 +26,8 @@ export interface AgentConfig {
   headers?: Record<string, string>;
   maxTurns?: number;
   EnableSubagents?: boolean;
+  subagents?: boolean | (Agent | { name: string; description: string; agent: Agent })[];
+  stateless?: boolean;
 }
 
 export interface AgentRunOptions {

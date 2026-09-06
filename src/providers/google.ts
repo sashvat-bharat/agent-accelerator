@@ -15,6 +15,7 @@ import { getApiKey } from "../utils/env.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { buildSessionHeaders } from "../utils/headers.ts";
 import { getModelsForProvider } from "../models/catalog.ts";
+import { countTokens } from "../tokens/counter.ts";
 
 // ============================================================================
 // Google AI Studio Provider Types
@@ -447,8 +448,12 @@ export class GoogleAIStudioProvider extends BaseProvider {
         }
       }
 
-      if (msg.thoughtSignature && isValidThoughtSignature(msg.thoughtSignature) && parts.length > 0 && !parts[0]?.thoughtSignature) {
-        parts[0] = { ...parts[0]!, thoughtSignature: msg.thoughtSignature };
+      const hasSig = parts.some((p) => Boolean(p.thoughtSignature));
+      if (!hasSig && msg.thoughtSignature && isValidThoughtSignature(msg.thoughtSignature) && parts.length > 0) {
+        const targetIdx = parts.findIndex((p) => p.functionCall) >= 0
+          ? parts.findIndex((p) => p.functionCall)
+          : parts.length - 1;
+        parts[targetIdx] = { ...parts[targetIdx]!, thoughtSignature: msg.thoughtSignature };
       }
 
       if (parts.length > 0) {
@@ -519,31 +524,39 @@ export class GoogleAIStudioProvider extends BaseProvider {
 
     if (wantsExplicit && !cachedContentId) {
       try {
-        const ttlSeconds = options?.cache?.ttlSeconds ??
-          (options?.cache?.retention === "short" ? 300 : options?.cache?.retention === "medium" ? 3600 : 43200);
-        const apiKeyForCache = getApiKey(this.id, options?.apiKey, options?.env);
-        if (apiKeyForCache && (context.systemPrompt || (payload.tools && payload.tools.length > 0))) {
-          const baseUrlForCache = options?.baseUrl || this.defaultBaseUrl;
-          let modelName = modelId;
-          if (!modelName.startsWith("models/")) modelName = `models/${modelName}`;
+        // Google cachedContents endpoint requires minimum 32,768 tokens for Gemini 3.x
+        const estTokens = countTokens({
+          systemPrompt: context.systemPrompt,
+          messages: context.messages,
+          tools: options?.tools as any,
+        });
+        if (estTokens >= 32768) {
+          const ttlSeconds = options?.cache?.ttlSeconds ??
+            (options?.cache?.retention === "short" ? 300 : options?.cache?.retention === "medium" ? 3600 : 43200);
+          const apiKeyForCache = getApiKey(this.id, options?.apiKey, options?.env);
+          if (apiKeyForCache && (context.systemPrompt || (payload.tools && payload.tools.length > 0) || payload.contents.length > 0)) {
+            const baseUrlForCache = options?.baseUrl || this.defaultBaseUrl;
+            let modelName = modelId;
+            if (!modelName.startsWith("models/")) modelName = `models/${modelName}`;
 
-          const cached = await createExplicitCache({
-            model: modelName,
-            systemInstruction: context.systemPrompt,
-            contents: [],
-            tools: payload.tools as any,
-            toolConfig: payload.toolConfig as any,
-            displayName: `accel-${(options?.cache?.sessionId || options?.sessionId || "").slice(0, 32)}`,
-            ttlSeconds,
-            apiKey: apiKeyForCache,
-            baseUrl: baseUrlForCache,
-          });
-          cachedContentId = cached.name;
-          (context as any).cachedContentId = cachedContentId;
-          if (options?.cache) (options.cache as any).cachedContentId = cachedContentId;
+            const cached = await createExplicitCache({
+              model: modelName,
+              systemInstruction: context.systemPrompt,
+              contents: payload.contents as any,
+              tools: payload.tools as any,
+              toolConfig: payload.toolConfig as any,
+              displayName: `accel-${(options?.cache?.sessionId || options?.sessionId || "").slice(0, 32)}`,
+              ttlSeconds,
+              apiKey: apiKeyForCache,
+              baseUrl: baseUrlForCache,
+            });
+            cachedContentId = cached.name;
+            (context as any).cachedContentId = cachedContentId;
+            if (options?.cache) (options.cache as any).cachedContentId = cachedContentId;
+          }
         }
       } catch {
-        // Fallback to implicit on failure
+        // Fallback to implicit prefix cache on failure
       }
     }
 
@@ -592,11 +605,12 @@ export class GoogleAIStudioProvider extends BaseProvider {
     if (!usageMetadata) {
       return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     }
-    const input = usageMetadata.promptTokenCount ?? 0;
-    const output = usageMetadata.candidatesTokenCount ?? 0;
-    const cached = usageMetadata.cachedContentTokenCount ?? 0;
-    const thinking = usageMetadata.thoughtsTokenCount ?? 0;
-    const total = usageMetadata.totalTokenCount ?? input + output;
+    const raw: any = usageMetadata;
+    const input = raw.promptTokenCount ?? raw.prompt_token_count ?? 0;
+    const output = raw.candidatesTokenCount ?? raw.candidates_token_count ?? 0;
+    const cached = raw.cachedContentTokenCount ?? raw.cached_content_token_count ?? 0;
+    const thinking = raw.thoughtsTokenCount ?? raw.thoughts_token_count ?? 0;
+    const total = raw.totalTokenCount ?? raw.total_token_count ?? input + output;
 
     return {
       inputTokens: input,
@@ -680,13 +694,18 @@ export class GoogleAIStudioProvider extends BaseProvider {
     const candidate = responseJson.candidates?.[0];
     let text = "";
     let thinking = "";
-    let thoughtSignature: string | undefined;
+    let finalThoughtSignature: string | undefined;
+    let thinkingSignature: string | undefined;
+    let textSignature: string | undefined;
     const toolCalls: ToolCallRecord[] = [];
 
     if (candidate?.content?.parts) {
       for (const part of candidate.content.parts) {
-        if (part.thoughtSignature) {
-          thoughtSignature = retainThoughtSignature(thoughtSignature, part.thoughtSignature);
+        const partSig = part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature)
+          ? part.thoughtSignature
+          : undefined;
+        if (partSig) {
+          finalThoughtSignature = retainThoughtSignature(finalThoughtSignature, partSig);
         }
 
         const isThinking = Boolean(
@@ -716,23 +735,28 @@ export class GoogleAIStudioProvider extends BaseProvider {
 
         if (isThinking && thoughtText) {
           thinking += thoughtText;
+          if (partSig) thinkingSignature = retainThoughtSignature(thinkingSignature, partSig);
         } else if (part.text && !isThinking) {
           text += part.text;
+          if (partSig) textSignature = retainThoughtSignature(textSignature, partSig);
         } else if (part.functionCall) {
           const callId = part.functionCall.id || `call_${Math.random().toString(36).slice(2, 9)}`;
           toolCalls.push({
             id: callId,
             name: part.functionCall.name,
             arguments: part.functionCall.args || {},
-            thoughtSignature: part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature)
-              ? part.thoughtSignature
-              : retainThoughtSignature(undefined, thoughtSignature),
+            thoughtSignature: partSig,
           });
         }
       }
+
+      // If functionCall didn't have explicit signature and thinking/text didn't consume it, assign global signature
+      if (toolCalls.length > 0 && !toolCalls.some((tc) => tc.thoughtSignature) && !thinkingSignature && !textSignature && finalThoughtSignature) {
+        toolCalls[0]!.thoughtSignature = finalThoughtSignature;
+      }
     }
 
-    const usage = this.extractUsage(responseJson.usageMetadata);
+    const usage = this.extractUsage(responseJson.usageMetadata || responseJson.usage_metadata);
     const finishReason = candidate?.finishReason || "STOP";
     const responseId = responseJson.responseId;
     const finalText = text || (toolCalls.length === 0 && thinking ? thinking : "");
@@ -740,7 +764,9 @@ export class GoogleAIStudioProvider extends BaseProvider {
     return {
       text: finalText,
       thinking: thinking.length > 0 ? thinking : undefined,
-      thoughtSignature: thoughtSignature && isValidThoughtSignature(thoughtSignature) ? thoughtSignature : undefined,
+      thoughtSignature: finalThoughtSignature && isValidThoughtSignature(finalThoughtSignature) ? finalThoughtSignature : undefined,
+      thinkingSignature,
+      textSignature,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage,
       finishReason,
@@ -820,6 +846,8 @@ export class GoogleAIStudioProvider extends BaseProvider {
         let accumulatedText = "";
         let accumulatedThinking = "";
         let finalThoughtSignature: string | undefined;
+        let thinkingSignature: string | undefined;
+        let textSignature: string | undefined;
         const accumulatedToolCalls: ToolCallRecord[] = [];
         let finalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finalFinishReason = "STOP";
@@ -841,8 +869,9 @@ export class GoogleAIStudioProvider extends BaseProvider {
                 finalResponseId = chunkJson.responseId;
               }
 
-              if (chunkJson.usageMetadata) {
-                finalUsage = this.extractUsage(chunkJson.usageMetadata);
+              const usageMeta = chunkJson.usageMetadata || chunkJson.usage_metadata;
+              if (usageMeta) {
+                finalUsage = this.extractUsage(usageMeta);
                 eventStream.push({
                   type: "usage",
                   usage: finalUsage,
@@ -856,8 +885,11 @@ export class GoogleAIStudioProvider extends BaseProvider {
 
               if (candidate?.content?.parts) {
                 for (const part of candidate.content.parts) {
-                  if (part.thoughtSignature) {
-                    finalThoughtSignature = retainThoughtSignature(finalThoughtSignature, part.thoughtSignature);
+                  const partSig = part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature)
+                    ? part.thoughtSignature
+                    : undefined;
+                  if (partSig) {
+                    finalThoughtSignature = retainThoughtSignature(finalThoughtSignature, partSig);
                   }
 
                   const isThinking = Boolean(
@@ -887,6 +919,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
 
                   if (isThinking && thoughtText) {
                     accumulatedThinking += thoughtText;
+                    if (partSig) thinkingSignature = retainThoughtSignature(thinkingSignature, partSig);
                     eventStream.push({
                       type: "thinking_delta",
                       thinkingDelta: thoughtText,
@@ -894,6 +927,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
                     });
                   } else if (part.text && !isThinking) {
                     accumulatedText += part.text;
+                    if (partSig) textSignature = retainThoughtSignature(textSignature, partSig);
                     eventStream.push({
                       type: "text_delta",
                       delta: part.text,
@@ -905,11 +939,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
                       id: callId,
                       name: part.functionCall.name,
                       arguments: part.functionCall.args || {},
-                      thoughtSignature: part.thoughtSignature && isValidThoughtSignature(part.thoughtSignature)
-                        ? part.thoughtSignature
-                        : finalThoughtSignature && isValidThoughtSignature(finalThoughtSignature)
-                        ? finalThoughtSignature
-                        : undefined,
+                      thoughtSignature: partSig,
                     };
                     accumulatedToolCalls.push(toolCall);
                     eventStream.push({
@@ -930,10 +960,16 @@ export class GoogleAIStudioProvider extends BaseProvider {
           if (!msg.data || msg.data === "[DONE]") continue;
           try {
             const chunkJson = JSON.parse(msg.data);
-            if (chunkJson.usageMetadata) {
-              finalUsage = this.extractUsage(chunkJson.usageMetadata);
+            const usageMeta = chunkJson.usageMetadata || chunkJson.usage_metadata;
+            if (usageMeta) {
+              finalUsage = this.extractUsage(usageMeta);
             }
           } catch {}
+        }
+
+        // If functionCall didn't have explicit signature and thinking/text didn't consume it, assign global signature
+        if (accumulatedToolCalls.length > 0 && !accumulatedToolCalls.some((tc) => tc.thoughtSignature) && !thinkingSignature && !textSignature && finalThoughtSignature) {
+          accumulatedToolCalls[0]!.thoughtSignature = finalThoughtSignature;
         }
 
         const { AgentResponse } = await import("../types/response.ts");
@@ -942,6 +978,8 @@ export class GoogleAIStudioProvider extends BaseProvider {
           text: finalText,
           thinking: accumulatedThinking.length > 0 ? accumulatedThinking : undefined,
           thoughtSignature: finalThoughtSignature && isValidThoughtSignature(finalThoughtSignature) ? finalThoughtSignature : undefined,
+          thinkingSignature,
+          textSignature,
           toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
           usage: finalUsage,
           responseId: finalResponseId,

@@ -2,17 +2,19 @@ import { z } from "zod";
 
 // Core Agent & Tool Classes
 export { Agent, SubAgentModelError } from "./agent/agent.ts";
+export { SubAgent } from "./agent/subagent.ts";
+export type { SubAgentConfig } from "./agent/subagent.ts";
 export { tool, toStandardToolDeclarations } from "./tools/tool.ts";
 export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
 export { executeToolCalls } from "./tools/executor.ts";
 
-// Multi-Agent Orchestration
+// Multi-Agent Delegation & Tools
 export {
   agentToTool,
   buildAgentTools,
   createSubagentSpawnTool,
-} from "./agent/orchestrator.ts";
-export type { DynamicSubagentTask } from "./agent/orchestrator.ts";
+} from "./agent/delegation.ts";
+export type { DynamicSubagentTask } from "./agent/delegation.ts";
 
 // Providers & Registry — unified multi-provider layer (OpenRouter-style, no 5% fee)
 export {

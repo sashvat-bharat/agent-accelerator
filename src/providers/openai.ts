@@ -647,9 +647,26 @@ export class OpenAIProvider extends BaseProvider {
 
     const usage = this.extractUsage(responseJson.usage);
 
+    let finalText = text;
+    let finalThinking = thinking;
+    if (!finalText && toolCalls.length === 0 && thinking) {
+      if (thinking.includes("</think>")) {
+        const parts = thinking.split(/<\/(?:think|thought)>/i);
+        finalThinking = parts[0]!.replace(/<(?:think|thought)>/i, "").trim() || undefined;
+        finalText = parts.slice(1).join("").trim();
+      } else {
+        finalText = thinking;
+        finalThinking = undefined;
+      }
+    } else if (finalText && finalText.includes("<think>") && finalText.includes("</think>")) {
+      const parts = finalText.split(/<\/(?:think|thought)>/i);
+      finalThinking = (finalThinking ? finalThinking + "\n" : "") + parts[0]!.replace(/<(?:think|thought)>/i, "").trim();
+      finalText = parts.slice(1).join("").trim();
+    }
+
     return {
-      text,
-      thinking,
+      text: finalText,
+      thinking: finalThinking,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage,
       finishReason: choice?.finish_reason || "stop",
@@ -725,6 +742,9 @@ export class OpenAIProvider extends BaseProvider {
 
         let accumulatedText = "";
         let accumulatedThinking = "";
+        let reasoningSwitchedToContent = false;
+        let rollingReasoningTail = "";
+        let inContentThinking = false;
         const toolCallsMap: Map<number, { id: string; name: string; args: string; thoughtSignature?: string }> = new Map();
         let finalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finalFinishReason = "stop";
@@ -766,21 +786,134 @@ export class OpenAIProvider extends BaseProvider {
                 else if (typeof (delta as any).thought === "string" && (delta as any).thought) thinkingDelta = (delta as any).thought;
 
                 if (thinkingDelta) {
-                  accumulatedThinking += thinkingDelta;
-                  eventStream.push({
-                    type: "thinking_delta",
-                    thinkingDelta,
-                    partialThinking: accumulatedThinking,
-                  });
+                  if (reasoningSwitchedToContent) {
+                    accumulatedText += thinkingDelta;
+                    eventStream.push({
+                      type: "text_delta",
+                      delta: thinkingDelta,
+                      partialText: accumulatedText,
+                    });
+                  } else {
+                    const window = rollingReasoningTail + thinkingDelta;
+                    const thinkCloseMatch = window.match(/<\/(?:think|thought)>/i);
+
+                    if (thinkCloseMatch && thinkCloseMatch.index !== undefined) {
+                      const closeIndex = thinkCloseMatch.index;
+                      const closeEnd = closeIndex + thinkCloseMatch[0].length;
+                      const tailLen = rollingReasoningTail.length;
+
+                      const deltaBeforeTag = thinkingDelta.slice(0, Math.max(0, closeIndex - tailLen));
+                      if (deltaBeforeTag) {
+                        accumulatedThinking += deltaBeforeTag;
+                        eventStream.push({
+                          type: "thinking_delta",
+                          thinkingDelta: deltaBeforeTag,
+                          partialThinking: accumulatedThinking,
+                        });
+                      }
+
+                      reasoningSwitchedToContent = true;
+
+                      const deltaAfterTag = thinkingDelta.slice(Math.max(0, closeEnd - tailLen));
+                      if (deltaAfterTag) {
+                        accumulatedText += deltaAfterTag;
+                        eventStream.push({
+                          type: "text_delta",
+                          delta: deltaAfterTag,
+                          partialText: accumulatedText,
+                        });
+                      }
+                    } else if (
+                      accumulatedText.length === 0 &&
+                      ((accumulatedThinking.length === 0 && thinkingDelta.trimStart().match(/^(?:#{1,4}\s+|\*\*(?:Final Answer|Conclusion|Executive Summary|Executive Report|Report|Summary)\*\*)/i)) ||
+                        window.match(/(\n\s*(?:#{1,4}\s+|\*\*(?:Final Answer|Conclusion|Executive Summary|Executive Report|Report|Summary)\*\*))/i))
+                    ) {
+                      const headerMatch = window.match(/(\n\s*(?:#{1,4}\s+|\*\*(?:Final Answer|Conclusion|Executive Summary|Executive Report|Report|Summary)\*\*))/i);
+                      if (headerMatch && headerMatch.index !== undefined) {
+                        const matchStart = headerMatch.index;
+                        const firstSymbol = headerMatch[0].search(/[#*]/);
+                        const contentStartIndexInWindow = matchStart + (firstSymbol >= 0 ? firstSymbol : 0);
+                        const tailLen = rollingReasoningTail.length;
+
+                        const splitBeforeInDelta = Math.min(thinkingDelta.length, Math.max(0, matchStart - tailLen));
+                        const splitAfterInDelta = Math.min(thinkingDelta.length, Math.max(0, contentStartIndexInWindow - tailLen));
+
+                        const before = thinkingDelta.slice(0, splitBeforeInDelta);
+                        const after = thinkingDelta.slice(splitAfterInDelta);
+
+                        if (before) {
+                          accumulatedThinking += before;
+                          eventStream.push({
+                            type: "thinking_delta",
+                            thinkingDelta: before,
+                            partialThinking: accumulatedThinking,
+                          });
+                        }
+                        reasoningSwitchedToContent = true;
+                        if (after) {
+                          accumulatedText += after;
+                          eventStream.push({
+                            type: "text_delta",
+                            delta: after,
+                            partialText: accumulatedText,
+                          });
+                        }
+                      } else {
+                        reasoningSwitchedToContent = true;
+                        accumulatedText += thinkingDelta;
+                        eventStream.push({
+                          type: "text_delta",
+                          delta: thinkingDelta,
+                          partialText: accumulatedText,
+                        });
+                      }
+                    } else {
+                      accumulatedThinking += thinkingDelta;
+                      eventStream.push({
+                        type: "thinking_delta",
+                        thinkingDelta,
+                        partialThinking: accumulatedThinking,
+                      });
+                      rollingReasoningTail = (rollingReasoningTail + thinkingDelta).slice(-64);
+                    }
+                  }
                 }
 
                 if (delta.content) {
-                  accumulatedText += delta.content;
-                  eventStream.push({
-                    type: "text_delta",
-                    delta: delta.content,
-                    partialText: accumulatedText,
-                  });
+                  let textChunk = delta.content;
+                  if (!inContentThinking && textChunk.includes("<think>")) {
+                    const [before, after] = textChunk.split("<think>");
+                    if (before) {
+                      accumulatedText += before;
+                      eventStream.push({ type: "text_delta", delta: before, partialText: accumulatedText });
+                    }
+                    inContentThinking = true;
+                    textChunk = after || "";
+                  }
+                  if (inContentThinking) {
+                    if (textChunk.includes("</think>")) {
+                      const [thought, after] = textChunk.split("</think>");
+                      if (thought) {
+                        accumulatedThinking += thought;
+                        eventStream.push({ type: "thinking_delta", thinkingDelta: thought, partialThinking: accumulatedThinking });
+                      }
+                      inContentThinking = false;
+                      if (after) {
+                        accumulatedText += after;
+                        eventStream.push({ type: "text_delta", delta: after, partialText: accumulatedText });
+                      }
+                    } else if (textChunk) {
+                      accumulatedThinking += textChunk;
+                      eventStream.push({ type: "thinking_delta", thinkingDelta: textChunk, partialThinking: accumulatedThinking });
+                    }
+                  } else if (textChunk) {
+                    accumulatedText += textChunk;
+                    eventStream.push({
+                      type: "text_delta",
+                      delta: textChunk,
+                      partialText: accumulatedText,
+                    });
+                  }
                 }
 
                 if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
@@ -842,9 +975,21 @@ export class OpenAIProvider extends BaseProvider {
         }
 
         const { AgentResponse } = await import("../types/response.ts");
+        let finalText = accumulatedText;
+        let finalThinking = accumulatedThinking.length > 0 ? accumulatedThinking : undefined;
+        if (!finalText && finalToolCalls.length === 0 && accumulatedThinking) {
+          if (accumulatedThinking.includes("</think>")) {
+            const parts = accumulatedThinking.split(/<\/(?:think|thought)>/i);
+            finalThinking = parts[0]!.replace(/<(?:think|thought)>/i, "").trim() || undefined;
+            finalText = parts.slice(1).join("").trim();
+          } else {
+            finalText = accumulatedThinking;
+            finalThinking = undefined;
+          }
+        }
         const finalAgentResponse = new AgentResponse({
-          text: accumulatedText,
-          thinking: accumulatedThinking.length > 0 ? accumulatedThinking : undefined,
+          text: finalText,
+          thinking: finalThinking,
           toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined,
           usage: finalUsage,
           finishReason: finalFinishReason,

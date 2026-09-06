@@ -25,6 +25,8 @@ export interface AgentResponseJSON {
   text: string;
   thinking?: string;
   thoughtSignature?: string;
+  thinkingSignature?: string;
+  textSignature?: string;
   toolCalls?: ToolCallRecord[];
   toolResults?: ToolResultRecord[];
   subagents?: SubAgentExecutionMetadata[];
@@ -42,6 +44,8 @@ export class AgentResponse {
   readonly text: string;
   readonly thinking?: string;
   readonly thoughtSignature?: string;
+  readonly thinkingSignature?: string;
+  readonly textSignature?: string;
   readonly toolCalls: ToolCallRecord[];
   readonly toolResults: ToolResultRecord[];
   readonly subagents: SubAgentExecutionMetadata[];
@@ -58,6 +62,8 @@ export class AgentResponse {
     text: string;
     thinking?: string;
     thoughtSignature?: string;
+    thinkingSignature?: string;
+    textSignature?: string;
     toolCalls?: ToolCallRecord[];
     toolResults?: ToolResultRecord[];
     subagents?: SubAgentExecutionMetadata[];
@@ -73,6 +79,8 @@ export class AgentResponse {
     this.text = data.text;
     this.thinking = data.thinking;
     this.thoughtSignature = data.thoughtSignature;
+    this.thinkingSignature = data.thinkingSignature;
+    this.textSignature = data.textSignature;
     this.toolCalls = data.toolCalls ?? [];
     this.toolResults = data.toolResults ?? [];
     this.subagents = data.subagents ?? [];
@@ -95,6 +103,8 @@ export class AgentResponse {
       text: this.text,
       thinking: this.thinking,
       thoughtSignature: this.thoughtSignature,
+      thinkingSignature: this.thinkingSignature,
+      textSignature: this.textSignature,
       toolCalls: this.toolCalls.length > 0 ? this.toolCalls : undefined,
       toolResults: this.toolResults.length > 0 ? this.toolResults : undefined,
       subagents: this.subagents.length > 0 ? this.subagents : undefined,

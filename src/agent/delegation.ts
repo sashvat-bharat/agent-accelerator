@@ -279,7 +279,9 @@ export function agentToTool(
     execute: async ({ task }, ctx) => {
       const startTime = Date.now();
       try {
-        const response: any = await agentInstance.run(task, { signal: ctx?.signal } as any);
+        const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
+        const subSessionId = `${parentSessionId}-sub-${sanitizeToolName(name)}`;
+        const response: any = await agentInstance.run(task, { signal: ctx?.signal, sessionId: subSessionId } as any);
         const durationMs = Date.now() - startTime;
         const metadata: SubAgentExecutionMetadata = {
           name,

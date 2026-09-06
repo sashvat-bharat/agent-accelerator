@@ -95,6 +95,12 @@ export interface ResolvedModel {
  * context-length, pricing, thinking levels, modalities etc. — whatever model user passes is validated here.
  */
 export function resolveModel(model: string | ModelSpec): ResolvedModel {
+  if (!model || (typeof model === "string" && !model.trim())) {
+    throw new Error(
+      "[Agent Accelerator] No model specified. Please specify 'model' in Agent configuration or set the MODEL environment variable."
+    );
+  }
+
   if (typeof model === "object" && model !== null && "provider" in model) {
     const provider = getProvider(model.provider);
     // Enrich with catalog if available

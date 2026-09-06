@@ -178,6 +178,18 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     finalResult = genResult;
 
+    // Safety fallback: if no tool calls and text is empty, rescue answer from thinking
+    if ((!genResult.text || genResult.text.trim() === "") && (!genResult.toolCalls || genResult.toolCalls.length === 0) && genResult.thinking) {
+      if (genResult.thinking.includes("</think>")) {
+        const parts = genResult.thinking.split(/<\/(?:think|thought)>/i);
+        genResult.thinking = parts[0]!.replace(/<(?:think|thought)>/i, "").trim() || undefined;
+        genResult.text = parts.slice(1).join("").trim();
+      } else {
+        genResult.text = genResult.thinking;
+        genResult.thinking = undefined;
+      }
+    }
+
     accumulateUsage(accumulatedUsage, genResult.usage, spec);
 
     // Record assistant turn in context
@@ -185,7 +197,11 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       genResult.text,
       genResult.toolCalls,
       genResult.thinking,
-      genResult.thoughtSignature
+      genResult.thoughtSignature,
+      {
+        thinkingSignature: genResult.thinkingSignature,
+        textSignature: genResult.textSignature,
+      }
     );
 
     // If no tool calls, generation is complete!
@@ -201,6 +217,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       agentName,
       parallel: true,
       signal: runOptions?.signal,
+      sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
     });
 
     // Process results and extract any sub-agent execution metadata
@@ -296,7 +313,14 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           const est2 = countTokens({ systemPrompt: context.systemPrompt, messages: context.messages, tools: standardTools as any });
           if (est2 > budget2 && context.messages.length > 2) {
             const keep2 = Math.max(2, Math.floor(context.messages.length * 0.7));
-            context.messages = context.messages.slice(-keep2);
+            const toKeep = context.messages.slice(-keep2);
+            const firstUserIdx = context.messages.findIndex((m) => m.role === "user");
+            if (firstUserIdx >= 0 && firstUserIdx < context.messages.length - keep2) {
+              const head = context.messages.slice(0, 1);
+              context.messages = [...head, ...toKeep];
+            } else {
+              context.messages = toKeep;
+            }
           }
         } catch {}
 
@@ -327,13 +351,29 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         const turnResponse = await innerStream.result();
         lastResponse = turnResponse;
 
+        // Safety fallback: if no tool calls and text is empty, rescue answer from thinking
+        if ((!turnResponse.text || turnResponse.text.trim() === "") && (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) && turnResponse.thinking) {
+          if (turnResponse.thinking.includes("</think>")) {
+            const parts = turnResponse.thinking.split(/<\/(?:think|thought)>/i);
+            (turnResponse as any).thinking = parts[0]!.replace(/<(?:think|thought)>/i, "").trim() || undefined;
+            (turnResponse as any).text = parts.slice(1).join("").trim();
+          } else {
+            (turnResponse as any).text = turnResponse.thinking;
+            (turnResponse as any).thinking = undefined;
+          }
+        }
+
         accumulateUsage(accumulatedUsage, turnResponse.usage, spec2);
 
         context.addAssistantMessage(
           turnResponse.text,
           turnResponse.toolCalls,
           turnResponse.thinking,
-          turnResponse.thoughtSignature
+          turnResponse.thoughtSignature,
+          {
+            thinkingSignature: turnResponse.thinkingSignature,
+            textSignature: turnResponse.textSignature,
+          }
         );
 
         if (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) {
@@ -347,6 +387,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           agentName,
           parallel: true,
           signal: runOptions?.signal,
+          sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
         });
 
         const sanitizedResults: ToolResultRecord[] = [];
