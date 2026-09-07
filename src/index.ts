@@ -16,7 +16,7 @@ export {
 } from "./agent/delegation.ts";
 export type { DynamicSubagentTask } from "./agent/delegation.ts";
 
-// Providers & Registry — unified multi-provider layer (OpenRouter-style, no 5% fee)
+// Providers & Registry — unified multi-provider layer
 export {
   getProvider,
   resolveModel,

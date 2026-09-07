@@ -1,368 +1,1063 @@
 # Agent Accelerator
 
-> A thin, typed transport SDK for Google GenAI, OpenCode, and OpenRouter - engineered for ~90-95% prompt-cache hit rates and complete observability.
+A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
+
+Agent Accelerator supports `google`, `opencode`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`.
 
 ```ts
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: "opencode/hy3-free", // Switch seamlessly to google/gemini-3.5-flash-lite or openrouter
+  model: "google/gemini-3.5-flash-lite",
   instructions: "You are a concise research engineer.",
-  cache: { retention: "long" }, // Deterministic 80-90% cache hits on multi-turn runs
+  cache: { retention: "short" },
 });
 
-const { text, usage, raw } = await agent.run("Explain HBM pricing in 3 bullets");
-console.log(text);
-console.log(`Cache Efficiency: ${usage.cachedTokens} / ${usage.inputTokens}`);
-// Full access to raw.request & raw.response headers, payloads, and signatures
+const res = await agent.run("Explain HBM pricing in 3 bullets");
 
+console.log(res.text);
+console.log(res.usage);
 ```
 
 ---
-## Key Capabilities
 
-* **Zero-Leak Observability:** Access complete raw JSON, HTTP wire logs, provider reasoning traces, and thought signatures (`thoughtSignature`, `thinkingSignature`, `textSignature`).
-* **Cache-First Architecture:** Automatic routing for Google Gemini 3 prefix caching with thought-signature isolation, OpenRouter/OpenCode sticky `session_id` worker affinity, and Anthropic ephemeral breakpoints—achieving 50%–65%+ prompt cache hit rates.
-* **First-Class Sub-Agents (Pre-Defined & Dynamic):** Clean separation of concerns between tools (`tools: { ... }`) and dedicated sub-agents (`subagents: [researcher, critic]`), plus autonomous on-the-fly spawning (`EnableSubagents: true`) with full sub-agent telemetry rollups.
-* **Bulletproof Thinking Stream Extraction:** Cross-chunk rolling buffer prevents split tokens (e.g. `</th` + `ink>` or markdown headers) from leaking between `<think>` reasoning traces and final answer text.
-* **Unified Model Catalog & Preflight Validation:** Single source of truth driven by `models.dev` (`7,400+` models). Automatic context limits and preflight reasoning validation (`validateModelThinking`) that fails fast with available options if an unsupported thinking mode is selected.
-* **Typed Tooling:** Automatic Zod-to-JSON Schema transpilation with parallel execution via `Promise.all`.
-* **Universal Responses & Completions Routing:** Seamless support for OpenAI Responses API models (e.g. `muse-spark`) and standard Completions APIs without changing application code.
-
----
-## Architectural Comparison
-
-| Feature                | Standard Provider SDKs              | Agent Accelerator                                         |
-| ---------------------- | ----------------------------------- | --------------------------------------------------------- |
-| **Multi-Provider API** | Fragmented interfaces & types       | Unified `Agent` interface across all targets              |
-| **Observability**      | SDK abstracts/strips wire payloads  | Full access to `raw.request`, `raw.response`, and headers |
-| **Prefix Caching**     | Manual header crafting per provider | Automatic cache-key management & session affinity         |
-| **Context Limits**     | Hardcoded or runtime guesswork      | Live catalog resolution (`src/data/models.dev.json`)      |
-| **System Prompts**     | Hardcoded strings in code           | Versioned root Markdown files for cache stability         |
-
----
-## Installation & Setup
+## Install
 
 ```bash
 bun add agent-accelerator
-# or via npm / pnpm
-pnpm add agent-accelerator
+# npm / pnpm also work
 ```
 
-Configure your environment variables:
+Requires `bun` or `node 22+`.
 
-```bash
-# .env.local
-GEMINI_API_KEY=your_gemini_key
-OPENCODE_API_KEY=your_opencode_key
-OPENROUTER_API_KEY=your_openrouter_key
-
-# OpenAI or any OpenAI cURL-compatible endpoint (Ollama, vLLM, Groq, Together, etc.)
-OPENAI_BASE_API_KEY=your_openai_or_custom_key   # or OPENAI_API_KEY
-OPENAI_BASE_URL=https://api.openai.com/v1       # or custom cURL endpoint (e.g. http://localhost:11434/v1)
-
-MODEL=opencode/hy3-free
-SUB_AGENT_MODEL=google/gemini-3.5-flash-lite
-
-```
+The only dependency is `zod`.
 
 ---
-## Core Usage
 
-### 1. Basic Execution & Metadata
+## Setup
+
+```bash
+GEMINI_API_KEY=...
+OPENCODE_API_KEY=...
+OPENROUTER_API_KEY=...
+OPENAI_API_KEY=...
+# or OPENAI_BASE_API_KEY=...
+
+MODEL="google/gemini-3.5-flash-lite"
+SUB_AGENT_MODEL="google/gemini-3.5-flash-lite"
+
+# Any OpenAI-compatible endpoint, no code change:
+# MODEL="groq/llama-3.3-70b-versatile"
+# GROQ_API_KEY="..."
+# GROQ_BASE_URL="https://api.groq.com/openai/v1"
+
+# Local, no key needed:
+# MODEL="ollama/qwen2.5-coder"
+# OLLAMA_BASE_URL="http://localhost:11434/v1"
+```
+
+`MODEL` and `SUB_AGENT_MODEL` are used when `model` or `SubAgentModel` are omitted.
+
+Explicit configuration always takes precedence over environment variables.
+
+---
+
+## Quick Start
 
 ```ts
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: "google/gemini-3.5-flash",
+  model: "google/gemini-3.5-flash-lite",
   instructions: "Be direct and technical.",
 });
 
-const res = await agent.run("Explain lock contention in concurrent systems.");
+const res = await agent.run("Explain lock contention.");
 
-console.log(res.text);
-console.log(res.usage); // { inputTokens, outputTokens, cachedTokens, thinkingTokens, cost }
-console.log(res.raw.request.headers); // Audit wire headers
+console.log(res.text); // final answer
+console.log(res.thinking); // reasoning trace, if any
+console.log(res.usage); // input / output / cached / thinking / cost
+console.log(res.raw.request.headers); // wire audit
 ```
 
-### 2. Streaming & Thought Traces
+Use `instructions` for the system prompt.
+
+Keep `instructions` stable across turns to improve prefix-cache reuse.
+
+---
+
+## Agent
+
+`new Agent(config: AgentConfig)` is the main entry point.
+
+An `Agent` holds :
+
+* `instructions`
+* `tools`
+* resolved model
+* thinking configuration
+* cache configuration
+* service tier
+* `sessionId`
+* conversation `context`
+
+### AgentConfig
+
+| Field             | Type                                                 | Meaning / Use Case                                                                                                                                         |
+| ----------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`           | `string \| ModelSpec \| ModelProviderInstance`       | Model identifier, such as `"google/gemini-3.5-flash-lite"`. Use `ModelProvider.*` or `ModelSpec` to pin a provider and credentials. Falls back to `MODEL`. |
+| `instructions`    | `string`                                             | System prompt. Keep it stable; place per-turn additions in `additionalContext`.                                                                            |
+| `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
+| `functions`       | `((...args: any[]) => any)[]`                        | Shorthand for exposing plain JavaScript functions as tools. Useful for quick prototypes.                                                                   |
+| `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
+| `CustomAgents`    | `Agent[]`                                            | Legacy alias for `subagents`. Prefer `subagents`.                                                                                                          |
+| `EnableSubagents` | `boolean`                                            | When `true`, injects `spawn_subagents`, allowing the model to spawn 1–8 workers at runtime. Requires `SubAgentModel`.                                      |
+| `SubAgentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Model used by dynamically spawned workers. Falls back to `SUB_AGENT_MODEL`.                                                                                |
+| `ThinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh`. Validated against the model catalog before a request.                                      |
+| `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
+| `ServiceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
+| `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Defaults to `10`.                                                                                            |
+| `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
+| `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
+| `apiKey`          | `string`                                             | Overrides environment-based API-key lookup for this agent.                                                                                                 |
+| `baseUrl`         | `string`                                             | Overrides the default endpoint for this agent.                                                                                                             |
+| `stateless`       | `boolean`                                            | When `true`, history is cleared before and after each `run`. Useful for one-shot evaluators. Defaults to `false`.                                          |
+
+When `EnableSubagents: true` is configured without a subagent model, construction throws `SubAgentModelError`.
+
+### Agent Methods
 
 ```ts
-// One-liner — no manual loop, <think> auto-wrapped
-const res = await agent.run("Design an append-only commit log", {
-  stream: true,
-  wrapThinking: true, // → <think>\n...\n</think>\n\n before answer
-  onThinkingDelta: d => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
-  onDelta: d => process.stdout.write(d),
-  onEvent: e => { if (e.type === "subagent_complete") console.log(`\n↳ ${e.subagent!.name} done`); }
-});
-// thinking → res.thinking, answer → res.text (separate channels, any model)
+await agent.run(prompt, opts?) // non-streaming, or streaming when opts.stream is true
+agent.ask(prompt, optsOrBool?) // string deltas when streaming, otherwise same as run
+agent.stream(prompt, opts?) // AssistantMessageEventStream
+agent.reset() // clears messages + signatures, keeps config
 ```
 
-### 2.5 Manual for-await (advanced)
+`prompt` accepts `string | ContentPart[]`.
+
+Use `ContentPart[]` when sending images, audio, or video alongside text.
+
+### AgentRunOptions
+
+| Field                           | Meaning / Use Case                                                                                                                              |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stream`                        | When `true`, returns a stream instead of a regular response promise.                                                                            |
+| `onDelta(delta, event)`         | Called for each text chunk. Use to render answers live.                                                                                         |
+| `onThinkingDelta(delta, event)` | Called for each reasoning chunk. Use to render reasoning separately.                                                                            |
+| `onEvent(event)`                | Called for every event: `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `usage`, `done`, and `error`. |
+| `wrapThinking`                  | Wraps reasoning as `<think>\n...\n</think>\n\n`, allowing UIs to render it without maintaining separate state.                                  |
+| `additionalContext`             | Added only to the current user turn. Keeps the system prompt stable for better caching.                                                         |
+| `sessionId`                     | Per-run session override.                                                                                                                       |
+| `headers`                       | Per-run header merge.                                                                                                                           |
+| `signal`                        | `AbortSignal` used to cancel generation, tools, and subagents.                                                                                  |
+
+### Streaming
 
 ```ts
-const stream = agent.stream("Design an append-only commit log");
-for await (const event of stream) {
-  if (event.type === "thinking_delta") process.stdout.write(`\x1b[90m${event.thinkingDelta}\x1b[0m`);
-  if (event.type === "text_delta") process.stdout.write(event.delta!);
-}
-const finalResponse = await stream.result();
-```
-
-### 3. Parallel Tool Execution
-
-```ts
-import { Agent, tool, z } from "agent-accelerator";
-
-const agent = new Agent({
-  model: "opencode/hy3-free",
-  tools: {
-    fetch_metrics: tool({
-      description: "Fetch real-time cluster metrics",
-      input: z.object({ clusterId: z.string() }),
-      execute: async ({ clusterId }) => ({ clusterId, load: 0.42, status: "healthy" }),
-    }),
-  },
-});
-
-const res = await agent.run("Fetch metrics for cluster-a and cluster-b simultaneously");
-console.log(res.toolCalls, res.toolResults);
-```
-
-### 4. Multi-Agent Delegation
-
-Agent Accelerator provides two first-class paradigms for multi-agent workflows:
-
-#### 4a. Pre-Defined Sub-Agents (`SubAgent`)
-Create specialized sub-agents with dedicated models, personas, and optional stateless evaluation mode. Pre-defined sub-agents are automatically registered as callable tools on the parent agent:
-
-```ts
-import { Agent, SubAgent, tool, z } from "agent-accelerator";
-
-// 1. Specialized sub-agents
-const researcher = new SubAgent({
-  name: "deep_researcher",
-  instructions: "You are an exhaustive research specialist. Investigate quantifiable technical metrics...",
-  model: "google/gemini-3.5-flash",
-  cache: { retention: "short" },
-});
-
-const critic = new SubAgent({
-  name: "adversarial_critic",
-  instructions: "You are a skeptical devil's advocate. Expose economic bottlenecks and failure points...",
-  model: "openrouter/inclusionai/ling-3.0-flash-fin:free",
-  stateless: true, // One-shot evaluation: does not persist history across turns
-  cache: { retention: "short" },
-});
-
-// 2. Lead Agent with clean separation: tools in `tools`, subagents in `subagents`
-const lead = new Agent({
-  name: "Editorial Lead",
-  instructions: "Delegate research to deep_researcher, then pass findings to adversarial_critic.",
-  model: "google/gemini-3.7-flash",
-  tools: {
-    get_brief: tool({
-      description: "Fetch topic briefing",
-      input: z.object({ topic: z.string() }),
-      execute: async ({ topic }) => ({ topic, status: "pilot phase" }),
-    }),
-  },
-  subagents: [researcher, critic], // Converted into callable tools: deep_researcher, adversarial_critic
-});
-
-const res = await lead.run("Commercial deployment of Solid-State Batteries in consumer EVs", {
+const res = await agent.run("Design an append-only log", {
   stream: true,
   wrapThinking: true,
-  onDelta: d => process.stdout.write(d),
-  onEvent: e => {
+  onThinkingDelta: (d) => process.stdout.write(d),
+  onDelta: (d) => process.stdout.write(d),
+  onEvent: (e) => {
     if (e.type === "subagent_complete") {
-      const s = e.subagent!;
-      console.log(`\n↳ [SubAgent Completed] ${s.name} (${s.durationMs}ms • ${s.provider}/${s.model})`);
+      console.log(`done: ${e.subagent!.name}`);
+    }
+
+    if (e.type === "tool_result") {
+      console.log(`tool: ${e.toolResult!.name}`);
     }
   },
 });
 ```
 
-#### 4b. Dynamic On-the-Fly Spawning (`EnableSubagents: true`)
-When tasks are open-ended, the Lead Agent can autonomously author custom instructions and spawn parallel worker sub-agents at runtime:
+### Manual Iteration
 
 ```ts
-import { Agent } from "agent-accelerator";
+const stream = agent.stream("Hello");
 
+for await (const e of stream) {
+  if (e.type === "text_delta") {
+    process.stdout.write(e.delta!);
+  }
+
+  if (e.type === "thinking_delta") {
+    process.stdout.write(e.thinkingDelta!);
+  }
+}
+
+const final = await stream.result();
+
+stream.on("text_delta", (e) => console.log(e.delta));
+stream.off("text_delta", handler);
+```
+
+---
+
+## SubAgent
+
+`SubAgent extends Agent` and is designed for fixed worker roles.
+
+```ts
+import { Agent, SubAgent } from "agent-accelerator";
+
+const researcher = new SubAgent({
+  name: "researcher",
+  instructions: "You collect quantifiable metrics.",
+  model: "google/gemini-3.5-flash-lite",
+});
+
+const lead = new Agent({
+  model: "google/gemini-3.7-flash",
+  instructions: "Delegate research, then synthesize.",
+  subagents: [researcher],
+});
+```
+
+### Differences from Agent
+
+* `model` resolves as `config.model ?? SUB_AGENT_MODEL ?? MODEL` and throws if empty.
+* `cache` defaults to `{ retention: "short" }`.
+* `.asTool(name?, desc?)` / `.toTool(name?, desc?)` converts the subagent into a `ToolDefinition` for manual registration.
+* `stateless: true` is supported for one-shot judges that must not retain history.
+
+`SubAgentConfig` is identical to `AgentConfig`.
+
+### Pre-defined vs Dynamic Delegation
+
+**Pre-defined delegation**
+
+Pass `subagents: [a, b]`.
+
+Each subagent becomes `agentToTool(a)`, a tool that accepts:
+
+```ts
+{ task: string }
+```
+
+**Dynamic delegation**
+
+Set `EnableSubagents: true` together with `SubAgentModel`.
+
+A `spawn_subagents` tool is injected with the following task shape:
+
+```ts
+{
+  tasks: {
+    name,
+    role?,
+    instructions,
+    task
+  }[]
+}
+```
+
+A maximum of 8 workers can be spawned, and they run in parallel.
+
+Children inherit the parent's thinking, cache, tier, and headers. Each child receives its own session ID.
+
+Results are returned as aggregated XML along with per-agent metadata in `res.subagents`.
+
+```ts
 const agent = new Agent({
-  name: "Autonomous Architect",
-  instructions: "Decompose complex system queries and delegate to specialized sub-agents in parallel.",
-  model: process.env.MODEL,
-  SubAgentModel: process.env.SUB_AGENT_MODEL, // Strictly enforces isolated worker model
-  EnableSubagents: true, // Injects the `spawn_subagents` dynamic tool
-  cache: { retention: "short" },
+  model: "google/gemini-3.7-flash",
+  instructions: "Decompose and delegate in parallel.",
+  EnableSubagents: true,
+  SubAgentModel: "google/gemini-3.5-flash-lite",
   maxTurns: 10,
 });
 
-const res = await agent.run("Audit our authentication pipeline and generate a threat model", {
-  stream: true,
-  wrapThinking: true,
-  onDelta: d => process.stdout.write(d),
-});
-const { subagents, usage } = res;
+const res = await agent.run("Audit auth pipeline and write a threat model");
+
+console.log(res.subagents.map((s) => s.name));
 ```
+
+### Delegation Helpers
+
+* `agentToTool(agent | { name, description, agent })` — wraps one agent as a tool for manual wiring.
+* `buildAgentTools(list)` — wraps multiple agents and deduplicates names. Used internally by `subagents` and `CustomAgents`.
+* `createSubagentSpawnTool(parentAgent)` — builds the dynamic subagent spawner. Rarely needed directly.
+* `DynamicSubagentTask` — `{ name, role?, instructions, task, model? }`, the shape produced for dynamic delegation.
 
 ---
-## Caching Mechanics
-
-Agent Accelerator organizes prompt prefixes to maximize key stability:
-
-```
-Turn 1 (Cold Initialization)
-┌─────────────────────────────────────────────────────────┐
-│ System Prompt + Tool Definitions (Stable Prefix)        │
-│ User Prompt: Analyze architecture performance           │
-│ Assistant Output: Analysis payload                      │
-└─────────────────────────────────────────────────────────┘
-  ↳ Cache Hit: ~5%
-
-Turn 2 (Warm Context)
-┌─────────────────────────────────────────────────────────┐
-│ System Prompt + Tool Definitions (Stable Prefix)        │ ← [CACHED]
-│ Assistant Output: Analysis payload                      │ ← [CACHED ANCHOR]
-│ User Prompt: Drill down into step 2                     │ ← [NEW DELTA]
-└─────────────────────────────────────────────────────────┘
-  ↳ Cache Hit: 72% – 93%
-```
-
-| Provider                  | Strategy                       | Mechanism                                    | Minimum Token Gate | Verified Hit Rate |
-| ------------------------- | ------------------------------ | -------------------------------------------- | ------------------ | ----------------- |
-| **OpenRouter**            | Sticky Worker Affinity         | Payload `session_id` + Paged KV cache        | ~16–64 tokens      | **55% – 65%+**    |
-| **OpenCode**              | Sticky Session Routing         | Payload `session_id` + `x-opencode-session`  | ~16–64 tokens      | **45% – 50%+**    |
-| **Google GenAI (Gemini 3)**| Implicit Prefix Caching        | Thought Signature Isolation + Prefix Match   | ≥4,096 tokens      | **25% – 70%+**    |
-| **Google GenAI (Explicit)**| Dedicated Object (`"long"`)    | `POST /v1beta/cachedContents` (TTL: 1h–12h)  | ≥32,768 tokens     | **Cost Guaranteed** |
-| **Anthropic**             | Ephemeral Breakpoints          | `cache_control: { type: "ephemeral" }`       | ≥1,024 tokens      | **80% – 90%+**    |
-
-> **Prefix Caching Note on Google Gemini 3.x:**
-> Gemini 3 models (`gemini-3.7-flash`, `gemini-3.5-flash-lite`) architecturally require prompts to reach $\ge 4,096$ tokens before implicit caching engages. Agent Accelerator strictly isolates thought signatures (`thinkingSignature`, `textSignature`, `tc.thoughtSignature`) to ensure byte-for-byte prefix stability across turns without invalidating the KV cache. In production multi-agent runs starting with rich domain context, Gemini 3 achieves 65–75% hit rates. On OpenRouter/OpenCode, smaller block sizes (16–64 tokens) allow multi-turn agent loops to hit cache starting immediately on Turn 2.
-
----
-## Model Catalog & Preflight Validation
-
-Agent Accelerator uses `models.dev` as its catalog database to inspect model specs, pricing, context windows, and reasoning capabilities:
+## Tools
 
 ```ts
-import { validateModelThinking, getModelThinkingInfo, ThinkingLevelError } from "agent-accelerator";
+import { Agent, tool, z } from "agent-accelerator";
 
-// Inspect model thinking capabilities
-const info = getModelThinkingInfo("google", "gemini-3.7-flash");
-console.log(info.allowedLevels); // ["low", "medium", "high"]
+const agent = new Agent({
+  model: "google/gemini-3.5-flash-lite",
+  tools: {
+    fetch_metrics: tool({
+      description: "Fetch cluster metrics",
+      input: z.object({
+        clusterId: z.string(),
+      }),
+      execute: async ({ clusterId }) => ({
+        clusterId,
+        load: 0.42,
+      }),
+    }),
+  },
+});
+```
 
-// Preflight validation (fails fast before network requests)
-try {
-  validateModelThinking("google", "gemini-3.7-flash", "low"); // Valid!
-  validateModelThinking("openai", "gpt-4o", "high"); // Throws ThinkingLevelError with actionable remedy
-} catch (err) {
-  if (err instanceof ThinkingLevelError) {
-    console.error(`Invalid thinking mode for ${err.modelId}. Allowed:`, err.allowedLevels);
+### Tool Helpers
+
+* `tool({ name?, description, input?, parameters?, strict?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return any JSON-serializable value.
+* `toStandardToolDeclarations(record | array)` — converts tools to `{ name, description, parameters }` for providers.
+* `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
+* `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
+* `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls run through `Promise.all` when `>1`, validate Zod input, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
+
+### Tool Types
+
+`ToolExecutionContext`:
+
+```ts
+{
+  toolCallId,
+  agentName?,
+  signal?,
+  sessionId?
+}
+```
+
+`ToolCallRecord`:
+
+```ts
+{
+  id,
+  name,
+  arguments,
+  rawArguments?,
+  thoughtSignature?
+}
+```
+
+`ToolResultRecord`:
+
+```ts
+{
+  id,
+  name,
+  result,
+  isError?,
+  durationMs?
+}
+```
+
+---
+## Providers
+
+First-class provider IDs are:
+
+* `google`
+* `opencode`
+* `openrouter`
+* `openai`
+
+Any other provider prefix is treated as an OpenAI-compatible custom provider.
+
+### Model Strings
+
+* `"google/<id>"` → Google AI Studio at `generativelanguage.googleapis.com`.
+* `"opencode/<id>"` → OpenCode Zen at `opencode.ai/zen/v1`.
+* `"opencode-go/<id>"` → OpenCode Go endpoint.
+* OpenCode automatically selects Chat vs Responses API. Claude models and models using `api=openai-responses` use Responses.
+* `"openrouter/<scope>/<model>"` or `"scope/model:variant"` → OpenRouter.
+* `"openai/<id>"` → OpenAI.
+* `"groq/<id>"`, `"ollama/<id>"`, etc. → custom providers using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`. The API key is optional for local endpoints.
+* A bare `"some-model"` uses `OPENAI_BASE_URL` when configured. Otherwise, catalog lookup is attempted, followed by an `openrouter` fallback.
+
+Model resolution never silently selects a default model.
+
+An empty model throws.
+
+An unknown prefix with no catalog match still routes to a custom provider, allowing private model IDs and endpoints.
+
+### Registry
+
+* `resolveModel("google/x" | ModelSpec)` → `{ provider, modelId, modelSpec? }`. Use to inspect routing before execution.
+* `getProvider("groq")` → returns a cached provider and automatically creates a custom provider for unknown prefixes.
+* `ensureCustomProvider(prefix, { baseUrl?, apiKey?, name? })` → gets or creates a custom provider. Useful for multiple endpoints in one process.
+* `normalizeProviderPrefix(s)` → lowercases and trims a provider prefix.
+* `ModelProvider.GoogleGenAI(model, apiKey?, { thinking_level?, baseUrl? })` — same shape is available for `.OpenCode`, `.OpenRouter`, `.OpenAI`, `.Custom`, `.OpenAICompatible`, and `.Generic`.
+
+Each returns a `ModelProviderInstance`:
+
+```ts
+{
+  model,
+  apiKey?,
+  baseUrl?,
+  thinkingLevel?
+}
+```
+
+The result can be passed directly to `Agent.model`.
+
+Use `Custom` for Groq, Together, Ollama, vLLM, and similar endpoints.
+
+```ts
+import { Agent, ModelProvider } from "agent-accelerator";
+
+new Agent({
+  model: ModelProvider.GoogleGenAI("gemini-3.5-flash-lite"),
+});
+
+new Agent({
+  model: ModelProvider.Custom(
+    "groq/llama-3.3-70b-versatile",
+    process.env.GROQ_API_KEY,
+    {
+      baseUrl: process.env.GROQ_BASE_URL,
+    },
+  ),
+});
+```
+
+`BaseProvider` is the abstract provider base containing `id`, `name`, `models`, `getModel`, `generate`, `stream`, and `countTokens`.
+
+Its catalog-first `getModel` behavior includes a hardcoded fallback.
+
+Extend `BaseProvider` when implementing a fully custom transport.
+
+`ProviderRequestOptions { apiKey?, baseUrl?, headers?, thinking?, cache?, serviceTier?, tools?, toolChoice?, signal?, sessionId?, env? }` is the per-call options object passed to `generate`/`stream`. Agent builds it automatically.
+
+### Google
+
+`GoogleAIStudioProvider` and `GOOGLE_MODELS` provide Google AI Studio support.
+
+The catalog is filtered with fallback support for lite and flash models.
+
+Google models matching `gemini-1.x` or `gemini-2.x` are rejected.
+
+Thinking levels map to:
+
+```text
+OFF | MINIMAL | LOW | MEDIUM | HIGH
+```
+
+Google-specific handling includes:
+
+* Isolating `thoughtSignature` per part for prefix stability.
+* Converting JSON Schema to OpenAPI 3.0 through `stripSchemaForGoogle`.
+* Supporting explicit `cachedContents` when `retention != implicit` and the prompt is large.
+
+Helpers:
+
+* `createExplicitCache({ model, systemInstruction?, contents?, tools?, displayName?, ttlSeconds?, expireTime?, apiKey?, baseUrl? })`
+* `isValidThoughtSignature(sig)`
+* `retainThoughtSignature(existing, incoming)`
+* `stripSchemaForGoogle(schema)`
+
+### OpenAI
+
+`OpenAIProvider` and `OPENAI_MODELS` provide OpenAI support.
+
+`OpenAIProvider` is also the base class for OpenAI-wire transports.
+
+Thinking levels map to:
+
+```text
+reasoning_effort: low | medium | high
+```
+
+It also:
+
+* passes `service_tier`;
+* derives `max_completion_tokens` from the configured budget;
+* preserves Google thought signatures through `extra_content.google.thought_signature`;
+* exposes `extractGoogleThoughtSignature(obj)`.
+
+### OpenCode
+
+`OpenCodeProvider` and `OPENCODE_MODELS` provide OpenCode support.
+
+Requests include:
+
+* `session_id`
+* `prompt_cache_key`
+* headers used for sticky routing
+
+The provider handles both Chat and Responses payloads.
+
+Transient `500`, `502`, `503`, and `529` errors are retried with thinking disabled, followed by an attempt using the alternate endpoint.
+
+### OpenRouter
+
+`OpenRouterProvider` and `OPENROUTER_MODELS` provide OpenRouter support.
+
+Requests include:
+
+* `session_id`
+* `prompt_cache_key`
+
+Thinking is mapped to:
+
+```text
+reasoning { effort | enabled }
+include_reasoning
+```
+
+based on catalog capabilities.
+
+`ServiceTier` is mapped to provider routing.
+
+### Custom
+
+`OpenAICompatibleProvider` is also exposed through the `CustomProvider`, `createCustomProvider`, and `createOpenAICompatibleProvider(prefix, opts?)` aliases.
+
+`CustomProviderOptions`:
+
+```ts
+{
+  name?,
+  baseUrl?,
+  apiKey?,
+  defaultBaseUrl?
+}
+```
+
+`createGenericModelSpec(provider, modelId)` creates a permissive placeholder so private model IDs can pass validation and window checks.
+
+Provider wire types are exported for inspecting raw requests and responses through:
+
+```ts
+res.raw.request.body
+res.raw.response.body
+```
+
+Examples include:
+
+* `OpenAIChatCompletionRequest`
+* `GoogleGenerateContentRequest`
+* `OpenCodeChatRequest`
+* `OpenRouterChatRequest`
+
+---
+## Thinking
+
+Thinking uses a single flag:
+
+```ts
+ThinkingLevel =
+  | "none"
+  | "dynamic"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
+```
+
+### Thinking Levels
+
+* `none` — disables thinking where supported.
+* `dynamic` — allows the model to decide.
+* `minimal`, `low`, `medium`, `high`, `xhigh` — request increasing levels of reasoning where supported.
+
+Thinking can be configured on the `Agent` or through `ModelProvider.*(..., { thinking_level })`.
+
+Per-run overrides are not supported. Create an agent per thinking level or switch the `agent` instance.
+
+Internally, thinking is normalized to:
+
+```ts
+ThinkingConfig {
+  enabled?,
+  level?,
+  budgetTokens?,
+  includeThoughts?
+}
+```
+
+### Catalog Helpers
+
+* `getModelThinkingInfo(provider, modelId)` → `{ supportsThinking, reasoningOptions?, allowedLevels, supportsDisable, description }`. Useful for building UI selectors.
+* `validateModelThinking(provider, modelId, level)` → throws `ThinkingLevelError { provider, modelId, requestedLevel, allowedLevels, supportsThinking }` with a fix hint. Automatically called by `run` and `stream`. Catch it and use `err.allowedLevels` to offer valid options.
+* `getModelsForProvider("google")` → returns known model specifications.
+
+Unknown models allow all thinking levels.
+
+Fixed-reasoning models reject `none`.
+
+---
+## Cache
+
+```ts
+CacheConfig {
+  retention?,
+  cachedContentId?,
+  sessionId?,
+  ttlSeconds?
+}
+```
+
+```ts
+CacheRetention =
+  | "implicit"
+  | "short"
+  | "medium"
+  | "long";
+```
+
+### Retention
+
+* `implicit` — automatic prefix reuse without an explicit cache object or storage fee.
+* `short` — approximately 5 minutes.
+* `medium` — approximately 1 hour.
+* `long` — approximately 12 hours for Google explicit caches and approximately 24 hours for prompt caching where supported.
+
+### Session Affinity
+
+`sessionId` pins provider affinity using mechanisms such as:
+
+* `x-session-id`
+* `x-opencode-session`
+* `prompt_cache_key`
+
+Reuse the same session ID across turns when cache affinity is desired.
+
+### Explicit Caches
+
+`cachedContentId` reuses a previously created Google `cachedContents/...` resource.
+
+`ttlSeconds` overrides the retention mapping.
+
+### Provider Cache Mechanisms
+
+* **Google** keeps system prompts and tools stable and isolates signatures.
+* **OpenCode / OpenRouter** use sticky session keys.
+
+The following cache helpers are exported:
+
+* `applyAnthropicCacheControl`
+* `getCacheControlForRetention`
+* `getPromptCacheRetention`
+* `clampCacheKey`
+
+For the best cache reuse, keep `instructions` and the tool set stable. Put changing data in user messages or `additionalContext`.
+
+---
+## ServiceTier
+
+```ts
+ServiceTier = "flex" | "priority";
+```
+
+Omit `ServiceTier` for standard routing.
+
+Where supported, it is passed as `service_tier` or translated into provider-specific routing.
+
+* `flex` — suitable for batch-tolerant workloads.
+* `priority` — suitable for latency-sensitive workloads.
+
+---
+## Streaming and Events
+
+`AssistantMessageEventStream` implements `AsyncIterable<StreamEvent>`.
+
+It provides:
+
+```ts
+.result(): Promise<AgentResponse>
+.push(...)
+.end(...)
+.fail(...)
+.on(...)
+.off(...)
+```
+
+### StreamEvent
+
+```ts
+StreamEvent {
+  type,
+  delta?,
+  thinkingDelta?,
+  toolCall?,
+  toolResult?,
+  subagent?,
+  usage?,
+  responseId?,
+  finishReason?,
+  error?,
+  partialText?,
+  partialThinking?,
+  raw?
+}
+```
+
+Event types:
+
+```text
+start
+text_start
+text_delta
+text_end
+thinking_start
+thinking_delta
+thinking_end
+tool_call_start
+tool_call_delta
+tool_call_complete
+tool_result
+subagent_complete
+usage
+done
+error
+```
+
+Emitted in practice: `start`, `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `usage`, `done`, `error`. The rest exist in the type for forward compatibility.
+
+Use:
+
+* `text_delta` for answer output.
+* `thinking_delta` for reasoning output.
+* `tool_call_complete` / `tool_result` for tool progress.
+* `subagent_complete` for each completed worker during streaming multi-agent runs.
+* `usage` for interim usage counts.
+* `done` for final usage and completion information.
+
+`SSEParser` provides:
+
+```ts
+feed(chunk)
+flush()
+```
+
+It parses provider SSE streams and is only needed when implementing custom transports.
+
+---
+## Response, Usage, and Raw Data
+
+### AgentResponse
+
+```ts
+AgentResponse {
+  text,
+  thinking?,
+  thoughtSignature?,
+  thinkingSignature?,
+  textSignature?,
+  toolCalls,
+  toolResults,
+  subagents,
+  usage,
+  responseId?,
+  model,
+  provider,
+  finishReason?,
+  durationMs,
+  raw,
+  turns
+}
+```
+
+`AgentResponse` also provides:
+
+```ts
+.toString()
+.toJSON()
+```
+
+### SubAgentExecutionMetadata
+
+```ts
+SubAgentExecutionMetadata {
+  name,
+  role?,
+  task,
+  model,
+  provider,
+  durationMs,
+  usage,
+  turns,
+  finishReason?,
+  responseId?,
+  text,
+  thinking?,
+  toolCalls?,
+  raw?,
+  isError?,
+  error?
+}
+```
+
+### TokenUsage
+
+```ts
+TokenUsage {
+  inputTokens,
+  outputTokens,
+  totalTokens,
+  cachedTokens?,
+  cacheReadTokens?,
+  cacheWriteTokens?,
+  thinkingTokens?,
+  cost?: {
+    inputCost?,
+    outputCost?,
+    cacheReadCost?,
+    cacheWriteCost?,
+    totalCost?
   }
 }
 ```
 
-To update the local catalog snapshot anytime to the latest upstream model specs and pricing:
+Cost calculation prefers provider-reported totals. When unavailable, costs are computed using catalog pricing.
+
+Subagent usage is rolled into the parent totals.
+### ProviderRawData
+
+```ts
+ProviderRawData {
+  request: {
+    url,
+    method,
+    headers,
+    body
+  },
+  response?: {
+    status,
+    statusText,
+    headers,
+    body
+  }
+}
+```
+
+Sensitive keys are redacted.
+
+---
+## Model Catalog
+
+The model catalog is backed by:
+
+```text
+src/data/models.dev.json
+```
+
+The file is fetched from:
+
+```text
+https://models.dev/api.json
+```
+
+and is gitignored.
+
+Refresh the catalog with:
+
 ```bash
 bun run update-models
 ```
+### Catalog Helpers
+
+* `getModelFromCatalog(provider, modelId)` → `ModelSpec | undefined`, including alias and global fallback handling. Use it for context-window, pricing, and modality checks.
+* `getModelsForProvider(provider)` → returns `ModelSpec[]`.
+
+### ModelSpec
+
+```ts
+ModelSpec {
+  id,
+  provider,
+  name,
+  description?,
+  family?,
+  api?,
+  contextWindow,
+  maxOutputTokens,
+  limit?,
+  cost?,
+  modalities?,
+  reasoning?,
+  reasoning_options?,
+  tool_call?,
+  capabilities,
+  pricing?,
+  raw?
+}
+```
+
+`contextWindow` and `maxOutputTokens` mirror:
+
+```ts
+limit.context
+limit.output
+```
+
+### ModelCapabilities
+
+```ts
+ModelCapabilities {
+  supportsThinking?,
+  supportsThinkingBudget?,
+  supportsThinkingLevel?,
+  supportsImplicitCaching?,
+  supportsExplicitCaching?,
+  supportsLongCacheRetention?,
+  supportsParallelToolCalls?,
+  supportsStreaming?,
+  modalities?,
+  supportsReasoningToggle?,
+  supportsReasoningEffort?
+}
+```
+
+When estimated input exceeds the available context budget, `Agent` trims the oldest middle history using:
+
+```text
+context * 0.9 - maxOutput
+```
+
+The beginning of the conversation and the most recent tail are preserved.
 
 ---
-## Interactive Chat CLI
+## Messages and Media
 
-Try the fully persistent multi-turn chat CLI with subagent delegation and live metrics:
+### Message
+
+```ts
+Message {
+  role: "system" | "user" | "assistant" | "tool",
+  content: string | ContentPart[],
+  name?,
+  thoughtSignature?
+}
+```
+
+### ProviderContext
+
+```ts
+ProviderContext {
+  systemPrompt?,
+  messages,
+  tools?,
+  cachedContentId?
+}
+```
+
+### ContentPart
+
+Supported content parts include:
+
+* `TextPart { type:"text", text, thoughtSignature? }` — plain text.
+* `ThinkingPart { type:"thinking", thinking, thoughtSignature? }` — preserved reasoning.
+* `ToolCallPart { type:"tool_call", id, name, arguments, rawArguments?, thoughtSignature? }`
+* `ToolResultPart { type:"tool_result", id, name, result, isError? }`
+* `ImagePart { type:"image", image, mimeType? }`
+* `AudioPart`
+* `VideoPart`
+
+`image`, `audio`, and `video` inputs accept:
+
+* data URLs
+* remote `http(s)` URLs
+* local paths
+* raw base64
+* `Uint8Array`
+* `ArrayBuffer`
+
+`normalizeMediaInput(input, mime?)` returns:
+
+```ts
+{
+  mimeType,
+  base64Data,
+  dataUrl
+}
+```
+
+`inferMimeType(path)` infers the MIME type from a file extension.
+
+Media normalization is handled automatically by providers.
+
+---
+## Tokens
+
+Token counting is heuristic only.
+
+Actual billing information comes from `res.usage`.
+
+Available helpers:
+
+* `countTokens(string | Message[] | ProviderContext)` — useful for preflight sizing and history trimming.
+* `estimateTokensFromText(text)`
+* `estimateTokensFromMessage(msg)`
+* `estimateTokensFromPart(part)`
+
+---
+## Utils
+
+* `createSessionId(prefix="accel")` — creates a UUID-based session ID clamped to 64 characters for affinity.
+* `getEnv(key, fallback?)` — resolves an environment variable.
+* `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
+* `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
+* `z` — re-exported from Zod so tools do not require a separate Zod import.
+
+---
+## Examples
 
 ```bash
 bun run examples/chat.ts
+# persistent CLI, /model "..." /level <lvl> /help /exit
+
+bun run examples/sub-agents.ts
+# fixed researcher + critic pipeline
+
+bun run examples/multi_agent.ts
+# dynamic spawn_subagents demo
+
+bun run examples/metadata.ts
+# usage + raw inspection
 ```
 
-Interactive commands during chat:
-* `/model "provider/model-id"` — Switch model on the fly in double quotes (e.g. `/model "opencode/ling-3.0-flash-fin-free"`).
-* `/level <lvl>` — Switch reasoning level (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `dynamic`).
-* `/help` — Show available commands.
-* `/exit` / `/quit` — Exit chat session.
+The chat example persists conversations to:
 
-Session state automatically persists to `.session.jsonl` after every turn and configuration change, resuming seamlessly on launch. Unified real-time telemetry (`↑in`, `↓out`, `CR`, `CW`, `CH%`, cost, context window utilization) is displayed on every turn.
-
----
-## API Reference
-
-### `new Agent(options)`
-
-| Parameter                                      | Type                                                                       | Description                                                                              |
-| ---------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `model`                                        | `string, ModelSpec, ModelProviderInstance`                                 | e.g. `"google/model-id"` or `ModelProvider.GoogleGenAI(...)`                             |
-| `instructions`                                 | `string`                                                                   | System prompt — keep stable for cache                                                    |
-| `subagents`                                    | `SubAgent[], Agent[]`                                                      | Pre-defined sub-agents registered as distinct callable tools                             |
-| `tools`                                        | `Record<string, ToolDefinition>, ToolDefinition[]`                         | Deterministic tools (Zod → JSON Schema, parallel `Promise.all`)                           |
-| `stateless`                                    | `boolean`                                                                  | Default `false`. When `true`, does not persist conversational history across turns        |
-| `SubAgentModel`                                | `string, ModelSpec`                                                        | Strictly required if `EnableSubagents: true` (or via `SUB_AGENT_MODEL` env). Enforces model isolation. |
-| `ThinkingLevel`                                | `"none", "dynamic", "minimal", "low", "medium", "high", "xhigh"`           | Reasoning level (generic via catalog preflight)                                          |
-| `cache`                                        | `{ retention?: "implicit", "short", "medium", "long", sessionId?: string }` | `"implicit"` ($0 storage fee prefix cache), `short=5m`, `medium=1h`, `long=12h`          |
-| `ServiceTier`                                  | `"flex", "priority"`                                             | `standard` = default                                                                     |
-| `EnableSubagents`                              | `boolean`                                                        | Adds `spawn_subagents` tool for dynamic runtime spawning (strictly runs on `SubAgentModel`)|
-| `CustomAgents`                                 | `Agent[]`                                                        | Exposed as tools (legacy alias)                                                          |
-| `maxTurns`                                     | `number`                                                         | Default `10`                                                                             |
-| `sessionId` / `headers` / `apiKey` / `baseUrl` | `string`                                                         | Overrides                                                                                |
-
-**`agent.run(prompt, opts)`** `stream?: boolean` `wrapThinking?: boolean` (`<think>…</think>` + blank line) `onDelta?` `onThinkingDelta?` `onEvent?` `signal?` `sessionId?` `additionalContext?`
-
----
-### `new SubAgent(options)`
-
-Extends `Agent` with defaults optimized for modular sub-agent pipelines:
-* Resolves `model` from `config.model ?? process.env.SUB_AGENT_MODEL ?? process.env.MODEL`. Strictly throws an actionable error if no model is provided (zero silent fallback models).
-* Defaults `cache` to `{ retention: "short" }` with child session affinity.
-* Exposes `.asTool(name?, desc?)` and `.toTool()` for fluent registration.
-
----
-### `AgentResponse` Properties
-
-* **`text`**: Complete decoded output string.
-* **`thinking`**: Extracted reasoning tokens and trace.
-* **`thoughtSignature`**: Provider reasoning signatures (persisted automatically for Gemini 3.x multi-turn replay).
-* **`thinkingSignature` / `textSignature`**: Part-level signatures preserved for KV cache stability.
-* **`toolCalls` / `toolResults`**: Structured logs of all tool interactions.
-* **`subagents`**: Array of `SubAgentExecutionMetadata` (name, task, model, provider, durationMs, usage, cost, turns, text, thinking).
-* **`model` / `provider`**: Resolved model identifier and provider string.
-* **`usage`**: `{ inputTokens, outputTokens, cachedTokens, cacheReadTokens, thinkingTokens, cost }`.
-* **`raw`**: Unmodified HTTP request and response envelopes `{ request, response }`.
-
----
-## Repository Structure
-
+```text
+.session.jsonl
 ```
-src/
-├── agent/       # Agent context, main execution loop, subagent class, and delegation tools
-├── providers/   # Single-file provider modules (google.ts, openai.ts, opencode.ts, openrouter.ts, custom.ts)
-├── models/      # Catalog parser and context resolution
-├── data/        # models.dev database snapshot (gitignored, updated via bun run update-models)
-├── tools/       # Zod schemas, wrappers, and parallel executor
-├── streaming/   # SSE parser and typed event stream emitters (cross-chunk rolling buffer)
-├── tokens/      # Context window and token utilization counters
-└── utils/       # Cache control, wire headers, and session handlers
+
+It resumes from that file on next launch.
+
+It also displays per-turn:
+
+```text
+input / output / cached / cost / context %
 ```
 
 ---
-## Development & Testing
+## Scripts and Structure
+
+### Scripts
 
 ```bash
-bun run typecheck              # Typecheck
-bun test                       # Run full test suite (64 unit tests)
-bun run update-models          # Refresh models.dev catalog snapshot
-bun run examples/sub-agents.ts # Multi-agent research & critique pipeline with cache telemetry
-bun run examples/chat.ts       # Run interactive CLI session
-bun run examples/multi_agent.ts# Run dynamic sub-agent delegation demo
-bun run examples/metadata.ts   # Full metadata & wire inspection demo
+bun run typecheck     # tsc --noEmit
+bun test              # bun test test/
+bun run update-models # refresh src/data/models.dev.json
+```
+### Project Structure
+
+```text
+src/
+├── agent/      # Agent, context, loop, delegation, subagent
+├── providers/  # google, openai, opencode, openrouter, custom, registry, base
+├── models/     # catalog parser
+├── data/       # models.dev snapshot (gitignored)
+├── tools/      # tool(), schema, executor
+├── streaming/  # event stream, SSE parser
+├── tokens/     # estimator
+├── types/      # agent, core, message, model, response, tool
+└── utils/      # cache, env, headers, media, session
 ```
 
 ---
 ## License
 
-Not yet decided :)
+TBD
 
 ---

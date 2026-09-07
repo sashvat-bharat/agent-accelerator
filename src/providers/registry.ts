@@ -24,7 +24,7 @@ providerRegistry.set("openrouter", openrouterProvider);
 providerRegistry.set("openai", openaiProvider);
 
 // ---------------------------------------------------------------------------
-// Unified multi-provider layer (OpenRouter-style, zero 5% fee)
+// Unified multi-provider layer
 // Any `MODEL="<prefix>/<model-id>"` works without SDK changes as long as
 // `{PREFIX}_API_KEY` (+ optional `{PREFIX}_BASE_URL`) is set. Examples:
 //   MODEL="groq/llama-3.3-70b-versatile" + GROQ_API_KEY + GROQ_BASE_URL
@@ -156,7 +156,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
           const spec = p.getModel(remainingModel) || getModelFromCatalog(remainingModel, remainingModel);
           return { provider: p, modelId: remainingModel, modelSpec: spec as ModelSpec };
         }
-        // Dedicated env (or no generic base) → direct provider routing. No 5% fee.
+        // Dedicated env (or no generic base) → direct provider routing.
         const custom = ensureCustomProvider(providerPrefix);
         const spec =
           custom.getModel(remainingModel) ||
@@ -308,7 +308,7 @@ export const ModelProvider = {
   },
 
   /**
-   * Unified third-party provider — OpenRouter-style without the 5% fee.
+   * Unified third-party provider.
    * ```ts
    * // Env-only (no code): MODEL="groq/llama-3.3-70b-versatile"
    * // Explicit (multi-provider in one process):
