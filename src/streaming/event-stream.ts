@@ -1,5 +1,6 @@
 import type { StreamEvent, AgentResponse } from "../types/response.ts";
 
+/** Listener invoked for a matching stream event type or `*`. */
 export type StreamEventListener = (event: StreamEvent) => void;
 
 type Resolver = {
@@ -7,16 +8,29 @@ type Resolver = {
   reject: (err: Error) => void;
 };
 
+/** Async-iterable event stream returned by Agent.stream and streaming Agent.run. */
 export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
   private queue: StreamEvent[] = [];
   private resolvers: Resolver[] = [];
   private listeners: Map<string, Set<StreamEventListener>> = new Map();
   private finished = false;
   private error: Error | null = null;
+  private cancelled = false;
+  private cancelHandlers = new Set<() => void>();
   private finalResultPromise: Promise<AgentResponse>;
   private resolveFinalResult!: (result: AgentResponse) => void;
   private rejectFinalResult!: (err: Error) => void;
 
+  /**
+   * Creates an empty event stream. `Agent.stream()` creates and completes
+   * streams automatically; this constructor is useful for custom adapters.
+   *
+   * @example
+   * ```ts
+   * const stream = new AssistantMessageEventStream();
+   * stream.on("text_delta", (event) => process.stdout.write(event.delta ?? ""));
+   * ```
+   */
   constructor() {
     this.finalResultPromise = new Promise<AgentResponse>((resolve, reject) => {
       this.resolveFinalResult = resolve;
@@ -26,6 +40,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     this.finalResultPromise.catch(() => {});
   }
 
+  /** Publishes an event to listeners and async iterators. */
   push(event: StreamEvent): void {
     if (this.finished) return;
 
@@ -73,6 +88,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     }
   }
 
+  /** Completes the stream and resolves result() with the final response. */
   end(finalResponse?: AgentResponse): void {
     if (this.finished) return;
     this.finished = true;
@@ -91,12 +107,46 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     }
   }
 
+  /** Fails the stream and rejects pending consumers. */
   fail(error: Error): void {
     if (this.finished) return;
     // Delegate to push for unified error handling (listeners + queue + rejection)
     this.push({ type: "error", error } as StreamEvent);
   }
 
+  /** True once cancel() has been called. Background work should stop. */
+  isCancelled(): boolean {
+    return this.cancelled;
+  }
+
+  /** Registers a callback invoked once on cancel(). Returns an unsubscribe fn. */
+  onCancel(handler: () => void): () => void {
+    if (this.cancelled) {
+      try { handler(); } catch {}
+      return () => {};
+    }
+    this.cancelHandlers.add(handler);
+    return () => { this.cancelHandlers.delete(handler); };
+  }
+
+  /** Cancels the stream: stops background work and rejects result() with AbortError.
+   * Safe to call multiple times. Breaking out of for-await calls this automatically. */
+  cancel(reason?: unknown): void {
+    if (this.finished || this.cancelled) return;
+    this.cancelled = true;
+    for (const h of [...this.cancelHandlers]) {
+      try { h(); } catch {}
+    }
+    this.cancelHandlers.clear();
+    const err = reason instanceof Error ? reason : null;
+    const abortErr: Error =
+      err && (err.name === "AbortError" || /abort|cancel/i.test(err.message))
+        ? err
+        : Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+    this.fail(abortErr);
+  }
+
+  /** Registers a listener for an event type or `*`. */
   on(event: string, listener: StreamEventListener): this {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set());
@@ -105,17 +155,34 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     return this;
   }
 
+  /** Removes a previously registered listener. */
   off(event: string, listener: StreamEventListener): this {
     this.listeners.get(event)?.delete(listener);
     return this;
   }
 
+  /** Resolves when the stream finishes with the normalized AgentResponse. */
   result(): Promise<AgentResponse> {
     return this.finalResultPromise;
   }
 
   [Symbol.asyncIterator](): AsyncIterator<StreamEvent> {
+    let iteratorDone = false;
     return {
+      return: (): Promise<IteratorResult<StreamEvent>> => {
+        if (!iteratorDone) {
+          iteratorDone = true;
+          this.cancel();
+        }
+        return Promise.resolve({ value: undefined as any, done: true });
+      },
+      throw: (err?: unknown): Promise<IteratorResult<StreamEvent>> => {
+        if (!iteratorDone) {
+          iteratorDone = true;
+          this.cancel(err);
+        }
+        return Promise.reject(err);
+      },
       next: (): Promise<IteratorResult<StreamEvent>> => {
         if (this.queue.length > 0) {
           const value = this.queue.shift()!;

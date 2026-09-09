@@ -1,4 +1,6 @@
-import { promises as fs } from "node:fs";
+// NOTE: no static node:fs import — it breaks browser bundles. Local file
+// paths are loaded via a lazy dynamic import so browsers never resolve it.
+import { bytesToBase64 } from "./base64.ts";
 
 export interface NormalizedMedia {
   mimeType: string;
@@ -8,6 +10,11 @@ export interface NormalizedMedia {
 
 /**
  * Detects MIME type from common file signatures or extensions
+ */
+/**
+ * Infers a MIME type from a URL/path extension.
+ *
+ * @example `const mime = inferMimeType("photo.webp");`
  */
 export function inferMimeType(input: string, fallback = "application/octet-stream"): string {
   const clean = input.toLowerCase().split("?")[0]!;
@@ -28,15 +35,20 @@ export function inferMimeType(input: string, fallback = "application/octet-strea
 /**
  * Normalizes an image, audio, or video input into raw base64 and data URL
  */
+/**
+ * Normalizes a path, URL, data URL, base64 string, or binary value into media payloads.
+ *
+ * @example `const image = await normalizeMediaInput("https://example.com/photo.png");`
+ */
 export async function normalizeMediaInput(
   input: string | Uint8Array | ArrayBuffer,
   explicitMimeType?: string
 ): Promise<NormalizedMedia> {
   // 1. If input is ArrayBuffer or Uint8Array
   if (input instanceof Uint8Array || input instanceof ArrayBuffer) {
-    const buffer = Buffer.from(input as any);
+    const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
     const mimeType = explicitMimeType || "application/octet-stream";
-    const base64Data = buffer.toString("base64");
+    const base64Data = bytesToBase64(bytes);
     return {
       mimeType,
       base64Data,
@@ -63,12 +75,12 @@ export async function normalizeMediaInput(
       throw new Error(`Failed to fetch media from URL: ${input} (${response.statusText})`);
     }
     const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const buffer = new Uint8Array(arrayBuffer);
     const mimeType =
       explicitMimeType ||
       response.headers.get("content-type") ||
       inferMimeType(input);
-    const base64Data = buffer.toString("base64");
+    const base64Data = bytesToBase64(buffer);
     return {
       mimeType,
       base64Data,
@@ -93,12 +105,13 @@ export async function normalizeMediaInput(
     };
   }
 
-  // 5. If input is local file path
+  // 5. If input is local file path (Node only — browsers use data URLs / FileReader)
   if (typeof input === "string") {
     try {
+      const { promises: fs } = await import("node:fs");
       const buffer = await fs.readFile(input);
       const mimeType = explicitMimeType || inferMimeType(input);
-      const base64Data = buffer.toString("base64");
+      const base64Data = bytesToBase64(buffer);
       return {
         mimeType,
         base64Data,

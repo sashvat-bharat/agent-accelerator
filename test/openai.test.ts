@@ -244,7 +244,10 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
     }
   });
 
-  test("should accept multimodal inputs (text, image, audio, video) and output text only", async () => {
+  test("should accept multimodal inputs (text, image, audio, pdf) and output text only", async () => {
+    // NOTE: OpenAI chat completions supports image + wav/mp3 audio + PDF only.
+    // Video is Gemini-only (Vercel throws UnsupportedFunctionalityError on OpenAI),
+    // so video coverage lives in the converter unit test below.
     const provider = new OpenAIProvider();
     const originalFetch = globalThis.fetch;
     let interceptedBody: any = null;
@@ -258,7 +261,7 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
             {
               message: {
                 role: "assistant",
-                content: "I analyzed the image, audio, video, and text instructions.",
+                content: "I analyzed the image, audio, pdf, and text instructions.",
               },
               finish_reason: "stop",
             },
@@ -287,8 +290,10 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
                   audio: "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==",
                 },
                 {
-                  type: "video",
-                  video: "data:video/mp4;base64,AAAAHGZ0eXBtcDQyAAAAAG1wNDJpc29tYXZjMQAAAA==",
+                  type: "file",
+                  file: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmo=",
+                  mimeType: "application/pdf",
+                  filename: "doc.pdf",
                 },
               ],
             },
@@ -300,7 +305,7 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
         }
       );
 
-      // Verify payload structure matches OpenAI cURL format
+      // Verify payload structure matches OpenAI cURL format (via Vercel AI SDK)
       expect(interceptedBody).toBeDefined();
       const content = interceptedBody.messages[0].content;
       expect(Array.isArray(content)).toBe(true);
@@ -315,14 +320,15 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
       expect(audioPart.input_audio.data).toBeDefined();
       expect(audioPart.input_audio.format).toBe("wav");
 
-      const videoPart = content.find((p: any) => p.type === "video_url");
-      expect(videoPart.video_url.url).toContain("data:video/mp4;base64,");
+      const filePart = content.find((p: any) => p.type === "file");
+      expect(filePart.file.filename).toBe("doc.pdf");
+      expect(filePart.file.file_data).toContain("data:application/pdf;base64,");
 
       // Verify extra_body cached_content
       expect(interceptedBody.extra_body?.google?.cached_content).toBe("cachedContents/test1234");
 
       // Verify text-only output
-      expect(result.text).toBe("I analyzed the image, audio, video, and text instructions.");
+      expect(result.text).toBe("I analyzed the image, audio, pdf, and text instructions.");
       expect(typeof result.text).toBe("string");
     } finally {
       globalThis.fetch = originalFetch;

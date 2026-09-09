@@ -95,6 +95,76 @@ function sanitizeToolResult(r: ToolResultRecord): { sanitized: ToolResultRecord;
   return { sanitized: r, metas: [] };
 }
 
+function toolCallFingerprint(call: ToolCallRecord): string {
+  const stableSerialize = (value: any, seen = new Set<any>()): string => {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    if (Array.isArray(value)) return `[${value.map((item) => stableSerialize(item, seen)).join(",")}]`;
+    const output = `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key], seen)}`).join(",")}}`;
+    seen.delete(value);
+    return output;
+  };
+  const args = stableSerialize(call.arguments ?? {});
+  return `${call.name}\u0000${args}`;
+}
+
+/**
+ * Prevents an identical tool call from being executed in consecutive model
+ * turns. The synthetic error is sent back to the model so it can reuse the
+ * previous result or choose a different action.
+ */
+async function executeToolCallsWithRepeatGuard(options: {
+  tools: Record<string, ToolDefinition>;
+  toolCalls: ToolCallRecord[];
+  previousFingerprints: Set<string>;
+  agentName?: string;
+  signal?: AbortSignal;
+  sessionId?: string;
+}): Promise<{ results: ToolResultRecord[]; fingerprints: Set<string> }> {
+  const { toolCalls, previousFingerprints } = options;
+  const currentFingerprints = new Set<string>();
+  const blocked = new Map<string, ToolResultRecord>();
+  const executable: ToolCallRecord[] = [];
+
+  for (const call of toolCalls) {
+    const fingerprint = toolCallFingerprint(call);
+    currentFingerprints.add(fingerprint);
+    if (previousFingerprints.has(fingerprint)) {
+      blocked.set(call.id, {
+        id: call.id,
+        name: call.name,
+        result:
+          `Error: Tool '${call.name}' was called again immediately with identical arguments. ` +
+          "The previous result is already available; reuse it or call the tool with different arguments.",
+        isError: true,
+        durationMs: 0,
+      });
+    } else {
+      executable.push(call);
+    }
+  }
+
+  const executed = executable.length > 0
+    ? await executeToolCalls({
+        tools: options.tools,
+        toolCalls: executable,
+        agentName: options.agentName,
+        parallel: true,
+        signal: options.signal,
+        sessionId: options.sessionId,
+      })
+    : [];
+  const byId = new Map<string, ToolResultRecord>();
+  for (const result of executed) byId.set(result.id, result);
+  for (const [id, result] of blocked) byId.set(id, result);
+
+  return {
+    results: toolCalls.map((call) => byId.get(call.id)!).filter(Boolean),
+    fingerprints: currentFingerprints,
+  };
+}
+
 /**
  * Runs a single non-streaming agent turn or multi-turn loop
  */
@@ -128,6 +198,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   const allSubagents: SubAgentExecutionMetadata[] = [];
   let finalResult: any = null;
   let turns = 0;
+  let previousToolCallFingerprints = new Set<string>();
 
   while (turns < maxTurns) {
     turns++;
@@ -197,11 +268,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       genResult.text,
       genResult.toolCalls,
       genResult.thinking,
-      genResult.thoughtSignature,
-      {
-        thinkingSignature: genResult.thinkingSignature,
-        textSignature: genResult.textSignature,
-      }
+      genResult.thoughtSignature
     );
 
     // If no tool calls, generation is complete!
@@ -211,14 +278,16 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     // Execute tool calls — always parallel (model-driven, bloatfree DX7)
     allToolCalls.push(...genResult.toolCalls);
-    const results = await executeToolCalls({
+    const guarded = await executeToolCallsWithRepeatGuard({
       tools,
       toolCalls: genResult.toolCalls,
+      previousFingerprints: previousToolCallFingerprints,
       agentName,
-      parallel: true,
       signal: runOptions?.signal,
       sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
     });
+    const results = guarded.results;
+    previousToolCallFingerprints = guarded.fingerprints;
 
     // Process results and extract any sub-agent execution metadata
     const sanitizedResults: ToolResultRecord[] = [];
@@ -269,6 +338,29 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   const outerStream = new AssistantMessageEventStream();
   const startTime = Date.now();
 
+  // Cancellation: merge user signal + outer cancel() into one linked controller.
+  // Vercel doStream honors abortSignal for all providers, so aborting this
+  // stops the HTTP request; we also cancel the active inner provider stream.
+  const linked = new AbortController();
+  const userSignal = config.runOptions?.signal;
+  const forwardUserAbort = () => {
+    try { linked.abort((userSignal as any)?.reason); } catch { try { linked.abort(); } catch {} }
+  };
+  if (userSignal?.aborted) forwardUserAbort();
+  else userSignal?.addEventListener("abort", forwardUserAbort, { once: true });
+  let currentInner: AssistantMessageEventStream | null = null;
+  const removeOuterCancel = outerStream.onCancel(() => {
+    try { linked.abort(); } catch {}
+    try { currentInner?.cancel(); } catch {}
+  });
+  linked.signal.addEventListener("abort", () => {
+    try { currentInner?.cancel(); } catch {}
+  });
+  const throwIfCancelled = () => {
+    if (linked.signal.aborted || outerStream.isCancelled())
+      throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+  };
+
   (async () => {
     try {
       const {
@@ -299,9 +391,10 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       const allSubagents: SubAgentExecutionMetadata[] = [];
       let lastResponse: AgentResponse | null = null;
       let turns = 0;
+      let previousToolCallFingerprints = new Set<string>();
 
       while (turns < maxTurns) {
-        if (runOptions?.signal?.aborted) break;
+        throwIfCancelled();
         turns++;
 
         // Same context-window trim as non-stream (ensure cache prefix stable)
@@ -329,7 +422,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
           cache: options?.cache,
           tools: standardTools.length > 0 ? standardTools : undefined,
-          signal: runOptions?.signal,
+          signal: linked.signal,
         };
 
         const innerStream = provider.stream(
@@ -341,14 +434,18 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           },
           providerOptions
         );
+        currentInner = innerStream as AssistantMessageEventStream;
 
         for await (const event of innerStream) {
+          throwIfCancelled();
           if (event.type !== "done") {
             outerStream.push(event);
           }
         }
 
         const turnResponse = await innerStream.result();
+        currentInner = null;
+        throwIfCancelled();
         lastResponse = turnResponse;
 
         // Safety fallback: if no tool calls and text is empty, rescue answer from thinking
@@ -369,11 +466,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           turnResponse.text,
           turnResponse.toolCalls,
           turnResponse.thinking,
-          turnResponse.thoughtSignature,
-          {
-            thinkingSignature: turnResponse.thinkingSignature,
-            textSignature: turnResponse.textSignature,
-          }
+          turnResponse.thoughtSignature
         );
 
         if (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) {
@@ -381,14 +474,17 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         }
 
         allToolCalls.push(...turnResponse.toolCalls);
-        const results = await executeToolCalls({
+        const guarded = await executeToolCallsWithRepeatGuard({
           tools,
           toolCalls: turnResponse.toolCalls,
+          previousFingerprints: previousToolCallFingerprints,
           agentName,
-          parallel: true,
-          signal: runOptions?.signal,
+          signal: linked.signal,
           sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
         });
+        throwIfCancelled();
+        const results = guarded.results;
+        previousToolCallFingerprints = guarded.fingerprints;
 
         const sanitizedResults: ToolResultRecord[] = [];
 
@@ -449,7 +545,21 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 
       outerStream.end(finalAgentResponse);
     } catch (err: any) {
-      outerStream.fail(err instanceof Error ? err : new Error(String(err)));
+      const raw = err instanceof Error ? err : new Error(String(err));
+      const isAbort =
+        linked.signal.aborted ||
+        outerStream.isCancelled() ||
+        (raw as any)?.name === "AbortError" ||
+        /abort|cancell?ed/i.test(String((raw as any)?.message ?? raw));
+      outerStream.fail(
+        isAbort
+          ? Object.assign(raw.name === "AbortError" ? raw : new Error("Stream aborted"), { name: "AbortError" })
+          : raw
+      );
+    } finally {
+      try { currentInner?.cancel(); } catch {}
+      try { userSignal?.removeEventListener("abort", forwardUserAbort); } catch {}
+      try { removeOuterCancel(); } catch {}
     }
   })();
 

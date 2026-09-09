@@ -6,6 +6,11 @@ import type { ProviderContext } from "../types/message.ts";
  * For English text, average is ~4 characters per token or ~0.75 words per token.
  * Code and symbols average ~2-3 characters per token.
  */
+/**
+ * Estimates token count from text without contacting a provider tokenizer.
+ *
+ * @example `const tokens = estimateTokensFromText(prompt);`
+ */
 export function estimateTokensFromText(text: string): number {
   if (!text || text.length === 0) return 0;
   const chars = text.length;
@@ -37,6 +42,11 @@ export function estimateTokensFromText(text: string): number {
   return Math.ceil(Math.max(chars / charDivisor, words * wordFactor));
 }
 
+/**
+ * Estimates tokens for one multimodal, thinking, or tool content part.
+ *
+ * @example `const tokens = estimateTokensFromPart({ type: "text", text: prompt });`
+ */
 export function estimateTokensFromPart(part: ContentPart): number {
   switch (part.type) {
     case "text":
@@ -52,6 +62,8 @@ export function estimateTokensFromPart(part: ContentPart): number {
     case "video":
       // ~250 tokens per frame / minute
       return 500;
+    case "file":
+      return 400;
     case "tool_call":
       return (
         estimateTokensFromText(part.name) +
@@ -71,6 +83,11 @@ export function estimateTokensFromPart(part: ContentPart): number {
   }
 }
 
+/**
+ * Estimates tokens for one normalized message including metadata overhead.
+ *
+ * @example `const tokens = estimateTokensFromMessage({ role: "user", content: "Hi" });`
+ */
 export function estimateTokensFromMessage(message: Message): number {
   let count = 4; // Message metadata overhead (role, markers)
   if (typeof message.content === "string") {
@@ -83,6 +100,11 @@ export function estimateTokensFromMessage(message: Message): number {
   return count;
 }
 
+/**
+ * Estimates tokens for text, messages, or a complete ProviderContext.
+ *
+ * @example `const tokens = countTokens({ messages });`
+ */
 export function countTokens(
   input: string | Message[] | ProviderContext
 ): number {

@@ -56,9 +56,9 @@ try {
     name: "Telemetry Analyst",
     instructions: "You are a systems infrastructure analyst. Always use get_system_metrics to inspect clusters and give concise, technical summaries.",
     model: modelToUse,
-    SubAgentModel: process.env.SUB_AGENT_MODEL || "google/gemini-3.5-flash-lite",
-    EnableSubagents: true,
-    ThinkingLevel: (process.env.THINKING_LEVEL as any) ?? "low",
+    subAgentModel: process.env.SUB_AGENT_MODEL || "google/gemini-3.5-flash-lite",
+    enableSubagents: true,
+    thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "low",
     cache: { retention: "short" },
     tools: { get_system_metrics },
   });
@@ -220,7 +220,7 @@ if (response.subagents && response.subagents.length > 0) {
   });
 } else {
   console.log("  No subagents were delegated for this single-agent turn.");
-  console.log("  (When EnableSubagents: true spawns delegates, full traces appear here)");
+  console.log("  (When enableSubagents: true spawns delegates, full traces appear here)");
 }
 console.log("");
 

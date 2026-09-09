@@ -30,7 +30,7 @@ bun add agent-accelerator
 
 Requires `bun` or `node 22+`.
 
-The only dependency is `zod`.
+Core dependencies are `zod`, `ai`, and selected `@ai-sdk/*` provider packages used as the backend transport.
 
 ---
 
@@ -56,7 +56,7 @@ SUB_AGENT_MODEL="google/gemini-3.5-flash-lite"
 # OLLAMA_BASE_URL="http://localhost:11434/v1"
 ```
 
-`MODEL` and `SUB_AGENT_MODEL` are used when `model` or `SubAgentModel` are omitted.
+`MODEL` and `SUB_AGENT_MODEL` are used when `model` or `subAgentModel` are omitted.
 
 Explicit configuration always takes precedence over environment variables.
 
@@ -108,14 +108,12 @@ An `Agent` holds :
 | `model`           | `string \| ModelSpec \| ModelProviderInstance`       | Model identifier, such as `"google/gemini-3.5-flash-lite"`. Use `ModelProvider.*` or `ModelSpec` to pin a provider and credentials. Falls back to `MODEL`. |
 | `instructions`    | `string`                                             | System prompt. Keep it stable; place per-turn additions in `additionalContext`.                                                                            |
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
-| `functions`       | `((...args: any[]) => any)[]`                        | Shorthand for exposing plain JavaScript functions as tools. Useful for quick prototypes.                                                                   |
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
-| `CustomAgents`    | `Agent[]`                                            | Legacy alias for `subagents`. Prefer `subagents`.                                                                                                          |
-| `EnableSubagents` | `boolean`                                            | When `true`, injects `spawn_subagents`, allowing the model to spawn 1–8 workers at runtime. Requires `SubAgentModel`.                                      |
-| `SubAgentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Model used by dynamically spawned workers. Falls back to `SUB_AGENT_MODEL`.                                                                                |
-| `ThinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh`. Validated against the model catalog before a request.                                      |
+| `enableSubagents` | `boolean`                                            | When `true`, injects `spawn_subagents`, allowing the model to spawn 1–8 workers at runtime. Requires `subAgentModel`.                                      |
+| `subAgentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Model used by dynamically spawned workers. Falls back to `SUB_AGENT_MODEL`.                                                                                |
+| `thinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh`. Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
-| `ServiceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
+| `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Defaults to `10`.                                                                                            |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
@@ -123,7 +121,7 @@ An `Agent` holds :
 | `baseUrl`         | `string`                                             | Overrides the default endpoint for this agent.                                                                                                             |
 | `stateless`       | `boolean`                                            | When `true`, history is cleared before and after each `run`. Useful for one-shot evaluators. Defaults to `false`.                                          |
 
-When `EnableSubagents: true` is configured without a subagent model, construction throws `SubAgentModelError`.
+When `enableSubagents: true` is configured without a subagent model, construction throws `SubAgentModelError`.
 
 ### Agent Methods
 
@@ -230,7 +228,7 @@ const lead = new Agent({
 
 Pass `subagents: [a, b]`.
 
-Each subagent becomes `agentToTool(a)`, a tool that accepts:
+Each subagent is automatically registered as an internal tool on the parent that accepts:
 
 ```ts
 { task: string }
@@ -238,7 +236,7 @@ Each subagent becomes `agentToTool(a)`, a tool that accepts:
 
 **Dynamic delegation**
 
-Set `EnableSubagents: true` together with `SubAgentModel`.
+Set `enableSubagents: true` together with `subAgentModel`.
 
 A `spawn_subagents` tool is injected with the following task shape:
 
@@ -263,8 +261,8 @@ Results are returned as aggregated XML along with per-agent metadata in `res.sub
 const agent = new Agent({
   model: "google/gemini-3.7-flash",
   instructions: "Decompose and delegate in parallel.",
-  EnableSubagents: true,
-  SubAgentModel: "google/gemini-3.5-flash-lite",
+  enableSubagents: true,
+  subAgentModel: "google/gemini-3.5-flash-lite",
   maxTurns: 10,
 });
 
@@ -275,8 +273,7 @@ console.log(res.subagents.map((s) => s.name));
 
 ### Delegation Helpers
 
-* `agentToTool(agent | { name, description, agent })` — wraps one agent as a tool for manual wiring.
-* `buildAgentTools(list)` — wraps multiple agents and deduplicates names. Used internally by `subagents` and `CustomAgents`.
+* `buildAgentTools(list)` — wraps multiple agents and deduplicates names. Used internally by `subagents`.
 * `createSubagentSpawnTool(parentAgent)` — builds the dynamic subagent spawner. Rarely needed directly.
 * `DynamicSubagentTask` — `{ name, role?, instructions, task, model? }`, the shape produced for dynamic delegation.
 
@@ -305,11 +302,43 @@ const agent = new Agent({
 
 ### Tool Helpers
 
-* `tool({ name?, description, input?, parameters?, strict?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return any JSON-serializable value.
+* `tool({ name?, description, input?, parameters?, strict?, timeoutMs?, maxTries?, maxConcurrency?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return arbitrary values; results are converted safely for model context. `timeoutMs` defaults to `0` (no time limit) and is a best-effort event-loop deadline; `ctx.signal` enables cooperative cancellation. `maxTries` accepts a number or numeric string; a positive value is the total attempt limit, while `0`/omitted means no configured limit for transient retries. `maxConcurrency` limits simultaneous calls for that tool (default pool: 8).
 * `toStandardToolDeclarations(record | array)` — converts tools to `{ name, description, parameters }` for providers.
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
-* `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls run through `Promise.all` when `>1`, validate Zod input, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
+* `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls validate Zod input, use bounded parallelism, enforce per-tool timeouts, retry transient failures, recover namespace/camel-case tool-name aliases, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
+
+The agent loop also blocks an identical tool name and argument set when the model requests it in the immediately following turn. The synthetic error is returned to the model so it can reuse the prior result or change its arguments.
+
+### Tool Timing and Deadlines
+
+Every `ToolResultRecord` includes `durationMs`, measured in whole milliseconds with a minimum displayed value of `1ms`. The value covers the tool execution attempt (including retry/backoff time), but excludes queue wait and input-schema validation.
+
+`timeoutMs` is specified in milliseconds:
+
+```ts
+const get_status = tool({
+  name: "get_status",
+  description: "Check user authentication status.",
+  timeoutMs: 1,
+  input: z.object({ username: z.string() }),
+  execute: async ({ username }, ctx) => {
+    // Pass ctx.signal to cancellable APIs such as fetch.
+    return username === "Akshat Dwivedi" ? "Valid" : "Invalid";
+  },
+});
+```
+
+`timeoutMs: 0` or an omitted value disables the deadline. Positive values are best-effort event-loop deadlines: JavaScript cannot forcibly stop arbitrary synchronous code, so asynchronous implementations should honor `ctx.signal`. A timeout is returned as an error tool result and is not retried indefinitely unless a positive `maxTries` is configured.
+
+Tool timing is available after a run:
+
+```ts
+const response = await agent.run("Check status");
+for (const result of response.toolResults) {
+  console.log(`${result.name}: ${result.durationMs}ms`);
+}
+```
 
 ### Tool Types
 
@@ -383,7 +412,7 @@ An unknown prefix with no catalog match still routes to a custom provider, allow
 * `getProvider("groq")` → returns a cached provider and automatically creates a custom provider for unknown prefixes.
 * `ensureCustomProvider(prefix, { baseUrl?, apiKey?, name? })` → gets or creates a custom provider. Useful for multiple endpoints in one process.
 * `normalizeProviderPrefix(s)` → lowercases and trims a provider prefix.
-* `ModelProvider.GoogleGenAI(model, apiKey?, { thinking_level?, baseUrl? })` — same shape is available for `.OpenCode`, `.OpenRouter`, `.OpenAI`, `.Custom`, `.OpenAICompatible`, and `.Generic`.
+* `ModelProvider.GoogleGenAI(model, apiKey?, { thinkingLevel?, baseUrl? })` — same shape is available for `.OpenCode`, `.OpenRouter`, `.OpenAI`, `.Custom`, `.OpenAICompatible`, and `.Generic`.
 
 Each returns a `ModelProviderInstance`:
 
@@ -504,7 +533,7 @@ include_reasoning
 
 based on catalog capabilities.
 
-`ServiceTier` is mapped to provider routing.
+`serviceTier` is mapped to provider routing.
 
 ### Custom
 
@@ -540,7 +569,7 @@ Examples include:
 ---
 ## Thinking
 
-Thinking uses a single flag:
+Thinking uses a single `thinkingLevel` flag:
 
 ```ts
 ThinkingLevel =
@@ -559,9 +588,9 @@ ThinkingLevel =
 * `dynamic` — allows the model to decide.
 * `minimal`, `low`, `medium`, `high`, `xhigh` — request increasing levels of reasoning where supported.
 
-Thinking can be configured on the `Agent` or through `ModelProvider.*(..., { thinking_level })`.
+Thinking can be configured on the `Agent` or through `ModelProvider.*(..., { thinkingLevel })`.
 
-Per-run overrides are not supported. Create an agent per thinking level or switch the `agent` instance.
+The per-run `thinkingLevel` option can override the agent default for one request.
 
 Internally, thinking is normalized to:
 
@@ -621,6 +650,9 @@ CacheRetention =
 
 Reuse the same session ID across turns when cache affinity is desired.
 
+In browser runtimes only CORS-safe attribution headers are sent; affinity
+still flows via `promptCacheKey` provider options, never via headers.
+
 ### Explicit Caches
 
 `cachedContentId` reuses a previously created Google `cachedContents/...` resource.
@@ -642,13 +674,13 @@ The following cache helpers are exported:
 For the best cache reuse, keep `instructions` and the tool set stable. Put changing data in user messages or `additionalContext`.
 
 ---
-## ServiceTier
+## serviceTier
 
 ```ts
-ServiceTier = "flex" | "priority";
+serviceTier = "flex" | "priority";
 ```
 
-Omit `ServiceTier` for standard routing.
+Omit `serviceTier` for standard routing.
 
 Where supported, it is passed as `service_tier` or translated into provider-specific routing.
 
@@ -669,6 +701,9 @@ It provides:
 .fail(...)
 .on(...)
 .off(...)
+.cancel()
+.onCancel(...)
+.isCancelled()
 ```
 
 ### StreamEvent
@@ -721,6 +756,13 @@ Use:
 * `subagent_complete` for each completed worker during streaming multi-agent runs.
 * `usage` for interim usage counts.
 * `done` for final usage and completion information.
+
+Breaking out of `for await` auto-cancels. Cancellation joins your
+`AbortSignal` and stream cancellation into one linked controller, so
+`controller.abort()` and `stream.cancel()` both stop the HTTP request.
+Abort rejects with `AbortError` (never retried) and never resolves partial
+results. `agent.run(prompt, { stream: true, signal })` exposes the same
+`cancel` handle.
 
 `SSEParser` provides:
 
@@ -833,6 +875,32 @@ ProviderRawData {
 Sensitive keys are redacted.
 
 ---
+## Errors
+
+Provider failures throw `AgentAccelProviderError` — one actionable line,
+never a wire dump:
+
+```text
+[openrouter/nvidia/nemotron-3.5-lightning:free] request failed (404): No endpoints found that support input video
+```
+
+Raw details (`statusCode`, `url`, truncated body) stay attached as
+non-enumerable properties: available programmatically, invisible in runtime
+dumps. URL query strings are stripped (keys sometimes live there); headers
+and cookies are never attached. Helpers:
+
+* `toConciseProviderError(err, providerId, modelId)` — collapse any provider error.
+* `assertModalitiesSupported(context, providerId, modelId)` — pre-request modality gate.
+
+Examples print failures as exactly one line via `examples/_shared.ts`:
+
+```ts
+const res = await agent.run([...]).catch(fail);
+// ✖ [provider/model] request failed (404): ...
+// exit 1, no stack dump
+```
+
+---
 ## Model Catalog
 
 The model catalog is backed by:
@@ -854,6 +922,11 @@ Refresh the catalog with:
 ```bash
 bun run update-models
 ```
+
+Upstream data lags on some inputs (e.g. `gpt-4o` accepts audio). Record
+verified corrections in `MODALITY_OVERRIDES` in `src/models/catalog.ts`
+(keyed `provider/model`, merged over the snapshot) — never edit the JSON
+directly, a refresh would wipe it.
 ### Catalog Helpers
 
 * `getModelFromCatalog(provider, modelId)` → `ModelSpec | undefined`, including alias and global fallback handling. Use it for context-window, pricing, and modality checks.
@@ -950,10 +1023,11 @@ Supported content parts include:
 * `ToolCallPart { type:"tool_call", id, name, arguments, rawArguments?, thoughtSignature? }`
 * `ToolResultPart { type:"tool_result", id, name, result, isError? }`
 * `ImagePart { type:"image", image, mimeType? }`
-* `AudioPart`
-* `VideoPart`
+* `AudioPart { type:"audio", audio, mimeType? }`
+* `VideoPart { type:"video", video, mimeType? }`
+* `FilePart { type:"file", file, mimeType?, filename? }` — PDFs/documents.
 
-`image`, `audio`, and `video` inputs accept:
+`image`, `audio`, `video`, and `file` inputs accept:
 
 * data URLs
 * remote `http(s)` URLs
@@ -974,7 +1048,19 @@ Supported content parts include:
 
 `inferMimeType(path)` infers the MIME type from a file extension.
 
-Media normalization is handled automatically by providers.
+Media normalization is handled automatically by providers (mapped to Vercel V4 `file` parts).
+
+Provider matrix: text + image + wav/mp3 audio + PDF work on all supported
+providers. Video works on Gemini only.
+
+Before any network call, the executor checks `image` / `audio` / `video` /
+`file`-as-PDF parts against the catalog's `modalities.input` for that
+provider/model and fails fast with a one-line error naming the gap
+(`assertModalitiesSupported`). Models absent from the catalog (custom
+providers, dynamic routers) are skipped — the provider endpoint decides and
+its verdict surfaces as a concise error (see [Errors](#errors)). Verified
+catalog corrections live in `MODALITY_OVERRIDES` (`src/models/catalog.ts`),
+never in the gitignored snapshot.
 
 ---
 ## Tokens
@@ -1003,18 +1089,36 @@ Available helpers:
 ## Examples
 
 ```bash
-bun run examples/chat.ts
+bun run examples/06-chat.ts
 # persistent CLI, /model "..." /level <lvl> /help /exit
 
-bun run examples/sub-agents.ts
+bun run examples/05-sub-agents.ts
 # fixed researcher + critic pipeline
 
-bun run examples/multi_agent.ts
+bun run examples/04-multi_agent.ts
 # dynamic spawn_subagents demo
 
-bun run examples/metadata.ts
+bun run examples/01-metadata.ts
 # usage + raw inspection
+
+bun run examples/02-function_calling.ts
+# single tool call
+
+bun run examples/03-multimodal_image.ts [./photo.png]
+# image input (remote URL default, local path optional)
+
+bun run examples/07-multimodal_audio.ts
+# audio input
+
+bun run examples/08-multimodal_document.ts
+# PDF/file input
+
+bun run examples/09-multimodal_video.ts
+# video input (video-capable model required)
 ```
+
+Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
+so failures print one line and exit `1` — no stack dumps.
 
 The chat example persists conversations to:
 
@@ -1045,14 +1149,21 @@ bun run update-models # refresh src/data/models.dev.json
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
-├── providers/  # google, openai, opencode, openrouter, custom, registry, base
-├── models/     # catalog parser
+├── ai-sdk/     # the only provider backend: provider factories, converters,
+│               # executor, call options/retries, concise errors, registry
+├── models/     # catalog parser + verified modality overrides
 ├── data/       # models.dev snapshot (gitignored)
 ├── tools/      # tool(), schema, executor
 ├── streaming/  # event stream, SSE parser
 ├── tokens/     # estimator
 ├── types/      # agent, core, message, model, response, tool
-└── utils/      # cache, env, headers, media, session
+└── utils/      # base64, cache, env, headers, media, serialization, session
+examples/
+├── 01-metadata.ts  02-function_calling.ts  03-multimodal_image.ts
+├── 04-multi_agent.ts  05-sub-agents.ts  06-chat.ts
+├── 07-multimodal_audio.ts  08-multimodal_document.ts
+├── 09-multimodal_video.ts  _shared.ts
+test/            # 90+ tests mirroring the above
 ```
 
 ---

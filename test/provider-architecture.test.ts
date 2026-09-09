@@ -24,7 +24,7 @@ import type {
   OpenCodeChatRequest,
   OpenCodeResponsesRequest,
   OpenRouterChatRequest,
-} from "../src/index.ts";
+} from "../src/types/provider-payloads.ts";
 
 describe("Single-File Provider Architecture & Provider-Specific Types", () => {
   it("should have all providers defined in single .ts files and registered", () => {
@@ -141,13 +141,10 @@ describe("Single-File Provider Architecture & Provider-Specific Types", () => {
     expect((google as any).cleanModelId("google/gemini-3.5-flash-lite")).toBe("gemini-3.5-flash-lite");
     expect((google as any).cleanModelId("gemini-3.7-flash")).toBe("gemini-3.7-flash");
 
-    // Wire payload for Gemini 3 uses thinkingLevel without thinkingBudget
-    const payload = await (google as any).buildPayload(
-      "gemini-3.7-flash",
-      { messages: [{ role: "user", content: "Hello" }] },
-      { thinking: { enabled: true, level: "high" } }
-    );
-    expect(payload.generationConfig?.thinkingConfig?.thinkingLevel).toBe("HIGH");
-    expect(payload.generationConfig?.thinkingConfig?.thinkingBudget).toBeUndefined();
+    // Thinking maps to Vercel providerOptions for Gemini 3 (level, no budget field)
+    const { mapThinkingToProviderOptions } = await import("../src/index.ts");
+    const providerOptions = mapThinkingToProviderOptions("google", { enabled: true, level: "high" });
+    expect((providerOptions as any).google?.thinkingConfig?.thinkingLevel).toBe("high");
+    expect((providerOptions as any).google?.thinkingConfig?.thinkingBudget).toBeUndefined();
   });
 });

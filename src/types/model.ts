@@ -7,6 +7,7 @@ import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 // Provider identity — battle-tested: matches models.dev provider keys
 // Known first-class: google | opencode | openrouter, plus aliases. Allow string for future.
 // ---------------------------------------------------------------------------
+/** Supported provider IDs plus arbitrary custom prefixes. */
 export type ProviderId = "google" | "opencode" | "opencode-zen" | "opencode-go" | "openrouter" | "openai" | (string & {});
 
 // ---------------------------------------------------------------------------
@@ -107,6 +108,7 @@ export interface ModelPricing {
 // ModelSpec — battle-tested, single source from models.dev
 // Keep legacy aliases contextWindow/maxOutputTokens for BC, plus full raw.
 // ---------------------------------------------------------------------------
+/** Normalized model catalog entry used for routing, validation, and pricing. */
 export interface ModelSpec {
   id: string;
   provider: ProviderId;
@@ -139,6 +141,7 @@ export interface ModelSpec {
 // ---------------------------------------------------------------------------
 // Provider plumbing — unchanged API
 // ---------------------------------------------------------------------------
+/** Request controls passed from Agent to a provider implementation. */
 export interface ProviderRequestOptions {
   apiKey?: string;
   baseUrl?: string;
@@ -155,6 +158,7 @@ export interface ProviderRequestOptions {
   maxRetryDelayMs?: number;
 }
 
+/** Auditable request/response wire payload captured in AgentResponse. */
 export interface ProviderRawData {
   request: {
     url: string;
@@ -170,12 +174,11 @@ export interface ProviderRawData {
   };
 }
 
+/** Normalized single provider generation result. */
 export interface ProviderGenerateResult {
   text: string;
   thinking?: string;
   thoughtSignature?: string;
-  thinkingSignature?: string;
-  textSignature?: string;
   toolCalls?: ToolCallRecord[];
   usage: TokenUsage;
   finishReason?: string;
@@ -186,6 +189,7 @@ export interface ProviderGenerateResult {
   durationMs: number;
 }
 
+/** Provider contract implemented by the AI-SDK transport layer. */
 export interface Provider {
   id: ProviderId;
   name: string;

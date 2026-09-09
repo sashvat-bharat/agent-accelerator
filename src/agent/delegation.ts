@@ -3,14 +3,15 @@ import { tool } from "../tools/tool.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { SubAgentExecutionMetadata } from "../types/response.ts";
 import type { Agent } from "./agent.ts";
-import { resolveModel } from "../providers/registry.ts";
+import { resolveModel } from "../ai-sdk/registry.ts";
 
+/** Task descriptor accepted by the automatic `spawn_subagents` tool. */
 export interface DynamicSubagentTask {
   name: string;
   role?: string;
   instructions: string;
   task: string;
-  /** Optional per-subagent model override; if omitted inherits parent SubAgentModel (agent-accel parity). */
+  /** Optional per-subagent model override; if omitted inherits parent subAgentModel. */
   model?: string;
 }
 
@@ -65,37 +66,77 @@ function providerOf(modelStr: string | any | undefined): string | undefined {
  * Creates a dynamic sub-agent spawning tool.
  * Allows ANY provider/model for any sub-agent (no restriction). If LLM requests a model whose API key is missing, gracefully falls back to parent model instead of failing.
  */
+/**
+ * Creates the built-in tool that runs up to eight configured sub-agents concurrently.
+ *
+ * @example `new Agent({ model, enableSubagents: true, subAgentModel: model })`
+ */
 export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
   return tool({
     name: "spawn_subagents",
     description:
       "Dynamically creates and runs one or more specialized sub-agents concurrently to handle sub-tasks. " +
       "Use this whenever a query or task benefits from modular delegation, parallel research, multi-perspective analysis, or division of labor. " +
-      "All sub-agent outputs are aggregated and returned inside structured XML tags.",
+      "All sub-agent outputs are aggregated and returned inside structured XML tags. " +
+      "Every entry in tasks MUST include all of: name (UPPER_SNAKE tag), instructions (system prompt for the worker), task (concrete assignment for the worker). " +
+      "Example: {\"tasks\": [{\"name\": \"HBM_PRICING_ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst. Return sourced findings only.\", \"task\": \"Research HBM3E pricing, LTA structures, and supply constraints.\"}]}",
     input: z.object({
       tasks: z
         .array(
           z.object({
             name: z
               .string()
-              .describe("Unique UPPER_SNAKE role tag dynamically derived from task (e.g. RESEARCH_ANALYST, MARKET_ANALYST, CODE_REVIEWER)"),
+              .optional()
+              .describe("Unique UPPER_SNAKE role tag dynamically derived from task (e.g. RESEARCH_ANALYST, MARKET_ANALYST, CODE_REVIEWER). Auto-generated when omitted."),
             role: z
               .string()
               .optional()
               .describe("Short persona / domain expertise for this sub-agent"),
             instructions: z
               .string()
-              .describe("Personalized system prompt crafted by Main Agent to increase instruction following"),
+              .optional()
+              .describe("Personalized system prompt crafted by Main Agent to increase instruction following. Falls back to task when omitted."),
             task: z
               .string()
-              .describe("Specific research/task prompt for this sub-agent"),
+              .optional()
+              .describe("Specific research/task prompt for this sub-agent. REQUIRED — falls back to instructions when omitted."),
           })
         )
-        .describe("Array of sub-agents to spawn — each gets a personalized prompt and executes strictly on the configured SubAgentModel"),
+        .min(1)
+        .describe("Array of sub-agents to spawn — each gets a personalized prompt and executes strictly on the configured subAgentModel"),
     }),
     execute: async ({ tasks }, context) => {
       if (!tasks || tasks.length === 0) {
-        return "No sub-agent tasks provided.";
+        return "Error: tasks array is empty. Provide at least one entry shaped like {\"name\": \"HBM_PRICING_ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"<system prompt>\", \"task\": \"<concrete assignment>\"}. Fix the arguments and call spawn_subagents again.";
+      }
+      const repaired = tasks.map((entry: Record<string, unknown>, index: number) => {
+        const rec = (entry ?? {}) as Record<string, unknown>;
+        const taskText =
+          (typeof rec["task"] === "string" && rec["task"].trim()) ||
+          (typeof rec["instructions"] === "string" && (rec["instructions"] as string).trim()) ||
+          "";
+        const instructionsText =
+          (typeof rec["instructions"] === "string" && (rec["instructions"] as string).trim()) ||
+          (typeof rec["task"] === "string" && (rec["task"] as string).trim()) ||
+          (typeof rec["role"] === "string" && (rec["role"] as string).trim()) ||
+          "";
+        const nameText =
+          (typeof rec["name"] === "string" && (rec["name"] as string).trim()) ||
+          `SUBAGENT_${index + 1}`;
+        const roleText =
+          typeof rec["role"] === "string" ? ((rec["role"] as string).trim() || undefined) : undefined;
+        return { ...rec, name: nameText, role: roleText, instructions: instructionsText, task: taskText };
+      });
+      const invalid = repaired.findIndex((r) => !r.task);
+      if (invalid >= 0) {
+        const keys = Object.keys((tasks[invalid] ?? {}) as object).join(", ") || "(none)";
+        return (
+          `Error: tasks[${invalid}].task is missing and could not be inferred. ` +
+          `Received keys: [${keys}]. ` +
+          `Each tasks[] entry MUST include task (concrete assignment) plus instructions (system prompt) and name (UPPER_SNAKE tag). ` +
+          `Example: {\"name\": \"HBM_PRICING_ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst.\", \"task\": \"Research HBM3E pricing.\"}. ` +
+          `Fix the entry and call spawn_subagents again.`
+        );
       }
       if (context?.signal?.aborted) {
         throw new Error("Sub-agent spawning aborted");
@@ -103,8 +144,8 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
 
       if (!parentAgent.subagentModel) {
         throw new Error(
-          "[Agent Accelerator] Cannot spawn sub-agents: SubAgentModel is not configured. " +
-          "Please specify SubAgentModel in Agent config or set the SUB_AGENT_MODEL environment variable."
+          "[Agent Accelerator] Cannot spawn sub-agents: subAgentModel is not configured. " +
+          "Please specify subAgentModel in Agent config or set the SUB_AGENT_MODEL environment variable."
         );
       }
 
@@ -113,7 +154,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
       const subagentMetadataList: SubAgentExecutionMetadata[] = [];
       const seenNames = new Set<string>();
 
-      const limitedTasks = tasks.slice(0, 8);
+      const limitedTasks = repaired.slice(0, 8);
       const executedResults = await Promise.all(
         limitedTasks.map(async (t) => {
           const startTime = Date.now();
@@ -126,7 +167,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           seenNames.add(deduped);
           const subagentName = deduped;
 
-          // Strictly use configured SubAgentModel (no LLM generation or fallback to parent model)
+          // Strictly use configured subAgentModel
           const chosenModel: any = parentAgent.subagentModel;
           // Normalize chosenModel to string|ModelSpec handling
           let chosenModelStrForProvider = typeof chosenModel === "string" ? chosenModel : (chosenModel as any)?.model ?? (chosenModel as any)?.id ?? String(chosenModel);
@@ -154,11 +195,11 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               model: modelToUse,
               apiKey,
               baseUrl,
-              ThinkingLevel: parentAgent.thinkingConfig?.level,
+              thinkingLevel: parentAgent.thinkingConfig?.level,
               sessionId: childSessionId,
               // Inherit cache & service tier from parent for max hit
               cache: parentAgent.cacheConfig,
-              ServiceTier: parentAgent.serviceTier,
+              serviceTier: parentAgent.serviceTier,
               headers: parentAgent.customHeaders,
               maxTurns: parentAgent.maxTurns,
             });
@@ -250,12 +291,18 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
   });
 }
 
+/** Optional name/description wrapper for converting an Agent into a tool. */
 export interface AgentAsToolTarget {
   name?: string;
   description?: string;
   agent: Agent;
 }
 
+/**
+ * Converts one agent into a `{ task: string }` ToolDefinition.
+ *
+ * @example `const researchTool = researcher.asTool("research");`
+ */
 export function agentToTool(
   input: Agent | AgentAsToolTarget
 ): ToolDefinition {
@@ -331,6 +378,11 @@ export function agentToTool(
   });
 }
 
+/**
+ * Converts a list of agents into uniquely named delegation tools.
+ *
+ * @example `const tools = buildAgentTools([researcher, reviewer]);`
+ */
 export function buildAgentTools(
   agents?: (Agent | AgentAsToolTarget)[]
 ): Record<string, ToolDefinition> {

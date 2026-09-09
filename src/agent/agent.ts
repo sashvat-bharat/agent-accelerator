@@ -5,30 +5,37 @@ import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
-import { resolveModel } from "../providers/registry.ts";
+import { resolveModel } from "../ai-sdk/registry.ts";
 import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
 import { runAgentLoop, streamAgentLoop } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
-import { tool } from "../tools/tool.ts";
 import { validateModelThinking } from "../models/catalog.ts";
+import { resolveEffectiveThinking } from "../ai-sdk/options.ts";
 
+/** Thrown when dynamic sub-agent spawning is enabled without an explicit model. */
 export class SubAgentModelError extends Error {
   readonly parentModel?: string;
 
+  /**
+   * Creates a configuration error with the missing sub-agent model and a
+   * concrete fix for the parent model setup.
+   *
+   * @param parentModel The parent model that attempted to enable delegation.
+   */
   constructor(parentModel?: string) {
     const parentName = parentModel || "your main model";
     const formatted =
-      `\x1b[31m[Agent Accelerator] Missing Configuration: SubAgentModel is required when EnableSubagents is true\x1b[0m\n` +
+      `\x1b[31m[Agent Accelerator] Missing Configuration: subAgentModel is required when enableSubagents is true\x1b[0m\n` +
       `  \x1b[1mMain Agent Model:\x1b[0m ${parentName}\n` +
-      `  \x1b[1mIssue:\x1b[0m            Sub-agent delegation was enabled (EnableSubagents: true), but no model was assigned for sub-agents.\n` +
+      `  \x1b[1mIssue:\x1b[0m            Sub-agent delegation was enabled (enableSubagents: true), but no model was assigned for sub-agents.\n` +
       `                    Sub-agents must never run on unverified models or default implicitly.\n\n` +
       `  \x1b[36m💡 How to fix:\x1b[0m\n` +
-      `    1. Pass SubAgentModel in your Agent configuration:\n` +
+      `    1. Pass subAgentModel in your Agent configuration:\n` +
       `       const agent = new Agent({\n` +
       `         model: "${parentName}",\n` +
-      `         EnableSubagents: true,\n` +
-      `         SubAgentModel: "provider/model-id", // Explicit sub-agent model\n` +
+      `         enableSubagents: true,\n` +
+      `         subAgentModel: "provider/model-id", // Explicit sub-agent model\n` +
       `       });\n\n` +
       `    2. Or set the SUB_AGENT_MODEL environment variable in your .env or shell:\n` +
       `       SUB_AGENT_MODEL="provider/model-id"`;
@@ -43,24 +50,73 @@ export class SubAgentModelError extends Error {
   }
 }
 
+/**
+ * Stateful, tool-capable LLM agent with unified provider routing.
+ *
+ * @example
+ * ```ts
+ * const agent = new Agent({
+ *   model: "google/gemini-3.5-flash-lite",
+ *   instructions: "Be concise and factual.",
+ *   tools: { get_status },
+ * });
+ * const response = await agent.run("Check the status");
+ * console.log(response.text);
+ * ```
+ */
 export class Agent {
+  /** Display name. */
   readonly name: string;
+  /** Delegation/tool description. */
   readonly description: string;
+  /** Stable system instructions. */
   instructions: string;
+  /** Original model string or catalog spec used for resolution. */
   readonly modelStringOrSpec: string | any;
+  /** Configured dynamic sub-agent model, if enabled. */
   readonly subagentModel?: string | any;
+  /** Registered model-callable tools. */
   readonly tools: Record<string, ToolDefinition> = {};
+  /** Normalized reasoning configuration. */
   readonly thinkingConfig?: ThinkingConfig;
+  /** Cache retention/session settings. */
   readonly cacheConfig?: CacheConfig;
+  /** Provider service tier. */
   readonly serviceTier?: ServiceTier;
+  /** Maximum model/tool turns per run. */
   readonly maxTurns: number;
+  /** Session ID used for history and cache affinity. */
   readonly sessionId: string;
+  /** Explicit API key override. */
   readonly apiKey?: string;
+  /** Explicit provider endpoint override. */
   readonly baseUrl?: string;
+  /** Headers applied to requests. */
   readonly customHeaders?: Record<string, string>;
+  /** Mutable conversation context. */
   readonly context: AgentContext;
+  /** Whether history is cleared around each run. */
   readonly stateless: boolean;
 
+  /**
+   * Creates an agent and registers its model, tools, cache, and delegation settings.
+   *
+   * @param config Agent configuration. `model` may be a provider/model string,
+   * a catalog spec, or a model-provider instance.
+   *
+   * @example
+   * ```ts
+   * const agent = new Agent({
+   *   model: "google/gemini-3.5-flash-lite",
+   *   instructions: "Be concise and factual.",
+   *   thinkingLevel: "medium",
+   *   tools: { get_status },
+   * });
+   *
+   * const response = await agent.run("Check the status");
+   * console.log(response.text);
+   * ```
+   */
   constructor(config: AgentConfig) {
     this.name = config.name || "Agent";
     this.description = config.description || "AI Agent powered by Agent Accelerator";
@@ -75,8 +131,7 @@ export class Agent {
     } else {
       this.modelStringOrSpec = rawModel || getModel();
     }
-    // DX2: only SubAgentModel (bloatfree) — also accept subagentModel lowercase for backwards compat during transition
-    const subAgentRaw = (config as any).SubAgentModel ?? (config as any).subagentModel;
+    const subAgentRaw = config.subAgentModel;
     if (subAgentRaw && typeof subAgentRaw === "object" && "model" in subAgentRaw) {
       this.subagentModel = (subAgentRaw as any).model;
     } else if (subAgentRaw && typeof subAgentRaw === "object" && "id" in subAgentRaw && "provider" in subAgentRaw) {
@@ -90,8 +145,8 @@ export class Agent {
     this.maxTurns = config.maxTurns ?? 10;
     this.sessionId = config.sessionId || config.cache?.sessionId || createSessionId();
 
-    // DX4: single ThinkingLevel flag — also inherit from ModelProviderInstance if config.ThinkingLevel not set
-    const mpThinking = (rawModel as any)?.thinkingLevel ?? (rawModel as any)?.thinking_level;
+    // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
+    const mpThinking = (rawModel as any)?.thinkingLevel;
     this.thinkingConfig = normalizeThinking(config, mpThinking);
 
     // DX5: cache retention short|medium|long, undefined = no explicit
@@ -102,8 +157,7 @@ export class Agent {
     // C11: wire explicit cachedContentId into context for Google explicit cache
     const initialCachedId = (this.cacheConfig as any)?.cachedContentId;
 
-    // DX6: ServiceTier only flex|priority
-    this.serviceTier = config.ServiceTier;
+    this.serviceTier = config.serviceTier;
     this.stateless = config.stateless ?? false;
 
     // Tools registration
@@ -123,49 +177,15 @@ export class Agent {
       }
     }
 
-    if (config.functions && Array.isArray(config.functions)) {
-      for (const fn of config.functions) {
-        const fnName = fn.name || `func_${Object.keys(this.tools).length}`;
-        this.tools[fnName] = tool({
-          name: fnName,
-          description: `Executes function ${fnName}`,
-          execute: async (args: any) => {
-            if (typeof args === "object" && args !== null) {
-              const argValues = Object.values(args);
-              return fn(...argValues);
-            }
-            return fn(args);
-          },
-        });
-      }
-    }
 
-    // Dedicated SubAgents registration (subagents: [critique, researcher])
-    const rawSubagents = (config as any).subagents;
-    if (Array.isArray(rawSubagents)) {
-      const subagentTools = buildAgentTools(rawSubagents);
+    if (Array.isArray(config.subagents)) {
+      const subagentTools = buildAgentTools(config.subagents);
       for (const [toolName, toolDef] of Object.entries(subagentTools)) {
         this.tools[toolName] = toolDef;
       }
     }
 
-    // DX3: only CustomAgents (renamed from agents)
-    const rawCustom = (config as any).CustomAgents ?? (config as any).customAgents;
-    if (rawCustom && Array.isArray(rawCustom)) {
-      const agentTools = buildAgentTools(rawCustom);
-      for (const [toolName, toolDef] of Object.entries(agentTools)) {
-        this.tools[toolName] = toolDef;
-      }
-    }
-
-    // DX8: Dynamic Subagents Spawning (EnableSubagents: true or subagents: true)
-    const enableSubs =
-      (config as any).EnableSubagents === true ||
-      (config as any).enableSubagents === true ||
-      (config as any).EnableSubAgents === true ||
-      rawSubagents === true ||
-      (config as any).subAgents === true;
-    if (enableSubs === true) {
+    if (config.enableSubagents === true) {
       if (!this.subagentModel) {
         throw new SubAgentModelError(
           typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : (this.modelStringOrSpec as any)?.id
@@ -198,6 +218,7 @@ export class Agent {
     return base || undefined;
   }
 
+  /** Clears conversation messages and provider thought signatures while keeping configuration. */
   reset(): void {
     this.context.messages = [];
     this.context.thoughtSignatures = [];
@@ -231,6 +252,10 @@ export class Agent {
     this.context.addUserMessage(prompt);
   }
 
+  /**
+   * Runs one or more model/tool turns and resolves to a normalized AgentResponse.
+   * @example `const response = await agent.run("Summarize this document");`
+   */
   run(
     prompt: string | ContentPart[],
     options?: AgentRunOptions
@@ -248,6 +273,9 @@ export class Agent {
         hybrid.on = s.on.bind(s);
         hybrid.off = s.off.bind(s);
         hybrid.result = s.result.bind(s);
+        hybrid.cancel = s.cancel.bind(s);
+        hybrid.onCancel = s.onCancel.bind(s);
+        hybrid.isCancelled = s.isCancelled.bind(s);
         // also expose push/end/fail for compat, though not needed by caller
         return hybrid;
       }
@@ -255,7 +283,7 @@ export class Agent {
     }
 
     const resolved = resolveModel(this.modelStringOrSpec);
-    const effectiveLevel = (options as any)?.ThinkingLevel || (options as any)?.thinkingLevel || this.thinkingConfig?.level;
+    const effectiveLevel = options?.thinkingLevel || this.thinkingConfig?.level;
     if (effectiveLevel) {
       validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
     }
@@ -265,7 +293,7 @@ export class Agent {
       apiKey: this.apiKey,
       baseUrl: this.baseUrl,
       headers: { ...(this.customHeaders ?? {}), ...(options?.headers ?? {}) },
-      thinking: this.thinkingConfig,
+      thinking: resolveEffectiveThinking(this.thinkingConfig, options?.thinkingLevel),
       cache: this.stateless
         ? { sessionId: options?.sessionId || this.sessionId }
         : { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
@@ -294,6 +322,10 @@ export class Agent {
     return promise as any;
   }
 
+  /**
+   * Convenience API: non-streaming alias for run, or a text-delta async iterable when streaming.
+   * @example `const response = await agent.ask("What is the answer?");`
+   */
   ask(
     prompt: string | ContentPart[],
     optionsOrStream?: boolean | AgentRunOptions
@@ -324,6 +356,9 @@ export class Agent {
         },
         result: () => stream.result(),
         on: (evt: string, fn: any) => stream.on(evt, fn),
+        cancel: () => stream.cancel(),
+        onCancel: (fn: any) => stream.onCancel(fn),
+        isCancelled: () => stream.isCancelled(),
       };
       // Make await work (resolves to AgentResponse)
       const resultPromise = stream.result();
@@ -335,12 +370,21 @@ export class Agent {
     return this.run(prompt, runOpts);
   }
 
+  /**
+   * Starts a stream of text, thinking, tool, sub-agent, usage, and completion events.
+   * @example
+   * ```ts
+   * for await (const event of agent.stream("Explain this")) {
+   *   if (event.type === "text_delta") process.stdout.write(event.delta ?? "");
+   * }
+   * ```
+   */
   stream(
     prompt: string | ContentPart[],
     options?: AgentRunOptions
   ): AssistantMessageEventStream {
     const resolved = resolveModel(this.modelStringOrSpec);
-    const effectiveLevel = (options as any)?.ThinkingLevel || (options as any)?.thinkingLevel || this.thinkingConfig?.level;
+    const effectiveLevel = options?.thinkingLevel || this.thinkingConfig?.level;
     if (effectiveLevel) {
       validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
     }
@@ -350,7 +394,7 @@ export class Agent {
       apiKey: this.apiKey,
       baseUrl: this.baseUrl,
       headers: { ...(this.customHeaders ?? {}), ...(options?.headers ?? {}) },
-      thinking: this.thinkingConfig,
+      thinking: resolveEffectiveThinking(this.thinkingConfig, options?.thinkingLevel),
       cache: this.stateless
         ? { sessionId: options?.sessionId || this.sessionId }
         : { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
@@ -477,9 +521,10 @@ export class Agent {
   }
 }
 
+/** Normalizes the public `thinkingLevel` flag into provider-neutral thinking settings. */
 export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): ThinkingConfig | undefined {
-  // DX4: only ThinkingLevel flag, values: none, dynamic, minimal, low, medium, high, xhigh
-  const rawLevel = (config as any).ThinkingLevel ?? (config as any).thinkingLevel ?? (config as any).thinking_level ?? fallbackLevel;
+  // DX4: only thinkingLevel, values: none, dynamic, minimal, low, medium, high, xhigh
+  const rawLevel = config.thinkingLevel ?? fallbackLevel;
   const level = rawLevel as ThinkingLevel | undefined;
 
   if (!level) return undefined;

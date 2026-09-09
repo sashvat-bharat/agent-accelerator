@@ -139,4 +139,59 @@ describe("End-to-End Agent Execution", () => {
       googleProvider.stream = originalStream;
     }
   });
+
+  it("should block an identical tool call in the immediately following turn", async () => {
+    const googleProvider = getProvider("google") as any;
+    const originalGenerate = googleProvider.generate.bind(googleProvider);
+    let modelTurns = 0;
+    let executions = 0;
+
+    googleProvider.generate = async (): Promise<ProviderGenerateResult> => {
+      modelTurns++;
+      if (modelTurns <= 2) {
+        return {
+          text: "",
+          toolCalls: [{ id: `repeat_${modelTurns}`, name: "get_status", arguments: { username: "Akshat Dwivedi" } }],
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          model: "mock-gemini",
+          provider: "google" as any,
+          raw: { request: {} as any },
+          durationMs: 1,
+        };
+      }
+      return {
+        text: "Done",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        model: "mock-gemini",
+        provider: "google" as any,
+        raw: { request: {} as any },
+        durationMs: 1,
+      };
+    };
+
+    try {
+      const agent = new Agent({
+        model: "google/gemini-3.5-flash-lite",
+        apiKey: "mock-key",
+        tools: {
+          get_status: tool({
+            description: "Checks status.",
+            execute: async () => {
+              executions++;
+              return "Valid";
+            },
+          }),
+        },
+      });
+      const result = await agent.run("Check status");
+
+      expect(executions).toBe(1);
+      expect(result.toolResults.length).toBe(2);
+      expect(result.toolResults[1]!.isError).toBe(true);
+      expect(String(result.toolResults[1]!.result)).toContain("called again immediately");
+      expect(result.text).toBe("Done");
+    } finally {
+      googleProvider.generate = originalGenerate;
+    }
+  });
 });

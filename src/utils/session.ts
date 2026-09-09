@@ -1,16 +1,22 @@
-import { randomUUID as nodeRandomUUID } from "node:crypto";
 import { clampCacheKey } from "./cache.ts";
 
 /**
  * Creates or formats a unique session ID for prompt caching affinity (clamped to 64 chars like agent-accel)
  */
+/**
+ * Creates a unique, provider-safe session ID for cache affinity.
+ *
+ * @example `const sessionId = createSessionId("checkout");`
+ */
 export function createSessionId(prefix = "accel"): string {
   let id: string;
   try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      id = `${prefix}-${crypto.randomUUID()}`;
+    const webCrypto =
+      (globalThis as any)?.crypto ?? (typeof crypto !== "undefined" ? crypto : undefined);
+    if (webCrypto && typeof webCrypto.randomUUID === "function") {
+      id = `${prefix}-${webCrypto.randomUUID()}`;
     } else {
-      id = `${prefix}-${nodeRandomUUID()}`;
+      throw new Error("no randomUUID");
     }
   } catch {
     // Fallback — still clamp

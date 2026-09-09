@@ -1,25 +1,31 @@
 import { describe, it, expect } from "bun:test";
 import {
   Agent,
-  agentToTool,
+  SubAgent,
   buildAgentTools,
   createSubagentSpawnTool,
   AgentResponse,
 } from "../src/index.ts";
 
 describe("Multi-Agent Dynamic Delegation & Metadata", () => {
-  it("should convert sub-agents into callable tool definitions", () => {
-    const subAgent = new Agent({
+  it("should automatically inject subagents as tools on parent Agent", () => {
+    const subAgent = new SubAgent({
       name: "Domain_Specialist",
       description: "Handles specialized domain tasks",
       model: "google/gemini-3.5-flash-lite",
       apiKey: "TEST_KEY",
     });
 
-    const agentTool = agentToTool(subAgent);
-    expect(agentTool.name).toBe("domain_specialist");
-    expect(agentTool.description).toBe("Handles specialized domain tasks");
-    expect(agentTool.input).toBeDefined();
+    const leadAgent = new Agent({
+      model: "google/gemini-3.5-flash-lite",
+      apiKey: "TEST_KEY",
+      subagents: [subAgent],
+    });
+
+    expect(leadAgent.tools["domain_specialist"]).toBeDefined();
+    expect(leadAgent.tools["domain_specialist"]!.name).toBe("domain_specialist");
+    expect(leadAgent.tools["domain_specialist"]!.description).toBe("Handles specialized domain tasks");
+    expect(leadAgent.tools["domain_specialist"]!.input).toBeDefined();
 
     const toolsRecord = buildAgentTools([subAgent]);
     expect(toolsRecord["domain_specialist"]).toBeDefined();
@@ -30,8 +36,8 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
       name: "Root_Agent",
       model: "google/gemini-3.5-flash-lite",
       apiKey: "TEST_KEY",
-      SubAgentModel: "google/gemini-3.5-flash-lite",
-      subagents: true,
+      subAgentModel: "google/gemini-3.5-flash-lite",
+      enableSubagents: true,
     });
 
     expect(parentAgent.tools["spawn_subagents"]).toBeDefined();
@@ -45,7 +51,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(taskShape.instructions).toBeDefined();
   });
 
-  it("should strictly throw SubAgentModelError when EnableSubagents is true but SubAgentModel is missing", () => {
+  it("should strictly throw SubAgentModelError when enableSubagents is true but subAgentModel is missing", () => {
     const { SubAgentModelError } = require("../src/index.ts");
     const prevEnv = process.env.SUB_AGENT_MODEL;
     delete process.env.SUB_AGENT_MODEL;
@@ -56,9 +62,9 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
           name: "Test_Agent",
           model: "google/gemini-3.8-flash",
           apiKey: "TEST_KEY",
-          EnableSubagents: true,
+          enableSubagents: true,
         });
-      }).toThrow(/SubAgentModel is required when EnableSubagents is true/);
+      }).toThrow(/subAgentModel is required when enableSubagents is true/);
     } finally {
       if (prevEnv) process.env.SUB_AGENT_MODEL = prevEnv;
     }

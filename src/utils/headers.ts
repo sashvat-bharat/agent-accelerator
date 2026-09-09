@@ -2,10 +2,16 @@ import type { ProviderId } from "../types/model.ts";
 import type { CacheConfig } from "../types/core.ts";
 import { clampCacheKey } from "./cache.ts";
 
+export function isBrowserRuntime(): boolean {
+  try {
+    return typeof (globalThis as any).window !== "undefined" && typeof (globalThis as any).window.document !== "undefined";
+  } catch {
+    return false;
+  }
+}
+
 function getAgentAccelUserAgent(): string {
   try {
-    // match agent-accel's agent-accel-user-agent.ts: agent-accel (platform release; arch)
-    // use node:os if available, else fallback
     const os = (globalThis as any).process?.getBuiltinModule?.("node:os") ?? null;
     if (os) {
       return `agent-accel (${os.platform()} ${os.release()}; ${os.arch()})`;
@@ -14,23 +20,53 @@ function getAgentAccelUserAgent(): string {
   return "agent-accel (linux; x64)";
 }
 
+const BROWSER_DROPPED = new Set([
+  "user-agent",
+  "x-session-id",
+  "x-client-request-id",
+  "session_id",
+  "x-opencode-session",
+  "x-opencode-client",
+  "x-goog-api-client",
+]);
+
+function stripForBrowser(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (BROWSER_DROPPED.has(k.toLowerCase())) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Builds provider-specific session, cache-affinity, and attribution headers.
+ *
+ * Browser note: custom `x-*` session/affinity headers force a CORS preflight
+ * (`OPTIONS`) and providers only allow-list their own documented headers, so a
+ * preflight failure surfaces as a bare `TypeError: Failed to fetch`. In browser
+ * runtimes this returns only CORS-safe attribution headers (OpenRouter
+ * `HTTP-Referer` / `X-Title`); session affinity still flows via `providerOptions`
+ * (`promptCacheKey`), never via headers.
+ * @example `const headers = buildSessionHeaders("google", { sessionId: "session-123" });`
+ */
 export function buildSessionHeaders(
   provider: ProviderId | string,
   cache?: CacheConfig,
   customHeaders?: Record<string, string>,
   explicitSessionId?: string
 ): Record<string, string> {
+  const browser = isBrowserRuntime();
   const headers: Record<string, string> = {
-    "User-Agent": "Agent-Accelerator/1.0",
+    ...(browser ? {} : { "User-Agent": "Agent-Accelerator/1.0" }),
     ...(customHeaders ?? {}),
   };
 
   const rawSessionId = explicitSessionId || cache?.sessionId;
   const sessionId = clampCacheKey(rawSessionId);
 
-  if (sessionId) {
+  if (sessionId && !browser) {
     if (provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") {
-      // OpenCode session affinity headers for completions and responses endpoints
       headers["x-opencode-session"] = sessionId;
       headers["x-session-id"] = sessionId;
       headers["x-client-request-id"] = sessionId;
@@ -51,19 +87,24 @@ export function buildSessionHeaders(
       headers["x-client-request-id"] = sessionId;
       headers["session_id"] = sessionId;
     }
+  } else if (provider === "openrouter") {
+    if (!headers["HTTP-Referer"]) headers["HTTP-Referer"] = "https://sashvat.com";
+    if (!headers["X-Title"]) headers["X-Title"] = "Agent Accelerator";
   }
 
-  // Google client header attribution (always set for google provider)
-  if (provider === "google" && !headers["x-goog-api-client"]) {
+  if (provider === "google" && !browser && !headers["x-goog-api-client"]) {
     headers["x-goog-api-client"] = "agent-accel/1.0";
   }
 
-  // agent-accel also sets x-opencode-client via getAgentAccelUserAgent for opencode — ensure it persists even without sessionId
-  if ((provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") && !headers["x-opencode-client"]) {
-    // Even without sessionId, agent-accel still advertises client for attribution (helps opencode allow free models)
+  if (
+    (provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") &&
+    !browser &&
+    !headers["x-opencode-client"]
+  ) {
     headers["x-opencode-client"] = "agent-accel";
     headers["User-Agent"] = getAgentAccelUserAgent();
   }
 
+  if (browser) return stripForBrowser(headers);
   return headers;
 }

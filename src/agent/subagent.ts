@@ -4,6 +4,7 @@ import type { ToolDefinition } from "../types/tool.ts";
 import { agentToTool } from "./delegation.ts";
 import { getSubModel, getModel } from "../utils/env.ts";
 
+/** AgentConfig alias for a delegated worker agent. */
 export interface SubAgentConfig extends AgentConfig {}
 
 /**
@@ -12,8 +13,37 @@ export interface SubAgentConfig extends AgentConfig {}
  *
  * It inherits 100% of the capabilities of Agent, defaults to SUB_AGENT_MODEL,
  * and provides .asTool() and .toTool() for seamless registration into parent agents.
+ *
+ * @example
+ * ```ts
+ * const researcher = new SubAgent({
+ *   name: "researcher",
+ *   model: "google/gemini-3.5-flash-lite",
+ *   instructions: "Return only sourced findings.",
+ * });
+ * const lead = new Agent({ model, subagents: [researcher] });
+ * ```
  */
 export class SubAgent extends Agent {
+  /**
+   * Creates a delegated worker, defaulting to `SUB_AGENT_MODEL` or `MODEL`
+   * when `model` is omitted, and retaining short-lived cache state by default.
+   *
+   * @param config Worker configuration. It accepts the same options as `Agent`
+   * and can be registered with a parent via `subagents`.
+   *
+   * @example
+   * ```ts
+   * const researcher = new SubAgent({
+   *   name: "researcher",
+   *   model: "google/gemini-3.5-flash-lite",
+   *   instructions: "Return only sourced findings.",
+   * });
+   *
+   * const lead = new Agent({ model, subagents: [researcher] });
+   * const result = await researcher.run("Find the relevant facts");
+   * ```
+   */
   constructor(config: SubAgentConfig) {
     const resolvedModel =
       config.model ??
@@ -36,6 +66,7 @@ export class SubAgent extends Agent {
 
   /**
    * Converts this SubAgent instance into a standard ToolDefinition for parent agent tool execution.
+   * @example `const research = researcher.asTool("research");`
    */
   asTool(nameOverride?: string, descriptionOverride?: string): ToolDefinition {
     return agentToTool({
@@ -45,9 +76,7 @@ export class SubAgent extends Agent {
     });
   }
 
-  /**
-   * Fluent alias for .asTool()
-   */
+  /** Fluent alias for `.asTool()`. @example `const research = researcher.toTool();` */
   toTool(nameOverride?: string, descriptionOverride?: string): ToolDefinition {
     return this.asTool(nameOverride, descriptionOverride);
   }

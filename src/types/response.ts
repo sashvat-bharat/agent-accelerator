@@ -2,6 +2,7 @@ import type { TokenUsage } from "./core.ts";
 import type { ToolCallRecord, ToolResultRecord } from "./tool.ts";
 import type { ProviderRawData, ProviderId } from "./model.ts";
 
+/** Per-worker result and usage metadata attached to an AgentResponse. */
 export interface SubAgentExecutionMetadata {
   name: string;
   role?: string;
@@ -21,12 +22,11 @@ export interface SubAgentExecutionMetadata {
   error?: string;
 }
 
+/** JSON representation returned by AgentResponse.toJSON(). */
 export interface AgentResponseJSON {
   text: string;
   thinking?: string;
   thoughtSignature?: string;
-  thinkingSignature?: string;
-  textSignature?: string;
   toolCalls?: ToolCallRecord[];
   toolResults?: ToolResultRecord[];
   subagents?: SubAgentExecutionMetadata[];
@@ -40,12 +40,11 @@ export interface AgentResponseJSON {
   turns: number;
 }
 
+/** Normalized final result returned by every Agent run. */
 export class AgentResponse {
   readonly text: string;
   readonly thinking?: string;
   readonly thoughtSignature?: string;
-  readonly thinkingSignature?: string;
-  readonly textSignature?: string;
   readonly toolCalls: ToolCallRecord[];
   readonly toolResults: ToolResultRecord[];
   readonly subagents: SubAgentExecutionMetadata[];
@@ -58,12 +57,17 @@ export class AgentResponse {
   readonly raw: ProviderRawData;
   readonly turns: number;
 
+  /**
+   * Constructs a normalized response. Agent runs create this automatically;
+   * construct one directly when adapting a custom provider integration.
+   *
+   * @param data Response text, model metadata, usage, timing, and optional
+   * tool/sub-agent records.
+   */
   constructor(data: {
     text: string;
     thinking?: string;
     thoughtSignature?: string;
-    thinkingSignature?: string;
-    textSignature?: string;
     toolCalls?: ToolCallRecord[];
     toolResults?: ToolResultRecord[];
     subagents?: SubAgentExecutionMetadata[];
@@ -79,8 +83,6 @@ export class AgentResponse {
     this.text = data.text;
     this.thinking = data.thinking;
     this.thoughtSignature = data.thoughtSignature;
-    this.thinkingSignature = data.thinkingSignature;
-    this.textSignature = data.textSignature;
     this.toolCalls = data.toolCalls ?? [];
     this.toolResults = data.toolResults ?? [];
     this.subagents = data.subagents ?? [];
@@ -94,17 +96,17 @@ export class AgentResponse {
     this.turns = data.turns ?? 1;
   }
 
+  /** Returns the final assistant text. */
   toString(): string {
     return this.text;
   }
 
+  /** Returns a JSON-safe representation including usage, tools, and raw wire data. */
   toJSON(): AgentResponseJSON {
     return {
       text: this.text,
       thinking: this.thinking,
       thoughtSignature: this.thoughtSignature,
-      thinkingSignature: this.thinkingSignature,
-      textSignature: this.textSignature,
       toolCalls: this.toolCalls.length > 0 ? this.toolCalls : undefined,
       toolResults: this.toolResults.length > 0 ? this.toolResults : undefined,
       subagents: this.subagents.length > 0 ? this.subagents : undefined,
@@ -120,6 +122,7 @@ export class AgentResponse {
   }
 }
 
+/** Event names emitted by AssistantMessageEventStream. */
 export type StreamEventType =
   | "start"
   | "text_start"
@@ -137,6 +140,7 @@ export type StreamEventType =
   | "done"
   | "error";
 
+/** Payload for one streaming text, thinking, tool, usage, or lifecycle event. */
 export interface StreamEvent {
   type: StreamEventType;
   delta?: string;

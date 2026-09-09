@@ -30,7 +30,7 @@ describe("Model Resolution & Providers", () => {
 
   it("should create model instances with ModelProvider helper", () => {
     const genAI = ModelProvider.GoogleGenAI("gemini-3.5-flash-lite", "TEST_KEY", {
-      thinking_level: "low",
+      thinkingLevel: "low",
     });
     expect(genAI.model).toBe("google/gemini-3.5-flash-lite");
     expect(genAI.apiKey).toBe("TEST_KEY");
