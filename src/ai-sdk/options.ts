@@ -117,6 +117,19 @@ export function mapThinkingToProviderOptions(
 }
 
 /**
+ * Providers known to tolerate OpenAI-style prompt-cache/service-tier body
+ * params. Strict OpenAI-compatible endpoints (groq, ollama, …) 400 on unknown
+ * properties like `promptCacheKey`, so anything off this list gets session
+ * affinity via headers only (always harmless).
+ */
+const PROMPT_CACHE_KEY_PROVIDERS = new Set([
+  "openai",
+  "openrouter",
+  "opencode",
+  "opencode-go",
+]);
+
+/**
  * Maps serviceTier to provider-specific providerOptions.
  */
 export function mapServiceTierToProviderOptions(
@@ -131,6 +144,7 @@ export function mapServiceTierToProviderOptions(
   if (norm === "openai") {
     return { openai: { serviceTier: tier } };
   }
+  if (!PROMPT_CACHE_KEY_PROVIDERS.has(norm)) return {};
   return {
     openai: { serviceTier: tier },
     [norm]: { serviceTier: tier },
@@ -157,16 +171,16 @@ export function mapCacheToProviderOptions(
     mergeProviderOptions(out, { google: { cachedContent: cachedContentId } });
   }
   const affinity = sessionId || cache?.sessionId;
-  if (affinity) {
+  if (affinity && PROMPT_CACHE_KEY_PROVIDERS.has(norm)) {
     mergeProviderOptions(out, { openai: { promptCacheKey: affinity } });
-    if (norm !== "openai" && norm !== "google" && norm !== "gemini") {
+    if (norm !== "openai") {
       mergeProviderOptions(out, { [norm]: { promptCacheKey: affinity } });
     }
   }
   const retention = cache?.retention;
   if (retention && retention !== "implicit") {
     const promptCacheRetention = getPromptCacheRetention(retention, true);
-    if (promptCacheRetention && (norm === "opencode" || norm === "opencode-zen" || norm === "opencode-go")) {
+    if (promptCacheRetention && (norm === "opencode" || norm === "opencode-go")) {
       mergeProviderOptions(out, {
         opencode: { prompt_cache_retention: promptCacheRetention },
         openai: { promptCacheRetention: promptCacheRetention },

@@ -66,7 +66,7 @@ export function buildSessionHeaders(
   const sessionId = clampCacheKey(rawSessionId);
 
   if (sessionId && !browser) {
-    if (provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") {
+    if (provider === "opencode" || provider === "opencode-go") {
       headers["x-opencode-session"] = sessionId;
       headers["x-session-id"] = sessionId;
       headers["x-client-request-id"] = sessionId;
@@ -97,7 +97,7 @@ export function buildSessionHeaders(
   }
 
   if (
-    (provider === "opencode" || provider === "opencode-zen" || provider === "opencode-go") &&
+    (provider === "opencode" || provider === "opencode-go") &&
     !browser &&
     !headers["x-opencode-client"]
   ) {

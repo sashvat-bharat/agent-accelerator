@@ -65,7 +65,7 @@ export async function executeAiSdkGenerate(
 ): Promise<ProviderGenerateResult> {
   const startTime = Date.now();
   assertModalitiesSupported(context, providerId, modelId);
-  const prompt = await toAiSdkPrompt(context);
+  const prompt = await toAiSdkPrompt(context, providerId);
   const tools = toAiSdkTools(options?.tools as any, providerId);
   const callOptions = buildAiSdkCallOptions(providerId, options);
 
@@ -134,7 +134,7 @@ export function executeAiSdkStream(
     linked.signal.addEventListener("abort", cancelReader, { once: true });
     try {
       assertModalitiesSupported(context, providerId, modelId);
-      const prompt = await toAiSdkPrompt(context);
+      const prompt = await toAiSdkPrompt(context, providerId);
       const tools = toAiSdkTools(options?.tools as any, providerId);
       const callOptions = buildAiSdkCallOptions(providerId, { ...options, signal: linked.signal });
 

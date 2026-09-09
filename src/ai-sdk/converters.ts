@@ -44,10 +44,26 @@ function guessFilename(input: unknown, mimeType: string): string | undefined {
 }
 
 /**
+ * Providers known to accept echoed reasoning in history. Vercel serializes
+ * prompt `reasoning` parts to `reasoning_content`, which strict
+ * OpenAI-compatible endpoints (groq, ollama, …) reject with 400 — so off-list
+ * providers get history without the thinking trace (tool calls preserved).
+ */
+const REASONING_HISTORY_PROVIDERS = new Set([
+  "google",
+  "gemini",
+  "openai",
+  "openrouter",
+  "opencode",
+  "opencode-go",
+]);
+
+/**
  * Converts Agent Accelerator ProviderContext to Vercel AI SDK LanguageModelV4Prompt.
  */
 export async function toAiSdkPrompt(
-  context: ProviderContext
+  context: ProviderContext,
+  providerId?: string
 ): Promise<LanguageModelV4Prompt> {
   const prompt: LanguageModelV4Prompt = [];
 
@@ -92,7 +108,11 @@ export async function toAiSdkPrompt(
           if (part.type === "text" && part.text) {
             assistantParts.push({ type: "text", text: part.text });
           } else if (part.type === "thinking" && part.thinking) {
-            assistantParts.push({ type: "reasoning", text: part.thinking });
+            const keepReasoning =
+              !providerId || REASONING_HISTORY_PROVIDERS.has(providerId.toLowerCase().trim());
+            if (keepReasoning) {
+              assistantParts.push({ type: "reasoning", text: part.thinking });
+            }
           } else if (part.type === "tool_call") {
             assistantParts.push({
               type: "tool-call",

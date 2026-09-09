@@ -62,13 +62,9 @@ describe("AI SDK options mapping", () => {
   it("maps serviceTier and cache to providerOptions", () => {
     expect(mapServiceTierToProviderOptions("google", "flex")).toEqual({ google: { serviceTier: "flex" } });
     expect(mapServiceTierToProviderOptions("openai", "priority")).toEqual({ openai: { serviceTier: "priority" } });
-    expect(mapServiceTierToProviderOptions("groq", "flex")).toEqual({
-      openai: { serviceTier: "flex" },
-      groq: { serviceTier: "flex" },
-    });
+    expect(mapServiceTierToProviderOptions("groq", "flex")).toEqual({});
     expect(mapCacheToProviderOptions("google", { cachedContentId: "cache-123" }, "sess-1")).toEqual({
       google: { cachedContent: "cache-123" },
-      openai: { promptCacheKey: "sess-1" },
     });
   });
 
@@ -201,5 +197,25 @@ describe("modality guard (catalog-driven)", () => {
     expect(() =>
       assertModalitiesSupported(ctx({ type: "video", video: "https://x/y.mp4" }), "openrouter", "some/unknown-model")
     ).not.toThrow();
+  });
+});
+
+describe("strict-provider body-param gating", () => {
+  it("omits promptCacheKey/serviceTier for strict custom providers (groq)", () => {
+    expect(mapCacheToProviderOptions("groq", { retention: "short" }, "s1")).toEqual({});
+    expect(mapServiceTierToProviderOptions("groq", "priority")).toEqual({});
+    expect(mapCacheToProviderOptions("ollama", undefined, "s1")).toEqual({});
+  });
+
+  it("keeps promptCacheKey for tolerant providers", () => {
+    expect(mapCacheToProviderOptions("openai", undefined, "s1").openai).toMatchObject({ promptCacheKey: "s1" });
+    expect(mapCacheToProviderOptions("openrouter", undefined, "s1").openrouter).toMatchObject({ promptCacheKey: "s1" });
+    expect(mapCacheToProviderOptions("opencode", undefined, "s1").openai).toMatchObject({ promptCacheKey: "s1" });
+    expect(mapServiceTierToProviderOptions("openai", "priority")).toEqual({ openai: { serviceTier: "priority" } });
+  });
+
+  it("never sends promptCacheKey to google", () => {
+    const out = mapCacheToProviderOptions("google", { retention: "short" }, "s1");
+    expect(JSON.stringify(out)).not.toContain("promptCacheKey");
   });
 });

@@ -183,7 +183,7 @@ export class OpenCodeAiSdkProvider extends AiSdkBaseProvider {
 
   protected override cleanModelId(model: string | ModelSpec): string {
     const rawId = typeof model === "string" ? model : model.id;
-    return rawId.replace(/^(opencode-zen\/|opencode-go\/|opencode\/)/, "");
+    return rawId.replace(/^(opencode-go\/|opencode\/)/, "");
   }
 }
 

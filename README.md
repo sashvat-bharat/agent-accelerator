@@ -646,7 +646,7 @@ CacheRetention =
 
 * `x-session-id`
 * `x-opencode-session`
-* `prompt_cache_key`
+* `prompt_cache_key` (openai/openrouter/opencode only — strict endpoints such as groq reject it, so custom providers get headers only)
 
 Reuse the same session ID across turns when cache affinity is desired.
 
@@ -1048,7 +1048,7 @@ Supported content parts include:
 
 `inferMimeType(path)` infers the MIME type from a file extension.
 
-Media normalization is handled automatically by providers (mapped to Vercel V4 `file` parts).
+Media normalization is handled automatically by providers (mapped to Vercel V4 `file` parts). Thinking traces are echoed in follow-up turns only where accepted — strict endpoints receive tool calls without `reasoning_content`.
 
 Provider matrix: text + image + wav/mp3 audio + PDF work on all supported
 providers. Video works on Gemini only.

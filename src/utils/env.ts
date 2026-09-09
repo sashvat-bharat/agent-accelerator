@@ -50,7 +50,6 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
         getEnv("GOOGLE_GENAI_API_KEY")
       );
     case "opencode":
-    case "opencode-zen":
     case "opencode-go":
       return (
         getEnv("OPENCODE_API_KEY") ||

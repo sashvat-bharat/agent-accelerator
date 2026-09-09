@@ -13,7 +13,7 @@ describe("Model Resolution & Providers", () => {
   });
 
   it("should resolve OpenCode models", () => {
-    const res1 = resolveModel("opencode-zen/hy3-free");
+    const res1 = resolveModel("opencode/hy3-free");
     expect(res1.provider.id).toBe("opencode");
     expect(res1.modelId).toBe("hy3-free");
 

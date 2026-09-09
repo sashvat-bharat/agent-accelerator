@@ -15,8 +15,7 @@ import type { ThinkingLevel } from "../types/core.ts";
 // ---------------------------------------------------------------------------
 const PROVIDER_ALIASES: Record<string, string[]> = {
   google: ["google", "google-vertex", "google-vertex-anthropic"],
-  opencode: ["opencode", "opencode-zen", "opencode-go"],
-  "opencode-zen": ["opencode"],
+  opencode: ["opencode", "opencode-go"],
   "opencode-go": ["opencode-go", "opencode"],
   openrouter: ["openrouter"],
   openai: ["openai"],

@@ -21,7 +21,6 @@ const openaiProvider = new OpenAiAiSdkProvider();
 providerRegistry.set("google", googleProvider);
 providerRegistry.set("gemini", googleProvider);
 providerRegistry.set("opencode", opencodeProvider);
-providerRegistry.set("opencode-zen", opencodeProvider);
 providerRegistry.set("opencode-go", opencodeProvider);
 providerRegistry.set("openrouter", openrouterProvider);
 providerRegistry.set("openai", openaiProvider);
@@ -38,7 +37,6 @@ const FIRST_CLASS = new Set([
   "google",
   "gemini",
   "opencode",
-  "opencode-zen",
   "opencode-go",
   "openrouter",
   "openai",
@@ -167,7 +165,6 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
       "google",
       "gemini",
       "opencode",
-      "opencode-zen",
       "opencode-go",
       "openrouter",
     ].includes(providerPrefix);
@@ -213,7 +210,6 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
 
     if (
       providerPrefix === "opencode" ||
-      providerPrefix === "opencode-zen" ||
       providerPrefix === "opencode-go"
     ) {
       const p = getProvider("opencode");

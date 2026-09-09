@@ -59,3 +59,32 @@ describe("Vercel V4 prompt mapping (all five modalities)", () => {
     expect(filePart.filename).toBe("doc.pdf");
   });
 });
+
+describe("reasoning history gating (strict providers)", () => {
+  const history = {
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "let me call the tool" },
+          { type: "tool_call", id: "c1", name: "get_status", arguments: { username: "x" } },
+        ],
+      },
+    ],
+  } as any;
+
+  it("drops thinking for strict providers, keeps tool calls", async () => {
+    const prompt = await toAiSdkPrompt(history, "groq");
+    const asst: any = prompt.find((m: any) => m.role === "assistant");
+    expect(asst.content.some((x: any) => x.type === "reasoning")).toBe(false);
+    expect(asst.content.some((x: any) => x.type === "tool-call")).toBe(true);
+  });
+
+  it("keeps thinking for tolerant providers and when unlabelled", async () => {
+    for (const p of ["openrouter", "openai", "google", "opencode", undefined]) {
+      const prompt = await toAiSdkPrompt(history, p as any);
+      const asst: any = prompt.find((m: any) => m.role === "assistant");
+      expect(asst.content.some((x: any) => x.type === "reasoning")).toBe(true);
+    }
+  });
+});
