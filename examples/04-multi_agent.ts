@@ -1,4 +1,4 @@
-// Achieved ~99.3% of Cache Hit Rate!!
+// Achieved ~99.8% of Cache Hit Rate!!
 
 import * as fs from "node:fs";
 import { Agent } from "agent-accelerator";
@@ -10,8 +10,13 @@ try {
     name: "Editorial Lead",
     instructions: fs.readFileSync(new URL("../SYSTEM_PROMPT_AGENT.md", import.meta.url), "utf8"),
     model: process.env.MODEL,
-    subAgentModel: process.env.SUB_AGENT_MODEL,
-    enableSubagents: true,
+    dynamicSubagents: {
+      enabled: true,
+      model: process.env.SUB_AGENT_MODEL,
+      maxSpawn: 3,
+      thinkingLevel: (process.env.SUB_AGENT_THINKING_LEVEL as any) ?? "low",
+      timeout: 60000,
+    },
     thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
     cache: { retention: (process.env.CACHE_RETENTION as any) ?? "short" },
   });

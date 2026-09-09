@@ -104,7 +104,7 @@ const lead = new Agent({
   // Clean separation of concerns:
   tools: { get_topic_brief },
   subagents: [researcher, critic],
-    thinkingLevel: "high",
+  thinkingLevel: "high",
   cache: { retention: "short" },
 });
 

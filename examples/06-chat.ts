@@ -30,7 +30,7 @@ const SESSION_FILE =
 interface PersistedSession {
   sessionId: string;
   model: string;
-  subAgentModel?: string;
+  subagentModel?: string;
   thinkingLevel?: string;
   cache?: { retention: "short" | "medium" | "long" };
   cachedContentId?: string;
@@ -55,7 +55,7 @@ function loadSession(): PersistedSession | null {
     const lines = raw.split("\n").filter(Boolean);
     let sessionId = "";
     let model = "";
-    let subAgentModel: string | undefined;
+    let subagentModel: string | undefined;
     let thinkingLevel: string | undefined;
     let cache: any;
     let cachedContentId: string | undefined;
@@ -69,7 +69,7 @@ function loadSession(): PersistedSession | null {
         if (obj.type === "session") {
           sessionId = obj.id ?? obj.sessionId ?? sessionId;
           model = obj.model ?? model;
-          subAgentModel = obj.subAgentModel ?? subAgentModel;
+          subagentModel = obj.subagentModel ?? subagentModel;
           thinkingLevel = obj.thinkingLevel ?? thinkingLevel;
           cache = obj.cache ?? cache;
           cachedContentId = obj.cachedContentId ?? cachedContentId;
@@ -77,7 +77,7 @@ function loadSession(): PersistedSession | null {
           model = obj.id ?? obj.model ?? model;
           thinkingLevel = obj.thinkingLevel ?? thinkingLevel;
         } else if (obj.type === "subagentModel") {
-          subAgentModel = obj.id ?? obj.model ?? subAgentModel;
+          subagentModel = obj.id ?? obj.model ?? subagentModel;
         } else if (obj.type === "metrics") {
           totals = obj.metrics ?? totals;
         } else if (obj.type === "modelChange") {
@@ -101,7 +101,7 @@ function loadSession(): PersistedSession | null {
     return {
       sessionId: sessionId || `accel-${Date.now()}`,
       model: model || process.env.MODEL || "google/gemini-3.5-flash-lite",
-      subAgentModel,
+      subagentModel,
       thinkingLevel,
       cache,
       cachedContentId,
@@ -149,9 +149,13 @@ const agent = new Agent({
   name: "Chat Agent",
   instructions: loadPrompt(),
   model: initialModel,
-  subAgentModel: saved?.subAgentModel ?? process.env.SUB_AGENT_MODEL,
+  dynamicSubagents: {
+    enabled: true,
+    model: saved?.subagentModel ?? process.env.SUB_AGENT_MODEL,
+    maxSpawn: 4,
+    timeout: 60000,
+  },
   thinkingLevel: initialThinking as any,
-  enableSubagents: true,
   cache: (saved?.cache as any) ?? { retention: "implicit" as const },
   sessionId: saved?.sessionId,
   maxTurns: 10,

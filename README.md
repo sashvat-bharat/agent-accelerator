@@ -56,7 +56,7 @@ SUB_AGENT_MODEL="google/gemini-3.5-flash-lite"
 # OLLAMA_BASE_URL="http://localhost:11434/v1"
 ```
 
-`MODEL` and `SUB_AGENT_MODEL` are used when `model` or `subAgentModel` are omitted.
+`MODEL` and `SUB_AGENT_MODEL` are used when `model` or the dynamic worker model are omitted.
 
 Explicit configuration always takes precedence over environment variables.
 
@@ -109,8 +109,8 @@ An `Agent` holds :
 | `instructions`    | `string`                                             | System prompt. Keep it stable; place per-turn additions in `additionalContext`.                                                                            |
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
-| `enableSubagents` | `boolean`                                            | When `true`, injects `spawn_subagents`, allowing the model to spawn 1–8 workers at runtime. Requires `subAgentModel`.                                      |
-| `subAgentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Model used by dynamically spawned workers. Falls back to `SUB_AGENT_MODEL`.                                                                                |
+| `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Overridden by `dynamicSubagents.model`. Falls back to `SUB_AGENT_MODEL`. |
+| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout? }`. See [Dynamic delegation](#dynamic-delegation). |
 | `thinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh`. Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
@@ -121,7 +121,7 @@ An `Agent` holds :
 | `baseUrl`         | `string`                                             | Overrides the default endpoint for this agent.                                                                                                             |
 | `stateless`       | `boolean`                                            | When `true`, history is cleared before and after each `run`. Useful for one-shot evaluators. Defaults to `false`.                                          |
 
-When `enableSubagents: true` is configured without a subagent model, construction throws `SubAgentModelError`.
+When `dynamicSubagents.enabled` is set without a resolvable worker model, construction throws `SubAgentModelError`.
 
 ### Agent Methods
 
@@ -236,7 +236,24 @@ Each subagent is automatically registered as an internal tool on the parent that
 
 **Dynamic delegation**
 
-Set `enableSubagents: true` together with `subAgentModel`.
+`subagents` lists pre-defined workers (each becomes a callable tool). For
+LLM-spawned workers, configure `dynamicSubagents`:
+
+```ts
+const agent = new Agent({
+  name: "Main Agent",
+  model: process.env.MODEL,
+  tools: { get_topic_brief },
+  instructions: "You are the Main Agent",
+  dynamicSubagents: {
+    enabled: true,
+    maxSpawn: 4,
+    thinkingLevel: "low",
+    tools: { get_weather, recent_news },
+    timeout: 60000,
+  },
+});
+```
 
 A `spawn_subagents` tool is injected with the following task shape:
 
@@ -246,26 +263,19 @@ A `spawn_subagents` tool is injected with the following task shape:
     name,
     role?,
     instructions,
-    task
+    task,
+    tools?: string[],
+    timeoutMs?: number
   }[]
 }
 ```
 
-A maximum of 8 workers can be spawned, and they run in parallel.
-
-Children inherit the parent's thinking, cache, tier, and headers. Each child receives its own session ID.
-
-Results are returned as aggregated XML along with per-agent metadata in `res.subagents`.
+- `maxSpawn` — max workers per call. Extras are trimmed safely, and the limit is stated in the tool description plus the Main Agent's system prompt so the model knows it.
+- `tools` — developer-owned pool. Workers get zero tools unless the Main Agent grants a per-task `tools` subset by name (unknown names are ignored), keeping worker context small.
+- `timeout` (ms) — `0` = no limit, `-1` = the Main Agent sets a per-task `timeoutMs`, `>0` = fixed limit for every worker. Timed-out workers report an error entry; the rest of the batch still completes.
+- Workers are stateless: one task in, one result out, then shut down. No history, no recursion. The Main Agent cannot choose worker models or reasoning levels.
 
 ```ts
-const agent = new Agent({
-  model: "google/gemini-3.7-flash",
-  instructions: "Decompose and delegate in parallel.",
-  enableSubagents: true,
-  subAgentModel: "google/gemini-3.5-flash-lite",
-  maxTurns: 10,
-});
-
 const res = await agent.run("Audit auth pipeline and write a threat model");
 
 console.log(res.subagents.map((s) => s.name));
@@ -275,7 +285,7 @@ console.log(res.subagents.map((s) => s.name));
 
 * `buildAgentTools(list)` — wraps multiple agents and deduplicates names. Used internally by `subagents`.
 * `createSubagentSpawnTool(parentAgent)` — builds the dynamic subagent spawner. Rarely needed directly.
-* `DynamicSubagentTask` — `{ name, role?, instructions, task, model? }`, the shape produced for dynamic delegation.
+* `DynamicSubagentTask` — `{ name, role?, instructions, task, tools?, timeoutMs? }`, the shape produced for dynamic delegation. No `model` — workers run on the developer-configured model.
 
 ---
 ## Tools

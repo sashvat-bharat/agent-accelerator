@@ -18,8 +18,10 @@ export interface AgentConfig {
   instructions?: string;
   /** Model string (`provider/model`), catalog spec, or ModelProvider helper result. */
   model?: string | ModelSpec | ModelProviderInstance;
-  /** Explicit model for dynamically spawned sub-agents. */
-  subAgentModel?: string | ModelSpec | ModelProviderInstance;
+  /** Developer-only model for dynamically spawned sub-agents. Never exposed to the Main Agent LLM. */
+  subagentModel?: string | ModelSpec | ModelProviderInstance;
+  /** Dynamic sub-agent spawning policy. `subagents` lists pre-defined workers; this enables LLM-spawned stateless workers. */
+  dynamicSubagents?: DynamicSubagentsConfig;
   /** Per-agent API key override. */
   apiKey?: string;
   /** Per-agent provider base URL override. */
@@ -38,12 +40,26 @@ export interface AgentConfig {
   headers?: Record<string, string>;
   /** Maximum model/tool turns per run. Defaults to 10. */
   maxTurns?: number;
-  /** Enables the automatic `spawn_subagents` tool. Requires subAgentModel. */
-  enableSubagents?: boolean;
   /** Fixed worker agents exposed as delegation tools. */
   subagents?: (Agent | { name: string; description: string; agent: Agent })[];
   /** Clears conversation state before and after every run. */
   stateless?: boolean;
+}
+
+/** Developer-configured policy for LLM-spawned dynamic sub-agents. */
+export interface DynamicSubagentsConfig {
+  /** Enables the automatic `spawn_subagents` tool. Defaults to true when the object is present. */
+  enabled?: boolean;
+  /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then `SUB_AGENT_MODEL` env, then the parent model. */
+  model?: string | ModelSpec | ModelProviderInstance;
+  /** Max workers the Main Agent may spawn in a single `spawn_subagents` call. Extras are trimmed safely. Defaults to 4. */
+  maxSpawn?: number;
+  /** Fixed reasoning level for all dynamic workers. The Main Agent cannot override it. Falls back to the parent level when omitted. */
+  thinkingLevel?: ThinkingLevel;
+  /** Tool pool available to dynamic workers. Workers receive zero tools unless the Main Agent grants a per-task `tools` subset by name. */
+  tools?: Record<string, ToolDefinition> | ToolDefinition[];
+  /** Per-worker timeout in ms. `0` (default) = no limit. `-1` = the Main Agent sets a per-task `timeoutMs`. `>0` = fixed timeout for every worker. */
+  timeout?: number;
 }
 
 /** Per-run overrides for {@link Agent.run}, {@link Agent.ask}, and {@link Agent.stream}. */

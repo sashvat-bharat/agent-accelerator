@@ -171,6 +171,7 @@ export type {
 export type {
   AgentConfig,
   AgentRunOptions,
+  DynamicSubagentsConfig,
 } from "./types/agent.ts";
 
 export type {
