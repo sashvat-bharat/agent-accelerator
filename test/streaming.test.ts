@@ -104,7 +104,7 @@ describe("Streaming & SSE Parser", () => {
   });
 
   it("should switch from reasoning to text_delta when </think> tag or # header is encountered", async () => {
-    const { OpenRouterProvider } = await import("../src/providers/openrouter.ts");
+    const { OpenRouterProvider } = await import("../src/index.ts");
     const provider = new OpenRouterProvider();
     const originalFetch = globalThis.fetch;
 
@@ -157,7 +157,7 @@ describe("Streaming & SSE Parser", () => {
   });
 
   it("should rescue text from thinking when no content deltas were emitted and no tools called", async () => {
-    const { OpenRouterProvider } = await import("../src/providers/openrouter.ts");
+    const { OpenRouterProvider } = await import("../src/index.ts");
     const provider = new OpenRouterProvider();
     const originalFetch = globalThis.fetch;
 
@@ -196,7 +196,7 @@ describe("Streaming & SSE Parser", () => {
   });
 
   it("should detect document header split across SSE chunks (cross-chunk rolling buffer)", async () => {
-    const { OpenRouterProvider } = await import("../src/providers/openrouter.ts");
+    const { OpenRouterProvider } = await import("../src/index.ts");
     const provider = new OpenRouterProvider();
     const originalFetch = globalThis.fetch;
 
@@ -251,7 +251,7 @@ describe("Streaming & SSE Parser", () => {
   });
 
   it("should handle </think> tag split across SSE chunks (cross-chunk rolling buffer)", async () => {
-    const { OpenRouterProvider } = await import("../src/providers/openrouter.ts");
+    const { OpenRouterProvider } = await import("../src/index.ts");
     const provider = new OpenRouterProvider();
     const originalFetch = globalThis.fetch;
 

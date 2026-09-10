@@ -1,9 +1,19 @@
+/** Parsed Server-Sent Events message. */
 export interface SSEMessage {
   id?: string;
   event?: string;
   data: string;
 }
 
+/**
+ * Incremental SSE parser that preserves events split across network chunks.
+ *
+ * @example
+ * ```ts
+ * const parser = new SSEParser();
+ * const events = parser.feed("event: message\\ndata: hello\\n\\n");
+ * ```
+ */
 export class SSEParser {
   private buffer = "";
   // Persist across feed() calls — otherwise split SSE messages lose state (S1 fix)
@@ -11,6 +21,7 @@ export class SSEParser {
   private currentData: string[] = [];
   private currentId: string | undefined = undefined;
 
+  /** Feeds a chunk and returns all complete messages found in it. */
   feed(chunk: string): SSEMessage[] {
     this.buffer += chunk;
     const messages: SSEMessage[] = [];
@@ -60,6 +71,7 @@ export class SSEParser {
     return messages;
   }
 
+  /** Flushes any unterminated final event. */
   flush(): SSEMessage[] {
     const messages: SSEMessage[] = [];
     // S7: flush pending currentData first, then treat remaining buffer as final lines (avoid duplication)

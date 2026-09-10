@@ -9,9 +9,11 @@
 
 import type { CacheRetention } from "../types/core.ts";
 import type { ModelSpec } from "../types/model.ts";
+import { getApiKey } from "./env.ts";
 
 const CACHE_KEY_MAX = 64;
 
+/** Clamps a cache/session affinity key to the provider-safe 64-character limit. */
 export function clampCacheKey(key?: string): string | undefined {
   if (!key) return undefined;
   const chars = Array.from(key);
@@ -19,16 +21,17 @@ export function clampCacheKey(key?: string): string | undefined {
   return chars.slice(0, CACHE_KEY_MAX).join("");
 }
 
-export function getCacheControlForRetention(retention?: CacheRetention, supportsLong = true) {
+/** Maps retention to explicit-cache TTL seconds. short=5m, medium=1h, long=12h. Explicit ttlSeconds wins. */
+export function retentionToTtlSeconds(retention?: CacheRetention, ttlSeconds?: number): number | undefined {
+  if (ttlSeconds && ttlSeconds > 0) return Math.floor(ttlSeconds);
   if (!retention || retention === "implicit") return undefined;
-  // Anthropic: ttl undefined = 5m, ttl 1h for medium/long if supportsLong
-  if (retention === "short") return { type: "ephemeral" as const };
-  if (retention === "medium" || retention === "long") {
-    return supportsLong ? ({ type: "ephemeral" as const, ttl: "1h" as const }) : ({ type: "ephemeral" as const });
-  }
+  if (retention === "short") return 300;
+  if (retention === "medium") return 3600;
+  if (retention === "long") return 43200;
   return undefined;
 }
 
+/** Maps retention settings to OpenCode/OpenRouter prompt-cache TTL values. */
 export function getPromptCacheRetention(retention?: CacheRetention, supportsLong = true): "24h" | "1h" | undefined {
   if (!retention || retention === "implicit") return undefined;
   if (retention === "long" && supportsLong) return "24h";
@@ -37,106 +40,107 @@ export function getPromptCacheRetention(retention?: CacheRetention, supportsLong
   return undefined;
 }
 
-/**
- * Battle-tested: apply Anthropic cache_control to messages+tools, capped to 4
- * First turn optimization: system + last tool + last user are marked, so second turn's prefix (system+tools+history) hits.
- * This is called on every turn with same retention, so second turn's history (user1+assistant+tool) was already part of cached prefix.
- */
-export function applyAnthropicCacheControl(
-  messages: Array<Record<string, unknown>>,
-  tools: Array<Record<string, unknown>> | undefined,
-  retention?: CacheRetention,
-  modelSpec?: ModelSpec
-): number {
-  if (!retention || retention === "implicit") return 0;
-  const supportsLong = modelSpec?.capabilities.supportsLongCacheRetention ?? true;
-  const canCache = modelSpec?.capabilities.supportsImplicitCaching ?? true;
-  if (!canCache) return 0;
+// ============================================================================
+// Explicit Context Caching (Google cachedContents API)
+// ============================================================================
 
-  const cacheControl = getCacheControlForRetention(retention, supportsLong);
-  if (!cacheControl) return 0;
-
-  let bpCount = 0;
-  const maxBp = 4;
-
-  // 1) system (most important for hit rate — stable prefix)
-  if (bpCount < maxBp && messages.length > 0 && (messages[0] as any).role === "system") {
-    const sys: any = messages[0];
-    if (typeof sys.content === "string") {
-      sys.content = [{ type: "text", text: sys.content, cache_control: cacheControl }];
-      bpCount++;
-    } else if (Array.isArray(sys.content) && sys.content.length > 0) {
-      const arr = sys.content as any[];
-      const last = arr[arr.length - 1];
-      if (last?.type === "text") {
-        last.cache_control = cacheControl;
-        bpCount++;
-      }
-    }
-  }
-
-  // 2) last tool (stable prefix — tools rarely change)
-  if (bpCount < maxBp && tools && tools.length > 0) {
-    const lastTool: any = tools[tools.length - 1];
-    if (lastTool) {
-      lastTool.cache_control = cacheControl;
-      bpCount++;
-    }
-  }
-
-  // 3) last user (new prompt) — ensures next turn can extend cache
-  for (let i = messages.length - 1; i >= 0 && bpCount < maxBp; i--) {
-    const m: any = messages[i];
-    if (m.role === "user") {
-      if (typeof m.content === "string" && m.content.length > 0) {
-        m.content = [{ type: "text", text: m.content, cache_control: cacheControl }];
-        bpCount++;
-        break;
-      } else if (Array.isArray(m.content)) {
-        for (let j = m.content.length - 1; j >= 0; j--) {
-          if (m.content[j]?.type === "text") {
-            m.content[j].cache_control = cacheControl;
-            bpCount++;
-            i = -1;
-            break;
-          }
-        }
-        if (i === -1) break;
-      }
-    }
-  }
-
-  // 4) earliest large assistant in history (stable for 80-90% hit across 4+ turns)
-  // Pick the *first* large assistant (>2000 chars) — editorial stays stable, unlike most-recent which shifts to bullets on turn4 and breaks prefix
-  if (bpCount < maxBp) {
-    for (let i = 1; i < messages.length - 1; i++) {
-      const m: any = messages[i];
-      if (m.role !== "assistant") continue;
-      let len = 0;
-      let partIdx = -1;
-      if (typeof m.content === "string") len = m.content.length;
-      else if (Array.isArray(m.content)) {
-        for (let j = 0; j < m.content.length; j++) {
-          const c = m.content[j];
-          if (c?.type === "text" && typeof c.text === "string" && c.text.length > len && !c.cache_control) {
-            len = c.text.length;
-            partIdx = j;
-          }
-        }
-      }
-      if (len > 2000) {
-        if (typeof m.content === "string") {
-          m.content = [{ type: "text", text: m.content, cache_control: cacheControl }];
-        } else if (partIdx >= 0) {
-          m.content[partIdx].cache_control = cacheControl;
-        }
-        bpCount++;
-        break; // stable: first large editorial, not most recent
-      }
-    }
-  }
-
-  return bpCount;
+export interface CachedContentMetadata {
+  name: string;
+  displayName?: string;
+  model: string;
+  createTime: string;
+  updateTime: string;
+  expireTime: string;
+  usageMetadata?: {
+    totalTokenCount?: number;
+  };
 }
 
+export interface CreateExplicitCacheOptions {
+  model: string;
+  contents?: any[];
+  systemInstruction?: string;
+  tools?: any[];
+  toolConfig?: any;
+  displayName?: string;
+  ttlSeconds?: number;
+  retention?: CacheRetention;
+  expireTime?: string | Date;
+  apiKey?: string;
+  baseUrl?: string;
+}
 
+/**
+ * Creates an explicit cached content object using Google Gemini's cachedContents API.
+ * REST: POST https://generativelanguage.googleapis.com/v1beta/cachedContents?key=...
+ */
+/**
+ * Creates a Google Gemini cachedContents resource through the REST API.
+ *
+ * @example `const cache = await createExplicitCache({ model: "google/gemini-3.5-flash-lite", contents });`
+ */
+export async function createExplicitCache(
+  options: CreateExplicitCacheOptions
+): Promise<CachedContentMetadata> {
+  const apiKey = getApiKey("google", options.apiKey);
+  if (!apiKey) {
+    throw new Error("API key is required to create explicit cache (GEMINI_API_KEY)");
+  }
+
+  const baseUrl = options.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+  const ttlSeconds = retentionToTtlSeconds(options.retention, options.ttlSeconds) ?? 3600;
+  const ttl = options.expireTime ? undefined : `${ttlSeconds}s`;
+
+  let modelName = options.model;
+  if (!modelName.startsWith("models/")) {
+    modelName = `models/${modelName.replace(/^google\//, "")}`;
+  }
+
+  const payload: Record<string, unknown> = {
+    model: modelName,
+    contents: options.contents ?? [],
+    ...(ttl ? { ttl } : {}),
+    ...(options.expireTime
+      ? { expireTime: options.expireTime instanceof Date ? options.expireTime.toISOString() : options.expireTime }
+      : {}),
+  };
+
+  if (options.displayName) {
+    payload.displayName = options.displayName;
+    (payload as any).display_name = options.displayName;
+  }
+
+  if (options.systemInstruction) {
+    payload.systemInstruction = {
+      parts: [{ text: options.systemInstruction }],
+    };
+    (payload as any).system_instruction = payload.systemInstruction;
+  }
+
+  if (options.tools && options.tools.length > 0) {
+    payload.tools = options.tools;
+  }
+
+  if (options.toolConfig) {
+    payload.toolConfig = options.toolConfig;
+    (payload as any).tool_config = options.toolConfig;
+  }
+
+  const url = `${baseUrl}/cachedContents?key=${apiKey}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(
+      `Failed to create explicit cache (${response.status} ${response.statusText}): ${errorBody}`
+    );
+  }
+
+  return (await response.json()) as CachedContentMetadata;
+}

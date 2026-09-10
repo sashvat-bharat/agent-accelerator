@@ -1,6 +1,7 @@
 /**
  * Level-based reasoning — single flag for all levels (bloatfree)
  */
+/** Public reasoning control accepted by AgentConfig. */
 export type ThinkingLevel =
   | "none"
   | "dynamic"
@@ -11,6 +12,7 @@ export type ThinkingLevel =
   | "xhigh";
 
 // Internal normalized config (SDK-internal, not exposed as Agent flag)
+/** Internal normalized reasoning configuration passed to providers. */
 export interface ThinkingConfig {
   enabled?: boolean;
   level?: ThinkingLevel;
@@ -28,8 +30,10 @@ export interface ThinkingConfig {
  * - "long": 12 hours explicit TTL
  * - undefined: no explicit caching enforced (implicit may still happen)
  */
+/** Prompt-cache retention policy. */
 export type CacheRetention = "implicit" | "short" | "medium" | "long";
 
+/** Prompt-cache IDs, retention, TTL, and session-affinity settings. */
 export interface CacheConfig {
   /**
    * Retention duration:
@@ -57,11 +61,13 @@ export interface CacheConfig {
 /**
  * Service tier controls — bloatfree: only flex / priority (standard is default, no flag needed)
  */
+/** Optional provider service-priority routing tier. */
 export type ServiceTier = "flex" | "priority";
 
 /**
  * Token and cost usage — actual provider values, not heuristic
  */
+/** Normalized provider usage and optional calculated cost. */
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;

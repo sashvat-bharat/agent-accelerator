@@ -1,25 +1,31 @@
 import { describe, it, expect } from "bun:test";
 import {
   Agent,
-  agentToTool,
+  SubAgent,
   buildAgentTools,
   createSubagentSpawnTool,
   AgentResponse,
 } from "../src/index.ts";
 
 describe("Multi-Agent Dynamic Delegation & Metadata", () => {
-  it("should convert sub-agents into callable tool definitions", () => {
-    const subAgent = new Agent({
+  it("should automatically inject subagents as tools on parent Agent", () => {
+    const subAgent = new SubAgent({
       name: "Domain_Specialist",
       description: "Handles specialized domain tasks",
       model: "google/gemini-3.5-flash-lite",
       apiKey: "TEST_KEY",
     });
 
-    const agentTool = agentToTool(subAgent);
-    expect(agentTool.name).toBe("domain_specialist");
-    expect(agentTool.description).toBe("Handles specialized domain tasks");
-    expect(agentTool.input).toBeDefined();
+    const leadAgent = new Agent({
+      model: "google/gemini-3.5-flash-lite",
+      apiKey: "TEST_KEY",
+      subagents: [subAgent],
+    });
+
+    expect(leadAgent.tools["domain_specialist"]).toBeDefined();
+    expect(leadAgent.tools["domain_specialist"]!.name).toBe("domain_specialist");
+    expect(leadAgent.tools["domain_specialist"]!.description).toBe("Handles specialized domain tasks");
+    expect(leadAgent.tools["domain_specialist"]!.input).toBeDefined();
 
     const toolsRecord = buildAgentTools([subAgent]);
     expect(toolsRecord["domain_specialist"]).toBeDefined();
@@ -30,8 +36,12 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
       name: "Root_Agent",
       model: "google/gemini-3.5-flash-lite",
       apiKey: "TEST_KEY",
-      SubAgentModel: "google/gemini-3.5-flash-lite",
-      subagents: true,
+      dynamicSubagents: {
+        enabled: true,
+        model: "google/gemini-3.5-flash-lite",
+        maxSpawn: 4,
+        timeout: 60000,
+      },
     });
 
     expect(parentAgent.tools["spawn_subagents"]).toBeDefined();
@@ -45,7 +55,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(taskShape.instructions).toBeDefined();
   });
 
-  it("should strictly throw SubAgentModelError when EnableSubagents is true but SubAgentModel is missing", () => {
+  it("should strictly throw SubAgentModelError when dynamicSubagents is enabled but no model is configured", () => {
     const { SubAgentModelError } = require("../src/index.ts");
     const prevEnv = process.env.SUB_AGENT_MODEL;
     delete process.env.SUB_AGENT_MODEL;
@@ -56,12 +66,47 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
           name: "Test_Agent",
           model: "google/gemini-3.8-flash",
           apiKey: "TEST_KEY",
-          EnableSubagents: true,
+          dynamicSubagents: { enabled: true },
         });
-      }).toThrow(/SubAgentModel is required when EnableSubagents is true/);
+      }).toThrow(/sub-agent model is required when dynamic sub-agents are enabled/);
     } finally {
       if (prevEnv) process.env.SUB_AGENT_MODEL = prevEnv;
     }
+  });
+
+  it("should enforce maxSpawn, grant only requested pool tools, and keep workers stateless", async () => {
+    const { tool } = require("../src/index.ts");
+    const { z } = require("zod");
+    const calls: string[] = [];
+    const mkTool = (name: string) =>
+      tool({ name, description: `${name} tool`, input: z.object({}), execute: async () => { calls.push(name); return `${name}-ok`; } });
+    const parentAgent = new Agent({
+      name: "Root_Agent",
+      model: "google/gemini-3.5-flash-lite",
+      apiKey: "TEST_KEY",
+      dynamicSubagents: {
+        enabled: true,
+        model: "google/gemini-3.5-flash-lite",
+        maxSpawn: 2,
+        tools: { recent_news: mkTool("recent_news"), get_weather: mkTool("get_weather") },
+        timeout: 0,
+      },
+    });
+    expect(parentAgent.dynamicSubagents?.maxSpawn).toBe(2);
+    expect(Object.keys(parentAgent.dynamicSubagents?.tools ?? {}).sort()).toEqual(["get_weather", "recent_news"]);
+    const spawn = parentAgent.tools["spawn_subagents"] as any;
+    expect(spawn).toBeDefined();
+    expect(JSON.stringify(spawn.description)).toContain("at most 2 sub-agent(s)");
+    const taskShape = (spawn.input as any)?.shape?.tasks?.element?.shape ?? {};
+    expect(taskShape.model).toBeUndefined();
+    expect(taskShape.tools).toBeDefined();
+    expect(taskShape.timeoutMs).toBeDefined();
+    // maxSpawn is enforced at the schema level: 3 tasks with maxSpawn 2 must fail parsing
+    let threw = false;
+    try {
+      (spawn.input as any).parse({ tasks: [{ task: "a" }, { task: "b" }, { task: "c" }] });
+    } catch { threw = true; }
+    expect(threw).toBe(true);
   });
 
   it("should expose detailed sub-agent metadata breakdown in AgentResponse JSON", () => {

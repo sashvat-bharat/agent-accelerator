@@ -30,7 +30,7 @@ const SESSION_FILE =
 interface PersistedSession {
   sessionId: string;
   model: string;
-  subAgentModel?: string;
+  subagentModel?: string;
   thinkingLevel?: string;
   cache?: { retention: "short" | "medium" | "long" };
   cachedContentId?: string;
@@ -55,7 +55,7 @@ function loadSession(): PersistedSession | null {
     const lines = raw.split("\n").filter(Boolean);
     let sessionId = "";
     let model = "";
-    let subAgentModel: string | undefined;
+    let subagentModel: string | undefined;
     let thinkingLevel: string | undefined;
     let cache: any;
     let cachedContentId: string | undefined;
@@ -69,20 +69,20 @@ function loadSession(): PersistedSession | null {
         if (obj.type === "session") {
           sessionId = obj.id ?? obj.sessionId ?? sessionId;
           model = obj.model ?? model;
-          subAgentModel = obj.subAgentModel ?? subAgentModel;
+          subagentModel = obj.subagentModel ?? subagentModel;
           thinkingLevel = obj.thinkingLevel ?? thinkingLevel;
           cache = obj.cache ?? cache;
           cachedContentId = obj.cachedContentId ?? cachedContentId;
-        } else if (obj.type === "main_model") {
+        } else if (obj.type === "mainModel") {
           model = obj.id ?? obj.model ?? model;
           thinkingLevel = obj.thinkingLevel ?? thinkingLevel;
-        } else if (obj.type === "subagent_model") {
-          subAgentModel = obj.id ?? obj.model ?? subAgentModel;
+        } else if (obj.type === "subagentModel") {
+          subagentModel = obj.id ?? obj.model ?? subagentModel;
         } else if (obj.type === "metrics") {
           totals = obj.metrics ?? totals;
-        } else if (obj.type === "model_change") {
+        } else if (obj.type === "modelChange") {
           model = obj.modelId ?? obj.model ?? model;
-        } else if (obj.type === "thinking_level_change") {
+        } else if (obj.type === "thinkingLevelChange") {
           thinkingLevel = obj.thinkingLevel;
         } else if (obj.type === "message" && obj.message) {
           messages.push(obj.message);
@@ -101,7 +101,7 @@ function loadSession(): PersistedSession | null {
     return {
       sessionId: sessionId || `accel-${Date.now()}`,
       model: model || process.env.MODEL || "google/gemini-3.5-flash-lite",
-      subAgentModel,
+      subagentModel,
       thinkingLevel,
       cache,
       cachedContentId,
@@ -139,7 +139,7 @@ const formatCost = (c?: number) => {
 };
 
 // ---------------------------------------------------------------------------
-// 3. Agent Setup (Clean 1-line hardcoded ThinkingLevel default)
+// 3. Agent Setup (Clean 1-line hardcoded thinkingLevel default)
 // ---------------------------------------------------------------------------
 const saved = loadSession();
 const initialModel = saved?.model ?? process.env.MODEL ?? "google/gemini-3.5-flash-lite";
@@ -149,9 +149,13 @@ const agent = new Agent({
   name: "Chat Agent",
   instructions: loadPrompt(),
   model: initialModel,
-  SubAgentModel: saved?.subAgentModel ?? process.env.SUB_AGENT_MODEL,
-  ThinkingLevel: initialThinking as any,
-  EnableSubagents: true,
+  dynamicSubagents: {
+    enabled: true,
+    model: saved?.subagentModel ?? process.env.SUB_AGENT_MODEL,
+    maxSpawn: 4,
+    timeout: 60000,
+  },
+  thinkingLevel: initialThinking as any,
   cache: (saved?.cache as any) ?? { retention: "implicit" as const },
   sessionId: saved?.sessionId,
   maxTurns: 10,
@@ -240,7 +244,7 @@ function saveSession() {
     // 2. Main model line
     lines.push(
       JSON.stringify({
-        type: "main_model",
+        type: "mainModel",
         id: agent.modelStringOrSpec,
         thinkingLevel: level,
       })
@@ -250,7 +254,7 @@ function saveSession() {
     if (agent.subagentModel) {
       lines.push(
         JSON.stringify({
-          type: "subagent_model",
+          type: "subagentModel",
           id: agent.subagentModel,
         })
       );

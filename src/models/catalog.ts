@@ -15,12 +15,34 @@ import type { ThinkingLevel } from "../types/core.ts";
 // ---------------------------------------------------------------------------
 const PROVIDER_ALIASES: Record<string, string[]> = {
   google: ["google", "google-vertex", "google-vertex-anthropic"],
-  opencode: ["opencode", "opencode-zen", "opencode-go"],
-  "opencode-zen": ["opencode"],
+  opencode: ["opencode", "opencode-go"],
   "opencode-go": ["opencode-go", "opencode"],
   openrouter: ["openrouter"],
   openai: ["openai"],
 };
+
+// Verified modality corrections — models.dev lags on some inputs (e.g. gpt-4o
+// accepts audio). Keyed `provider/model`, merged over upstream data so
+// `npm run update-models` never wipes them. Add entries here, not in the JSON.
+const MODALITY_OVERRIDES: Record<string, { input?: string[]; output?: string[] }> = {
+  "openai/gpt-4o": { input: ["text", "image", "audio", "pdf"] },
+  "openai/gpt-4o-mini": { input: ["text", "image", "audio", "pdf"] },
+  // OpenRouter routes this free model to an endpoint that parses PDFs,
+  // verified end-to-end via examples/08. If routing changes, the runtime
+  // 404 still surfaces as a one-line error.
+  "openrouter/nvidia/nemotron-3.5-lightning:free": { input: ["text", "pdf"] },
+};
+
+function applyModalityOverrides(provider: string, modelId: string, base: ModelModalities): ModelModalities {
+  const hit =
+    MODALITY_OVERRIDES[`${provider}/${modelId}`] ??
+    MODALITY_OVERRIDES[`${provider}/${normalizeModelIdForLookup(modelId)}`];
+  if (!hit) return base;
+  return {
+    input: ((hit.input ?? base.input) as ModelModalities["input"]),
+    output: ((hit.output ?? base.output) as ModelModalities["output"]),
+  };
+}
 
 function normalizeModelIdForLookup(modelId: string): string {
   if (modelId.includes("/")) {
@@ -55,7 +77,11 @@ function mapCapabilities(raw: any, cost: ModelCost, reasoning: boolean, toolCall
 function mapModelSpec(provider: string, modelId: string, raw: any): ModelSpec {
   const limit: ModelLimit = raw.limit || { context: 128000, output: 8192 };
   const cost: ModelCost = raw.cost || {};
-  const modalities: ModelModalities = raw.modalities || { input: ["text"], output: ["text"] };
+  const modalities: ModelModalities = applyModalityOverrides(
+    provider,
+    modelId,
+    raw.modalities || { input: ["text"], output: ["text"] }
+  );
   const reasoning = !!raw.reasoning;
   const toolCall = !!raw.tool_call;
 
@@ -126,6 +152,11 @@ function getGlobalIndex(): Map<string, IndexEntry> {
 // ---------------------------------------------------------------------------
 // Public: getModelFromCatalog — battle-tested, cached, alias-aware
 // ---------------------------------------------------------------------------
+/**
+ * Looks up one model using provider aliases, normalized IDs, and the global catalog index.
+ *
+ * @example `const model = getModelFromCatalog("google", "gemini-3.5-flash-lite");`
+ */
 export function getModelFromCatalog(providerInput: string, modelIdInput: string): ModelSpec | undefined {
   const cacheKey = `${providerInput}::${modelIdInput}`;
   if (lookupCache.has(cacheKey)) return lookupCache.get(cacheKey);
@@ -178,6 +209,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
   return undefined;
 }
 
+/** Thinking capabilities and allowed levels for a catalog model. */
 export interface ModelThinkingInfo {
   supportsThinking: boolean;
   reasoningOptions?: any[];
@@ -186,6 +218,11 @@ export interface ModelThinkingInfo {
   description: string;
 }
 
+/**
+ * Returns reasoning support and permitted ThinkingLevel values for a model.
+ *
+ * @example `const info = getModelThinkingInfo("google", "gemini-3.5-flash-lite");`
+ */
 export function getModelThinkingInfo(provider: string, modelId: string): ModelThinkingInfo {
   const spec = getModelFromCatalog(provider, modelId) || getModelFromCatalog(modelId, modelId);
   if (!spec) {
@@ -267,6 +304,7 @@ export function getModelThinkingInfo(provider: string, modelId: string): ModelTh
   };
 }
 
+/** Thrown when a requested ThinkingLevel is unsupported by the selected model. */
 export class ThinkingLevelError extends Error {
   readonly provider: string;
   readonly modelId: string;
@@ -274,6 +312,11 @@ export class ThinkingLevelError extends Error {
   readonly allowedLevels: string[];
   readonly supportsThinking: boolean;
 
+  /**
+   * Creates a descriptive validation error for an unsupported thinking level.
+   *
+   * @param opts Provider/model, requested level, supported levels, and remedy.
+   */
   constructor(opts: {
     provider: string;
     modelId: string;
@@ -311,6 +354,11 @@ export class ThinkingLevelError extends Error {
   }
 }
 
+/**
+ * Validates a ThinkingLevel against catalog metadata and throws ThinkingLevelError on mismatch.
+ *
+ * @example `validateModelThinking("google", "gemini-3.5-flash-lite", "medium");`
+ */
 export function validateModelThinking(provider: string, modelId: string, requestedLevel?: ThinkingLevel | string): void {
   if (!requestedLevel) return;
   const level = String(requestedLevel).toLowerCase().trim();
@@ -325,7 +373,7 @@ export function validateModelThinking(provider: string, modelId: string, request
         allowedLevels: [],
         supportsThinking: false,
         reason: `Model "${modelId}" does not support thinking/reasoning.`,
-        remedy: `Omit ThinkingLevel or set ThinkingLevel: "none".`,
+        remedy: `Omit thinkingLevel or set thinkingLevel: "none".`,
       });
     }
     return;
@@ -341,7 +389,7 @@ export function validateModelThinking(provider: string, modelId: string, request
         allowedLevels: [],
         supportsThinking: true,
         reason: `Model "${modelId}" is a fixed-reasoning model and cannot have thinking disabled ("none").`,
-        remedy: `Omit ThinkingLevel to use the model's default reasoning.`,
+        remedy: `Omit thinkingLevel to use the model's default reasoning.`,
       });
     }
     return;
@@ -356,7 +404,7 @@ export function validateModelThinking(provider: string, modelId: string, request
       allowedLevels: info.allowedLevels,
       supportsThinking: true,
       reason: `Model "${modelId}" requires thinking and does not support disabling it ("none").`,
-      remedy: `Set ThinkingLevel to one of: ${info.allowedLevels.map((l) => `"${l}"`).join(" | ")}, or omit ThinkingLevel to use the model default.`,
+      remedy: `Set thinkingLevel to one of: ${info.allowedLevels.map((l) => `"${l}"`).join(" | ")}, or omit thinkingLevel to use the model default.`,
     });
   }
 
@@ -369,7 +417,7 @@ export function validateModelThinking(provider: string, modelId: string, request
       allowedLevels: info.allowedLevels,
       supportsThinking: true,
       reason: `Invalid thinking level "${requestedLevel}" for model "${modelId}".`,
-      remedy: `Set ThinkingLevel to one of: ${info.allowedLevels.map((l) => `"${l}"`).join(" | ")}, or omit ThinkingLevel to use the model default.`,
+      remedy: `Set thinkingLevel to one of: ${info.allowedLevels.map((l) => `"${l}"`).join(" | ")}, or omit thinkingLevel to use the model default.`,
     });
   }
 }
@@ -378,6 +426,11 @@ export function validateModelThinking(provider: string, modelId: string, request
 // getModelsForProvider — battle-tested view for BaseProvider.models
 // Opencode total context length now comes from catalog, not stale hardcoded file.
 // ---------------------------------------------------------------------------
+/**
+ * Returns normalized catalog specs for a provider and its configured aliases.
+ *
+ * @example `const googleModels = getModelsForProvider("google");`
+ */
 export function getModelsForProvider(provider: string): ModelSpec[] {
   if (providerModelsCache.has(provider)) return providerModelsCache.get(provider)!;
   const aliases = PROVIDER_ALIASES[provider] || [provider];
@@ -397,4 +450,7 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
   return out;
 }
 
-
+export const GOOGLE_MODELS: ModelSpec[] = getModelsForProvider("google");
+export const OPENAI_MODELS: ModelSpec[] = getModelsForProvider("openai");
+export const OPENCODE_MODELS: ModelSpec[] = getModelsForProvider("opencode");
+export const OPENROUTER_MODELS: ModelSpec[] = getModelsForProvider("openrouter");

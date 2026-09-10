@@ -16,10 +16,12 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/node": "^22.0.0",
     "typescript": "^7.0.0"
   },
   "dependencies": {
+    "@ai-sdk/google": "^4.0.64",
+    "@ai-sdk/openai": "^4.0.60",
+    "@ai-sdk/openai-compatible": "^3.0.44",
     "zod": "^4.4.3"
   }
 }

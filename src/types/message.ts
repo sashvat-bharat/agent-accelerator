@@ -1,13 +1,15 @@
 /**
- * Multimodal input modalities supported: Text, Image, Audio, Video
+ * Multimodal input modalities supported: Text, Image, Audio, Video, File
  */
 
+/** Text content within a multimodal message. */
 export interface TextPart {
   type: "text";
   text: string;
   thoughtSignature?: string;
 }
 
+/** Image content accepted as a URL, data, path, or binary value. */
 export interface ImagePart {
   type: "image";
   /**
@@ -17,6 +19,7 @@ export interface ImagePart {
   mimeType?: string;
 }
 
+/** Audio content accepted as a URL, data, path, or binary value. */
 export interface AudioPart {
   type: "audio";
   /**
@@ -26,6 +29,18 @@ export interface AudioPart {
   mimeType?: string;
 }
 
+/** File/document content (PDF, text, etc.) accepted as a URL, data, path, or binary value. */
+export interface FilePart {
+  type: "file";
+  /**
+   * Raw base64 data, data URL (data:...;base64,...), remote URL (https://...), or local file path
+   */
+  file: string | Uint8Array | ArrayBuffer;
+  mimeType?: string;
+  filename?: string;
+}
+
+/** Video content accepted as a URL, data, path, or binary value. */
 export interface VideoPart {
   type: "video";
   /**
@@ -35,6 +50,7 @@ export interface VideoPart {
   mimeType?: string;
 }
 
+/** Assistant-generated structured tool invocation. */
 export interface ToolCallPart {
   type: "tool_call";
   id: string;
@@ -50,6 +66,7 @@ export interface ToolCallPart {
   thoughtSignature?: string;
 }
 
+/** Tool execution result returned to the model context. */
 export interface ToolResultPart {
   type: "tool_result";
   id: string;
@@ -58,23 +75,27 @@ export interface ToolResultPart {
   isError?: boolean;
 }
 
+/** Provider reasoning/thinking content. */
 export interface ThinkingPart {
   type: "thinking";
   thinking: string;
   thoughtSignature?: string;
 }
 
+/** Any supported text, media, reasoning, tool-call, or tool-result part. */
 export type ContentPart =
   | TextPart
   | ImagePart
   | AudioPart
   | VideoPart
+  | FilePart
   | ToolCallPart
   | ToolResultPart
   | ThinkingPart;
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
+/** Normalized conversation message. */
 export interface Message {
   role: MessageRole;
   content: string | ContentPart[];
@@ -85,6 +106,7 @@ export interface Message {
 /**
  * Normalized input context passed to AI providers
  */
+/** Provider-neutral prompt context passed into generate/stream calls. */
 export interface ProviderContext {
   systemPrompt?: string;
   messages: Message[];

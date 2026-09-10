@@ -3,6 +3,11 @@ import { z } from "zod";
 /**
  * Converts a Zod schema or plain JSON object schema into standard JSON Schema for LLMs
  */
+/**
+ * Converts a Zod schema or JSON Schema object into provider-compatible JSON Schema.
+ *
+ * @example `const parameters = zodToJsonSchema(z.object({ query: z.string() }));`
+ */
 export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
   if (!schema) {
     return {
@@ -54,6 +59,11 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
 /**
  * Recursively removes $schema/$defs/definitions but preserves additionalProperties when explicitly set (S4 fix)
  * S10: resolves $ref against $defs before stripping (agent-accel typebox-helpers inline)
+ */
+/**
+ * Removes unsupported schema metadata and resolves local `$ref` definitions.
+ *
+ * @example `const clean = cleanJsonSchema(rawSchema);`
  */
 export function cleanJsonSchema(schema: any, rootDefs?: Record<string, any>): Record<string, unknown> {
   if (typeof schema !== "object" || schema === null) {
@@ -182,4 +192,30 @@ function inferZodPropertyType(prop: any): Record<string, unknown> {
     type: "string",
     ...(description ? { description } : {}),
   };
+}
+
+/**
+ * Google uses OpenAPI 3.0 Schema and strictly rejects JSON Schema keywords
+ * such as $schema, $defs, definitions, and additionalProperties.
+ */
+/** Removes JSON Schema keywords rejected by Google OpenAPI 3 schemas. */
+export function stripSchemaForGoogle(schema: any): any {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    if (Array.isArray(schema)) return schema.map(stripSchemaForGoogle);
+    return schema;
+  }
+  const { $schema, $defs, definitions, additionalProperties, ...rest } = schema as any;
+  const out: any = { ...rest };
+  if (out.properties && typeof out.properties === "object") {
+    const cleaned: any = {};
+    for (const [k, v] of Object.entries(out.properties)) {
+      cleaned[k] = stripSchemaForGoogle(v);
+    }
+    out.properties = cleaned;
+  }
+  if (out.items) out.items = stripSchemaForGoogle(out.items);
+  if (out.anyOf) out.anyOf = (out.anyOf as any[]).map(stripSchemaForGoogle);
+  if (out.oneOf) out.oneOf = (out.oneOf as any[]).map(stripSchemaForGoogle);
+  if (out.allOf) out.allOf = (out.allOf as any[]).map(stripSchemaForGoogle);
+  return out;
 }

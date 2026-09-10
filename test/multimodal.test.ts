@@ -1,7 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import { normalizeMediaInput, inferMimeType } from "../src/index.ts";
+import { toAiSdkPrompt } from "../src/ai-sdk/converters.ts";
 
-describe("Input Modalities Support (Text, Image, Audio, Video)", () => {
+describe("Input Modalities Support (Text, Image, Audio, Video, File)", () => {
   it("should infer MIME types correctly", () => {
     expect(inferMimeType("photo.png")).toBe("image/png");
     expect(inferMimeType("photo.jpg")).toBe("image/jpeg");
@@ -24,5 +25,66 @@ describe("Input Modalities Support (Text, Image, Audio, Video)", () => {
 
     expect(norm.mimeType).toBe("audio/mp3");
     expect(norm.dataUrl.startsWith("data:audio/mp3;base64,")).toBe(true);
+  });
+});
+
+describe("Vercel V4 prompt mapping (all five modalities)", () => {
+  it("should map text/image/audio/video/file to valid V4 parts", async () => {
+    const prompt = await toAiSdkPrompt({
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "hello" },
+            { type: "image", image: "data:image/png;base64,iVBORw0KGgo=" } as any,
+            { type: "audio", audio: "data:audio/mp3;base64,SUQz" } as any,
+            { type: "video", video: "data:video/mp4;base64,AAAA" } as any,
+            { type: "file", file: "data:application/pdf;base64,JVBERg==", mimeType: "application/pdf", filename: "doc.pdf" } as any,
+          ],
+        },
+      ],
+    });
+    const userMsg: any = prompt.find((m: any) => m.role === "user");
+    expect(userMsg).toBeDefined();
+    expect(userMsg.content.length).toBe(5);
+    // V4 has no `image` part: everything media is a tagged `file` part
+    for (const part of userMsg.content.slice(1)) {
+      expect(part.type).toBe("file");
+      expect(part.data?.type).toBe("data");
+      expect(part.data?.data instanceof Uint8Array).toBe(true);
+    }
+    const mediaTypes = userMsg.content.slice(1).map((x: any) => x.mediaType);
+    expect(mediaTypes).toEqual(["image/png", "audio/mp3", "video/mp4", "application/pdf"]);
+    const filePart = userMsg.content[4];
+    expect(filePart.filename).toBe("doc.pdf");
+  });
+});
+
+describe("reasoning history gating (strict providers)", () => {
+  const history = {
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "let me call the tool" },
+          { type: "tool_call", id: "c1", name: "get_status", arguments: { username: "x" } },
+        ],
+      },
+    ],
+  } as any;
+
+  it("drops thinking for strict providers, keeps tool calls", async () => {
+    const prompt = await toAiSdkPrompt(history, "groq");
+    const asst: any = prompt.find((m: any) => m.role === "assistant");
+    expect(asst.content.some((x: any) => x.type === "reasoning")).toBe(false);
+    expect(asst.content.some((x: any) => x.type === "tool-call")).toBe(true);
+  });
+
+  it("keeps thinking for tolerant providers and when unlabelled", async () => {
+    for (const p of ["openrouter", "openai", "google", "opencode", undefined]) {
+      const prompt = await toAiSdkPrompt(history, p as any);
+      const asst: any = prompt.find((m: any) => m.role === "assistant");
+      expect(asst.content.some((x: any) => x.type === "reasoning")).toBe(true);
+    }
   });
 });

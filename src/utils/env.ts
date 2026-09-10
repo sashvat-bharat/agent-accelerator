@@ -1,6 +1,11 @@
 /**
  * Safe environment lookup for API keys and configurations
  */
+/**
+ * Reads an environment/global value without assuming a Node-only runtime.
+ *
+ * @example `const apiKey = getEnv("OPENAI_API_KEY");`
+ */
 export function getEnv(key: string, fallback?: string): string | undefined {
   if (typeof process !== "undefined" && process.env && process.env[key]) {
     return process.env[key];
@@ -13,6 +18,11 @@ export function getEnv(key: string, fallback?: string): string | undefined {
 
 export type ProviderEnv = Record<string, string>;
 
+/**
+ * Resolves a provider API key from explicit input, overrides, and standard aliases.
+ *
+ * @example `const key = getApiKey("google");`
+ */
 export function getApiKey(provider: string, explicitKey?: string, env?: ProviderEnv): string | undefined {
   if (explicitKey) return explicitKey;
   // ProviderEnv override takes precedence (agent-accel inspiration, SDK-light)
@@ -40,7 +50,6 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
         getEnv("GOOGLE_GENAI_API_KEY")
       );
     case "opencode":
-    case "opencode-zen":
     case "opencode-go":
       return (
         getEnv("OPENCODE_API_KEY") ||
@@ -58,10 +67,12 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
   }
 }
 
+/** Reads MODEL or MODEL_NAME, with an optional fallback. */
 export function getModel(fallback?: string): string | undefined {
   return getEnv("MODEL") || getEnv("MODEL_NAME") || fallback;
 }
 
+/** Reads SUB_AGENT_MODEL, with an optional fallback. */
 export function getSubModel(fallback?: string): string | undefined {
   return getEnv("SUB_AGENT_MODEL") || fallback;
 }

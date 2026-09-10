@@ -55,23 +55,14 @@ describe("Caching & Session Affinity", () => {
     expect(sub.cacheConfig?.retention).toBe("short");
   });
 
-  it("should inject session_id into OpenRouter and OpenCode payloads", async () => {
-    const { getProvider } = await import("../src/index.ts");
-    const openrouter: any = getProvider("openrouter");
-    const opencode: any = getProvider("opencode");
+  it("should inject session affinity into OpenRouter and OpenCode call options", async () => {
+    const { buildAiSdkCallOptions } = await import("../src/index.ts");
+    const orOpts = buildAiSdkCallOptions("openrouter", { sessionId: "test-sess-123" } as any);
+    expect(
+      orOpts.headers?.["session_id"] ?? orOpts.headers?.["x-session-id"]
+    ).toBe("test-sess-123");
 
-    const orPayload = await openrouter.buildPayload(
-      "inclusionai/ling-3.0-flash-fin:free",
-      { messages: [{ role: "user", content: "Hello" }] },
-      { sessionId: "test-sess-123" }
-    );
-    expect(orPayload.session_id).toBe("test-sess-123");
-
-    const ocPayload = await opencode.buildPayload(
-      "gpt-5.4",
-      { messages: [{ role: "user", content: "Hello" }] },
-      { sessionId: "test-sess-456" }
-    );
-    expect(ocPayload.session_id).toBe("test-sess-456");
+    const ocOpts = buildAiSdkCallOptions("opencode", { sessionId: "test-sess-456" } as any);
+    expect(ocOpts.headers?.["x-opencode-session"] ?? ocOpts.headers?.["session_id"]).toBe("test-sess-456");
   });
 });

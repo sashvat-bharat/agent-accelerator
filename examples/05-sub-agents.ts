@@ -1,4 +1,5 @@
 import { Agent, SubAgent, tool, z } from "agent-accelerator";
+import { fail } from "./_shared";
 
 // 1. Standard Function Tool (Tools are strictly deterministic functions)
 const get_topic_brief = tool({
@@ -71,7 +72,7 @@ const researcher = new SubAgent({
     "You are an exhaustive research specialist. Investigate the topic thoroughly, " +
     "providing deep technical breakthroughs, quantifiable metrics, and positive growth indicators.",
   model: process.env.SUB_AGENT_MODEL,
-  ThinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
+  thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
   cache: { retention: "short" },
 });
 
@@ -84,7 +85,7 @@ const critic = new SubAgent({
     "expose hidden economic bottlenecks, unverified assumptions, regulatory barriers, and potential failure points.",
   model: process.env.SUB_AGENT_MODEL,
   stateless: true, // One-shot evaluation mode: does not persist history across turns
-  ThinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
+  thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
   cache: { retention: "short" },
 });
 
@@ -103,7 +104,7 @@ const lead = new Agent({
   // Clean separation of concerns:
   tools: { get_topic_brief },
   subagents: [researcher, critic],
-  ThinkingLevel: "high",
+  thinkingLevel: "high",
   cache: { retention: "short" },
 });
 
@@ -127,7 +128,7 @@ const response = await lead.run(topic, {
       console.log(`\n\x1b[33m↳ [SubAgent Completed] ${s.name} (${s.durationMs}ms • ${fmt(s.usage.totalTokens)} tok • ${formatCost(s.usage.cost?.totalCost)} • provider: ${s.provider} • model: ${s.model})\x1b[0m\n`);
     }
   },
-});
+}).catch(fail);
 
 // 6. Summary Telemetry
 const cached = response.usage.cachedTokens ?? response.usage.cacheReadTokens ?? 0;

@@ -1,7 +1,8 @@
-// Achieved ~99.3% of Cache Hit Rate!!
+// Achieved ~99.8% of Cache Hit Rate!!
 
 import * as fs from "node:fs";
 import { Agent } from "agent-accelerator";
+import { fail } from "./_shared";
 
 let agent: Agent;
 try {
@@ -9,9 +10,14 @@ try {
     name: "Editorial Lead",
     instructions: fs.readFileSync(new URL("../SYSTEM_PROMPT_AGENT.md", import.meta.url), "utf8"),
     model: process.env.MODEL,
-    SubAgentModel: process.env.SUB_AGENT_MODEL,
-    EnableSubagents: true,
-    ThinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
+    dynamicSubagents: {
+      enabled: true,
+      model: process.env.SUB_AGENT_MODEL,
+      maxSpawn: 3,
+      thinkingLevel: (process.env.SUB_AGENT_THINKING_LEVEL as any) ?? "low",
+      timeout: 60000,
+    },
+    thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
     cache: { retention: (process.env.CACHE_RETENTION as any) ?? "short" },
   });
 } catch (err: any) {
@@ -44,21 +50,26 @@ async function ask(prompt: string) {
         console.log(`\n\x1b[90m↳ ${e.subagent!.name} done (${fmt(e.subagent!.usage.totalTokens)} tok${costPart})\x1b[0m`);
       }
     },
-  });
+  }).catch(fail);
 
   const u = res.usage;
+  const prevIn = totals.in;
+  const prevCr = totals.cr;
   totals.in += u.inputTokens ?? 0;
   totals.out += u.outputTokens ?? 0;
-  const cr = u.cachedTokens ?? u.cacheReadTokens ?? 0;
-  totals.cr += cr;
+  const runCr = u.cachedTokens ?? u.cacheReadTokens ?? 0;
+  totals.cr += runCr;
   totals.cw += u.cacheWriteTokens ?? 0;
   const turnCost = u.cost?.totalCost ?? 0;
   totals.cost += turnCost;
-  const ch = u.inputTokens ? ((cr / u.inputTokens) * 100).toFixed(1) : "0";
+  const turnIn = totals.in - prevIn;
+  const turnCr = totals.cr - prevCr;
+  const turnCh = turnIn ? ((turnCr / turnIn) * 100).toFixed(1) : "0.0";
+  const totalCh = totals.in ? ((totals.cr / totals.in) * 100).toFixed(1) : "0.0";
   const lvl = (agent as any).thinkingConfig?.level ? ` • ${(agent as any).thinkingConfig.level}` : "";
   const costSummary = turnCost > 0 ? `turn: ${formatCost(turnCost)} | total: ${formatCost(totals.cost)}` : formatCost(totals.cost);
 
-  console.log(`\n\x1b[35m↑${fmt(totals.in)} ↓${fmt(totals.out)} CR${fmt(totals.cr)} CW${fmt(totals.cw)} CH${ch}% [${costSummary}] • ${res.provider}/${res.model}${lvl} ${res.durationMs}ms\x1b[0m`);
+  console.log(`\n\x1b[35m↑${fmt(totals.in)} ↓${fmt(totals.out)} CR${fmt(totals.cr)} CW${fmt(totals.cw)} turn-CH${turnCh}% total-CH${totalCh}% [${costSummary}] • ${res.provider}/${res.model}${lvl} ${res.durationMs}ms\x1b[0m`);
   if (res.subagents?.length) {
     console.log(`\x1b[90m  subagents: ${res.subagents.map((s: any) => `${s.name}:ok (${formatCost(s.usage?.cost?.totalCost ?? 0)})`).join(", ")}\x1b[0m`);
   }
