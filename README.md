@@ -30,8 +30,17 @@ console.log(res.usage);
 ## Install
 
 ```bash
+# Bun (recommended)
 bun add agent-accelerator
-# npm / pnpm also work
+
+# npm
+npm install agent-accelerator
+
+# pnpm
+pnpm add agent-accelerator
+
+# Yarn
+yarn add agent-accelerator
 ```
 
 Requires `bun` or `node 22+`.
