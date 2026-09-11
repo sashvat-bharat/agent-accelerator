@@ -37,6 +37,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
-# models.dev database snapshot (regenerate with bun run update-models)
+# models.dev database snapshot & cache (regenerate with bun run update-models)
 src/data/models.dev.json
+src/data/models-cache.json
 models.dev.json
+models-cache.json

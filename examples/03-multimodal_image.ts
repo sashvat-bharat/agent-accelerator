@@ -17,4 +17,6 @@ const res = await agent.run([
 ]).catch(fail);
 
 console.log(res.text);
+console.log(`[${res.usage.inputTokens} tok]`);
+console.log(`[${res.usage.outputTokens} tok]`);
 console.log(`[${res.usage.totalTokens} tok]`);

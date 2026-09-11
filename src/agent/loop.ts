@@ -7,7 +7,7 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { toStandardToolDeclarations } from "../tools/tool.ts";
 import { executeToolCalls } from "../tools/executor.ts";
-import { getModelFromCatalog } from "../models/catalog.ts";
+import { getModelFromCatalog, ensureModelCatalogFresh } from "../models/catalog.ts";
 import { countTokens } from "../tokens/counter.ts";
 
 export interface AgentLoopConfig {
@@ -169,6 +169,7 @@ async function executeToolCallsWithRepeatGuard(options: {
  * Runs a single non-streaming agent turn or multi-turn loop
  */
 export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentResponse> {
+  await ensureModelCatalogFresh();
   const {
     agentName,
     provider,
@@ -363,6 +364,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 
   (async () => {
     try {
+      await ensureModelCatalogFresh();
       const {
         agentName,
         provider,

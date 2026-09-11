@@ -1,11 +1,22 @@
 /**
  * Model catalog — battle-tested single source of truth (models.dev)
- * Stored at src/data/models.dev.json (fetched from https://models.dev/api.json)
+ * Dynamically loaded and synchronized via ~/.cache with ~12h TTL.
  * All context length, pricing, limits, reasoning, modalities come from here.
  * Providers' hardcoded GOOGLE_MODELS etc. are DEPRECATED fallbacks only.
  */
 
-import catalogData from "../data/models.dev.json" with { type: "json" };
+import {
+  getActiveCatalog,
+  registerCatalogUpdateListener,
+  refreshModelCatalog,
+  ensureModelCatalogFresh,
+  getCatalogStatus,
+  setCatalogTTL,
+  getCatalogTTL,
+  DEFAULT_CATALOG_TTL_MS,
+  type CatalogStatus,
+  type RefreshCatalogOptions,
+} from "./catalog-cache.ts";
 import type { ModelSpec, ProviderId, ModelLimit, ModelCost, ModelModalities } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
 
@@ -133,7 +144,8 @@ let globalIndex: Map<string, IndexEntry> | null = null;
 function getGlobalIndex(): Map<string, IndexEntry> {
   if (globalIndex) return globalIndex;
   globalIndex = new Map();
-  for (const [p, providerData] of Object.entries(catalogData as Record<string, any>)) {
+  const catalog = getActiveCatalog();
+  for (const [p, providerData] of Object.entries(catalog as Record<string, any>)) {
     const models = (providerData as any)?.models;
     if (!models) continue;
     for (const [key, raw] of Object.entries(models as Record<string, any>)) {
@@ -167,9 +179,10 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
 
   const aliasProviders = PROVIDER_ALIASES[provider] || [provider];
   const tryProviders = [...new Set([...aliasProviders, provider, provider.replace("-zen", ""), provider.replace("-go", "")])];
+  const catalog = getActiveCatalog();
 
   for (const p of tryProviders) {
-    const providerData: any = (catalogData as any)[p];
+    const providerData: any = (catalog as any)[p];
     if (!providerData?.models) continue;
     const candidates = [
       modelId,
@@ -436,8 +449,9 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
   const aliases = PROVIDER_ALIASES[provider] || [provider];
   const seen = new Set<string>();
   const out: ModelSpec[] = [];
+  const catalog = getActiveCatalog();
   for (const alias of aliases) {
-    const data: any = (catalogData as any)[alias];
+    const data: any = (catalog as any)[alias];
     if (!data?.models) continue;
     for (const [key, raw] of Object.entries(data.models as Record<string, any>)) {
       if (seen.has(key)) continue;
@@ -450,7 +464,40 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
   return out;
 }
 
-export const GOOGLE_MODELS: ModelSpec[] = getModelsForProvider("google");
-export const OPENAI_MODELS: ModelSpec[] = getModelsForProvider("openai");
-export const OPENCODE_MODELS: ModelSpec[] = getModelsForProvider("opencode");
-export const OPENROUTER_MODELS: ModelSpec[] = getModelsForProvider("openrouter");
+export const GOOGLE_MODELS: ModelSpec[] = [...getModelsForProvider("google")];
+export const OPENAI_MODELS: ModelSpec[] = [...getModelsForProvider("openai")];
+export const OPENCODE_MODELS: ModelSpec[] = [...getModelsForProvider("opencode")];
+export const OPENROUTER_MODELS: ModelSpec[] = [...getModelsForProvider("openrouter")];
+
+function refreshExportedModels(): void {
+  GOOGLE_MODELS.length = 0;
+  GOOGLE_MODELS.push(...getModelsForProvider("google"));
+  OPENAI_MODELS.length = 0;
+  OPENAI_MODELS.push(...getModelsForProvider("openai"));
+  OPENCODE_MODELS.length = 0;
+  OPENCODE_MODELS.push(...getModelsForProvider("opencode"));
+  OPENROUTER_MODELS.length = 0;
+  OPENROUTER_MODELS.push(...getModelsForProvider("openrouter"));
+}
+
+// Invalidate caches and refresh exported models whenever the catalog updates
+registerCatalogUpdateListener(() => {
+  lookupCache.clear();
+  providerModelsCache.clear();
+  globalIndex = null;
+  refreshExportedModels();
+});
+
+// Re-export cache management utilities
+export {
+  refreshModelCatalog,
+  ensureModelCatalogFresh,
+  getCatalogStatus,
+  setCatalogTTL,
+  getCatalogTTL,
+  getCacheDir,
+  getCacheFilePath,
+  DEFAULT_CATALOG_TTL_MS,
+  type CatalogStatus,
+  type RefreshCatalogOptions,
+} from "./catalog-cache.ts";

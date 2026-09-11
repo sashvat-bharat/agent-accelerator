@@ -1,7 +1,39 @@
 {
   "name": "agent-accelerator",
-  "version": "1.0.0",
-  "description": "Lightweight, high-performance TypeScript SDK providing a unified AI provider layer with complete JSON data exposure and prompt caching optimization.",
+  "version": "0.1.0",
+  "description": "High-performance SDK for AI agents with a unified API across AI providers. Optimized for high cache hit rates, observability, and seamless agent orchestration. Built to power production-grade agentic systems and harnesses for teams at any scale.",
+  "license": "MIT",
+  "author": "Sashvat Bharat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sashvat-bharat/agent-accelerator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sashvat-bharat/agent-accelerator/issues"
+  },
+  "homepage": "https://github.com/sashvat-bharat/agent-accelerator#readme",
+  "keywords": [
+    "ai",
+    "agents",
+    "agents sdk",
+    "ai agents sdk",
+    "typescript",
+    "agent accelerator",
+    "agent accel"
+  ],
+  "files": [
+    "src",
+    "SYSTEM_PROMPT.md",
+    "SYSTEM_PROMPT_AGENT.md",
+    "SYSTEM_PROMPT_TOOLS.md",
+    "tsconfig.json",
+    "bunfig.toml",
+    "bun.lock",
+    "README.md",
+    "LICENSE",
+    "!src/data/models-cache.json",
+    "!src/data/models.dev.json"
+  ],
   "main": "./src/index.ts",
   "module": "./src/index.ts",
   "types": "./src/index.ts",
@@ -12,7 +44,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test test/",
-    "update-models": "curl -sSL https://models.dev/api.json -o src/data/models.dev.json"
+    "update-models": "bun scripts/update-models.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

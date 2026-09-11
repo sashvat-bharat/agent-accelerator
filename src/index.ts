@@ -30,6 +30,16 @@ export {
   validateModelThinking,
   getModelsForProvider,
   ThinkingLevelError,
+  refreshModelCatalog,
+  ensureModelCatalogFresh,
+  getCatalogStatus,
+  setCatalogTTL,
+  getCatalogTTL,
+  getCacheDir,
+  getCacheFilePath,
+  DEFAULT_CATALOG_TTL_MS,
+  type CatalogStatus,
+  type RefreshCatalogOptions,
 } from "./models/catalog.ts";
 export { AiSdkBaseProvider as BaseProvider } from "./ai-sdk/model-provider.ts";
 export {
