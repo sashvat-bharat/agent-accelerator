@@ -1,8 +1,14 @@
 # Agent Accelerator
 
+[![GitHub](https://img.shields.io/badge/GitHub-sashvat--bharat%2Fagent--accelerator-blue?logo=github)](https://github.com/sashvat-bharat/agent-accelerator)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
 
+GitHub: [https://github.com/sashvat-bharat/agent-accelerator](https://github.com/sashvat-bharat/agent-accelerator)
+
 Agent Accelerator supports `google`, `opencode`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`.
+
 
 ```ts
 import { Agent } from "agent-accelerator";
@@ -911,36 +917,55 @@ const res = await agent.run([...]).catch(fail);
 ```
 
 ---
-## Model Catalog
+## Model Catalog & Dynamic 12-Hour TTL Sync
 
-The model catalog is backed by:
+Agent Accelerator features an adaptive, dynamically synchronized model catalog powered by [models.dev](https://models.dev). To avoid shipping a bloated 4.4 MB static JSON file with production builds, the SDK employs a high-performance **12-hour TTL local caching architecture**:
 
-```text
-src/data/models.dev.json
+- **Automated 12-Hour Cache Validation**: When `.run()`, `.ask()`, or `.stream()` executes, the runtime checks `src/data/models-cache.json`. If the cache timestamp is within 12 hours, it reads from disk with zero network delay. When the TTL expires, it transparently synchronizes with `https://models.dev/api.json`.
+- **Git & Package Safety**: The dynamic cache file (`src/data/models-cache.json`) is gitignored and excluded from production packages.
+
+### Developer Catalog Controls
+
+```ts
+import {
+  refreshModelCatalog,
+  getCatalogStatus,
+  setCatalogTTL,
+  getModelFromCatalog,
+  getModelThinkingInfo,
+} from "agent-accelerator";
+
+// Force an immediate refresh from models.dev:
+await refreshModelCatalog({ force: true });
+
+// Customize default TTL (e.g. 24 hours):
+setCatalogTTL(24 * 60 * 60 * 1000);
+
+// Inspect cache health and metadata:
+const status = getCatalogStatus();
+console.log(status.modelCount, status.providerCount, status.isExpired);
 ```
 
-The file is fetched from:
-
-```text
-https://models.dev/api.json
-```
-
-and is gitignored.
-
-Refresh the catalog with:
+### CLI Refresh
 
 ```bash
-bun run update-models
+bun run update-models                 # Refresh model catalog (force or expired)
+bun scripts/update-models.ts --force  # Force re-download
+bun scripts/update-models.ts --ttl=24h # Refresh with custom TTL
 ```
 
 Upstream data lags on some inputs (e.g. `gpt-4o` accepts audio). Record
 verified corrections in `MODALITY_OVERRIDES` in `src/models/catalog.ts`
 (keyed `provider/model`, merged over the snapshot) — never edit the JSON
 directly, a refresh would wipe it.
+
 ### Catalog Helpers
 
 * `getModelFromCatalog(provider, modelId)` → `ModelSpec | undefined`, including alias and global fallback handling. Use it for context-window, pricing, and modality checks.
 * `getModelsForProvider(provider)` → returns `ModelSpec[]`.
+* `getModelThinkingInfo(provider, modelId)` → inspect permitted thinking levels.
+* `refreshModelCatalog(options?)` → programmatically sync with upstream models.dev.
+* `getCatalogStatus()` → diagnostic info on active catalog, provider count, and TTL expiry.
 
 ### ModelSpec
 
@@ -1152,17 +1177,16 @@ input / output / cached / cost / context %
 ```bash
 bun run typecheck     # tsc --noEmit
 bun test              # bun test test/
-bun run update-models # refresh src/data/models.dev.json
+bun run update-models # refresh model catalog cache (supports --force, --ttl=24h)
 ```
 ### Project Structure
 
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
-├── ai-sdk/     # the only provider backend: provider factories, converters,
-│               # executor, call options/retries, concise errors, registry
-├── models/     # catalog parser + verified modality overrides
-├── data/       # models.dev snapshot (gitignored)
+├── ai-sdk/     # Provider backend: provider factories, converters, executor, registry
+├── models/     # Dynamic catalog cache, parser, verified overrides
+├── data/       # Dynamic model catalog cache (gitignored, excluded from bundle)
 ├── tools/      # tool(), schema, executor
 ├── streaming/  # event stream, SSE parser
 ├── tokens/     # estimator
@@ -1173,12 +1197,15 @@ examples/
 ├── 04-multi_agent.ts  05-sub-agents.ts  06-chat.ts
 ├── 07-multimodal_audio.ts  08-multimodal_document.ts
 ├── 09-multimodal_video.ts  _shared.ts
-test/            # 90+ tests mirroring the above
+test/            # 105 tests mirroring the above
 ```
 
 ---
 ## License
 
-TBD
+MIT License — see [LICENSE](file:///data/projects/Agent-Accelerator/LICENSE) for details.
+
+Copyright (c) 2026 Sashvat Bharat.
 
 ---
+

@@ -1,46 +1,84 @@
-# Models Catalog Data (`models.dev.json`)
+# Model Catalog Cache (`src/data/`)
 
-This directory contains the model catalog snapshot used by **Agent Accelerator** as its single source of truth for model capabilities, pricing, context windows, token limits, and reasoning configurations across 200+ providers and 7,500+ models.
+This directory is the local destination for the dynamic model catalog cache used by **Agent Accelerator**.
 
----
-
-## Why is `models.dev.json` in `.gitignore`?
-
-`models.dev.json` is a ~4.4 MB generated data snapshot fetched directly from [models.dev](https://models.dev). Because models and pricing change frequently upstream, this file is excluded from git tracking to prevent repository bloat and merge conflicts.
+Agent Accelerator references a catalog of **7,500+ models across 200+ providers** for token limits, context windows, modality support, reasoning configurations, and per-token pricing (input, output, cache-read, cache-write).
 
 ---
 
-## How to Generate / Update `models.dev.json`
+## Zero-Bloat Distribution Architecture
 
-You can generate or refresh the catalog snapshot anytime using one of the following methods:
+To keep the repository and published npm/Bun package lightweight and blazing fast:
 
-### Method 1: Using the bun/npm script (Recommended)
+1. **Excluded from Production Package & Git**:
+   * The ~4.5 MB full catalog snapshot (`models-cache.json` / `models.dev.json`) is **never** committed to git and is **excluded** from the npm/Bun distribution bundle.
+   * Both files are tracked in `.gitignore` and `.npmignore`.
 
-From the project root:
+2. **Dynamic 12-Hour Automated TTL Cache**:
+   * On agent execution (`runAgentLoop` / `streamAgentLoop`), Agent Accelerator checks the status of `src/data/models-cache.json`.
+   * **Cache Hit (< 12h)**: Instant memory/disk load with zero network overhead.
+   * **Cache Miss / Expired (≥ 12h)**: Automatically downloads the latest catalog directly from `https://models.dev/api.json`, caches it to `src/data/models-cache.json`, and loads the catalog into memory.
+   * **Resilience**: If an existing cache exists on disk, temporary upstream network issues will safely continue using the local cached copy.
+
+---
+
+## Developer Controls & Management
+
+### 1. CLI Script
+
+You can manually inspect or refresh the model catalog anytime via the developer CLI script:
 
 ```bash
+# Refresh catalog if expired (or download if missing)
 bun run update-models
-```
 
-*(or `npm run update-models` / `pnpm run update-models`)*
+# Force download regardless of age
+bun run update-models --force
 
----
-
-### Method 2: Using `curl` directly
-
-```bash
-curl -sSL https://models.dev/api.json -o src/data/models.dev.json
+# Custom TTL (e.g., 24 hours)
+bun scripts/update-models.ts --ttl=24h
 ```
 
 ---
 
-## How It Works in Agent Accelerator
+### 2. Programmatic API
 
-When Agent Accelerator runs:
-1. `src/models/catalog.ts` loads `src/data/models.dev.json`.
-2. An in-memory global index (`getGlobalIndex()`) indexes all models in $O(1)$ lookup time.
-3. Every model query automatically resolves:
-   * **Context window & max output limits**
-   * **Input, output, and prompt cache read/write pricing**
-   * **Supported thinking levels** (`low`, `medium`, `high`, etc.)
-   * **Modalities** (`text`, `image`, `audio`, `video`)
+All catalog cache lifecycle controls are exported from the root package:
+
+```typescript
+import {
+  refreshModelCatalog,
+  ensureModelCatalogFresh,
+  getCatalogStatus,
+  setCatalogTTL,
+  getModelFromCatalog,
+} from "agent-accelerator";
+
+// 1. Check current cache status
+const status = getCatalogStatus();
+console.log(status);
+// {
+//   isExpired: false,
+//   cachedAt: 1773400000000,
+//   ttlMs: 43200000,
+//   modelCount: 7696,
+//   providerCount: 213,
+//   source: "cache"
+// }
+
+// 2. Refresh on-demand (e.g. in a cron job or startup hook)
+await refreshModelCatalog({ force: true });
+
+// 3. Customize runtime TTL (e.g., 6 hours)
+setCatalogTTL(6 * 60 * 60 * 1000);
+```
+
+---
+
+## Structure
+
+```text
+src/data/
+├── README.md               # This documentation
+└── models-cache.json       # Auto-generated on first run (gitignored, excluded from bundle)
+```

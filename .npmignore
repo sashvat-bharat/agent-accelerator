@@ -1,0 +1,25 @@
+# Development, testing, and internal docs
+examples/
+test/
+references/
+ai/
+scripts/
+commit.md
+
+# Environment secrets and local files
+.env
+.env.*
+.env.local
+.env.example
+
+# Large dynamic catalog dumps and caches
+src/data/models-cache.json
+src/data/models.dev.json
+models-cache.json
+models.dev.json
+
+# Build outputs, logs, and caches
+dist/
+coverage/
+*.log
+.DS_Store
