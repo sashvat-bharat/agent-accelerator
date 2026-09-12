@@ -1,11 +1,10 @@
 # Agent Accelerator
 
+[![npm version](https://img.shields.io/npm/v/agent-accelerator.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/agent-accelerator)
 [![GitHub](https://img.shields.io/badge/GitHub-sashvat--bharat%2Fagent--accelerator-blue?logo=github)](https://github.com/sashvat-bharat/agent-accelerator)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
-
-GitHub: [https://github.com/sashvat-bharat/agent-accelerator](https://github.com/sashvat-bharat/agent-accelerator)
 
 Agent Accelerator supports `google`, `opencode`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`.
 
