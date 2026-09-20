@@ -14,7 +14,7 @@ describe("Model Catalog Dynamic Cache & 12h TTL", () => {
     const dir = getCacheDir();
     const filePath = getCacheFilePath();
     expect(dir).toContain("src/data");
-    expect(filePath).toContain("src/data/models-cache.json");
+    expect(filePath).toContain("src/data/models.dev.json");
   });
 
   it("should have a default TTL of 12 hours", () => {

@@ -929,8 +929,8 @@ const res = await agent.run([...]).catch(fail);
 
 Agent Accelerator features an adaptive, dynamically synchronized model catalog powered by [models.dev](https://models.dev). To avoid shipping a bloated 4.4 MB static JSON file with production builds, the SDK employs a high-performance **12-hour TTL local caching architecture**:
 
-- **Automated 12-Hour Cache Validation**: When `.run()`, `.ask()`, or `.stream()` executes, the runtime checks `src/data/models-cache.json`. If the cache timestamp is within 12 hours, it reads from disk with zero network delay. When the TTL expires, it transparently synchronizes with `https://models.dev/api.json`.
-- **Git & Package Safety**: The dynamic cache file (`src/data/models-cache.json`) is gitignored and excluded from production packages.
+- **Automated 12-Hour Cache Validation**: When `.run()`, `.ask()`, or `.stream()` executes, the runtime checks `src/data/models.dev.json`. If the cache timestamp is within 12 hours, it reads from disk with zero network delay. When the TTL expires, it transparently synchronizes with `https://models.dev/api.json`.
+- **Git & Package Safety**: The dynamic cache file (`src/data/models.dev.json`) is gitignored and excluded from production packages.
 
 ### Developer Catalog Controls
 
@@ -957,9 +957,9 @@ console.log(status.modelCount, status.providerCount, status.isExpired);
 ### CLI Refresh
 
 ```bash
-bun run update-models                 # Refresh model catalog (force or expired)
-bun scripts/update-models.ts --force  # Force re-download
-bun scripts/update-models.ts --ttl=24h # Refresh with custom TTL
+bun run update-models              # Refresh model catalog (force or expired)
+bun src/update-models.ts --force  # Force re-download
+bun src/update-models.ts --ttl=24h # Refresh with custom TTL
 ```
 
 Upstream data lags on some inputs (e.g. `gpt-4o` accepts audio). Record

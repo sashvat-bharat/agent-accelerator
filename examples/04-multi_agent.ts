@@ -8,7 +8,7 @@ let agent: Agent;
 try {
   agent = new Agent({
     name: "Editorial Lead",
-    instructions: fs.readFileSync(new URL("../SYSTEM_PROMPT_AGENT.md", import.meta.url), "utf8"),
+    instructions: fs.readFileSync(new URL("./prompts/SYSTEM_PROMPT_AGENT.md", import.meta.url), "utf8"),
     model: process.env.MODEL,
     dynamicSubagents: {
       enabled: true,

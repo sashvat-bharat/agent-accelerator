@@ -23,15 +23,14 @@
   ],
   "files": [
     "src",
-    "SYSTEM_PROMPT.md",
-    "SYSTEM_PROMPT_AGENT.md",
-    "SYSTEM_PROMPT_TOOLS.md",
+    "examples/prompts/SYSTEM_PROMPT.md",
+    "examples/prompts/SYSTEM_PROMPT_AGENT.md",
+    "examples/prompts/SYSTEM_PROMPT_TOOLS.md",
     "tsconfig.json",
     "bunfig.toml",
     "bun.lock",
     "README.md",
     "LICENSE",
-    "!src/data/models-cache.json",
     "!src/data/models.dev.json"
   ],
   "main": "./src/index.ts",
@@ -44,7 +43,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test test/",
-    "update-models": "bun scripts/update-models.ts"
+    "update-models": "bun src/update-models.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
