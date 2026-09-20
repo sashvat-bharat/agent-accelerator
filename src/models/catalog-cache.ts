@@ -70,9 +70,9 @@ export function getCacheDir(): string {
   return path.resolve(process.cwd(), "src/data");
 }
 
-/** Non-configurable cache file path: src/data/models-cache.json */
+/** Non-configurable cache file path: src/data/models.dev.json */
 export function getCacheFilePath(): string {
-  return path.resolve(process.cwd(), "src/data/models-cache.json");
+  return path.resolve(process.cwd(), "src/data/models.dev.json");
 }
 
 function readJsonFileSync(filePath: string): any {
@@ -99,7 +99,7 @@ let activeFetchedAt: number | undefined = undefined;
 let activeTtlMs: number = globalCatalogTtlMs;
 let activeFromCache = false;
 
-// Synchronous bootstrap: load from src/data/models-cache.json if present
+// Synchronous bootstrap: load from src/data/models.dev.json if present
 function initializeCatalogSync(): void {
   const cachePath = getCacheFilePath();
   const cached = readJsonFileSync(cachePath);
@@ -167,7 +167,7 @@ export function getCatalogStatus(): CatalogStatus {
 
 /**
  * Refreshes the model catalog by downloading from models.dev
- * directly into src/data/models-cache.json with a 12-hour TTL.
+ * directly into src/data/models.dev.json with a 12-hour TTL.
  */
 export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): Promise<CatalogStatus> {
   const effectiveTtl = options.ttlMs ?? globalCatalogTtlMs;
@@ -236,7 +236,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
     data: freshData,
   };
 
-  // Save to src/data/models-cache.json
+  // Save to src/data/models.dev.json
   writeJsonFileSync(cachePath, cachePayload);
 
   // Update in-memory state

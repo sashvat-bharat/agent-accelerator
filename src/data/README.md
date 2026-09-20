@@ -11,13 +11,13 @@ Agent Accelerator references a catalog of **7,500+ models across 200+ providers*
 To keep the repository and published npm/Bun package lightweight and blazing fast:
 
 1. **Excluded from Production Package & Git**:
-   * The ~4.5 MB full catalog snapshot (`models-cache.json` / `models.dev.json`) is **never** committed to git and is **excluded** from the npm/Bun distribution bundle.
-   * Both files are tracked in `.gitignore` and `.npmignore`.
+   * The ~4.5 MB full catalog snapshot (`models.dev.json`) is **never** committed to git and is **excluded** from the npm/Bun distribution bundle.
+   * The file is tracked in `.gitignore` and `.npmignore`.
 
 2. **Dynamic 12-Hour Automated TTL Cache**:
-   * On agent execution (`runAgentLoop` / `streamAgentLoop`), Agent Accelerator checks the status of `src/data/models-cache.json`.
+   * On agent execution (`runAgentLoop` / `streamAgentLoop`), Agent Accelerator checks the status of `src/data/models.dev.json`.
    * **Cache Hit (< 12h)**: Instant memory/disk load with zero network overhead.
-   * **Cache Miss / Expired (≥ 12h)**: Automatically downloads the latest catalog directly from `https://models.dev/api.json`, caches it to `src/data/models-cache.json`, and loads the catalog into memory.
+   * **Cache Miss / Expired (≥ 12h)**: Automatically downloads the latest catalog directly from `https://models.dev/api.json`, caches it to `src/data/models.dev.json`, and loads the catalog into memory.
    * **Resilience**: If an existing cache exists on disk, temporary upstream network issues will safely continue using the local cached copy.
 
 ---
@@ -36,7 +36,7 @@ bun run update-models
 bun run update-models --force
 
 # Custom TTL (e.g., 24 hours)
-bun scripts/update-models.ts --ttl=24h
+bun src/update-models.ts --ttl=24h
 ```
 
 ---
@@ -80,5 +80,5 @@ setCatalogTTL(6 * 60 * 60 * 1000);
 ```text
 src/data/
 ├── README.md               # This documentation
-└── models-cache.json       # Auto-generated on first run (gitignored, excluded from bundle)
+└── models.dev.json         # Auto-generated on first run (gitignored, excluded from bundle)
 ```

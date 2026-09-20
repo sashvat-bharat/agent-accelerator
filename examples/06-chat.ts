@@ -115,8 +115,8 @@ function loadSession(): PersistedSession | null {
 
 function loadPrompt(): string {
   const candidates = [
-    path.join(process.cwd(), "SYSTEM_PROMPT_AGENT.md"),
-    path.join(import.meta.dir, "../SYSTEM_PROMPT_AGENT.md"),
+    path.join(process.cwd(), "examples/prompts/SYSTEM_PROMPT_AGENT.md"),
+    path.join(import.meta.dir, "prompts/SYSTEM_PROMPT_AGENT.md"),
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return fs.readFileSync(c, "utf8");

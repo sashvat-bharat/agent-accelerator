@@ -3,12 +3,12 @@
  * Developer script to manually download and refresh the models.dev catalog.
  *
  * Usage:
- *   bun scripts/update-models.ts
- *   bun scripts/update-models.ts --force
- *   bun scripts/update-models.ts --ttl=24h
+ *   bun src/update-models.ts
+ *   bun src/update-models.ts --force
+ *   bun src/update-models.ts --ttl=24h
  */
 
-import { refreshModelCatalog, getCatalogStatus } from "../src/index.ts";
+import { refreshModelCatalog, getCatalogStatus } from "./index.ts";
 
 const args = process.argv.slice(2);
 const force = args.includes("--force") || !args.some((a) => a.startsWith("--ttl"));
