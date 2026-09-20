@@ -4,6 +4,9 @@ node_modules
 ai/
 references/
 
+AGENTS.md
+codebase.md
+
 # output
 out
 dist
