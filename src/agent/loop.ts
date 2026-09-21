@@ -8,7 +8,6 @@ import { AgentContext } from "./context.ts";
 import { toStandardToolDeclarations } from "../tools/tool.ts";
 import { executeToolCalls } from "../tools/executor.ts";
 import { getModelFromCatalog, ensureModelCatalogFresh } from "../models/catalog.ts";
-import { countTokens } from "../tokens/counter.ts";
 
 export interface AgentLoopConfig {
   agentName?: string;
@@ -204,30 +203,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   while (turns < maxTurns) {
     turns++;
 
-    // Battle-tested context window check — trim oldest history if needed, keep cached prefix (system+tools)
     const spec = getModelFromCatalog(provider.id, modelId);
-    const contextWindow = spec?.limit?.context ?? spec?.contextWindow ?? 128000;
-    const maxOutput = spec?.limit?.output ?? spec?.maxOutputTokens ?? 8192;
-    // Reserve for output + 10% headroom, ensure first turn already cache-friendly
-    const budgetForInput = Math.floor(contextWindow * 0.9) - maxOutput;
-    let estimated = 0;
-    try {
-      estimated = countTokens({ systemPrompt: context.systemPrompt, messages: context.messages, tools: standardTools as any });
-    } catch {}
-    if (estimated > budgetForInput && context.messages.length > 2) {
-      // Keep system + last 70% of history, drop oldest middle (preserve cached prefix stability)
-      const keepCount = Math.max(2, Math.floor(context.messages.length * 0.7));
-      const toKeep = context.messages.slice(-keepCount);
-      // Preserve at least system and first user if possible
-      const firstUserIdx = context.messages.findIndex((m) => m.role === "user");
-      if (firstUserIdx >= 0 && firstUserIdx < context.messages.length - keepCount) {
-        // Drop middle, keep head + tail for cache stability
-        const head = context.messages.slice(0, 1);
-        context.messages = [...head, ...toKeep];
-      } else {
-        context.messages = toKeep;
-      }
-    }
 
     const providerOptions: ProviderRequestOptions = {
       ...options,
@@ -399,25 +375,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         throwIfCancelled();
         turns++;
 
-        // Same context-window trim as non-stream (ensure cache prefix stable)
         const spec2 = getModelFromCatalog(provider.id, modelId);
-        const cw2 = spec2?.limit?.context ?? spec2?.contextWindow ?? 128000;
-        const mo2 = spec2?.limit?.output ?? spec2?.maxOutputTokens ?? 8192;
-        const budget2 = Math.floor(cw2 * 0.9) - mo2;
-        try {
-          const est2 = countTokens({ systemPrompt: context.systemPrompt, messages: context.messages, tools: standardTools as any });
-          if (est2 > budget2 && context.messages.length > 2) {
-            const keep2 = Math.max(2, Math.floor(context.messages.length * 0.7));
-            const toKeep = context.messages.slice(-keep2);
-            const firstUserIdx = context.messages.findIndex((m) => m.role === "user");
-            if (firstUserIdx >= 0 && firstUserIdx < context.messages.length - keep2) {
-              const head = context.messages.slice(0, 1);
-              context.messages = [...head, ...toKeep];
-            } else {
-              context.messages = toKeep;
-            }
-          }
-        } catch {}
 
         const providerOptions: ProviderRequestOptions = {
           ...options,

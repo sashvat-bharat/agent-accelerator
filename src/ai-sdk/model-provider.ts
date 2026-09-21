@@ -10,7 +10,6 @@ import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import type { LanguageModelV4 } from "@ai-sdk/provider";
 import { getAiSdkModel } from "./provider.ts";
 import { executeAiSdkGenerate, executeAiSdkStream } from "./executor.ts";
-import { countTokens } from "../tokens/counter.ts";
 import { getModelFromCatalog, getModelsForProvider } from "../models/catalog.ts";
 import { getApiKey, getEnv } from "../utils/env.ts";
 
@@ -121,13 +120,6 @@ export class AiSdkBaseProvider implements Provider {
     const clean = this.cleanModelId(rawId);
     const aiModel = this.toAiSdkModel(clean, options);
     return executeAiSdkStream(aiModel, this.id, clean, context, options);
-  }
-
-  async countTokens(
-    _model: string | ModelSpec,
-    context: ProviderContext
-  ): Promise<number> {
-    return countTokens(context);
   }
 }
 

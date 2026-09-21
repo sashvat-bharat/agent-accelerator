@@ -2,8 +2,6 @@ import { describe, it, expect } from "bun:test";
 import {
   buildSessionHeaders,
   createSessionId,
-  countTokens,
-  estimateTokensFromText,
 } from "../src/index.ts";
 
 describe("Caching & Session Affinity", () => {
@@ -36,13 +34,6 @@ describe("Caching & Session Affinity", () => {
     expect(headers["x-goog-api-client"]).toBe("agent-accel/1.0");
     expect(headers["x-session-id"]).toBe(sessionId);
     expect(headers["x-client-request-id"]).toBe(sessionId);
-  });
-
-  it("should estimate tokens accurately", () => {
-    const text = "Hello world! This is a test sentence for token counting.";
-    const count = countTokens(text);
-    expect(count).toBeGreaterThan(5);
-    expect(count).toBeLessThan(30);
   });
 
   it("should default SubAgent cache config to retention short", async () => {

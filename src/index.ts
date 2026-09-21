@@ -101,14 +101,6 @@ export type {
   CachedContentMetadata,
 } from "./utils/cache.ts";
 
-
-export {
-  countTokens,
-  estimateTokensFromText,
-  estimateTokensFromMessage,
-  estimateTokensFromPart,
-} from "./tokens/counter.ts";
-
 // Streaming & Events
 export { AssistantMessageEventStream } from "./streaming/event-stream.ts";
 export { SSEParser } from "./streaming/sse-parser.ts";

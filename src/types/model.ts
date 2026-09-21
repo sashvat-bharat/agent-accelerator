@@ -205,8 +205,4 @@ export interface Provider {
     context: ProviderContext,
     options?: ProviderRequestOptions
   ): AssistantMessageEventStream;
-  countTokens(
-    model: string | ModelSpec,
-    context: ProviderContext
-  ): Promise<number>;
 }

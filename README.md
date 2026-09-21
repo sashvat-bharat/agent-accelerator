@@ -471,7 +471,7 @@ new Agent({
 });
 ```
 
-`BaseProvider` is the abstract provider base containing `id`, `name`, `models`, `getModel`, `generate`, `stream`, and `countTokens`.
+`BaseProvider` is the abstract provider base containing `id`, `name`, `models`, `getModel`, `generate`, and `stream`.
 
 Its catalog-first `getModel` behavior includes a hardcoded fallback.
 
@@ -1024,15 +1024,8 @@ ModelCapabilities {
 }
 ```
 
-When estimated input exceeds the available context budget, `Agent` trims the oldest middle history using:
-
-```text
-context * 0.9 - maxOutput
-```
-
-The beginning of the conversation and the most recent tail are preserved.
-
 ---
+
 ## Messages and Media
 
 ### Message
@@ -1104,20 +1097,6 @@ providers, dynamic routers) are skipped — the provider endpoint decides and
 its verdict surfaces as a concise error (see [Errors](#errors)). Verified
 catalog corrections live in `MODALITY_OVERRIDES` (`src/models/catalog.ts`),
 never in the gitignored snapshot.
-
----
-## Tokens
-
-Token counting is heuristic only.
-
-Actual billing information comes from `res.usage`.
-
-Available helpers:
-
-* `countTokens(string | Message[] | ProviderContext)` — useful for preflight sizing and history trimming.
-* `estimateTokensFromText(text)`
-* `estimateTokensFromMessage(msg)`
-* `estimateTokensFromPart(part)`
 
 ---
 ## Utils
@@ -1197,7 +1176,6 @@ src/
 ├── data/       # Dynamic model catalog cache (gitignored, excluded from bundle)
 ├── tools/      # tool(), schema, executor
 ├── streaming/  # event stream, SSE parser
-├── tokens/     # estimator
 ├── types/      # agent, core, message, model, response, tool
 └── utils/      # base64, cache, env, headers, media, serialization, session
 examples/
@@ -1205,7 +1183,7 @@ examples/
 ├── 04-multi_agent.ts  05-sub-agents.ts  06-chat.ts
 ├── 07-multimodal_audio.ts  08-multimodal_document.ts
 ├── 09-multimodal_video.ts  _shared.ts
-test/            # 105 tests mirroring the above
+test/            # 104 tests mirroring the above
 ```
 
 ---
