@@ -64,6 +64,11 @@ export interface ToolCallPart {
    * Optional Gemini thought signature associated with this tool call
    */
   thoughtSignature?: string;
+  /**
+   * Provider pairing identifier (e.g. Responses `call_id`), preserved so
+   * history builders can pair results without inventing ids.
+   */
+  callId?: string;
 }
 
 /** Tool execution result returned to the model context. */

@@ -12,14 +12,10 @@ describe("Model Resolution & Providers", () => {
     expect(res2.modelId).toBe("gemini-3.7-flash");
   });
 
-  it("should resolve OpenCode models", () => {
-    const res1 = resolveModel("opencode/hy3-free");
-    expect(res1.provider.id).toBe("opencode");
-    expect(res1.modelId).toBe("hy3-free");
-
-    const res2 = resolveModel("opencode-go/muse-spark-1.2-contributor-free");
-    expect(res2.provider.id).toBe("opencode");
-    expect(res2.modelId).toBe("muse-spark-1.2-contributor-free");
+  it("should reject removed OpenCode prefixes", () => {
+    expect(() => resolveModel("opencode/hy3-free")).toThrow(/has been removed/);
+    expect(() => resolveModel("opencode-go/mimo-v2.5-free")).toThrow(/has been removed/);
+    expect(() => getProvider("opencode")).toThrow(/has been removed/);
   });
 
   it("should resolve OpenRouter models", () => {
@@ -36,9 +32,7 @@ describe("Model Resolution & Providers", () => {
     expect(genAI.apiKey).toBe("TEST_KEY");
     expect(genAI.thinkingLevel).toBe("low");
 
-    const openCode = ModelProvider.OpenCode("hy3-free", "OPENCODE_KEY");
-    expect(openCode.model).toBe("opencode/hy3-free");
-    expect(openCode.apiKey).toBe("OPENCODE_KEY");
+    expect((ModelProvider as any).OpenCode).toBeUndefined();
   });
 
   it("should validate thinking options against models.dev.json", () => {
@@ -68,7 +62,7 @@ describe("Model Resolution & Providers", () => {
       expect(e).toBeInstanceOf(Error);
       expect(e.modelId).toBe("gemini-3.8-flash");
       expect(e.requestedLevel).toBe("none");
-      expect(e.allowedLevels).toEqual(["low", "medium", "high"]);
+      expect(e.allowedLevels).toEqual(["low", "medium", "high", "dynamic"]);
       expect(e.message).toContain("requires thinking and does not support disabling it");
       expect(e.message).toContain("How to fix:");
     }

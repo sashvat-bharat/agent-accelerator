@@ -56,8 +56,9 @@ export class SSEParser {
         // Comment / ping
         continue;
       } else if (line.startsWith("data:")) {
-        const val = line.slice(5);
-        this.currentData.push(val.startsWith(" ") ? val.slice(1) : val.trimStart());
+        // Per WHATWG SSE, strip exactly one leading space — never tabs or
+        // further whitespace, so indented code/JSON payloads survive intact.
+        this.currentData.push(line.startsWith("data: ") ? line.slice(6) : line.slice(5));
       } else if (line.startsWith("event:")) {
         const val = line.slice(6);
         this.currentEvent = (val.startsWith(" ") ? val.slice(1) : val).trim();
@@ -76,8 +77,9 @@ export class SSEParser {
     const messages: SSEMessage[] = [];
     // S7: flush pending currentData first, then treat remaining buffer as final lines (avoid duplication)
     if (this.buffer.trim() !== "") {
-      // Feed remaining buffer as if terminated
-      const pending = this.feed(this.buffer + "\n\n");
+      // Terminate the leftover buffer in place: feed() appends its argument
+      // to this.buffer, so re-feeding the buffer itself would duplicate it.
+      const pending = this.feed("\n\n");
       messages.push(...pending);
       this.buffer = "";
     }

@@ -16,7 +16,7 @@ interface TinyFishSearchResponse {
 }
 
 // Hardcoded for now — replace with your real key.
-const TINYFISH_API_KEY = process.env.TINYFISH_API_KEY ?? "";
+const TINYFISH_API_KEY = process.env.TINYFISH_API_KEY;
 
 const web_search = tool({
   name: "web_search",

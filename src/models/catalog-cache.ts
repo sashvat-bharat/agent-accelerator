@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { getEnv } from "../utils/env.ts";
 
 /** Default TTL: 12 Hours (in milliseconds). */
 export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
@@ -65,8 +66,14 @@ function notifyUpdateListeners(): void {
   }
 }
 
-/** Non-configurable cache directory: src/data */
+/**
+ * Catalog cache directory. Defaults to `src/data` (repo convention); override
+ * with `AGENT_CACHE_DIR` when embedding as a package or running on a
+ * read-only filesystem (serverless/containers).
+ */
 export function getCacheDir(): string {
+  const override = getEnv("AGENT_CACHE_DIR");
+  if (override && override.trim()) return path.resolve(override.trim());
   return path.resolve(process.cwd(), "src/data");
 }
 
@@ -166,6 +173,27 @@ export function getCatalogStatus(): CatalogStatus {
 }
 
 /**
+ * Structural check for a models.dev catalog payload: a map of provider ids
+ * to entries that each carry a `models` map. Rejects chat-completion
+ * payloads, error envelopes, and other non-catalog JSON (e.g. from mocked
+ * `fetch` in tests) BEFORE they can overwrite the good on-disk cache.
+ */
+export function isValidCatalogPayload(data: unknown): data is Record<string, any> {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const entries = Object.entries(data as Record<string, unknown>);
+  if (entries.length < 3) return false;
+  let providersWithModels = 0;
+  for (const [, value] of entries) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const models = (value as Record<string, unknown>).models;
+    if (!models || typeof models !== "object" || Array.isArray(models)) return false;
+    if (Object.keys(models).length > 0) providersWithModels++;
+  }
+  // Guard against degenerate-but-shaped payloads (e.g. `{a:{models:{}}}`).
+  return providersWithModels >= 3;
+}
+
+/**
  * Refreshes the model catalog by downloading from models.dev
  * directly into src/data/models.dev.json with a 12-hour TTL.
  */
@@ -211,6 +239,21 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
     }
 
     freshData = (await res.json()) as Record<string, any>;
+
+    // Never let a non-catalog payload (mocked fetch, proxy error page,
+    // chat-completion stub) overwrite the good on-disk cache.
+    if (!isValidCatalogPayload(freshData)) {
+      clearTimeout(timer);
+      const existing = readJsonFileSync(cachePath);
+      if (existing && existing.data) {
+        activeCatalog = existing.data;
+        activeFetchedAt = existing.fetchedAt;
+        activeTtlMs = existing.ttlMs || effectiveTtl;
+        activeFromCache = true;
+        notifyUpdateListeners();
+      }
+      return getCatalogStatus();
+    }
   } catch (err: any) {
     clearTimeout(timer);
     // If download fails, retain disk cache if available
@@ -236,14 +279,22 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
     data: freshData,
   };
 
-  // Save to src/data/models.dev.json
-  writeJsonFileSync(cachePath, cachePayload);
-
-  // Update in-memory state
+  // Update in-memory state FIRST so a read-only filesystem still serves the
+  // fresh catalog for this process; disk persistence below is best-effort.
   activeCatalog = freshData;
   activeFetchedAt = fetchedAt;
   activeTtlMs = effectiveTtl;
   activeFromCache = true;
+
+  // Save to src/data/models.dev.json (or the AGENT_CACHE_DIR override)
+  try {
+    writeJsonFileSync(cachePath, cachePayload);
+  } catch (err) {
+    activeFromCache = false;
+    console.warn(
+      `[Agent Accelerator] Could not write model catalog cache to ${cachePath} (${err instanceof Error ? err.message : String(err)}). Continuing with the in-memory catalog.`
+    );
+  }
 
   notifyUpdateListeners();
   return getCatalogStatus();

@@ -7,7 +7,9 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { toStandardToolDeclarations } from "../tools/tool.ts";
 import { executeToolCalls } from "../tools/executor.ts";
-import { getModelFromCatalog, ensureModelCatalogFresh } from "../models/catalog.ts";
+import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
+import { preprocessFilePartsForBypass } from "../utils/documents.ts";
+import { noteProviderTurn } from "../providers.ts";
 
 export interface AgentLoopConfig {
   agentName?: string;
@@ -18,6 +20,8 @@ export interface AgentLoopConfig {
   options?: ProviderRequestOptions;
   runOptions?: AgentRunOptions;
   maxTurns?: number;
+  /** Convert `file` parts client-side for pdf-incapable models (see Agent flag). */
+  bypassInputFileModality?: boolean;
 }
 
 export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec): TokenUsage["cost"] {
@@ -65,6 +69,13 @@ function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpe
   target.cacheReadTokens = (target.cacheReadTokens ?? 0) + (source.cacheReadTokens ?? 0);
   target.cacheWriteTokens = (target.cacheWriteTokens ?? 0) + (source.cacheWriteTokens ?? 0);
   target.thinkingTokens = (target.thinkingTokens ?? 0) + (source.thinkingTokens ?? 0);
+
+  // Canonical invariant (provider-agnostic): cache hits are a subset of
+  // input. Some providers occasionally report cached > input on long chained
+  // runs, which surfaces as >100% hit rates downstream. Clamp the aggregate
+  // so no consumer can observe an impossible ratio.
+  target.cachedTokens = Math.min(target.cachedTokens ?? 0, target.inputTokens);
+  target.cacheReadTokens = Math.min(target.cacheReadTokens ?? 0, target.inputTokens);
 
   const sourceCost = computeCostFromPricing(source, spec);
   if (sourceCost) {
@@ -154,12 +165,26 @@ async function executeToolCallsWithRepeatGuard(options: {
         sessionId: options.sessionId,
       })
     : [];
-  const byId = new Map<string, ToolResultRecord>();
-  for (const result of executed) byId.set(result.id, result);
-  for (const [id, result] of blocked) byId.set(id, result);
+  const byId = new Map<string, ToolResultRecord[]>();
+  for (const result of executed) {
+    const queue = byId.get(result.id) ?? [];
+    queue.push(result);
+    byId.set(result.id, queue);
+  }
+  for (const [id, result] of blocked) {
+    const queue = byId.get(id) ?? [];
+    queue.push(result);
+    byId.set(id, queue);
+  }
 
   return {
-    results: toolCalls.map((call) => byId.get(call.id)!).filter(Boolean),
+    // Consume per-id queues in call order: some open-weights models reuse one
+    // id for several distinct calls in a turn, and a plain id->result map
+    // would hand every call the last result. Queues keep each result aligned
+    // with its own call.
+    results: toolCalls
+      .map((call) => byId.get(call.id)?.shift())
+      .filter((r): r is ToolResultRecord => Boolean(r)),
     fingerprints: currentFingerprints,
   };
 }
@@ -179,6 +204,14 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     runOptions,
     maxTurns = 10,
   } = config;
+
+  if (config.bypassInputFileModality) {
+    await preprocessFilePartsForBypass(config.context.messages, {
+      providerId: provider.id,
+      modelId,
+      signal: runOptions?.signal,
+    });
+  }
 
   const standardTools = toStandardToolDeclarations(tools);
   const startTime = Date.now();
@@ -225,6 +258,12 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     );
 
     finalResult = genResult;
+
+    // Canonical session routing: lets adapters detect provider switches.
+    noteProviderTurn(
+      runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+      provider.id
+    );
 
     // Safety fallback: if no tool calls and text is empty, rescue answer from thinking
     if ((!genResult.text || genResult.text.trim() === "") && (!genResult.toolCalls || genResult.toolCalls.length === 0) && genResult.thinking) {
@@ -316,7 +355,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   const startTime = Date.now();
 
   // Cancellation: merge user signal + outer cancel() into one linked controller.
-  // Vercel doStream honors abortSignal for all providers, so aborting this
+  // Native fetch honors abortSignal on every provider, so aborting this
   // stops the HTTP request; we also cancel the active inner provider stream.
   const linked = new AbortController();
   const userSignal = config.runOptions?.signal;
@@ -341,6 +380,27 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   (async () => {
     try {
       await ensureModelCatalogFresh();
+      // Re-validate after refresh: Agent.stream() validates before the catalog
+      // is guaranteed fresh, so a cold cache validates permissively. A mismatch
+      // discovered here fails the stream instead of reaching the provider.
+      {
+        const lvl = config.runOptions?.thinkingLevel ?? config.options?.thinking?.level;
+        if (lvl) {
+          try {
+            validateModelThinking(config.provider.id, config.modelId, lvl);
+          } catch (err) {
+            outerStream.fail(err instanceof Error ? err : new Error(String(err)));
+            return;
+          }
+        }
+      }
+      if (config.bypassInputFileModality) {
+        await preprocessFilePartsForBypass(config.context.messages, {
+          providerId: config.provider.id,
+          modelId: config.modelId,
+          signal: config.runOptions?.signal,
+        });
+      }
       const {
         agentName,
         provider,
@@ -407,6 +467,11 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         currentInner = null;
         throwIfCancelled();
         lastResponse = turnResponse;
+        // Canonical session routing: lets adapters detect provider switches.
+        noteProviderTurn(
+          runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+          provider.id
+        );
 
         // Safety fallback: if no tool calls and text is empty, rescue answer from thinking
         if ((!turnResponse.text || turnResponse.text.trim() === "") && (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) && turnResponse.thinking) {
