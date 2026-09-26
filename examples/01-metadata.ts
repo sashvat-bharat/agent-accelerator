@@ -62,7 +62,7 @@ try {
       maxSpawn: 4,
       timeout: 0,
     },
-    thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "low",
+    thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
     cache: { retention: "short" },
     tools: { get_system_metrics },
   });
@@ -121,8 +121,8 @@ try {
     onDelta: (d) => process.stdout.write(d),
     onEvent: (event) => {
       streamEventsLog.push(event.type);
-      if (event.type === "tool_call_start") {
-        console.log(`\n\x1b[34m↳ Stream Event [tool_call_start]:\x1b[0m ${event.toolCall?.name}(${JSON.stringify(event.toolCall?.arguments)})`);
+      if (event.type === "tool_call_complete") {
+        console.log(`\n\x1b[34m↳ Stream Event [tool_call_complete]:\x1b[0m ${event.toolCall?.name}(${JSON.stringify(event.toolCall?.arguments)})`);
       } else if (event.type === "tool_result") {
         console.log(`\x1b[34m↳ Stream Event [tool_result]:\x1b[0m ${event.toolResult?.name} completed in ${event.toolResult?.durationMs ?? 0}ms`);
       } else if (event.type === "subagent_complete") {

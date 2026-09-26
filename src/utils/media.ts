@@ -88,10 +88,13 @@ export async function normalizeMediaInput(
     };
   }
 
-  // 4. If input is already raw base64 string (stricter: length threshold + no file markers)
+  // 4. If input is already raw base64 string (stricter: length threshold + no file markers).
+  // Note: `/` is a valid base64 character (RFC 4648 index 63), so it must NOT
+  // exclude this path — POSIX file paths fail the base64 charset test below
+  // on their own (`.`, `-`, short length). Only backslashes (Windows paths)
+  // are excluded up front.
   if (
     typeof input === "string" &&
-    !input.includes("/") && // file paths contain /
     !input.includes("\\") &&
     input.length > 100 &&
     /^[A-Za-z0-9+/=\n\r]+$/.test(input.slice(0, 200)) &&

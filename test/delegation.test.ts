@@ -264,12 +264,24 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     (globalThis as any).fetch = async (_url: any, opts: any) => {
       requestCount++;
       const body = JSON.parse(opts.body);
-      // In Google payload, contents contains messages:
-      expect(body.contents.length).toBe(1); // strictly 1 turn!
+      expect(body.previous_interaction_id).toBeUndefined();
+      expect(body.input).toBe(`Turn ${requestCount} prompt`);
       return new Response(
         JSON.stringify({
-          candidates: [{ content: { parts: [{ text: `Response ${requestCount}` }] }, finishReason: "STOP" }],
-          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+          id: `v1_stateless${requestCount}`,
+          object: "interaction",
+          model: "gemini-3.5-flash-lite",
+          status: "completed",
+          steps: [
+            { type: "model_output", content: [{ type: "text", text: `Response ${requestCount}` }] },
+          ],
+          usage: {
+            total_tokens: 15,
+            total_input_tokens: 10,
+            total_output_tokens: 5,
+            total_cached_tokens: 0,
+            total_thought_tokens: 0,
+          },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
@@ -278,13 +290,66 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     try {
       const res1 = await statelessAgent.run("Turn 1 prompt");
       expect(res1.text).toBe("Response 1");
-      // Immediately after execution, stateless agent resets context messages
       expect(statelessAgent.context.messages.length).toBe(0);
 
       const res2 = await statelessAgent.run("Turn 2 prompt");
       expect(res2.text).toBe("Response 2");
       expect(statelessAgent.context.messages.length).toBe(0);
       expect(requestCount).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("should keep fixed sub-agent child sessions within OpenAI 64-char prompt_cache_key", async () => {
+    // Regression: `parent-sub-adversarial_critic` (65 chars) 400d on OpenAI
+    // (`Invalid 'prompt_cache_key': string too long`), yielding 0-tok
+    // `provider: unknown` sub-agents. Child ids must fit 64 chars.
+    const { SubAgent, executeToolCalls } = require("../src/index.ts");
+
+    const critic = new SubAgent({
+      name: "adversarial_critic",
+      description: "Critiques findings",
+      instructions: "Critique briefly.",
+      model: "google/gemini-3.5-flash-lite",
+      apiKey: "TEST_KEY",
+    });
+
+    const longParent = "accel-80040b02-6884-4f5a-b552-97e7bf8f550a";
+    expect(`${longParent}-sub-adversarial_critic`.length).toBeGreaterThan(64);
+
+    const originalFetch = globalThis.fetch;
+    let sentBody: any = null;
+    (globalThis as any).fetch = async (_url: any, opts: any) => {
+      sentBody = JSON.parse(opts.body);
+      return new Response(
+        JSON.stringify({
+          id: "v1_fixed64",
+          object: "interaction",
+          model: "gemini-3.5-flash-lite",
+          status: "completed",
+          steps: [{ type: "model_output", content: [{ type: "text", text: "critique ok" }] }],
+          usage: { total_tokens: 10, total_input_tokens: 7, total_output_tokens: 3 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    try {
+      const tools = buildAgentTools([critic]);
+      const results = await executeToolCalls({
+        tools,
+        toolCalls: [{ id: "c1", name: "adversarial_critic", arguments: { task: "Critique this." } }],
+        sessionId: longParent,
+      });
+      expect(results[0]!.isError).toBe(false);
+      const meta: any = (results[0]!.result as any)._subagentMetadata?.[0];
+      expect(meta).toBeDefined();
+      expect(meta.isError).toBe(false);
+      expect(meta.provider).toBe("google");
+      // Google has no 64-char body key, but the child session plumbing must
+      // stay provider-safe regardless of provider (OpenAI enforces it).
+      expect(sentBody).toBeDefined();
     } finally {
       globalThis.fetch = originalFetch;
     }

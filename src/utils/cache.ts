@@ -31,7 +31,7 @@ export function retentionToTtlSeconds(retention?: CacheRetention, ttlSeconds?: n
   return undefined;
 }
 
-/** Maps retention settings to OpenCode/OpenRouter prompt-cache TTL values. */
+/** Maps retention settings to OpenRouter prompt-cache TTL values. */
 export function getPromptCacheRetention(retention?: CacheRetention, supportsLong = true): "24h" | "1h" | undefined {
   if (!retention || retention === "implicit") return undefined;
   if (retention === "long" && supportsLong) return "24h";

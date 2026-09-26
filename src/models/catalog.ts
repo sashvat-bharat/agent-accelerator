@@ -22,12 +22,10 @@ import type { ThinkingLevel } from "../types/core.ts";
 
 // ---------------------------------------------------------------------------
 // Provider aliases — maps our internal ids to models.dev keys
-// battle-tested: opencode covers zen/go, google covers vertex variants
+// battle-tested: google covers vertex variants
 // ---------------------------------------------------------------------------
 const PROVIDER_ALIASES: Record<string, string[]> = {
   google: ["google", "google-vertex", "google-vertex-anthropic"],
-  opencode: ["opencode", "opencode-go"],
-  "opencode-go": ["opencode-go", "opencode"],
   openrouter: ["openrouter"],
   openai: ["openai"],
 };
@@ -42,6 +40,11 @@ const MODALITY_OVERRIDES: Record<string, { input?: string[]; output?: string[] }
   // verified end-to-end via examples/08. If routing changes, the runtime
   // 404 still surfaces as a one-line error.
   "openrouter/nvidia/nemotron-3.5-lightning:free": { input: ["text", "pdf"] },
+  // Live-verified 2026-09-24: `stealth/space-bunny-alpha` accepts PDF
+  // `input_file` over Responses and PDFs via the file-parser plugin over Chat
+  // Completions (Berkshire letter + sample-files PDF both completed), though
+  // models.dev lists text/image/video only.
+  "openrouter/stealth/space-bunny-alpha": { input: ["text", "image", "video", "pdf"] },
 };
 
 function applyModalityOverrides(provider: string, modelId: string, base: ModelModalities): ModelModalities {
@@ -305,6 +308,11 @@ export function getModelThinkingInfo(provider: string, modelId: string): ModelTh
     };
   }
 
+  // "dynamic" means server default (the level is omitted from the request),
+  // so it is expressible on every configurable thinking model regardless of
+  // which concrete effort/toggle/budget options the catalog lists.
+  allowed.add("dynamic");
+
   const allowedLevels = Array.from(allowed);
   const supportsDisable = allowed.has("none") || !!toggleOpt || Boolean(budgetOpt && (budgetOpt.min === undefined || budgetOpt.min <= 0));
 
@@ -437,7 +445,7 @@ export function validateModelThinking(provider: string, modelId: string, request
 
 // ---------------------------------------------------------------------------
 // getModelsForProvider — battle-tested view for BaseProvider.models
-// Opencode total context length now comes from catalog, not stale hardcoded file.
+// Total context length now comes from catalog, not stale hardcoded file.
 // ---------------------------------------------------------------------------
 /**
  * Returns normalized catalog specs for a provider and its configured aliases.
@@ -466,7 +474,6 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
 
 export const GOOGLE_MODELS: ModelSpec[] = [...getModelsForProvider("google")];
 export const OPENAI_MODELS: ModelSpec[] = [...getModelsForProvider("openai")];
-export const OPENCODE_MODELS: ModelSpec[] = [...getModelsForProvider("opencode")];
 export const OPENROUTER_MODELS: ModelSpec[] = [...getModelsForProvider("openrouter")];
 
 function refreshExportedModels(): void {
@@ -474,8 +481,6 @@ function refreshExportedModels(): void {
   GOOGLE_MODELS.push(...getModelsForProvider("google"));
   OPENAI_MODELS.length = 0;
   OPENAI_MODELS.push(...getModelsForProvider("openai"));
-  OPENCODE_MODELS.length = 0;
-  OPENCODE_MODELS.push(...getModelsForProvider("opencode"));
   OPENROUTER_MODELS.length = 0;
   OPENROUTER_MODELS.push(...getModelsForProvider("openrouter"));
 }
@@ -497,7 +502,48 @@ export {
   getCatalogTTL,
   getCacheDir,
   getCacheFilePath,
+  isValidCatalogPayload,
   DEFAULT_CATALOG_TTL_MS,
   type CatalogStatus,
   type RefreshCatalogOptions,
 } from "./catalog-cache.ts";
+
+/**
+ * Permissive placeholder so custom endpoints never fail preflight:
+ * allows every ThinkingLevel (none -> xhigh + dynamic).
+ * @example `const spec = createGenericModelSpec("groq", "llama-3.3-70b-versatile");`
+ */
+export function createGenericModelSpec(provider: string, modelId: string): ModelSpec {
+  const clean = modelId.includes("/") ? modelId.split("/").slice(1).join("/") : modelId;
+  return {
+    id: clean,
+    provider: provider as ProviderId,
+    name: clean,
+    contextWindow: 128000,
+    maxOutputTokens: 8192,
+    limit: { context: 128000, output: 8192 },
+    cost: {},
+    modalities: { input: ["text"], output: ["text"] },
+    reasoning: true,
+    reasoning_options: [
+      { type: "toggle" },
+      { type: "effort", values: ["minimal", "low", "medium", "high", "xhigh"] },
+      { type: "budget_tokens", min: 0, max: 128000 },
+    ],
+    tool_call: true,
+    capabilities: {
+      supportsThinking: true,
+      supportsThinkingLevel: true,
+      supportsThinkingBudget: true,
+      supportsReasoningToggle: true,
+      supportsReasoningEffort: true,
+      supportsImplicitCaching: true,
+      supportsExplicitCaching: false,
+      supportsLongCacheRetention: false,
+      supportsParallelToolCalls: true,
+      supportsStreaming: true,
+      modalities: ["text"],
+    },
+    pricing: {},
+  };
+}

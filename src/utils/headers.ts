@@ -4,7 +4,15 @@ import { clampCacheKey } from "./cache.ts";
 
 export function isBrowserRuntime(): boolean {
   try {
-    return typeof (globalThis as any).window !== "undefined" && typeof (globalThis as any).window.document !== "undefined";
+    const g = globalThis as any;
+    if (typeof g.window !== "undefined" && typeof g.window.document !== "undefined") return true;
+    // Web Workers / Service Workers have no window.document but are still
+    // CORS-constrained browser scopes: custom x-* headers trigger preflights
+    // the providers never allow-list (surfaces as `TypeError: Failed to fetch`).
+    if (typeof g.WorkerGlobalScope !== "undefined") return true;
+    if (typeof g.importScripts === "function") return true;
+    if (typeof g.navigator !== "undefined" && g.navigator?.product === "ReactNative") return true;
+    return false;
   } catch {
     return false;
   }
@@ -25,8 +33,6 @@ const BROWSER_DROPPED = new Set([
   "x-session-id",
   "x-client-request-id",
   "session_id",
-  "x-opencode-session",
-  "x-opencode-client",
   "x-goog-api-client",
 ]);
 
@@ -66,14 +72,7 @@ export function buildSessionHeaders(
   const sessionId = clampCacheKey(rawSessionId);
 
   if (sessionId && !browser) {
-    if (provider === "opencode" || provider === "opencode-go") {
-      headers["x-opencode-session"] = sessionId;
-      headers["x-session-id"] = sessionId;
-      headers["x-client-request-id"] = sessionId;
-      headers["session_id"] = sessionId;
-      headers["x-opencode-client"] = "agent-accel";
-      headers["User-Agent"] = getAgentAccelUserAgent();
-    } else if (provider === "openrouter") {
+    if (provider === "openrouter") {
       headers["x-session-id"] = sessionId;
       headers["x-client-request-id"] = sessionId;
       headers["HTTP-Referer"] = "https://sashvat.com";
@@ -94,15 +93,6 @@ export function buildSessionHeaders(
 
   if (provider === "google" && !browser && !headers["x-goog-api-client"]) {
     headers["x-goog-api-client"] = "agent-accel/1.0";
-  }
-
-  if (
-    (provider === "opencode" || provider === "opencode-go") &&
-    !browser &&
-    !headers["x-opencode-client"]
-  ) {
-    headers["x-opencode-client"] = "agent-accel";
-    headers["User-Agent"] = getAgentAccelUserAgent();
   }
 
   if (browser) return stripForBrowser(headers);

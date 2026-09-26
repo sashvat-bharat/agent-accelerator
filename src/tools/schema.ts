@@ -65,7 +65,7 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
  *
  * @example `const clean = cleanJsonSchema(rawSchema);`
  */
-export function cleanJsonSchema(schema: any, rootDefs?: Record<string, any>): Record<string, unknown> {
+export function cleanJsonSchema(schema: any, rootDefs?: Record<string, any>, seenRefs: Set<string> = new Set()): Record<string, unknown> {
   if (typeof schema !== "object" || schema === null) {
     return schema;
   }
@@ -78,8 +78,18 @@ export function cleanJsonSchema(schema: any, rootDefs?: Record<string, any>): Re
     if (target) {
       // Merge sibling props (e.g. description) with target
       const { $ref, ...siblings } = schema;
-      const resolved = cleanJsonSchema(target, defs);
-      return { ...resolved, ...cleanJsonSchema(siblings, defs) } as any;
+      if (seenRefs.has(refName)) {
+        // Recursive schema (AST nodes, trees, nested categories): stop
+        // expanding to avoid overflowing the stack; keep siblings.
+        return { type: "object", ...cleanJsonSchema(siblings, defs, seenRefs) } as any;
+      }
+      seenRefs.add(refName);
+      try {
+        const resolved = cleanJsonSchema(target, defs, seenRefs);
+        return { ...resolved, ...cleanJsonSchema(siblings, defs, seenRefs) } as any;
+      } finally {
+        seenRefs.delete(refName);
+      }
     }
   }
   const { $schema, $defs, definitions, ...rest } = schema;
@@ -94,22 +104,22 @@ export function cleanJsonSchema(schema: any, rootDefs?: Record<string, any>): Re
   if (rest.properties && typeof rest.properties === "object") {
     const cleanedProps: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(rest.properties)) {
-      cleanedProps[key] = cleanJsonSchema(value, defs);
+      cleanedProps[key] = cleanJsonSchema(value, defs, seenRefs);
     }
     rest.properties = cleanedProps;
   }
 
   if (rest.items) {
-    rest.items = cleanJsonSchema(rest.items, defs);
+    rest.items = cleanJsonSchema(rest.items, defs, seenRefs);
   }
-  if (rest.anyOf) rest.anyOf = (rest.anyOf as any[]).map((v: any) => cleanJsonSchema(v, defs));
-  if (rest.oneOf) rest.oneOf = (rest.oneOf as any[]).map((v: any) => cleanJsonSchema(v, defs));
-  if (rest.allOf) rest.allOf = (rest.allOf as any[]).map((v: any) => cleanJsonSchema(v, defs));
-  if (rest.prefixItems) rest.prefixItems = (rest.prefixItems as any[]).map((v: any) => cleanJsonSchema(v, defs));
+  if (rest.anyOf) rest.anyOf = (rest.anyOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
+  if (rest.oneOf) rest.oneOf = (rest.oneOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
+  if (rest.allOf) rest.allOf = (rest.allOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
+  if (rest.prefixItems) rest.prefixItems = (rest.prefixItems as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
   // Recursively clean nested $ref inside properties that were not top-level
   for (const k of Object.keys(rest)) {
     if (rest[k] && typeof rest[k] === "object" && !Array.isArray(rest[k]) && (rest[k] as any).$ref) {
-      rest[k] = cleanJsonSchema(rest[k], defs);
+      rest[k] = cleanJsonSchema(rest[k], defs, seenRefs);
     }
   }
   return rest;
@@ -167,7 +177,7 @@ function inferZodPropertyType(prop: any): Record<string, unknown> {
   }
   if (tn.includes("literal")) {
     const val = unwrapped._def?.value;
-    return { type: typeof val, enum: [val], ...(description ? { description } : {}) };
+    return { type: val === null ? "null" : typeof val, enum: [val], ...(description ? { description } : {}) };
   }
   if (tn.includes("array") || tn === "zodarray") {
     const elem = unwrapped._def?.type || unwrapped._def?.element || unwrapped._def?.valueType || {};

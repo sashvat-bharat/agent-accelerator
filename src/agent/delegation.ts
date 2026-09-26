@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { tool } from "../tools/tool.ts";
+import { normalizeToolName } from "../tools/executor.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { SubAgentExecutionMetadata } from "../types/response.ts";
 import type { Agent } from "./agent.ts";
-import { resolveModel } from "../ai-sdk/registry.ts";
+import { resolveModel } from "../providers/registry.ts";
 
 /** Task descriptor accepted by the automatic `spawn_subagents` tool.
  *
@@ -58,7 +59,27 @@ function createChildSessionId(parentId: string, tag: string): string {
   } catch {
     rand = Math.random().toString(36).slice(2, 10);
   }
-  return `${parentId}-sub-${tag.toLowerCase().slice(0, 16)}-${rand}`;
+  // Provider-safe: OpenAI `prompt_cache_key` enforces max 64 chars (400
+  // otherwise). Parent ids are already ~42 chars (`accel-<uuid>`), so naive
+  // `${parent}-sub-${tag}-${rand}` overflows (observed 65-72 chars → every
+  // sub-agent 400s with 0 usage). Truncate the parent portion to fit, keeping
+  // the tag + rand suffix intact for uniqueness/debuggability.
+  const cleanTag = tag.toLowerCase().slice(0, 16);
+  const suffix = `-sub-${cleanTag}-${rand}`;
+  const maxParent = Math.max(0, 64 - suffix.length);
+  const truncatedParent = parentId.slice(0, maxParent);
+  return `${truncatedParent}${suffix}`;
+}
+
+/** Builds a deterministic fixed-subagent session id that fits 64 chars. */
+function createFixedChildSessionId(parentId: string, name: string): string {
+  const suffix = `-sub-${name}`;
+  if ((parentId + suffix).length <= 64) return parentId + suffix;
+  // Truncate parent first (preserves full tool name for debugging); if still
+  // over (very long tool name), truncate the name tail as last resort.
+  const maxParent = Math.max(0, 64 - suffix.length);
+  if (maxParent > 0) return parentId.slice(0, maxParent) + suffix;
+  return (`${parentId}-sub-${name}`).slice(0, 64);
 }
 
 function providerOf(modelStr: string | any | undefined): string | undefined {
@@ -247,10 +268,18 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             if (context?.signal?.aborted) throw new Error("Aborted before spawn");
             const childSessionId = createChildSessionId(parentAgent.sessionId, subagentName);
             // Grant ONLY the Main Agent-selected subset from the developer pool. Unknown names are dropped.
+            // Matching is case/format-insensitive (same rules as tool execution): the model may emit
+            // "RECENT_NEWS" or "recent news" for a registered "recent_news" tool.
+            const poolByNormalized = new Map<string, ToolDefinition>();
+            for (const [key, def] of Object.entries(toolPool)) {
+              poolByNormalized.set(normalizeToolName(key), def);
+              const declared = (def as ToolDefinition)?.name;
+              if (declared) poolByNormalized.set(normalizeToolName(declared), def);
+            }
             const grantedTools: Record<string, ToolDefinition> = {};
             for (const toolName of (t as any).tools ?? []) {
-              const pooled = toolPool[toolName];
-              if (pooled) grantedTools[toolName] = pooled;
+              const pooled = toolPool[toolName] ?? poolByNormalized.get(normalizeToolName(String(toolName)));
+              if (pooled) grantedTools[(pooled as ToolDefinition).name || toolName] = pooled;
             }
             // Timeout: >0 fixed for every worker; 0 = no limit; -1 = per-task timeoutMs from the Main Agent.
             const workerTimeout = cfgTimeout > 0 ? cfgTimeout : cfgTimeout === -1 && (t as any).timeoutMs > 0 ? (t as any).timeoutMs : 0;
@@ -271,21 +300,40 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               maxTurns: parentAgent.maxTurns,
             });
             let abortListener: (() => void) | null = null;
-            const abortPromise = context?.signal
+            // Per-worker controller: the parent signal alone cannot stop a
+            // worker that hits its own timeout, so the timeout path aborts
+            // the worker explicitly instead of leaving it running unseen.
+            const workerController = new AbortController();
+            const parentSignal = context?.signal;
+            const forwardParentAbort = () => {
+              try {
+                workerController.abort((parentSignal as any)?.reason);
+              } catch {
+                try { workerController.abort(); } catch {}
+              }
+            };
+            if (parentSignal?.aborted) forwardParentAbort();
+            else parentSignal?.addEventListener("abort", forwardParentAbort, { once: true });
+            const abortPromise = parentSignal
               ? new Promise<never>((_, reject) => {
                   const onAbort = () => reject(new Error("Sub-agent aborted via parent signal"));
                   abortListener = onAbort;
-                  if (context.signal!.aborted) reject(new Error("Sub-agent aborted via parent signal"));
-                  else context.signal!.addEventListener("abort", onAbort, { once: true });
+                  if (parentSignal.aborted) reject(new Error("Sub-agent aborted via parent signal"));
+                  else parentSignal.addEventListener("abort", onAbort, { once: true });
                 })
               : null;
             let timeoutId: ReturnType<typeof setTimeout> | null = null;
             const timeoutPromise = workerTimeout > 0
               ? new Promise<never>((_, reject) => {
-                  timeoutId = setTimeout(() => reject(new Error(`Sub-agent ${subagentName} timed out after ${workerTimeout}ms`)), workerTimeout);
+                  timeoutId = setTimeout(() => {
+                    try {
+                      workerController.abort(new Error(`Sub-agent ${subagentName} timed out after ${workerTimeout}ms`));
+                    } catch {}
+                    reject(new Error(`Sub-agent ${subagentName} timed out after ${workerTimeout}ms`));
+                  }, workerTimeout);
                 })
               : null;
-            const taskPromise = subAgent.run(t.task, { signal: context?.signal } as any);
+            const taskPromise = subAgent.run(t.task, { signal: workerController.signal } as any);
             try {
               const racers: Promise<unknown>[] = [taskPromise as unknown as Promise<unknown>];
               if (abortPromise) racers.push(abortPromise);
@@ -294,9 +342,10 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               return res;
             } finally {
               if (timeoutId) clearTimeout(timeoutId);
-              if (abortListener && context?.signal) {
-                try { context.signal.removeEventListener("abort", abortListener as any); } catch {}
+              if (abortListener && parentSignal) {
+                try { parentSignal.removeEventListener("abort", abortListener as any); } catch {}
               }
+              try { parentSignal?.removeEventListener("abort", forwardParentAbort); } catch {}
             }
           };
 
@@ -404,7 +453,7 @@ export function agentToTool(
       const startTime = Date.now();
       try {
         const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
-        const subSessionId = `${parentSessionId}-sub-${sanitizeToolName(name)}`;
+        const subSessionId = createFixedChildSessionId(parentSessionId, sanitizeToolName(name));
         const response: any = await agentInstance.run(task, { signal: ctx?.signal, sessionId: subSessionId } as any);
         const durationMs = Date.now() - startTime;
         const metadata: SubAgentExecutionMetadata = {

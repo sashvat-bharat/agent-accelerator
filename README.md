@@ -4,9 +4,11 @@
 [![GitHub](https://img.shields.io/badge/GitHub-sashvat--bharat%2Fagent--accelerator-blue?logo=github)](https://github.com/sashvat-bharat/agent-accelerator)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> **Stability notice:** Agent Accelerator is pre-1.0 and under active development. Public APIs, provider transports, and configuration options may still change in breaking ways between releases. For production use, please pin your dependency to an exact version.
+
 A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
 
-Agent Accelerator supports `google`, `opencode`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`.
+Agent Accelerator supports `google`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`.
 
 
 ```ts
@@ -44,7 +46,7 @@ yarn add agent-accelerator
 
 Requires `bun` or `node 22+`.
 
-Core dependencies are `zod`, `ai`, and selected `@ai-sdk/*` provider packages used as the backend transport.
+Core dependencies are `zod` only. Document conversion additionally uses the optional `@firecrawl/anydoc` peer. All provider transports are native REST (`fetch`, no SDK).
 
 ---
 
@@ -52,7 +54,6 @@ Core dependencies are `zod`, `ai`, and selected `@ai-sdk/*` provider packages us
 
 ```bash
 GEMINI_API_KEY=...
-OPENCODE_API_KEY=...
 OPENROUTER_API_KEY=...
 OPENAI_API_KEY=...
 # or OPENAI_BASE_API_KEY=...
@@ -128,6 +129,7 @@ An `Agent` holds :
 | `thinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh`. Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
+| `bypassInputFileModality` | `boolean`                                      | When `true`, `file` parts are converted client-side to Markdown for models lacking native support. Capable models still receive files natively. Defaults to `false`. |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Defaults to `10`.                                                                                            |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
@@ -326,11 +328,12 @@ const agent = new Agent({
 
 ### Tool Helpers
 
-* `tool({ name?, description, input?, parameters?, strict?, timeoutMs?, maxTries?, maxConcurrency?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return arbitrary values; results are converted safely for model context. `timeoutMs` defaults to `0` (no time limit) and is a best-effort event-loop deadline; `ctx.signal` enables cooperative cancellation. `maxTries` accepts a number or numeric string; a positive value is the total attempt limit, while `0`/omitted means no configured limit for transient retries. `maxConcurrency` limits simultaneous calls for that tool (default pool: 8).
+* `tool({ name?, description, input?, parameters?, strict?, timeoutMs?, maxTries?, maxConcurrency?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return arbitrary values; results are converted safely for model context. `timeoutMs` defaults to `0` (no time limit) and is a best-effort event-loop deadline; `ctx.signal` enables cooperative cancellation. `maxTries` accepts a number or numeric string; a positive value is the total attempt limit, while `0`/omitted falls back to 3 attempts. `maxConcurrency` limits simultaneous calls for that tool (default pool: 8).
 * `toStandardToolDeclarations(record | array)` — converts tools to `{ name, description, parameters }` for providers.
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
 * `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls validate Zod input, use bounded parallelism, enforce per-tool timeouts, retry transient failures, recover namespace/camel-case tool-name aliases, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
+* `convert_document_to_markdown` — built-in tool that converts document files (PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV, local path or URL) to Markdown for models without native document parsing. Requires the optional `@firecrawl/anydoc` peer.
 
 The agent loop also blocks an identical tool name and argument set when the model requests it in the immediately following turn. The synthetic error is returned to the model so it can reuse the prior result or change its arguments.
 
@@ -385,7 +388,8 @@ for (const result of response.toolResults) {
   name,
   arguments,
   rawArguments?,
-  thoughtSignature?
+  thoughtSignature?,
+  callId?,
 }
 ```
 
@@ -407,7 +411,6 @@ for (const result of response.toolResults) {
 First-class provider IDs are:
 
 * `google`
-* `opencode`
 * `openrouter`
 * `openai`
 
@@ -416,9 +419,6 @@ Any other provider prefix is treated as an OpenAI-compatible custom provider.
 ### Model Strings
 
 * `"google/<id>"` → Google AI Studio at `generativelanguage.googleapis.com`.
-* `"opencode/<id>"` → OpenCode Zen at `opencode.ai/zen/v1`.
-* `"opencode-go/<id>"` → OpenCode Go endpoint.
-* OpenCode automatically selects Chat vs Responses API. Claude models and models using `api=openai-responses` use Responses.
 * `"openrouter/<scope>/<model>"` or `"scope/model:variant"` → OpenRouter.
 * `"openai/<id>"` → OpenAI.
 * `"groq/<id>"`, `"ollama/<id>"`, etc. → custom providers using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`. The API key is optional for local endpoints.
@@ -436,7 +436,7 @@ An unknown prefix with no catalog match still routes to a custom provider, allow
 * `getProvider("groq")` → returns a cached provider and automatically creates a custom provider for unknown prefixes.
 * `ensureCustomProvider(prefix, { baseUrl?, apiKey?, name? })` → gets or creates a custom provider. Useful for multiple endpoints in one process.
 * `normalizeProviderPrefix(s)` → lowercases and trims a provider prefix.
-* `ModelProvider.GoogleGenAI(model, apiKey?, { thinkingLevel?, baseUrl? })` — same shape is available for `.OpenCode`, `.OpenRouter`, `.OpenAI`, `.Custom`, `.OpenAICompatible`, and `.Generic`.
+* `ModelProvider.GoogleGenAI(model, apiKey?, { thinkingLevel?, baseUrl? })` — same shape is available for `.OpenRouter`, `.OpenAI`, `.Custom`, `.OpenAICompatible`, and `.Generic`.
 
 Each returns a `ModelProviderInstance`:
 
@@ -471,93 +471,82 @@ new Agent({
 });
 ```
 
-`BaseProvider` is the abstract provider base containing `id`, `name`, `models`, `getModel`, `generate`, and `stream`.
+`Provider` is the provider contract containing `id`, `name`, `models`, `getModel`, `generate`, and `stream`.
 
-Its catalog-first `getModel` behavior includes a hardcoded fallback.
+Its catalog-first `getModel` behavior includes a permissive fallback (`createGenericModelSpec`) so private model IDs never fail preflight.
 
-Extend `BaseProvider` when implementing a fully custom transport.
+Implement the `Provider` interface when adding a fully custom transport.
 
 `ProviderRequestOptions { apiKey?, baseUrl?, headers?, thinking?, cache?, serviceTier?, tools?, toolChoice?, signal?, sessionId?, env? }` is the per-call options object passed to `generate`/`stream`. Agent builds it automatically.
 
 ### Google
 
-`GoogleAIStudioProvider` and `GOOGLE_MODELS` provide Google AI Studio support.
+`GoogleInteractionsProvider` (aliased as `GoogleAIStudioProvider`) and `GOOGLE_MODELS` provide Google support over the Interactions API (`POST {baseUrl}/interactions`, streaming via `?alt=sse`).
 
-The catalog is filtered with fallback support for lite and flash models.
+Turns chain statefully through `previous_interaction_id` per session, falling back to stateless full-history sends when the session switches providers or models.
 
-Google models matching `gemini-1.x` or `gemini-2.x` are rejected.
-
-Thinking levels map to:
+Thinking levels map to `thinking_level`, with `thinking_summaries` enabled whenever thinking is active:
 
 ```text
-OFF | MINIMAL | LOW | MEDIUM | HIGH
+minimal | low | medium | high   (xhigh clamps to high; none is unsupported and omitted; dynamic omits)
 ```
 
 Google-specific handling includes:
 
 * Isolating `thoughtSignature` per part for prefix stability.
 * Converting JSON Schema to OpenAPI 3.0 through `stripSchemaForGoogle`.
-* Supporting explicit `cachedContents` when `retention != implicit` and the prompt is large.
+* Implicit/automatic caching only — explicit retention and `cachedContentId` are warned about and dropped (the Interactions API defines no explicit cache primitives).
 
 Helpers:
 
 * `createExplicitCache({ model, systemInstruction?, contents?, tools?, displayName?, ttlSeconds?, expireTime?, apiKey?, baseUrl? })`
 * `isValidThoughtSignature(sig)`
 * `retainThoughtSignature(existing, incoming)`
+* `extractGoogleThoughtSignature(obj)`
 * `stripSchemaForGoogle(schema)`
+* `clearInteractionChains(sessionId?)`
 
 ### OpenAI
 
-`OpenAIProvider` and `OPENAI_MODELS` provide OpenAI support.
+`OpenAIResponsesProvider` (aliased as `OpenAIProvider`) and `OPENAI_MODELS` provide OpenAI support over the Responses API (`POST {baseUrl}/responses`).
 
-`OpenAIProvider` is also the base class for OpenAI-wire transports.
+Every turn is stateless: the full history is sent explicitly with `store: false`, so no `previous_response_id`, `background`, or conversation chaining is ever used.
 
-Thinking levels map to:
+Thinking levels map to `reasoning.effort` verbatim:
 
 ```text
-reasoning_effort: low | medium | high
+none | minimal | low | medium | high | xhigh   (dynamic omits — server default)
 ```
 
 It also:
 
-* passes `service_tier`;
-* derives `max_completion_tokens` from the configured budget;
-* preserves Google thought signatures through `extra_content.google.thought_signature`;
-* exposes `extractGoogleThoughtSignature(obj)`.
-
-### OpenCode
-
-`OpenCodeProvider` and `OPENCODE_MODELS` provide OpenCode support.
-
-Requests include:
-
-* `session_id`
-* `prompt_cache_key`
-* headers used for sticky routing
-
-The provider handles both Chat and Responses payloads.
-
-Transient `500`, `502`, `503`, and `529` errors are retried with thinking disabled, followed by an attempt using the alternate endpoint.
+* passes `service_tier` (`flex` | `priority`);
+* pins cache affinity with `prompt_cache_key` (clamped to 64 chars);
+* rejects `video` parts up front with a one-line error (the Responses wire carries text/image/file only);
+* never sends `temperature`, token caps, or background/conversation fields.
 
 ### OpenRouter
 
-`OpenRouterProvider` and `OPENROUTER_MODELS` provide OpenRouter support.
+`OpenRouterChatCompletionsProvider` (aliased as `OpenRouterProvider` / `OpenRouter`) and `OPENROUTER_MODELS` provide OpenRouter support over Chat Completions (`POST {baseUrl}/chat/completions`).
 
-Requests include:
+Every turn is stateless: the full `messages[]` array is sent explicitly — no chaining primitives exist on this endpoint.
 
-* `session_id`
-* `prompt_cache_key`
+Session affinity is a top-level body `session_id` plus the `x-session-id` header fallback (body takes precedence per OpenRouter docs).
 
-Thinking is mapped to:
+Thinking levels map to `reasoning.effort` verbatim:
 
 ```text
-reasoning { effort | enabled }
-include_reasoning
+none | minimal | low | medium | high | xhigh   (dynamic omits — server default)
 ```
 
-based on catalog capabilities.
+It also:
 
-`serviceTier` is mapped to provider routing.
+* passes `service_tier` (`flex` | `priority`);
+* enables the `file-parser` plugin when file parts are present (remote file URLs are additionally surfaced in text);
+* maps `tool_choice` (`auto` omitted; `none`, `required`, and function pins supported);
+* reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present.
+
+`serviceTier` values other than `flex` / `priority` are omitted (standard routing).
 
 ### Custom
 
@@ -587,7 +576,6 @@ Examples include:
 
 * `OpenAIChatCompletionRequest`
 * `GoogleGenerateContentRequest`
-* `OpenCodeChatRequest`
 * `OpenRouterChatRequest`
 
 ---
@@ -631,6 +619,7 @@ ThinkingConfig {
 
 * `getModelThinkingInfo(provider, modelId)` → `{ supportsThinking, reasoningOptions?, allowedLevels, supportsDisable, description }`. Useful for building UI selectors.
 * `validateModelThinking(provider, modelId, level)` → throws `ThinkingLevelError { provider, modelId, requestedLevel, allowedLevels, supportsThinking }` with a fix hint. Automatically called by `run` and `stream`. Catch it and use `err.allowedLevels` to offer valid options.
+* `resolveEffectiveThinking(base, override?)` → resolves a per-run `thinkingLevel` override into a `ThinkingConfig` without mutating agent config.
 * `getModelsForProvider("google")` → returns known model specifications.
 
 Unknown models allow all thinking levels.
@@ -659,40 +648,40 @@ CacheRetention =
 
 ### Retention
 
-* `implicit` — automatic prefix reuse without an explicit cache object or storage fee.
-* `short` — approximately 5 minutes.
-* `medium` — approximately 1 hour.
-* `long` — approximately 12 hours for Google explicit caches and approximately 24 hours for prompt caching where supported.
+* `implicit` — automatic prefix reuse without an explicit cache object or storage fee. This is the only retention the native adapters act on (by doing nothing special — stable prompts plus session affinity do the work).
+* `short` / `medium` / `long` — TTL hints (`5m` / `1h` / `12h`) consumed only by the opt-in `createExplicitCache` helper. Provider adapters warn about and drop any non-`implicit` retention: none of the native transports expose retention control.
 
 ### Session Affinity
 
 `sessionId` pins provider affinity using mechanisms such as:
 
-* `x-session-id`
-* `x-opencode-session`
-* `prompt_cache_key` (openai/openrouter/opencode only — strict endpoints such as groq reject it, so custom providers get headers only)
+* `x-session-id` (+ `x-client-request-id`) headers — all providers, best effort
+* top-level body `session_id` — OpenRouter (takes precedence over the header)
+* `prompt_cache_key` — OpenAI only (custom endpoints get headers only; strict ones reject unknown body fields)
 
 Reuse the same session ID across turns when cache affinity is desired.
 
-In browser runtimes only CORS-safe attribution headers are sent; affinity
-still flows via `promptCacheKey` provider options, never via headers.
+In browser runtimes custom `x-*` headers are stripped to avoid CORS preflights: OpenAI keeps affinity through its body key, while custom endpoints lose affinity entirely on browsers.
 
 ### Explicit Caches
 
-`cachedContentId` reuses a previously created Google `cachedContents/...` resource.
+`createExplicitCache` mints a Google `cachedContents/...` resource directly (TTL via `retention`/`ttlSeconds`).
+
+`cachedContentId` is accepted and carried in context, but no native adapter currently sends it — explicit references are warned about and dropped, so stable prompts plus session affinity remain the cache-reuse path.
 
 `ttlSeconds` overrides the retention mapping.
 
 ### Provider Cache Mechanisms
 
-* **Google** keeps system prompts and tools stable and isolates signatures.
-* **OpenCode / OpenRouter** use sticky session keys.
+* **Google** keeps system prompts and tools stable and isolates signatures (implicit caching only).
+* **OpenAI** pins affinity with `prompt_cache_key`.
+* **OpenRouter** pins affinity with body `session_id` plus headers (sticky routing from the first request).
+* **Custom endpoints** get headers-only affinity; anything else cache-related is warned about and dropped.
 
 The following cache helpers are exported:
 
-* `applyAnthropicCacheControl`
-* `getCacheControlForRetention`
 * `getPromptCacheRetention`
+* `retentionToTtlSeconds`
 * `clampCacheKey`
 
 For the best cache reuse, keep `instructions` and the tool set stable. Put changing data in user messages or `additionalContext`.
@@ -807,8 +796,6 @@ AgentResponse {
   text,
   thinking?,
   thoughtSignature?,
-  thinkingSignature?,
-  textSignature?,
   toolCalls,
   toolResults,
   subagents,
@@ -1084,7 +1071,7 @@ Supported content parts include:
 
 `inferMimeType(path)` infers the MIME type from a file extension.
 
-Media normalization is handled automatically by providers (mapped to Vercel V4 `file` parts). Thinking traces are echoed in follow-up turns only where accepted — strict endpoints receive tool calls without `reasoning_content`.
+Media normalization is handled automatically by providers (mapped to provider-native media shapes). Thinking traces are echoed in follow-up turns only where accepted — strict endpoints receive tool calls without `reasoning_content`.
 
 Provider matrix: text + image + wav/mp3 audio + PDF work on all supported
 providers. Video works on Gemini only.
@@ -1105,19 +1092,22 @@ never in the gitignored snapshot.
 * `getEnv(key, fallback?)` — resolves an environment variable.
 * `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
+* `withRetries(fn, { maxRetries?, maxRetryDelayMs?, signal?, label? })` / `isTransientError(err)` — bounded retries for transient provider failures (defaults: 2 retries, 5s cap, aborts never retried).
+* `convertDocumentToMarkdown(input, { filename?, format?, mimeType?, maxChars? })` — converts PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV to Markdown via the optional `@firecrawl/anydoc` peer. Throws `DocumentConversionError` on failure.
+* `convert_document_to_markdown` — built-in model-callable version of the above (returns a `<Document>` envelope); auto-registered with `bypassInputFileModality: true`.
 * `z` — re-exported from Zod so tools do not require a separate Zod import.
 
 ---
 ## Examples
 
 ```bash
-bun run examples/06-chat.ts
+bun run examples/05-chat.ts
 # persistent CLI, /model "..." /level <lvl> /help /exit
 
-bun run examples/05-sub-agents.ts
+bun run examples/04-sub-agents.ts
 # fixed researcher + critic pipeline
 
-bun run examples/04-multi_agent.ts
+bun run examples/03-multi_agent.ts
 # dynamic spawn_subagents demo
 
 bun run examples/01-metadata.ts
@@ -1126,17 +1116,20 @@ bun run examples/01-metadata.ts
 bun run examples/02-function_calling.ts
 # single tool call
 
-bun run examples/03-multimodal_image.ts [./photo.png]
+bun run examples/06-multimodal_image.ts [./photo.png]
 # image input (remote URL default, local path optional)
 
 bun run examples/07-multimodal_audio.ts
 # audio input
 
-bun run examples/08-multimodal_document.ts
+bun run examples/09-multimodal_document.ts
 # PDF/file input
 
-bun run examples/09-multimodal_video.ts
+bun run examples/08-multimodal_video.ts
 # video input (video-capable model required)
+
+bun run examples/10-document_markdown.ts
+# document → Markdown preprocessing (any model, optional @firecrawl/anydoc peer)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
@@ -1171,19 +1164,20 @@ bun run update-models # refresh model catalog cache (supports --force, --ttl=24h
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
-├── ai-sdk/     # Provider backend: provider factories, converters, executor, registry
+├── providers/  # native REST adapters (google/openai/openrouter/openai-compat) + registry + canonical contract
 ├── models/     # Dynamic catalog cache, parser, verified overrides
 ├── data/       # Dynamic model catalog cache (gitignored, excluded from bundle)
 ├── tools/      # tool(), schema, executor
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
-└── utils/      # base64, cache, env, headers, media, serialization, session
+└── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, documents, retry, errors
 examples/
-├── 01-metadata.ts  02-function_calling.ts  03-multimodal_image.ts
-├── 04-multi_agent.ts  05-sub-agents.ts  06-chat.ts
-├── 07-multimodal_audio.ts  08-multimodal_document.ts
-├── 09-multimodal_video.ts  _shared.ts
-test/            # 104 tests mirroring the above
+├── 01-metadata.ts  02-function_calling.ts  03-multi_agent.ts
+├── 04-sub-agents.ts  05-chat.ts  06-multimodal_image.ts
+├── 07-multimodal_audio.ts  08-multimodal_video.ts
+├── 09-multimodal_document.ts  10-document_markdown.ts
+├── files/  prompts/  research-agent.ts  _shared.ts
+test/            # unit + mocked-provider tests mirroring src/
 ```
 
 ---

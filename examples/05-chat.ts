@@ -4,7 +4,7 @@
  * Ultra-clean, persistent multi-turn chat session with automatic .session.jsonl persistence,
  * subagent delegation, streaming thought traces, and unified metadata & cost telemetry.
  *
- * Run: bun run examples/chat.ts
+ * Run: bun run examples/05-chat.ts
  */
 
 import * as readline from "node:readline/promises";
@@ -32,7 +32,7 @@ interface PersistedSession {
   model: string;
   subagentModel?: string;
   thinkingLevel?: string;
-  cache?: { retention: "short" | "medium" | "long" };
+  cache?: { retention: "implicit" | "short" | "medium" | "long" };
   cachedContentId?: string;
   context?: { systemPrompt?: string; messages: any[] };
   totals?: {
@@ -166,7 +166,7 @@ if (saved?.context?.messages?.length) {
   agent.context.messages = saved.context.messages;
   if (saved.context.systemPrompt) agent.context.systemPrompt = saved.context.systemPrompt;
   if (saved.cachedContentId) {
-    (agent.context as any).cachedContentId = saved.cachedContentId;
+    agent.context.cachedContentId = saved.cachedContentId;
   }
 }
 
@@ -330,13 +330,13 @@ while (true) {
     const match = rawArg.match(/^"([^"]+)"$/);
     if (!match) {
       console.log(`\x1b[31m✖ Invalid format. You must specify the model in quotes: /model "provider/model-id"\x1b[0m`);
-      console.log(`\x1b[90mExample: /model "opencode/ling-3.0-flash-fin-free" or /model "google/gemini-3.5-flash-lite"\x1b[0m`);
+      console.log(`\x1b[90mExample: /model "openrouter/z-ai/glm-5.3-flash" or /model "google/gemini-3.5-flash-lite"\x1b[0m`);
       continue;
     }
 
     const nextModel = match[1]!.trim();
     if (!nextModel.includes("/")) {
-      console.log(`\x1b[31m✖ Invalid model format "${nextModel}". Must be "provider/model-id" (e.g. /model "opencode/ling-3.0-flash-fin-free").\x1b[0m`);
+      console.log(`\x1b[31m✖ Invalid model format "${nextModel}". Must be "provider/model-id" (e.g. /model "openrouter/z-ai/glm-5.3-flash").\x1b[0m`);
       continue;
     }
 

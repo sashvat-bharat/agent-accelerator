@@ -1,6 +1,6 @@
 {
   "name": "agent-accelerator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "High-performance SDK for AI agents with a unified API across AI providers. Optimized for high cache hit rates, observability, and seamless agent orchestration. Built to power production-grade agentic systems and harnesses for teams at any scale.",
   "license": "MIT",
   "author": "Sashvat Bharat",
@@ -46,13 +46,19 @@
     "update-models": "bun src/update-models.ts"
   },
   "devDependencies": {
+    "@firecrawl/anydoc": "^0.2.4",
     "@types/bun": "latest",
     "typescript": "^7.0.0"
   },
+  "peerDependencies": {
+    "@firecrawl/anydoc": "^0.2.4"
+  },
+  "peerDependenciesMeta": {
+    "@firecrawl/anydoc": {
+      "optional": true
+    }
+  },
   "dependencies": {
-    "@ai-sdk/google": "^4.0.64",
-    "@ai-sdk/openai": "^4.0.60",
-    "@ai-sdk/openai-compatible": "^3.0.44",
     "zod": "^4.4.3"
   }
 }
