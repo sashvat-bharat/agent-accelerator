@@ -7,6 +7,7 @@ import {
   getCatalogTTL,
   DEFAULT_CATALOG_TTL_MS,
   ensureModelCatalogFresh,
+  isValidCatalogPayload,
 } from "../src/index.ts";
 
 describe("Model Catalog Dynamic Cache & 12h TTL", () => {
@@ -41,5 +42,31 @@ describe("Model Catalog Dynamic Cache & 12h TTL", () => {
     const status = await ensureModelCatalogFresh();
     expect(status.loaded).toBe(true);
     expect(status.providerCount).toBeGreaterThan(0);
+  });
+
+  it("should reject non-catalog payloads before they overwrite the disk cache", () => {
+    // Mocked-fetch chat completion (the payload that once poisoned the cache).
+    expect(
+      isValidCatalogPayload({
+        id: "chatcmpl-local",
+        choices: [{ message: { role: "assistant", content: "local hello" } }],
+        usage: { total_tokens: 8 },
+      })
+    ).toBe(false);
+    // Error envelope.
+    expect(isValidCatalogPayload({ error: { message: "boom", code: 500 } })).toBe(false);
+    // Primitives / arrays.
+    expect(isValidCatalogPayload(null)).toBe(false);
+    expect(isValidCatalogPayload([])).toBe(false);
+    // Degenerate shaped payload (no real models).
+    expect(isValidCatalogPayload({ a: { models: {} }, b: { models: {} } })).toBe(false);
+    // Real shape.
+    expect(
+      isValidCatalogPayload({
+        google: { models: { "gemini-3.5-flash-lite": { id: "gemini-3.5-flash-lite" } } },
+        openai: { models: { "gpt-4o": { id: "gpt-4o" } } },
+        openrouter: { models: { "x/y": { id: "x/y" } } },
+      })
+    ).toBe(true);
   });
 });

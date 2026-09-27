@@ -36,7 +36,8 @@ function integerOption(value: number | string | undefined): number | undefined {
   return parsed === undefined ? undefined : Math.floor(parsed);
 }
 
-function normalizeToolName(name: string): string {
+/** Normalizes a tool name for case/format-insensitive matching (shared with delegation grants). */
+export function normalizeToolName(name: string): string {
   return name
     .trim()
     .replace(/^(?:functions?|tools?)\./i, "")
@@ -99,6 +100,7 @@ class Semaphore {
     resolve: (release: () => void) => void;
     reject: (error: Error) => void;
     signal?: AbortSignal;
+    onAbort?: () => void;
   }> = [];
 
   constructor(private readonly limit: number) {}
@@ -110,13 +112,19 @@ class Semaphore {
       return Promise.resolve(() => this.release());
     }
     return new Promise((resolve, reject) => {
-      const waiter = { resolve, reject, signal };
-      this.waiters.push(waiter);
+      const waiter: {
+        resolve: (release: () => void) => void;
+        reject: (error: Error) => void;
+        signal?: AbortSignal;
+        onAbort?: () => void;
+      } = { resolve, reject, signal };
       const onAbort = () => {
         const index = this.waiters.indexOf(waiter);
         if (index >= 0) this.waiters.splice(index, 1);
         reject(new Error("Tool execution aborted"));
       };
+      waiter.onAbort = onAbort;
+      this.waiters.push(waiter);
       signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
@@ -130,6 +138,9 @@ class Semaphore {
         continue;
       }
       this.active++;
+      // The waiter is leaving the queue: drop its abort listener so long-lived
+      // session signals don't accumulate one listener per queued tool call.
+      if (waiter.onAbort) waiter.signal?.removeEventListener("abort", waiter.onAbort);
       waiter.resolve(() => this.release());
       return;
     }
@@ -306,9 +317,11 @@ export async function executeToolCalls(
       }
 
       const configuredTries = integerOption(toolDef.maxTries);
-      // A positive value is the total attempt count.  0/omitted deliberately
-      // means there is no configured retry limit for transient failures.
-      const maxAttempts = configuredTries && configuredTries > 0 ? configuredTries : Number.POSITIVE_INFINITY;
+      // A positive value is the total attempt count. 0/omitted falls back to
+      // a bounded default: an unbounded retry loop on a persistently failing
+      // dependency (e.g. steady 503/429) would hang the agent loop forever,
+      // so callers opt into more attempts explicitly via maxTries.
+      const maxAttempts = configuredTries && configuredTries > 0 ? configuredTries : 3;
       const timeoutMs = numericOption(toolDef.timeoutMs);
       // Telemetry starts when the tool body is about to run, excluding queue
       // wait and schema validation. Retries/backoff remain part of this call.

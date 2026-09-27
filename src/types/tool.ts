@@ -50,6 +50,12 @@ export interface ToolCallRecord {
   arguments: Record<string, unknown>;
   rawArguments?: string;
   thoughtSignature?: string;
+  /**
+   * Provider pairing identifier, distinct from the item `id` when the
+   * provider uses both (e.g. Responses `call_id` alongside the `fc_…` item
+   * id). Tool results pair against this when present.
+   */
+  callId?: string;
 }
 
 export interface ToolResultRecord {

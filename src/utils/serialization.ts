@@ -78,6 +78,21 @@ export function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknow
 }
 
 /**
+ * Escapes arbitrary text for embedding inside XML element content or
+ * double-quoted attributes.
+ *
+ * @example `const xml = "<Document>" + escapeXml(markdown) + "</Document>";`
+ */
+export function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
  * Safely serializes arbitrary values without throwing on circular or unsupported data.
  *
  * @example `logger.info(safeStringify(toolResult));`

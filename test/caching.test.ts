@@ -5,27 +5,11 @@ import {
 } from "../src/index.ts";
 
 describe("Caching & Session Affinity", () => {
-  it("should generate proper session headers for OpenCode (x-opencode-session)", () => {
-    const sessionId = "session_12345";
-    const headers = buildSessionHeaders("opencode", { sessionId });
-    expect(headers["x-opencode-session"]).toBe(sessionId);
-    expect(headers["x-session-id"]).toBe(sessionId);
-  });
-
   it("should generate proper session headers for OpenRouter (x-session-id)", () => {
     const sessionId = "session_or_999";
     const headers = buildSessionHeaders("openrouter", { sessionId });
     expect(headers["x-session-id"]).toBe(sessionId);
     expect(headers["X-Title"]).toBe("Agent Accelerator");
-  });
-
-  it("should generate proper session headers for OpenCode Responses API (x-client-request-id & session_id)", () => {
-    const sessionId = "session_12345";
-    const headers = buildSessionHeaders("opencode", { sessionId });
-    expect(headers["x-opencode-session"]).toBe(sessionId);
-    expect(headers["x-session-id"]).toBe(sessionId);
-    expect(headers["x-client-request-id"]).toBe(sessionId);
-    expect(headers["session_id"]).toBe(sessionId);
   });
 
   it("should generate proper headers for Google (x-goog-api-client & session headers)", () => {
@@ -46,14 +30,38 @@ describe("Caching & Session Affinity", () => {
     expect(sub.cacheConfig?.retention).toBe("short");
   });
 
-  it("should inject session affinity into OpenRouter and OpenCode call options", async () => {
-    const { buildAiSdkCallOptions } = await import("../src/index.ts");
-    const orOpts = buildAiSdkCallOptions("openrouter", { sessionId: "test-sess-123" } as any);
-    expect(
-      orOpts.headers?.["session_id"] ?? orOpts.headers?.["x-session-id"]
-    ).toBe("test-sess-123");
-
-    const ocOpts = buildAiSdkCallOptions("opencode", { sessionId: "test-sess-456" } as any);
-    expect(ocOpts.headers?.["x-opencode-session"] ?? ocOpts.headers?.["session_id"]).toBe("test-sess-456");
+  it("should send session affinity headers on native custom requests", async () => {
+    const { OpenAICompatibleChatProvider } = await import("../src/index.ts");
+    const provider = new OpenAICompatibleChatProvider("groq", {
+      baseUrl: "https://api.groq.com/openai/v1",
+    });
+    const originalFetch = globalThis.fetch;
+    let sentHeaders: any = null;
+    let sentBody: any = null;
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      sentHeaders = req.headers;
+      sentBody = JSON.parse(req.body);
+      return new Response(
+        JSON.stringify({
+          id: "c",
+          choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200 }
+      );
+    };
+    try {
+      await provider.generate(
+        "llama-3.3-70b-versatile",
+        { messages: [{ role: "user", content: "hi" }] },
+        { apiKey: "k", sessionId: "test-sess-456" }
+      );
+      // Headers-only affinity (strict endpoints reject unknown body properties).
+      expect(sentHeaders["x-session-id"]).toBe("test-sess-456");
+      expect(sentBody.session_id).toBeUndefined();
+      expect(sentBody.prompt_cache_key).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

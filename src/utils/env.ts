@@ -49,13 +49,6 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
         getEnv("GOOGLE_API_KEY") ||
         getEnv("GOOGLE_GENAI_API_KEY")
       );
-    case "opencode":
-    case "opencode-go":
-      return (
-        getEnv("OPENCODE_API_KEY") ||
-        getEnv("OPENCODE_ZEN_API_KEY") ||
-        getEnv("OPENCODE_GO_API_KEY")
-      );
     case "openrouter":
       return getEnv("OPENROUTER_API_KEY");
     case "openai":

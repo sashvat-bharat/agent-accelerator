@@ -2,7 +2,7 @@ import { Agent, tool, z } from "agent-accelerator";
 import { fail } from "./_shared";
 
 const get_status = tool({
-  timeoutMs: 1,
+  timeoutMs: 50,
   name: "get_status",
   description: "Check user authentication status.",
   input: z.object({ username: z.string() }),

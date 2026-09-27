@@ -49,7 +49,7 @@ export interface CacheConfig {
    */
   cachedContentId?: string;
   /**
-   * Session ID for cache affinity routing (e.g. x-session-id, x-opencode-session)
+   * Session ID for cache affinity routing (e.g. x-session-id)
    */
   sessionId?: string;
   /**

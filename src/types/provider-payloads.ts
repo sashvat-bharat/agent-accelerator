@@ -1,7 +1,7 @@
 /**
  * Provider wire payload and schema types for complete backwards compatibility.
- * All providers use Vercel AI SDK under the hood, but these types allow existing
- * applications and tests to type-check requests and responses seamlessly.
+ * These types allow existing applications and tests to type-check requests
+ * and responses seamlessly.
  */
 
 // ============================================================================
@@ -103,88 +103,6 @@ export interface GoogleGenerateContentResponse {
   candidates?: GoogleCandidate[];
   usageMetadata?: GoogleUsageMetadata;
   modelVersion?: string;
-}
-
-// ============================================================================
-// OpenCode Payload Types
-// ============================================================================
-
-export type OpenCodeReasoningEffort = "low" | "medium" | "high";
-export type OpenCodePromptCacheRetention = "none" | "1h" | "24h";
-
-export interface OpenCodeCacheControl {
-  type: "ephemeral";
-  ttl?: "1h";
-}
-
-export interface OpenCodeUsage {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-  prompt_tokens_details?: {
-    cached_tokens?: number;
-    cache_read?: number;
-    cache_creation?: number;
-  };
-}
-
-export interface OpenCodeChatRequest {
-  model: string;
-  messages: any[];
-  tools?: any[];
-  tool_choice?: any;
-  temperature?: number;
-  top_p?: number;
-  max_tokens?: number;
-  stop?: string | string[];
-  stream?: boolean;
-  reasoning_effort?: OpenCodeReasoningEffort;
-  prompt_cache_retention?: OpenCodePromptCacheRetention;
-  session_id?: string;
-}
-
-export interface OpenCodeChatResponse {
-  id?: string;
-  object?: string;
-  created?: number;
-  model?: string;
-  choices?: Array<{
-    index?: number;
-    message?: any;
-    delta?: any;
-    finish_reason?: string;
-  }>;
-  usage?: OpenCodeUsage;
-}
-
-export interface OpenCodeResponsesInputItem {
-  role: string;
-  content: any;
-  cache_control?: OpenCodeCacheControl;
-}
-
-export interface OpenCodeResponsesOutputItem {
-  id?: string;
-  type?: string;
-  status?: string;
-  content?: any;
-  name?: string;
-  call_id?: string;
-  arguments?: string;
-}
-
-export interface OpenCodeResponsesRequest {
-  model: string;
-  input: OpenCodeResponsesInputItem[];
-  tools?: any[];
-  parameters?: Record<string, unknown>;
-  session_id?: string;
-}
-
-export interface OpenCodeResponsesResponse {
-  id?: string;
-  output?: OpenCodeResponsesOutputItem[];
-  usage?: OpenCodeUsage;
 }
 
 // ============================================================================

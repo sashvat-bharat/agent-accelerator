@@ -1,12 +1,71 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import {
-  OpenAIProvider,
+  OpenAIResponsesProvider,
   resolveModel,
   ModelProvider,
   getProvider,
 } from "../src/index.ts";
+import {
+  mapThinkingLevelToOpenAI,
+  mapServiceTierToOpenAI,
+  applyCacheForOpenAI,
+  mapToolChoiceToOpenAI,
+  clearEmittedWarnings,
+} from "../src/providers.ts";
 
-describe("OpenAI Provider & cURL Format Compatibility", () => {
+describe("Canonical OpenAI mappings", () => {
+  test("maps thinking levels verbatim incl xhigh (native support), dynamic omits", () => {
+    clearEmittedWarnings();
+    expect(mapThinkingLevelToOpenAI("low")).toEqual({ effort: "low" });
+    expect(mapThinkingLevelToOpenAI("medium")).toEqual({ effort: "medium" });
+    expect(mapThinkingLevelToOpenAI("dynamic")).toEqual({});
+    expect(mapThinkingLevelToOpenAI(undefined)).toEqual({});
+    expect(mapThinkingLevelToOpenAI("none")).toEqual({ effort: "none" });
+    // OpenAI documents xhigh natively — no clamp/warn unlike OpenRouter.
+    expect(mapThinkingLevelToOpenAI("xhigh")).toEqual({ effort: "xhigh" });
+    expect(mapThinkingLevelToOpenAI("minimal")).toEqual({ effort: "minimal" });
+    clearEmittedWarnings();
+  });
+
+  test("maps service tier (omit = auto)", () => {
+    expect(mapServiceTierToOpenAI("flex")).toBe("flex");
+    expect(mapServiceTierToOpenAI("priority")).toBe("priority");
+    expect(mapServiceTierToOpenAI(undefined)).toBeUndefined();
+  });
+
+  test("warns and drops OpenAI cache retention instead of sending it", () => {
+    clearEmittedWarnings();
+    const messages: string[] = [];
+    const orig = console.warn;
+    console.warn = (...args: unknown[]) => {
+      messages.push(args.map(String).join(" "));
+    };
+    try {
+      applyCacheForOpenAI({ retention: "medium" }, "openai/x");
+      applyCacheForOpenAI({ cachedContentId: "cachedContents/abc" }, "openai/x");
+      applyCacheForOpenAI({ retention: "implicit" }, "openai/x");
+      applyCacheForOpenAI(undefined, "openai/x");
+      expect(messages.length).toBe(2);
+      expect(messages[0]).toMatch(/openai.*cache retention/i);
+    } finally {
+      console.warn = orig;
+      clearEmittedWarnings();
+    }
+  });
+
+  test("maps tool choice to Responses values (required is native)", () => {
+    expect(mapToolChoiceToOpenAI(undefined)).toBeUndefined();
+    expect(mapToolChoiceToOpenAI("auto")).toBeUndefined();
+    expect(mapToolChoiceToOpenAI("none")).toBe("none");
+    expect(mapToolChoiceToOpenAI("required")).toBe("required");
+    expect(mapToolChoiceToOpenAI({ type: "function", function: { name: "a" } })).toEqual({
+      type: "function",
+      name: "a",
+    });
+  });
+});
+
+describe("OpenAI Provider & Responses API Compatibility", () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
@@ -17,14 +76,14 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
     process.env = originalEnv;
   });
 
-  test("should register openai as a first-class provider", () => {
+  test("should register openai as a first-class native provider", () => {
     const p = getProvider("openai");
     expect(p).toBeDefined();
     expect(p.id).toBe("openai");
-    expect(p.name).toBe("OpenAI");
+    expect(p).toBeInstanceOf(OpenAIResponsesProvider);
   });
 
-  test("should resolve openai model with prefix", () => {
+  test("should resolve openai model with prefix (strips only openai/)", () => {
     const resolved = resolveModel("openai/gpt-4o");
     expect(resolved.provider.id).toBe("openai");
     expect(resolved.modelId).toBe("gpt-4o");
@@ -41,11 +100,11 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
     expect(inst.thinkingLevel).toBe("medium");
   });
 
-  test("should route by changing OPENAI_BASE_URL and OPENAI_BASE_API_KEY", async () => {
+  test("should route by changing OPENAI_BASE_URL and OPENAI_BASE_API_KEY (native /responses)", async () => {
     process.env.OPENAI_BASE_URL = "https://custom-proxy.internal/v1";
     process.env.OPENAI_BASE_API_KEY = "sk-custom-secret-key";
 
-    const provider = new OpenAIProvider();
+    const provider = new OpenAIResponsesProvider();
     let requestedUrl = "";
     let requestedHeaders: Record<string, string> = {};
     let requestedBody: any = null;
@@ -58,27 +117,32 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
 
       return new Response(
         JSON.stringify({
-          id: "chatcmpl-mock-123",
-          object: "chat.completion",
-          created: Date.now(),
-          model: "llama-3.3-70b",
-          choices: [
+          id: "resp-mock-123",
+          object: "response",
+          created_at: Date.now(),
+          model: "gpt-4o",
+          status: "completed",
+          output: [
             {
-              index: 0,
-              message: {
-                role: "assistant",
-                content: "Hello from custom OpenAI proxy!",
-                reasoning_content: "Deep thinking trace here...",
-              },
-              finish_reason: "stop",
+              type: "reasoning",
+              id: "rs_mock",
+              content: [{ type: "reasoning_text", text: "Deep thinking trace here..." }],
+              summary: [],
+            },
+            {
+              type: "message",
+              id: "msg_mock",
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Hello from custom OpenAI proxy!", annotations: [] }],
             },
           ],
           usage: {
-            prompt_tokens: 25,
-            completion_tokens: 15,
+            input_tokens: 25,
+            input_tokens_details: { cached_tokens: 10 },
+            output_tokens: 15,
+            output_tokens_details: { reasoning_tokens: 8 },
             total_tokens: 40,
-            prompt_tokens_details: { cached_tokens: 10 },
-            completion_tokens_details: { reasoning_tokens: 8 },
           },
         }),
         {
@@ -90,22 +154,28 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
 
     try {
       const result = await provider.generate(
-        "llama-3.3-70b",
+        "gpt-4o",
         {
+          systemPrompt: "Be concise.",
           messages: [{ role: "user", content: "Test message" }],
         },
         {
+          thinking: { enabled: true, level: "medium" },
           sessionId: "test-session-42",
         }
       );
 
-      expect(requestedUrl).toBe("https://custom-proxy.internal/v1/chat/completions");
+      expect(requestedUrl).toBe("https://custom-proxy.internal/v1/responses");
       expect(requestedHeaders["Authorization"]).toBe("Bearer sk-custom-secret-key");
-      expect(requestedHeaders["session_id"]).toBe("test-session-42");
-      expect(requestedBody.model).toBe("llama-3.3-70b");
-      expect(requestedBody.messages[0].content).toBe("Test message");
+      expect(requestedBody.model).toBe("gpt-4o");
+      expect(requestedBody.instructions).toBe("Be concise.");
+      expect(requestedBody.reasoning).toEqual({ effort: "medium" });
+      expect(requestedBody.prompt_cache_key).toBe("test-session-42");
+      expect(requestedBody.store).toBe(false);
+      expect(requestedBody.previous_response_id).toBeUndefined();
+      // Stateless array-form history (never bare string).
+      expect(Array.isArray(requestedBody.input)).toBe(true);
 
-      // Verify returned data & usage mapping
       expect(result.text).toBe("Hello from custom OpenAI proxy!");
       expect(result.thinking).toBe("Deep thinking trace here...");
       expect(result.usage.inputTokens).toBe(25);
@@ -113,22 +183,22 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
       expect(result.usage.cachedTokens).toBe(10);
       expect(result.usage.thinkingTokens).toBe(8);
       expect(result.finishReason).toBe("stop");
+      expect(result.responseId).toBe("resp-mock-123");
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  test("should stream responses with SSE parser and extract thinking + text deltas", async () => {
-    process.env.OPENAI_BASE_URL = "http://localhost:11434/v1";
-    process.env.OPENAI_API_KEY = "ollama-key";
-
-    const provider = new OpenAIProvider();
+  test("should stream responses via Responses SSE and extract thinking + text deltas", async () => {
+    const provider = new OpenAIResponsesProvider();
     const originalFetch = globalThis.fetch;
 
     const sseChunks = [
-      'data: {"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant","reasoning_content":"Thinking step 1..."}}]}\n\n',
-      'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hello "}}]}\n\n',
-      'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"world!"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":6,"total_tokens":18}}\n\n',
+      'data: {"type":"response.created","response":{"id":"resp-1"}}\n\n',
+      'data: {"type":"response.reasoning_text.delta","output_index":0,"delta":"Thinking step 1..."}\n\n',
+      'data: {"type":"response.output_text.delta","output_index":1,"delta":"Hello "}\n\n',
+      'data: {"type":"response.output_text.delta","output_index":1,"delta":"world!"}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":12,"output_tokens":6,"total_tokens":18}}}\n\n',
       "data: [DONE]\n\n",
     ];
 
@@ -149,9 +219,13 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
     };
 
     try {
-      const stream = provider.stream("qwen-2.5-coder", {
-        messages: [{ role: "user", content: "Write hello world" }],
-      });
+      const stream = provider.stream(
+        "gpt-4o",
+        {
+          messages: [{ role: "user", content: "Write hello world" }],
+        },
+        { apiKey: "test-key" }
+      );
 
       const textDeltas: string[] = [];
       const thinkingDeltas: string[] = [];
@@ -175,38 +249,30 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
     }
   });
 
-  test("should handle tool calls in OpenAI format correctly", async () => {
-    const provider = new OpenAIProvider();
+  test("should handle tool calls in Responses format correctly", async () => {
+    const provider = new OpenAIResponsesProvider();
     const originalFetch = globalThis.fetch;
 
-    (globalThis as any).fetch = async (url: string, init: RequestInit) => {
+    (globalThis as any).fetch = async (_url: string, init: RequestInit) => {
       const body = JSON.parse(init.body as string);
       expect(body.tools).toBeDefined();
-      expect(body.tools[0].function.name).toBe("calculator");
+      expect(body.tools[0].name).toBe("calculator");
+      expect(body.tools[0].type).toBe("function");
 
       return new Response(
         JSON.stringify({
-          id: "chatcmpl-tool-test",
-          choices: [
+          id: "resp-tool-test",
+          status: "completed",
+          output: [
             {
-              message: {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                  {
-                    id: "call_abc123",
-                    type: "function",
-                    function: {
-                      name: "calculator",
-                      arguments: '{"expr":"2+2"}',
-                    },
-                  },
-                ],
-              },
-              finish_reason: "tool_calls",
+              type: "function_call",
+              id: "fc_abc123",
+              call_id: "call_abc123",
+              name: "calculator",
+              arguments: '{"expr":"2+2"}',
             },
           ],
-          usage: { prompt_tokens: 30, completion_tokens: 10, total_tokens: 40 },
+          usage: { input_tokens: 30, output_tokens: 10, total_tokens: 40 },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
@@ -244,29 +310,27 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
     }
   });
 
-  test("should accept multimodal inputs (text, image, audio, pdf) and output text only", async () => {
-    // NOTE: OpenAI chat completions supports image + wav/mp3 audio + PDF only.
-    // Video is Gemini-only (Vercel throws UnsupportedFunctionalityError on OpenAI),
-    // so video coverage lives in the converter unit test below.
-    const provider = new OpenAIProvider();
+  test("should accept multimodal inputs (text, image, file) as input_image/input_file", async () => {
+    const provider = new OpenAIResponsesProvider();
     const originalFetch = globalThis.fetch;
     let interceptedBody: any = null;
 
-    (globalThis as any).fetch = async (url: string, init: RequestInit) => {
+    (globalThis as any).fetch = async (_url: string, init: RequestInit) => {
       interceptedBody = JSON.parse(init.body as string);
       return new Response(
         JSON.stringify({
-          id: "chatcmpl-multimodal-1",
-          choices: [
+          id: "resp-multimodal-1",
+          status: "completed",
+          output: [
             {
-              message: {
-                role: "assistant",
-                content: "I analyzed the image, audio, pdf, and text instructions.",
-              },
-              finish_reason: "stop",
+              type: "message",
+              id: "msg_mm",
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text: "I analyzed the image and pdf.", annotations: [] }],
             },
           ],
-          usage: { prompt_tokens: 150, completion_tokens: 15, total_tokens: 165 },
+          usage: { input_tokens: 150, output_tokens: 15, total_tokens: 165 },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
@@ -286,10 +350,6 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
                   image: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
                 },
                 {
-                  type: "audio",
-                  audio: "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==",
-                },
-                {
                   type: "file",
                   file: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmo=",
                   mimeType: "application/pdf",
@@ -299,39 +359,32 @@ describe("OpenAI Provider & cURL Format Compatibility", () => {
             },
           ],
         },
-        {
-          apiKey: "test-key",
-          cache: { cachedContentId: "cachedContents/test1234" } as any,
-        }
+        { apiKey: "test-key" }
       );
 
-      // Verify payload structure matches OpenAI cURL format (via Vercel AI SDK)
       expect(interceptedBody).toBeDefined();
-      const content = interceptedBody.messages[0].content;
-      expect(Array.isArray(content)).toBe(true);
+      expect(Array.isArray(interceptedBody.input)).toBe(true);
+      const userMsg = interceptedBody.input.find((i: any) => i.type === "message" && i.role === "user");
+      expect(userMsg).toBeDefined();
+      const types = userMsg.content.map((c: any) => c.type);
+      expect(types).toContain("input_text");
+      expect(types).toContain("input_image");
+      expect(types).toContain("input_file");
+      const img = userMsg.content.find((c: any) => c.type === "input_image");
+      expect(img.image_url).toContain("data:image/png;base64,");
 
-      const textPart = content.find((p: any) => p.type === "text");
-      expect(textPart.text).toBe("Please analyze all attached media:");
-
-      const imagePart = content.find((p: any) => p.type === "image_url");
-      expect(imagePart.image_url.url).toContain("data:image/png;base64,");
-
-      const audioPart = content.find((p: any) => p.type === "input_audio");
-      expect(audioPart.input_audio.data).toBeDefined();
-      expect(audioPart.input_audio.format).toBe("wav");
-
-      const filePart = content.find((p: any) => p.type === "file");
-      expect(filePart.file.filename).toBe("doc.pdf");
-      expect(filePart.file.file_data).toContain("data:application/pdf;base64,");
-
-      // Verify extra_body cached_content
-      expect(interceptedBody.extra_body?.google?.cached_content).toBe("cachedContents/test1234");
-
-      // Verify text-only output
-      expect(result.text).toBe("I analyzed the image, audio, pdf, and text instructions.");
-      expect(typeof result.text).toBe("string");
+      expect(result.text).toBe("I analyzed the image and pdf.");
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("requires an API key instead of failing opaquely", async () => {
+    const provider = new OpenAIResponsesProvider();
+    const err = await provider
+      .generate("gpt-4o", { messages: [{ role: "user", content: "x" }] }, { env: {} })
+      .then(() => null)
+      .catch((e) => e);
+    expect(String(err?.message ?? err)).toMatch(/OPENAI_API_KEY|API key/);
   });
 });

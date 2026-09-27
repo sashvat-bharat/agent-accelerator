@@ -1,5 +1,5 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { OpenAIProvider } from "../src/index.ts";
+import { OpenAICompatibleChatProvider } from "../src/index.ts";
 
 const SIG =
   "EvUCCvICARFNMg/41s9sgoOmB9q2scThMsvdj+j55/83oQo2aw0YIMW+KwweMjRQ4viuSnMRjn7UxfkV91wU9oA32nw6IpYTcmRu9ljJtXhMGbYgXMMHzJli+u60aU8Sj4l9RYliVxDtvuwqd31sK7RHoQv795ttw7Q/0D//Xa4Gf+rdazyYkOGURQFhaPaUqpZJv+vhWk4KChczMVkIxJ+uQ99ajHxoTygW07rZx2gTxhrZZX8aVcNJ7021Cvv1d90T8nGVw+Pwuh0Z9tRVEqoydaOiEEwrTbon250akXj6ze6NYQa86dhEvVPFmGpssyQzHQ33GnDdoqJTMCtVdvpxChiON0IhR2gYHgZcVTGNYWvxhD0wEVDG2myf+NxeADJwnHSB7Kz3zMWuZidIPktS+qkC34OCbki30QIh6wYJ2eMi/AkIBzQGUO8p5G2Fbi5/DTj8Ur62OoYP2Tb6UUz1NgqRDSz2xEcS46w8z9wqLr39BL+sxA==";
@@ -11,7 +11,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   });
 
   test("generate() captures extra_content.google.thought_signature", async () => {
-    const provider = new OpenAIProvider();
+    const provider = new OpenAICompatibleChatProvider("compat");
     (globalThis as any).fetch = async () => {
       return new Response(
         JSON.stringify({
@@ -49,7 +49,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   });
 
   test("buildPayload replays signature on Turn 2 (prevents 400)", async () => {
-    const provider = new OpenAIProvider();
+    const provider = new OpenAICompatibleChatProvider("compat");
     let replayedBody: any = null;
     (globalThis as any).fetch = async (_url: string, init: any) => {
       replayedBody = JSON.parse(init.body as string);
@@ -97,7 +97,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   });
 
   test("stream() captures signature from delta.tool_calls", async () => {
-    const provider = new OpenAIProvider();
+    const provider = new OpenAICompatibleChatProvider("compat");
     const chunks = [
       `data: {"id":"c1","choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"spawn_subagents","arguments":"{\\"tasks\\":[]}"},"extra_content":{"google":{"thought_signature":"${SIG}"}}}]}}]}\n\n`,
       `data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n`,
@@ -126,7 +126,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   });
 
   test("no signature → no extra_content (plain OpenAI unaffected)", async () => {
-    const provider = new OpenAIProvider();
+    const provider = new OpenAICompatibleChatProvider("compat");
     let body: any = null;
     (globalThis as any).fetch = async (_u: string, init: any) => {
       body = JSON.parse(init.body as string);

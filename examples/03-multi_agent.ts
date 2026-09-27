@@ -18,7 +18,7 @@ try {
       timeout: 60000,
     },
     thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
-    cache: { retention: (process.env.CACHE_RETENTION as any) ?? "short" },
+    cache: { retention: (process.env.CACHE_RETENTION as any) ?? "implicit" },
   });
 } catch (err: any) {
   console.error(`\n${err.message}\n`);
@@ -66,7 +66,7 @@ async function ask(prompt: string) {
   const turnCr = totals.cr - prevCr;
   const turnCh = turnIn ? ((turnCr / turnIn) * 100).toFixed(1) : "0.0";
   const totalCh = totals.in ? ((totals.cr / totals.in) * 100).toFixed(1) : "0.0";
-  const lvl = (agent as any).thinkingConfig?.level ? ` • ${(agent as any).thinkingConfig.level}` : "";
+  const lvl = agent.thinkingConfig?.level ? ` • ${agent.thinkingConfig.level}` : "";
   const costSummary = turnCost > 0 ? `turn: ${formatCost(turnCost)} | total: ${formatCost(totals.cost)}` : formatCost(totals.cost);
 
   console.log(`\n\x1b[35m↑${fmt(totals.in)} ↓${fmt(totals.out)} CR${fmt(totals.cr)} CW${fmt(totals.cw)} turn-CH${turnCh}% total-CH${totalCh}% [${costSummary}] • ${res.provider}/${res.model}${lvl} ${res.durationMs}ms\x1b[0m`);

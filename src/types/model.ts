@@ -5,10 +5,10 @@ import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 
 // ---------------------------------------------------------------------------
 // Provider identity — battle-tested: matches models.dev provider keys
-// Known first-class: google | opencode | openrouter, plus aliases. Allow string for future.
+// Known first-class: google | openrouter | openai, plus aliases. Allow string for future.
 // ---------------------------------------------------------------------------
 /** Supported provider IDs plus arbitrary custom prefixes. */
-export type ProviderId = "google" | "opencode" | "opencode-go" | "openrouter" | "openai" | (string & {});
+export type ProviderId = "google" | "openrouter" | "openai" | (string & {});
 
 // ---------------------------------------------------------------------------
 // Raw models.dev shapes — battle-tested, 1:1 with https://models.dev/api.json
@@ -189,7 +189,7 @@ export interface ProviderGenerateResult {
   durationMs: number;
 }
 
-/** Provider contract implemented by the AI-SDK transport layer. */
+/** Provider contract implemented by native REST transports. */
 export interface Provider {
   id: ProviderId;
   name: string;

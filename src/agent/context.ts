@@ -96,6 +96,7 @@ export class AgentContext {
           arguments: tc.arguments,
           rawArguments: tc.rawArguments,
           thoughtSignature: tc.thoughtSignature || (!thinkingSig && !textSig ? thoughtSignature : undefined),
+          callId: tc.callId,
         });
       }
     }

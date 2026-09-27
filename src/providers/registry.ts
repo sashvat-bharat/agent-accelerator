@@ -1,33 +1,30 @@
 import type { Provider, ProviderId, ModelSpec } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
-import {
-  GoogleAiSdkProvider,
-  OpenCodeAiSdkProvider,
-  OpenRouterAiSdkProvider,
-  OpenAiAiSdkProvider,
-  CustomAiSdkProvider,
-} from "./model-provider.ts";
+import { OpenAICompatibleChatProvider } from "./openai-compat.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
 import { getEnv } from "../utils/env.ts";
+import { GoogleInteractionsProvider } from "./google.ts";
+import { OpenRouterChatCompletionsProvider } from "./openrouter.ts";
+import { OpenAIResponsesProvider } from "./openai.ts";
 
 const providerRegistry = new Map<ProviderId, Provider>();
 
-// Initialize default supported providers powered purely by Vercel AI SDK
-const googleProvider = new GoogleAiSdkProvider();
-const opencodeProvider = new OpenCodeAiSdkProvider();
-const openrouterProvider = new OpenRouterAiSdkProvider();
-const openaiProvider = new OpenAiAiSdkProvider();
+// Google + OpenAI + OpenRouter are served by dedicated native REST adapters
+// (`./google.ts` Interactions, `./openai.ts` Responses, `./openrouter.ts`
+// Chat Completions). Any other prefix is served by the generic native
+// OpenAI-compatible Chat Completions adapter (`./openai-compat.ts`).
+const googleProvider = new GoogleInteractionsProvider();
+const openrouterProvider = new OpenRouterChatCompletionsProvider();
+const openaiProvider = new OpenAIResponsesProvider();
 
 providerRegistry.set("google", googleProvider);
 providerRegistry.set("gemini", googleProvider);
-providerRegistry.set("opencode", opencodeProvider);
-providerRegistry.set("opencode-go", opencodeProvider);
 providerRegistry.set("openrouter", openrouterProvider);
 providerRegistry.set("openai", openaiProvider);
 
 // ---------------------------------------------------------------------------
-// Unified multi-provider layer powered purely by Vercel AI SDK
-// Any `MODEL="<prefix>/<model-id>"` works without SDK changes as long as
+// Unified multi-provider layer (all native REST, no SDK transport)
+// Any `MODEL="<prefix>/<model-id>"` works without code changes as long as
 // `{PREFIX}_API_KEY` (+ optional `{PREFIX}_BASE_URL`) is set. Examples:
 //   MODEL="groq/llama-3.3-70b-versatile" + GROQ_API_KEY + GROQ_BASE_URL
 //   MODEL="cerebras/gpt-oss-120b"      + CEREBRAS_API_KEY + CEREBRAS_BASE_URL
@@ -36,11 +33,29 @@ providerRegistry.set("openai", openaiProvider);
 const FIRST_CLASS = new Set([
   "google",
   "gemini",
-  "opencode",
-  "opencode-go",
   "openrouter",
   "openai",
 ]);
+
+// Removed providers: fail loudly instead of misrouting. OpenCode free models
+// are harness-only since 2026, so the opencode/opencode-go prefixes no longer
+// resolve anywhere.
+const REMOVED_PROVIDERS = new Set(["opencode", "opencode-go"]);
+
+function removedProviderMessage(id: string): string {
+  return (
+    `[Agent Accelerator] Provider "${id}" has been removed: OpenCode free models are ` +
+    `harness-only and are no longer served over the API. Use google, openai, openrouter, or any ` +
+    `OpenAI-compatible endpoint ({PREFIX}_API_KEY + {PREFIX}_BASE_URL) instead.`
+  );
+}
+
+/** Throws for removed provider prefixes. */
+function assertProviderNotRemoved(id: string): void {
+  if (REMOVED_PROVIDERS.has(id.trim().toLowerCase())) {
+    throw new Error(removedProviderMessage(id.trim()));
+  }
+}
 
 /**
  * Normalizes a provider prefix for registry lookup and environment resolution.
@@ -51,7 +66,7 @@ export function normalizeProviderPrefix(prefix: string): string {
 }
 
 /**
- * Get-or-create an OpenAI-compatible provider for any prefix backed by Vercel AI SDK.
+ * Registers or retrieves a native OpenAI-compatible provider for any custom prefix.
  * Cached, so repeated `resolveModel("groq/...")` calls reuse one instance.
  */
 /**
@@ -63,20 +78,21 @@ export function ensureCustomProvider(
   prefix: string,
   opts?: { baseUrl?: string; apiKey?: string; name?: string }
 ): Provider {
+  assertProviderNotRemoved(prefix);
   const id = normalizeProviderPrefix(prefix) as ProviderId;
   const existing = providerRegistry.get(id);
   if (existing && !FIRST_CLASS.has(id.toLowerCase())) return existing;
   if (existing && opts?.baseUrl === undefined && opts?.apiKey === undefined) {
     return existing;
   }
-  const created = new CustomAiSdkProvider(id, opts);
+  const created = new OpenAICompatibleChatProvider(id, opts);
   providerRegistry.set(id, created);
   return created;
 }
 
 /**
  * Retrieves a provider by ID.
- * Unknown ids auto-create an OpenAI-compatible provider (unified layer),
+ * Unknown ids auto-create a native OpenAI-compatible provider (unified layer),
  * so `getProvider("groq")` works after setting `GROQ_API_KEY`/`GROQ_BASE_URL`.
  */
 /**
@@ -86,14 +102,15 @@ export function ensureCustomProvider(
  */
 export function getProvider(id: ProviderId | string): Provider {
   const key = String(id).trim() as ProviderId;
+  assertProviderNotRemoved(key);
   const provider = providerRegistry.get(key);
   if (provider) return provider;
   if (!key) {
     throw new Error(
-      `Provider '' is not supported or not registered. Available first-support providers: google, opencode, openrouter, openai — or any custom prefix via {PREFIX}_API_KEY + {PREFIX}_BASE_URL.`
+      `Provider '' is not supported or not registered. Available first-support providers: google, openrouter, openai — or any custom prefix via {PREFIX}_API_KEY + {PREFIX}_BASE_URL.`
     );
   }
-  // Unified layer: lazily create OpenAI-compatible provider for any custom prefix.
+  // Unified layer: lazily create a native OpenAI-compatible provider for any custom prefix.
   return ensureCustomProvider(key);
 }
 
@@ -105,8 +122,8 @@ export interface ResolvedModel {
 }
 
 /**
- * Resolves a model string (e.g. "google/model-id", "opencode/model-id", "openrouter/scope/model:variant")
- * or ModelSpec into provider instance and model ID using Vercel AI SDK provider layer.
+ * Resolves a model string (e.g. "google/model-id", "openai/gpt-4o", "openrouter/scope/model:variant")
+ * or ModelSpec into provider instance and model ID.
  */
 /**
  * Resolves `provider/model`, catalog specs, scoped OpenRouter IDs, and custom prefixes.
@@ -149,6 +166,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
     const parts = modelStr.split("/");
     const providerPrefix = parts[0]!.toLowerCase();
     const remainingModel = parts.slice(1).join("/");
+    assertProviderNotRemoved(providerPrefix);
 
     // 1. Explicit openai/ prefix ALWAYS routes to OpenAI provider
     if (providerPrefix === "openai") {
@@ -164,8 +182,6 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
     const isExplicitOther = [
       "google",
       "gemini",
-      "opencode",
-      "opencode-go",
       "openrouter",
     ].includes(providerPrefix);
 
@@ -208,18 +224,6 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
       return { provider: p, modelId: remainingModel, modelSpec: spec as ModelSpec };
     }
 
-    if (
-      providerPrefix === "opencode" ||
-      providerPrefix === "opencode-go"
-    ) {
-      const p = getProvider("opencode");
-      const spec =
-        p.getModel(remainingModel) ||
-        getModelFromCatalog("opencode", remainingModel) ||
-        getModelFromCatalog(remainingModel, remainingModel);
-      return { provider: p, modelId: remainingModel, modelSpec: spec as ModelSpec };
-    }
-
     if (providerPrefix === "openrouter") {
       const p = getProvider("openrouter");
       const spec =
@@ -249,7 +253,6 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
     const prioritizedUnknown =
       tryCatalogLookup(providerPrefix, remainingModel) ||
       tryCatalogLookup("google", remainingModel) ||
-      tryCatalogLookup("opencode", remainingModel) ||
       tryCatalogLookup("openai", remainingModel) ||
       tryCatalogLookup("openrouter", remainingModel) ||
       getModelFromCatalog(modelStr, modelStr);
@@ -283,7 +286,6 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
   // No slash — try catalog with internal provider priority
   const prioritized =
     tryCatalogLookup("google", modelStr) ||
-    tryCatalogLookup("opencode", modelStr) ||
     tryCatalogLookup("openai", modelStr) ||
     tryCatalogLookup("openrouter", modelStr) ||
     getModelFromCatalog(modelStr, modelStr);
@@ -329,20 +331,6 @@ export const ModelProvider = {
   ): ModelProviderInstance {
     return {
       model: model.startsWith("google/") ? model : `google/${model}`,
-      apiKey,
-      baseUrl: options?.baseUrl,
-      thinkingLevel: options?.thinkingLevel,
-    };
-  },
-
-  /** Builds an OpenCode model selection. @example `ModelProvider.OpenCode("kimi-k2.5")` */
-  OpenCode(
-    model: string,
-    apiKey?: string,
-    options?: { thinkingLevel?: ThinkingLevel; baseUrl?: string }
-  ): ModelProviderInstance {
-    return {
-      model: model.startsWith("opencode") ? model : `opencode/${model}`,
       apiKey,
       baseUrl: options?.baseUrl,
       thinkingLevel: options?.thinkingLevel,

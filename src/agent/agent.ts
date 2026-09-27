@@ -5,13 +5,26 @@ import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
-import { resolveModel } from "../ai-sdk/registry.ts";
+import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
+import { convert_document_to_markdown } from "../utils/documents.ts";
 import { runAgentLoop, streamAgentLoop } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
-import { validateModelThinking } from "../models/catalog.ts";
-import { resolveEffectiveThinking } from "../ai-sdk/options.ts";
+import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
+
+/**
+ * Resolves a per-run thinking override without mutating agent config.
+ */
+export function resolveEffectiveThinking(
+  base?: ThinkingConfig,
+  overrideLevel?: string
+): ThinkingConfig | undefined {
+  if (!overrideLevel) return base;
+  if (overrideLevel === "none") return { enabled: false, level: "none", budgetTokens: 0 };
+  if (overrideLevel === "dynamic") return { enabled: true, level: "dynamic", budgetTokens: -1 };
+  return { enabled: true, level: overrideLevel as ThinkingConfig["level"] };
+}
 
 /** Thrown when dynamic sub-agent spawning is enabled without an explicit model. */
 export class SubAgentModelError extends Error {
@@ -91,6 +104,8 @@ export class Agent {
   readonly cacheConfig?: CacheConfig;
   /** Provider service tier. */
   readonly serviceTier?: ServiceTier;
+  /** Convert `file` parts client-side for pdf-incapable models. */
+  readonly bypassInputFileModality: boolean;
   /** Maximum model/tool turns per run. */
   readonly maxTurns: number;
   /** Session ID used for history and cache affinity. */
@@ -198,6 +213,7 @@ export class Agent {
     const initialCachedId = (this.cacheConfig as any)?.cachedContentId;
 
     this.serviceTier = config.serviceTier;
+    this.bypassInputFileModality = config.bypassInputFileModality ?? false;
     this.stateless = config.stateless ?? false;
 
     // Tools registration
@@ -223,6 +239,10 @@ export class Agent {
       for (const [toolName, toolDef] of Object.entries(subagentTools)) {
         this.tools[toolName] = toolDef;
       }
+    }
+
+    if (this.bypassInputFileModality && !this.tools["convert_document_to_markdown"]) {
+      this.tools["convert_document_to_markdown"] = convert_document_to_markdown;
     }
 
     if (this.dynamicSubagents?.enabled === true) {
@@ -288,6 +308,11 @@ export class Agent {
   }
 
   private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions): void {
+    if (Array.isArray(prompt) && prompt.length === 0) {
+      throw new Error(
+        "[Agent Accelerator] Prompt cannot be empty: pass a non-empty string or at least one content part."
+      );
+    }
     if (this.stateless) {
       this.context.messages = [];
       this.context.thoughtSignatures = [];
@@ -319,8 +344,24 @@ export class Agent {
    */
   run(
     prompt: string | ContentPart[],
+    options: AgentRunOptions & { stream: true } & (
+      | { onDelta: NonNullable<AgentRunOptions["onDelta"]> }
+      | { onThinkingDelta: NonNullable<AgentRunOptions["onThinkingDelta"]> }
+      | { onEvent: NonNullable<AgentRunOptions["onEvent"]> }
+    )
+  ): Promise<AgentResponse> & AsyncIterable<StreamEvent>;
+  run(
+    prompt: string | ContentPart[],
+    options: AgentRunOptions & { stream: true }
+  ): AssistantMessageEventStream;
+  run(
+    prompt: string | ContentPart[],
     options?: AgentRunOptions
-  ): Promise<AgentResponse> & AssistantMessageEventStream {
+  ): Promise<AgentResponse>;
+  run(
+    prompt: string | ContentPart[],
+    options?: AgentRunOptions
+  ): Promise<AgentResponse> | AssistantMessageEventStream {
     const isStream = options?.stream === true;
     if (isStream) {
       const hasCallbacks = !!(options?.onDelta || options?.onThinkingDelta || options?.onEvent);
@@ -343,44 +384,48 @@ export class Agent {
       return s;
     }
 
-    const resolved = resolveModel(this.modelStringOrSpec);
-    const effectiveLevel = options?.thinkingLevel || this.thinkingConfig?.level;
-    if (effectiveLevel) {
-      validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
-    }
-    this.prepareTurn(prompt, options);
+    return (async (): Promise<AgentResponse> => {
+      // Refresh the catalog BEFORE thinking validation so levels are checked
+      // against live data instead of a possibly-empty cold cache.
+      await ensureModelCatalogFresh();
+      const resolved = resolveModel(this.modelStringOrSpec);
+      const effectiveLevel = options?.thinkingLevel || this.thinkingConfig?.level;
+      if (effectiveLevel) {
+        validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
+      }
+      this.prepareTurn(prompt, options);
 
-    const providerOptions = {
-      apiKey: this.apiKey,
-      baseUrl: this.baseUrl,
-      headers: { ...(this.customHeaders ?? {}), ...(options?.headers ?? {}) },
-      thinking: resolveEffectiveThinking(this.thinkingConfig, options?.thinkingLevel),
-      cache: this.stateless
-        ? { sessionId: options?.sessionId || this.sessionId }
-        : { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
-      serviceTier: this.serviceTier,
-      sessionId: options?.sessionId || this.sessionId,
-    };
+      const providerOptions = {
+        apiKey: this.apiKey,
+        baseUrl: this.baseUrl,
+        headers: { ...(this.customHeaders ?? {}), ...(options?.headers ?? {}) },
+        thinking: resolveEffectiveThinking(this.thinkingConfig, options?.thinkingLevel),
+        cache: this.stateless
+          ? { sessionId: options?.sessionId || this.sessionId }
+          : { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
+        serviceTier: this.serviceTier,
+        sessionId: options?.sessionId || this.sessionId,
+      };
 
-    const loopConfig = {
-      agentName: this.name,
-      provider: resolved.provider,
-      modelId: resolved.modelId,
-      context: this.context,
-      tools: this.tools,
-      options: providerOptions,
-      runOptions: options,
-      maxTurns: this.maxTurns,
-    };
+      const loopConfig = {
+        agentName: this.name,
+        provider: resolved.provider,
+        modelId: resolved.modelId,
+        context: this.context,
+        tools: this.tools,
+        options: providerOptions,
+        runOptions: options,
+        maxTurns: this.maxTurns,
+        bypassInputFileModality: this.bypassInputFileModality,
+      };
 
-    const promise = runAgentLoop(loopConfig).then((res) => {
+      const res = await runAgentLoop(loopConfig);
       if (this.stateless) {
         this.context.messages = [];
         this.context.thoughtSignatures = [];
       }
       return res;
-    });
-    return promise as any;
+    })();
   }
 
   /**
@@ -409,10 +454,16 @@ export class Agent {
       }
       const stringStream: any = {
         [Symbol.asyncIterator]: async function* () {
-          for await (const chunk of stream) {
-            if (chunk.type === "text_delta" && chunk.delta) {
-              yield chunk.delta;
+          try {
+            for await (const chunk of stream) {
+              if (chunk.type === "text_delta" && chunk.delta) {
+                yield chunk.delta;
+              }
             }
+          } finally {
+            // Breaking out early must stop the underlying provider stream
+            // instead of leaving the HTTP connection running in the background.
+            stream.cancel();
           }
         },
         result: () => stream.result(),
@@ -428,7 +479,7 @@ export class Agent {
       return stringStream;
     }
 
-    return this.run(prompt, runOpts);
+    return this.run(prompt, runOpts) as any;
   }
 
   /**
@@ -472,6 +523,7 @@ export class Agent {
       options: providerOptions,
       runOptions: options,
       maxTurns: this.maxTurns,
+      bypassInputFileModality: this.bypassInputFileModality,
     };
 
     const s = streamAgentLoop(loopConfig);
@@ -483,8 +535,32 @@ export class Agent {
     }
     // Wire one-liner callbacks so `stream:true` + onDelta is enough — no manual for-await needed
     if (options?.wrapThinking) {
-      // Auto-wrap reasoning as <think>\n...\n</think>\n\n per-turn — clean boundaries across multi-turn agent runs
+      // Auto-wrap reasoning as <think>…</think> per-turn — clean boundaries across multi-turn agent runs.
+      //
+      // Display-only whitespace hygiene (cache-safe): provider thought
+      // summaries routinely carry edge blank lines (observed `"...\n\n\n"`),
+      // and the wrapper itself adds newlines around the span. Without care
+      // this renders as blank lines after `<think>`, double blanks between
+      // sections, and a stray blank line before `</think>`. The buffering
+      // below touches ONLY the presented strings/callback args and synthetic
+      // tag events — never provider accumulation, AgentContext history, or
+      // request bodies — so prefix-cache affinity is untouched.
+      //
+      // Trailing-newline buffering: each chunk's trailing `\n` run is
+      // withheld and prepended to the next chunk (or dropped at close), so
+      // emitted display text never ends with `\n` and `</think>` never gets
+      // a preceding blank line. Interior breaks are preserved (collapsed to
+      // a single blank line at most).
       let isThinking = false;
+      let emittedAny = false;
+      let pendingNewlines = "";
+      // True once text has been emitted without a trailing newline: the next
+      // <think> open tag then needs its own leading newline, otherwise it
+      // glues onto the streamed text mid-line. False at stream start and
+      // after every tag (both end with newlines), preserving the exact
+      // "<think>\n...\n</think>\n\n" contract for thinking-first streams.
+      let needThinkNewline = false;
+      const collapseBlankLines = (s: string): string => s.replace(/\n{3,}/g, "\n\n");
       const userOnThinking = options.onThinkingDelta;
       const userOnDelta = options.onDelta;
       const userOnEvent = options.onEvent;
@@ -493,7 +569,10 @@ export class Agent {
       const openThink = (e?: any) => {
         if (!isThinking) {
           isThinking = true;
-          const tag = "<think>\n";
+          emittedAny = false;
+          pendingNewlines = "";
+          const tag = (needThinkNewline ? "\n" : "") + "<think>\n";
+          needThinkNewline = false;
           if (userOnThinking) userOnThinking(tag, e);
           else if (userOnDelta) userOnDelta(tag, e as any);
         }
@@ -502,20 +581,54 @@ export class Agent {
       const closeThink = (e?: any) => {
         if (isThinking) {
           isThinking = false;
-          const close = "\n</think>\n\n";
+          // Drop any withheld trailing newlines: the span ends cleanly and
+          // the tag supplies its own line breaks. Empty spans still close.
+          pendingNewlines = "";
+          const close = emittedAny ? "\n</think>\n\n" : "</think>\n\n";
+          emittedAny = false;
           if (userOnThinking) userOnThinking(close, e);
           else if (userOnDelta) userOnDelta(close, e as any);
         }
       };
 
+      /** Buffers one raw thinking chunk, returning the display string to
+       * emit now (`""` when nothing displayable yet). Mutates the event in
+       * place so manual `for-await` consumers see the same clean text; safe
+       * because loop context derives from the provider result, not these
+       * outer events. */
+      const bufferThinkingEvent = (e: any): string => {
+        const raw: string = e.thinkingDelta ?? "";
+        let chunk = collapseBlankLines(pendingNewlines + raw);
+        pendingNewlines = "";
+        if (!emittedAny) {
+          chunk = chunk.replace(/^\n+/, "");
+        }
+        if (!chunk) return "";
+        const m = chunk.match(/\n+$/);
+        if (m) {
+          pendingNewlines = m[0];
+          chunk = chunk.slice(0, -m[0].length);
+          if (!chunk) return "";
+        }
+        emittedAny = true;
+        e.thinkingDelta = chunk;
+        if (typeof e.partialThinking === "string") {
+          e.partialThinking = collapseBlankLines(e.partialThinking);
+        }
+        return chunk;
+      };
+
       if (userOnThinking || userOnDelta) {
         s.on("thinking_delta", (e: any) => {
           openThink(e);
-          if (userOnThinking) userOnThinking(e.thinkingDelta!, e);
-          else if (userOnDelta) userOnDelta(e.thinkingDelta!, e as any);
+          const chunk = bufferThinkingEvent(e);
+          if (!chunk) return;
+          if (userOnThinking) userOnThinking(chunk, e);
+          else if (userOnDelta) userOnDelta(chunk, e as any);
         });
         s.on("text_delta", (e: any) => {
           closeThink(e);
+          needThinkNewline = !((e.delta ?? "").endsWith("\n"));
           if (userOnDelta) userOnDelta(e.delta!, e);
           else if (userOnThinking) userOnThinking(e.delta!, e as any);
         });
@@ -528,48 +641,55 @@ export class Agent {
           closeThink(e || ({ type: "done" } as any));
         });
       } else {
-        // No callbacks but wrapThinking true — still emit tags as events for manual iteration
+        // No callbacks but wrapThinking true — still emit tags as events for manual iteration.
+        // Same display hygiene as above (in-place event normalization is safe:
+        // loop context derives from the provider result, not outer events).
+        const closeSynthetic = () => {
+          if (isThinking) {
+            isThinking = false;
+            pendingNewlines = "";
+            const tag = emittedAny ? "\n</think>\n\n" : "</think>\n\n";
+            emittedAny = false;
+            s.push({ type: "thinking_delta", thinkingDelta: tag, __synthetic: true } as any);
+          }
+        };
         s.on("thinking_delta", (e: any) => {
+          // Ignore our own synthetic tags: push() redelivers events to
+          // listeners synchronously, so without this guard the handler
+          // re-enters on every tag it emits (duplicate <think> spans and
+          // mutated queued events).
+          if ((e as any).__synthetic) return;
           if (!isThinking) {
             isThinking = true;
-            s.push({ type: "thinking_delta", thinkingDelta: "<think>\n" } as any);
+            emittedAny = false;
+            pendingNewlines = "";
+            const openTag = (needThinkNewline ? "\n" : "") + "<think>\n";
+            needThinkNewline = false;
+            s.push({ type: "thinking_delta", thinkingDelta: openTag, __synthetic: true } as any);
+          }
+          const chunk = bufferThinkingEvent(e);
+          if (!chunk) {
+            e.thinkingDelta = "";
           }
         });
         s.on("text_delta", (e: any) => {
-          if (isThinking) {
-            isThinking = false;
-            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
-          }
+          closeSynthetic();
+          needThinkNewline = !((e.delta ?? "").endsWith("\n"));
         });
         s.on("tool_call_start" as any, () => {
-          if (isThinking) {
-            isThinking = false;
-            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
-          }
+          closeSynthetic();
         });
         s.on("tool_call_complete" as any, () => {
-          if (isThinking) {
-            isThinking = false;
-            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
-          }
+          closeSynthetic();
         });
         s.on("tool_result" as any, () => {
-          if (isThinking) {
-            isThinking = false;
-            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
-          }
+          closeSynthetic();
         });
         s.on("subagent_complete" as any, () => {
-          if (isThinking) {
-            isThinking = false;
-            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
-          }
+          closeSynthetic();
         });
         s.on("done", () => {
-          if (isThinking) {
-            isThinking = false;
-            s.push({ type: "thinking_delta", thinkingDelta: "\n</think>\n\n" } as any);
-          }
+          closeSynthetic();
         });
         if (userOnEvent) s.on("*", userOnEvent as any);
       }
@@ -598,7 +718,7 @@ export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): 
       const provStr = typeof rawModel === "object" && rawModel?.provider ? rawModel.provider : modelStr.includes("/") ? modelStr.split("/")[0] : "";
       const actualModelId = modelStr.includes("/") ? modelStr.split("/").slice(1).join("/") : modelStr;
       if (actualModelId) {
-        validateModelThinking(provStr || "opencode", actualModelId, level);
+        validateModelThinking(provStr || "openrouter", actualModelId, level);
       }
     } catch (e) {
       throw e;

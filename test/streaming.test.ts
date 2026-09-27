@@ -103,198 +103,81 @@ describe("Streaming & SSE Parser", () => {
     ]);
   });
 
-  it("should switch from reasoning to text_delta when </think> tag or # header is encountered", async () => {
-    const { OpenRouterProvider } = await import("../src/index.ts");
-    const provider = new OpenRouterProvider();
+  it("should collapse provider blank-line padding in wrapThinking display without touching cache payloads", async () => {
+    // Regression: Gemini thought summaries trail with blank lines (observed
+    // `"...\n\n\n"`), and the `<think>` wrapper added its own newlines —
+    // rendering blank lines after `<think>`, double blanks between sections,
+    // and blanks before `</think>`. Display normalization must collapse
+    // `\n{3,}` → `\n\n` and keep tag boundaries tight while request bodies
+    // (instructions, chaining, affinity) stay byte-identical.
+    const { Agent } = await import("../src/agent/agent.ts");
     const originalFetch = globalThis.fetch;
-
-    // Simulate an upstream model dumping a document header into reasoning
-    const sseChunks = [
-      'data: {"id":"gen-1","choices":[{"delta":{"reasoning":"I will think for a second.\\n# Executive Report: Summary\\nContent here"}}],"finish_reason":"stop"}\n\n',
-      "data: [DONE]\n\n",
-    ];
-
-    (globalThis as any).fetch = async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          for (const chunk of sseChunks) {
-            controller.enqueue(new TextEncoder().encode(chunk));
-          }
-          controller.close();
-        },
-      });
-      return new Response(stream, {
-        status: 200,
-        headers: { "Content-Type": "text/event-stream" },
-      });
+    const seenBodies: any[] = [];
+    const sse = [
+      "event: interaction.created",
+      'data: {"interaction":{"id":"v1_w","status":"in_progress","object":"interaction","model":"m"},"event_type":"interaction.created"}',
+      "",
+      "event: step.start",
+      'data: {"index":0,"step":{"type":"thought"},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":0,"delta":{"content":{"type":"text","text":"A\\n\\n\\nB\\n\\n\\n"},"type":"thought_summary"},"event_type":"step.delta"}',
+      "",
+      "event: step.stop",
+      'data: {"index":0,"event_type":"step.stop"}',
+      "",
+      "event: step.start",
+      'data: {"index":1,"step":{"type":"model_output"},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":1,"delta":{"text":"Hi","type":"text"},"event_type":"step.delta"}',
+      "",
+      "event: step.stop",
+      'data: {"index":1,"event_type":"step.stop"}',
+      "",
+      "event: interaction.completed",
+      'data: {"interaction":{"id":"v1_w","status":"completed","usage":{"total_tokens":3,"total_input_tokens":2,"total_output_tokens":1,"total_cached_tokens":0,"total_thought_tokens":0}},"event_type":"interaction.completed"}',
+      "",
+      "event: done",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      try {
+        seenBodies.push(JSON.parse(req.body));
+      } catch {}
+      return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
     };
 
     try {
-      const stream = provider.stream(
-        "inclusionai/ling-3.0-flash-fin:free",
-        { messages: [{ role: "user", content: "Write report" }] },
-        { apiKey: "test-key" }
-      );
-
-      const textDeltas: string[] = [];
-      const thinkingDeltas: string[] = [];
-
-      for await (const event of stream) {
-        if (event.type === "text_delta" && event.delta) {
-          textDeltas.push(event.delta);
-        } else if (event.type === "thinking_delta" && event.thinkingDelta) {
-          thinkingDeltas.push(event.thinkingDelta);
-        }
-      }
-
-      const res = await stream.result();
-      expect(thinkingDeltas.join("")).toBe("I will think for a second.");
-      expect(textDeltas.join("")).toBe("# Executive Report: Summary\nContent here");
-      expect(res.text).toBe("# Executive Report: Summary\nContent here");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("should rescue text from thinking when no content deltas were emitted and no tools called", async () => {
-    const { OpenRouterProvider } = await import("../src/index.ts");
-    const provider = new OpenRouterProvider();
-    const originalFetch = globalThis.fetch;
-
-    const sseChunks = [
-      'data: {"id":"gen-2","choices":[{"delta":{"reasoning":"Simple text answer completely in reasoning"}}],"finish_reason":"stop"}\n\n',
-      "data: [DONE]\n\n",
-    ];
-
-    (globalThis as any).fetch = async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          for (const chunk of sseChunks) {
-            controller.enqueue(new TextEncoder().encode(chunk));
-          }
-          controller.close();
-        },
+      const agent = new Agent({
+        name: "WrapThinkingHygiene",
+        model: "google/gemini-3.5-flash-lite",
+        apiKey: "test-key",
       });
-      return new Response(stream, {
-        status: 200,
-        headers: { "Content-Type": "text/event-stream" },
+      const thinkingOut: string[] = [];
+      const textOut: string[] = [];
+      const res = await agent.run("Hi", {
+        stream: true,
+        wrapThinking: true,
+        onThinkingDelta: (d) => void thinkingOut.push(d),
+        onDelta: (d) => void textOut.push(d),
       });
-    };
 
-    try {
-      const stream = provider.stream(
-        "qwen/qwq-32b",
-        { messages: [{ role: "user", content: "hello" }] },
-        { apiKey: "test-key" }
-      );
-
-      const res = await stream.result();
-      expect(res.text).toBe("Simple text answer completely in reasoning");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("should detect document header split across SSE chunks (cross-chunk rolling buffer)", async () => {
-    const { OpenRouterProvider } = await import("../src/index.ts");
-    const provider = new OpenRouterProvider();
-    const originalFetch = globalThis.fetch;
-
-    // Simulate tokenizer splitting \n\n into Chunk 1 and # Title into Chunk 2
-    const sseChunks = [
-      'data: {"id":"gen-split-1","choices":[{"delta":{"reasoning":"Analyzing research findings.\\n\\n"}}]}\n\n',
-      'data: {"id":"gen-split-1","choices":[{"delta":{"reasoning":"# Executive Summary: Solid-State Batteries\\n"}}]}\n\n',
-      'data: {"id":"gen-split-1","choices":[{"delta":{"reasoning":"Commercialization timeline is 2027."}}],"finish_reason":"stop"}\n\n',
-      "data: [DONE]\n\n",
-    ];
-
-    (globalThis as any).fetch = async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          for (const chunk of sseChunks) {
-            controller.enqueue(new TextEncoder().encode(chunk));
-          }
-          controller.close();
-        },
-      });
-      return new Response(stream, {
-        status: 200,
-        headers: { "Content-Type": "text/event-stream" },
-      });
-    };
-
-    try {
-      const stream = provider.stream(
-        "inclusionai/ling-3.0-flash-fin:free",
-        { messages: [{ role: "user", content: "Write report" }] },
-        { apiKey: "test-key" }
-      );
-
-      const textDeltas: string[] = [];
-      const thinkingDeltas: string[] = [];
-
-      for await (const event of stream) {
-        if (event.type === "text_delta" && event.delta) {
-          textDeltas.push(event.delta);
-        } else if (event.type === "thinking_delta" && event.thinkingDelta) {
-          thinkingDeltas.push(event.thinkingDelta);
-        }
-      }
-
-      const res = await stream.result();
-      expect(thinkingDeltas.join("")).toBe("Analyzing research findings.\n\n");
-      expect(textDeltas.join("")).toBe("# Executive Summary: Solid-State Batteries\nCommercialization timeline is 2027.");
-      expect(res.text).toBe("# Executive Summary: Solid-State Batteries\nCommercialization timeline is 2027.");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("should handle </think> tag split across SSE chunks (cross-chunk rolling buffer)", async () => {
-    const { OpenRouterProvider } = await import("../src/index.ts");
-    const provider = new OpenRouterProvider();
-    const originalFetch = globalThis.fetch;
-
-    // Simulate </think> split across chunk 1 (</thi) and chunk 2 (nk>)
-    const sseChunks = [
-      'data: {"id":"gen-split-2","choices":[{"delta":{"reasoning":"Let me calculate. </thi"}}]}\n\n',
-      'data: {"id":"gen-split-2","choices":[{"delta":{"reasoning":"nk>\\nThe result is 42."}}],"finish_reason":"stop"}\n\n',
-      "data: [DONE]\n\n",
-    ];
-
-    (globalThis as any).fetch = async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          for (const chunk of sseChunks) {
-            controller.enqueue(new TextEncoder().encode(chunk));
-          }
-          controller.close();
-        },
-      });
-      return new Response(stream, {
-        status: 200,
-        headers: { "Content-Type": "text/event-stream" },
-      });
-    };
-
-    try {
-      const stream = provider.stream(
-        "inclusionai/ling-3.0-flash-fin:free",
-        { messages: [{ role: "user", content: "Calculate" }] },
-        { apiKey: "test-key" }
-      );
-
-      const textDeltas: string[] = [];
-
-      for await (const event of stream) {
-        if (event.type === "text_delta" && event.delta) {
-          textDeltas.push(event.delta);
-        }
-      }
-
-      const res = await stream.result();
-      expect(textDeltas.join("")).toBe("\nThe result is 42.");
-      expect(res.text).toBe("\nThe result is 42.");
+      const thinkingShown = thinkingOut.join("");
+      expect(thinkingShown).not.toContain("\n\n\n");
+      expect(thinkingShown.startsWith("<think>\nA")).toBe(true);
+      // Trailing provider newlines are buffered and dropped at close: no
+      // blank line before the tag.
+      expect(thinkingShown).toBe("<think>\nA\n\nB\n</think>\n\n");
+      // Stored thinking is trimmed (no provider trailing blanks).
+      expect(res.thinking).toBe("A\n\nB");
+      expect(textOut.join("")).toContain("Hi");
+      // Cache-relevant payload untouched: stateless single-turn sends the
+      // user turn only, no chaining id invented.
+      expect(seenBodies.length).toBe(1);
+      expect(seenBodies[0].previous_interaction_id).toBeUndefined();
+      expect(seenBodies[0].model).toBe("gemini-3.5-flash-lite");
     } finally {
       globalThis.fetch = originalFetch;
     }

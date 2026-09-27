@@ -3,7 +3,6 @@ import {
   Agent,
   tool,
   z,
-  BaseProvider,
   type ProviderGenerateResult,
   type ProviderRequestOptions,
   type ProviderContext,
