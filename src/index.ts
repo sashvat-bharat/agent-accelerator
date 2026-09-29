@@ -160,6 +160,23 @@ export { SSEParser } from "./streaming/sse-parser.ts";
 // Responses
 export { AgentResponse } from "./types/response.ts";
 
+// Session persistence & telemetry (conversation history + cost rollup)
+export {
+  SessionTelemetry,
+  loadSessionFile,
+  saveSessionFile,
+  buildSessionData,
+  serializeSession,
+  deserializeSession,
+  getSessionContextWindow,
+  computeSessionTurnCost,
+  formatSessionTokens,
+  formatSessionCost,
+  formatSessionBanner,
+  emptyTotals,
+} from "./session/store.ts";
+export type { PersistedAgentSession, SessionTotals, SessionAgentLike } from "./session/store.ts";
+
 // Utilities
 export { createSessionId } from "./utils/session.ts";
 export { getApiKey, getEnv } from "./utils/env.ts";

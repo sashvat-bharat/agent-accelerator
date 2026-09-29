@@ -12,6 +12,8 @@ import { runAgentLoop, streamAgentLoop } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
+import { buildSessionData, type PersistedAgentSession, type SessionTotals,} from "../session/store.ts";
+import { SessionTelemetry } from "../session/store.ts";
 
 /**
  * Resolves a per-run thinking override without mutating agent config.
@@ -305,6 +307,70 @@ export class Agent {
     this.context.thoughtSignatures = [];
     this.context.cachedContentId = (this.cacheConfig as any)?.cachedContentId;
     this.context.systemPrompt = this.getFullInstructions();
+  }
+
+  /**
+   * Exports this agent's conversation + config as a storable session snapshot.
+   * Pair with `importSession` / `loadSessionFile` / `saveSessionFile`.
+   *
+   * @example `saveSessionFile(".session.json", agent, telemetry)`
+   */
+  exportSession(telemetry?: SessionTelemetry | SessionTotals | null): PersistedAgentSession {
+    return buildSessionData(this as any, telemetry);
+  }
+
+  /**
+   * Restores conversation + config from `exportSession` / `loadSessionFile`.
+   * Restores messages, system prompt, cached content id, and (when present)
+   * session id, model, thinking level, instructions, cache, and worker model.
+   * No-ops on nullish input.
+   *
+   * @example `const saved = loadSessionFile(".session.json"); if (saved) agent.importSession(saved);`
+   */
+  importSession(data?: PersistedAgentSession | null): void {
+    if (!data) return;
+    if (data.sessionId) (this as any).sessionId = data.sessionId;
+    if (data.model) (this as any).modelStringOrSpec = data.model;
+    if (data.thinkingLevel) {
+      const lvl = String(data.thinkingLevel);
+      (this as any).thinkingConfig =
+        lvl === "none"
+          ? { enabled: false, level: "none", budgetTokens: 0 }
+          : lvl === "dynamic"
+            ? { enabled: true, level: "dynamic", budgetTokens: -1 }
+            : { enabled: true, level: lvl };
+    }
+    if (typeof data.instructions === "string") this.instructions = data.instructions;
+    if (data.cache) {
+      (this as any).cacheConfig = {
+        ...this.cacheConfig,
+        ...data.cache,
+        sessionId: data.sessionId ?? this.sessionId,
+      };
+    }
+    if (data.subagentModel) {
+      (this as any).subagentModel = data.subagentModel;
+      const dyn = (this as any).dynamicSubagents;
+      if (dyn) dyn.model = data.subagentModel;
+    }
+    try {
+      const g: any = globalThis as any;
+      this.context.messages = Array.isArray(data.messages)
+        ? (typeof g.structuredClone === "function"
+            ? g.structuredClone(data.messages)
+            : JSON.parse(JSON.stringify(data.messages)))
+        : [];
+    } catch {
+      this.context.messages = Array.isArray(data.messages) ? [...data.messages] : [];
+    }
+    this.context.thoughtSignatures = [];
+    if (data.systemPrompt) {
+      this.context.systemPrompt = data.systemPrompt;
+    } else {
+      this.context.systemPrompt = this.getFullInstructions();
+    }
+    this.context.cachedContentId =
+      data.cachedContentId ?? (this.cacheConfig as any)?.cachedContentId;
   }
 
   private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions): void {

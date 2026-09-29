@@ -146,6 +146,8 @@ await agent.run(prompt, opts?) // non-streaming, or streaming when opts.stream i
 agent.ask(prompt, optsOrBool?) // string deltas when streaming, otherwise same as run
 agent.stream(prompt, opts?) // AssistantMessageEventStream
 agent.reset() // clears messages + signatures, keeps config
+agent.exportSession(telemetry?) // storable snapshot for saveSessionFile
+agent.importSession(saved) // restores messages + config from loadSessionFile
 ```
 
 `prompt` accepts `string | ContentPart[]`.
@@ -1138,16 +1140,50 @@ so failures print one line and exit `1` — no stack dumps.
 The chat example persists conversations to:
 
 ```text
-.session.jsonl
+.session.json
 ```
 
-It resumes from that file on next launch.
-
-It also displays per-turn:
+It resumes from that file on next launch (legacy `.session.jsonl` files still load) and prints a resume banner:
 
 ```text
-input / output / cached / cost / context %
+↺ Previous session loaded • accel-1a2b… (.session.json) • 12 messages • google/gemini-3.5-flash-lite • total-CH82.4% • $0.013 total
 ```
+
+It also displays per-turn and session totals on one line:
+
+```text
+↑turn ↓turn CRturn turn-CH% | ↑total ↓total CRtotal total-CH% $total(+turn) ctx%/window
+```
+
+### Session persistence
+
+```ts
+import {
+  Agent,
+  loadSessionFile,
+  saveSessionFile,
+  SessionTelemetry,
+  formatSessionBanner,
+} from "agent-accelerator";
+
+const saved = loadSessionFile(".session.json");
+const telemetry = SessionTelemetry.fromSaved(saved);
+
+const agent = new Agent({
+  model: saved?.model ?? process.env.MODEL,
+  sessionId: saved?.sessionId,
+});
+
+if (saved) agent.importSession(saved);
+
+const res = await agent.run("Hello");
+telemetry.add(res.usage, agent.modelStringOrSpec as string);
+saveSessionFile(".session.json", agent, telemetry);
+```
+
+* `agent.exportSession(telemetry)` / `agent.importSession(saved)` round-trip messages, system prompt, model, thinking level, instructions, cache, and worker model without touching `AgentContext` internals.
+* `SessionTelemetry` accumulates `input / output / cacheRead / cacheWrite / reasoning / cost`, with clamped `turnHitRate()` / `totalHitRate()`, a dual `formatBar(res)`, and `formatSessionBanner(saved, telemetry, path)` for startup.
+* Files are pretty-printed JSON (2-space indent). Cost prefers provider-reported totals and falls back to catalog pricing.
 
 ---
 ## Scripts and Structure
@@ -1164,6 +1200,7 @@ bun run update-models # refresh model catalog cache (supports --force, --ttl=24h
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
+├── session/    # Session persistence + telemetry (snapshots, hit rates, .session.json store)
 ├── providers/  # native REST adapters (google/openai/openrouter/openai-compat) + registry + canonical contract
 ├── models/     # Dynamic catalog cache, parser, verified overrides
 ├── data/       # Dynamic model catalog cache (gitignored, excluded from bundle)
