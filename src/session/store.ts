@@ -14,12 +14,19 @@
  * telemetry.add(res.usage, agent.modelStringOrSpec as string);
  * saveSessionFile(".session.json", agent, telemetry);
  * ```
+ *
+ * For binary media (images, audio, video, files as bytes / data URLs /
+ * base64), prefer session folders — `saveSessionDir("sessions", agent,
+ * telemetry)` writes `sessions/<sessionId>/{session.json, media/*}` with
+ * parts rewritten to relative `media/…` paths, and
+ * `loadSessionDir(dir)` resolves them back.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Message } from "../types/message.ts";
+import type { Message, ContentPart } from "../types/message.ts";
 import type { TokenUsage, ThinkingLevel, CacheConfig } from "../types/core.ts";
 import type { AgentResponse } from "../types/response.ts";
+import { base64ToBytes } from "../utils/base64.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
 
 /** Cumulative per-session token + cost totals (JSON-safe). */
@@ -416,5 +423,253 @@ export function saveSessionFile(
     fs.writeFileSync(resolved, serializeSession(data) + "\n", "utf8");
   } catch {
     // persistence must never crash a chat turn
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session directories: sessions/<sessionId>/{session.json, media/*}
+// ---------------------------------------------------------------------------
+
+const MEDIA_PART_KEYS = ["image", "audio", "video", "file"] as const;
+
+function isHttpRef(value: string): boolean {
+  return value.startsWith("http://") || value.startsWith("https://");
+}
+
+function parseDataUrl(value: string): { mimeType: string; base64: string } | undefined {
+  const m = value.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/s);
+  if (m && m[2]) return { mimeType: m[1] || "application/octet-stream", base64: m[2] };
+  return undefined;
+}
+
+/** Same embedded-bytes heuristic as the media normalizer (paths fail it on their own). */
+function looksLikeEmbeddedBase64(value: string): boolean {
+  if (value.includes("\\") || value.length <= 100) return false;
+  if (value.length % 4 !== 0) return false;
+  return /^[A-Za-z0-9+/=\n\r]+$/.test(value.slice(0, 500));
+}
+
+function extForMedia(mimeType?: string, filename?: string): string {
+  const mime = (mimeType || "").toLowerCase().split(";")[0]!.trim();
+  const known: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/ogg": "ogg",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/quicktime": "mov",
+    "application/pdf": "pdf",
+    "text/csv": "csv",
+    "text/plain": "txt",
+  };
+  if (mime && known[mime]) return known[mime]!;
+  if (filename) {
+    const ext = filename.split("?")[0]!.split(".").pop()?.toLowerCase() ?? "";
+    if (/^[a-z0-9]{1,5}$/.test(ext)) return ext;
+  }
+  if (mime) {
+    const sub = mime.split("/").pop()?.toLowerCase() ?? "";
+    if (/^[a-z0-9]{1,5}$/.test(sub)) return sub;
+  }
+  return "bin";
+}
+
+function cloneMessages(messages: Message[]): Message[] {
+  try {
+    const g: any = globalThis as any;
+    if (typeof g.structuredClone === "function") return g.structuredClone(messages);
+  } catch {}
+  try {
+    return JSON.parse(JSON.stringify(messages));
+  } catch {
+    return [...messages];
+  }
+}
+
+/**
+ * Extracts embedded media bytes (binary, `data:` URLs, raw base64) into
+ * `<sessionDir>/media/` and rewrites those parts to relative `media/…`
+ * paths. Remote URLs and filesystem paths are left as references.
+ */
+export function extractMediaToDir(
+  messages: Message[],
+  sessionDir: string
+): { messages: Message[]; wrote: string[] } {
+  const cloned = cloneMessages(messages);
+  const mediaDir = path.join(sessionDir, "media");
+  try {
+    fs.rmSync(mediaDir, { recursive: true, force: true });
+  } catch {}
+  const wrote: string[] = [];
+  const counters: Record<string, number> = {};
+  let hasBinary = false;
+
+  for (const msg of cloned) {
+    if (!Array.isArray((msg as Message).content)) continue;
+    for (const part of (msg as Message).content as ContentPart[]) {
+      const p: any = part as any;
+      if (!p || typeof p.type !== "string") continue;
+      if (!(MEDIA_PART_KEYS as readonly string[]).includes(p.type)) continue;
+      const key = p.type as (typeof MEDIA_PART_KEYS)[number];
+      const raw = p[key] as unknown;
+      let bytes: Uint8Array | undefined;
+      let mimeType: string | undefined = typeof p.mimeType === "string" ? p.mimeType : undefined;
+      if (raw instanceof Uint8Array) bytes = raw;
+      else if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
+      else if (typeof raw === "string") {
+        if (isHttpRef(raw)) continue; // remote reference — provider fetches per turn
+        const dataUrl = raw.startsWith("data:") ? parseDataUrl(raw) : undefined;
+        if (dataUrl) {
+          bytes = base64ToBytes(dataUrl.base64);
+          mimeType = mimeType ?? dataUrl.mimeType;
+        } else if (looksLikeEmbeddedBase64(raw)) {
+          bytes = base64ToBytes(raw.replace(/\s/g, ""));
+        } else continue; // local path or short label — keep as reference
+      } else continue;
+
+      hasBinary = true;
+      const n = (counters[key] = (counters[key] ?? 0) + 1);
+      const ext = extForMedia(mimeType, typeof p.filename === "string" ? p.filename : undefined);
+      const file = `${key}-${String(n).padStart(3, "0")}.${ext}`;
+      try {
+        fs.mkdirSync(mediaDir, { recursive: true });
+        fs.writeFileSync(path.join(mediaDir, file), bytes);
+      } catch {
+        continue;
+      }
+      p[key] = `media/${file}`;
+      if (mimeType) p.mimeType = mimeType;
+      wrote.push(`media/${file}`);
+    }
+  }
+
+  // No embedded bytes: don't leave an empty media/ behind.
+  if (!hasBinary) {
+    try {
+      fs.rmSync(mediaDir, { recursive: true, force: true });
+    } catch {}
+  }
+  return { messages: cloned, wrote };
+}
+
+/**
+ * Resolves `media/…` relative refs to absolute paths anchored at the session
+ * folder, so a resumed session runs from any cwd. Absolute paths, URLs, and
+ * non-media strings pass through untouched.
+ */
+export function resolveMediaPaths(messages: Message[], sessionDir: string): Message[] {
+  const cloned = cloneMessages(messages);
+  for (const msg of cloned) {
+    if (!Array.isArray((msg as Message).content)) continue;
+    for (const part of (msg as Message).content as ContentPart[]) {
+      const p: any = part as any;
+      if (!p || typeof p.type !== "string") continue;
+      if (!(MEDIA_PART_KEYS as readonly string[]).includes(p.type)) continue;
+      const v = p[p.type] as unknown;
+      if (typeof v === "string" && (v === "media" || v.startsWith("media/"))) {
+        p[p.type] = path.join(sessionDir, v);
+      }
+    }
+  }
+  return cloned;
+}
+
+/** `<rootDir>/<sessionId>` — one folder per session. */
+export function sessionDirFor(rootDir: string, sessionId: string): string {
+  return path.join(path.resolve(rootDir), sessionId);
+}
+
+/**
+ * Saves `sessions/<sessionId>/session.json` (pretty, 2-space) plus
+ * `media/*` for embedded bytes. Returns the session folder. Re-saving the
+ * same session id rewrites the folder (no orphan accumulation).
+ */
+export function saveSessionDir(
+  rootDir: string,
+  agent: SessionAgentLike,
+  telemetry?: SessionTelemetry | SessionTotals | null
+): string {
+  const sessionDir = sessionDirFor(rootDir, agent.sessionId);
+  try {
+    fs.mkdirSync(sessionDir, { recursive: true });
+  } catch {}
+  const { messages } = extractMediaToDir(agent.context.messages, sessionDir);
+  const data = buildSessionData(
+    { ...agent, context: { ...agent.context, messages } },
+    telemetry
+  );
+  try {
+    fs.writeFileSync(path.join(sessionDir, "session.json"), serializeSession(data) + "\n", "utf8");
+  } catch {
+    // persistence must never crash a chat turn
+  }
+  return sessionDir;
+}
+
+/** A loaded session folder: snapshot (media paths resolved) + folder location. */
+export interface LoadedSessionDir {
+  session: PersistedAgentSession;
+  dir: string;
+}
+
+/**
+ * Loads a session folder (`<dir>/` or `<dir>/session.json`, plus legacy
+ * single files). Relative `media/…` refs resolve against the folder.
+ * Returns null when nothing loadable exists.
+ */
+export function loadSessionDir(sessionPath: string): LoadedSessionDir | null {
+  try {
+    const resolved = path.resolve(sessionPath);
+    let dir = resolved;
+    try {
+      const st = fs.statSync(resolved);
+      if (st.isFile()) {
+        const single = loadSessionFile(resolved);
+        if (!single) return null;
+        dir = path.dirname(resolved);
+        if (single.messages) {
+          single.messages = resolveMediaPaths(single.messages, dir);
+        }
+        return { session: single, dir };
+      }
+    } catch {
+      // path does not exist yet — fall through to session.json lookup
+    }
+    const file = path.join(dir, "session.json");
+    if (!fs.existsSync(file)) return null;
+    const data = deserializeSession(fs.readFileSync(file, "utf8"));
+    if (!data) return null;
+    data.messages = resolveMediaPaths(data.messages, dir);
+    return { session: data, dir };
+  } catch {
+    return null;
+  }
+}
+
+/** Most-recently-modified `sessions/<id>` folder, for resume-latest CLIs. */
+export function findLatestSessionDir(rootDir: string): string | null {
+  try {
+    const root = path.resolve(rootDir);
+    if (!fs.existsSync(root)) return null;
+    let best: { dir: string; mtime: number } | null = null;
+    for (const entry of fs.readdirSync(root)) {
+      const file = path.join(root, entry, "session.json");
+      try {
+        const st = fs.statSync(file);
+        if (!st.isFile()) continue;
+        if (!best || st.mtimeMs > best.mtime) best = { dir: path.join(root, entry), mtime: st.mtimeMs };
+      } catch {
+        continue;
+      }
+    }
+    return best?.dir ?? null;
+  } catch {
+    return null;
   }
 }

@@ -2,8 +2,9 @@
  * Agent Accelerator - Interactive Chat CLI
  *
  * Persistent multi-turn chat using SDK session helpers:
- * `loadSessionFile` / `saveSessionFile` / `SessionTelemetry` +
+ * `loadSessionDir` / `saveSessionDir` / `SessionTelemetry` +
  * `agent.importSession` / `agent.exportSession`.
+ * Sessions live in `sessions/<sessionId>/{session.json, media/*}`.
  *
  * Run: bun run examples/05-chat.ts
  */
@@ -19,6 +20,9 @@ import {
   validateModelThinking,
   loadSessionFile,
   saveSessionFile,
+  loadSessionDir,
+  saveSessionDir,
+  findLatestSessionDir,
   SessionTelemetry,
   getSessionContextWindow,
   formatSessionTokens,
@@ -27,12 +31,32 @@ import {
 } from "agent-accelerator";
 
 // ---------------------------------------------------------------------------
-// 1. Session file + prompt
+// 1. Session storage: sessions/<sessionId>/{session.json, media/*}
 // ---------------------------------------------------------------------------
-const SESSION_FILE =
+// Explicit single file still works: SESSION_FILE=... or --session-file=...
+// (legacy `.session.jsonl` included). Otherwise the CLI stores each session
+// in its own folder under SESSION_DIR and resumes the most recent one.
+const EXPLICIT_FILE =
   process.env.SESSION_FILE ??
-  process.argv.find((a) => a.startsWith("--session-file="))?.split("=")[1] ??
-  path.join(process.cwd(), ".session.json");
+  process.argv.find((a) => a.startsWith("--session-file="))?.split("=")[1];
+const SESSION_ROOT =
+  process.env.SESSION_DIR ??
+  process.argv.find((a) => a.startsWith("--session-dir="))?.split("=")[1] ??
+  path.join(process.cwd(), "sessions");
+const RESUMED_DIR = !EXPLICIT_FILE ? findLatestSessionDir(SESSION_ROOT) : null;
+const RESUMED = RESUMED_DIR ? loadSessionDir(RESUMED_DIR) : null;
+const saved = EXPLICIT_FILE ? loadSessionFile(EXPLICIT_FILE) : (RESUMED?.session ?? null);
+const telemetry = SessionTelemetry.fromSaved(saved);
+let sessionLocation = EXPLICIT_FILE ?? RESUMED_DIR ?? SESSION_ROOT;
+
+function persistSession() {
+  if (EXPLICIT_FILE) {
+    saveSessionFile(EXPLICIT_FILE, agent, telemetry);
+    sessionLocation = EXPLICIT_FILE;
+  } else {
+    sessionLocation = saveSessionDir(SESSION_ROOT, agent, telemetry);
+  }
+}
 
 function loadPrompt(): string {
   const candidates = [
@@ -48,8 +72,6 @@ function loadPrompt(): string {
 // ---------------------------------------------------------------------------
 // 2. Agent setup (restores history + totals in 3 calls)
 // ---------------------------------------------------------------------------
-const saved = loadSessionFile(SESSION_FILE);
-const telemetry = SessionTelemetry.fromSaved(saved);
 const initialModel = saved?.model ?? process.env.MODEL ?? "google/gemini-3.5-flash-lite";
 const initialThinking = (saved?.thinkingLevel as any) ?? (process.env.THINKING_LEVEL as any) ?? "medium";
 
@@ -77,9 +99,9 @@ if (saved) agent.importSession(saved);
 // ---------------------------------------------------------------------------
 const activeThinking = (agent as any).thinkingConfig?.level ?? initialThinking;
 console.log(`\n\x1b[1;36mAgent Accelerator — Interactive CLI\x1b[0m`);
-console.log(formatSessionBanner(saved, telemetry, SESSION_FILE));
+console.log(formatSessionBanner(saved, telemetry, sessionLocation));
 console.log(`Model: \x1b[32m"${agent.modelStringOrSpec}"\x1b[0m • Thinking: \x1b[33m${activeThinking}\x1b[0m • Context: \x1b[34m${formatSessionTokens(getSessionContextWindow(agent.modelStringOrSpec as string))}\x1b[0m`);
-console.log(`Session: \x1b[90m${agent.sessionId.slice(0, 16)}… (${SESSION_FILE})\x1b[0m`);
+console.log(`Session: \x1b[90m${agent.sessionId.slice(0, 16)}… (${sessionLocation})\x1b[0m`);
 console.log(`Commands: \x1b[90m/model "provider/model-id"  /level <lvl>  /help  /exit\x1b[0m\n`);
 
 const rl = readline.createInterface({ input: stdin, output: stdout });
@@ -128,7 +150,7 @@ while (true) {
     }
 
     (agent as any).modelStringOrSpec = nextModel;
-    saveSessionFile(SESSION_FILE, agent, telemetry);
+    persistSession();
     console.log(`\x1b[32m✔ Switched model to: "${nextModel}"\x1b[0m`);
     continue;
   }
@@ -144,7 +166,7 @@ while (true) {
           level: nextLevel,
           budgetTokens: nextLevel === "dynamic" ? -1 : nextLevel === "none" ? 0 : undefined,
         };
-        saveSessionFile(SESSION_FILE, agent, telemetry);
+        persistSession();
         console.log(`\x1b[32m✔ Switched thinking level to: ${nextLevel}\x1b[0m`);
       } catch (err: any) {
         console.log(`\x1b[31m✖ ${err.message}\x1b[0m`);
@@ -181,7 +203,7 @@ while (true) {
     });
 
     telemetry.add(res.usage, agent.modelStringOrSpec as string);
-    saveSessionFile(SESSION_FILE, agent, telemetry);
+    persistSession();
 
     const level = (agent as any).thinkingConfig?.level ?? "none";
     console.log(`\n${telemetry.formatBar(res, { model: agent.modelStringOrSpec as string, thinkingLevel: level })}`);
@@ -199,4 +221,4 @@ while (true) {
 }
 
 rl.close();
-saveSessionFile(SESSION_FILE, agent, telemetry);
+persistSession();

@@ -42,3 +42,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # models.dev database snapshot & cache (regenerate with bun run update-models)
 src/data/models.dev.json
 models.dev.json
+
+# chat session runtime artifacts (examples/05-chat.ts)
+.session.json
+sessions/

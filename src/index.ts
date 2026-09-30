@@ -165,6 +165,12 @@ export {
   SessionTelemetry,
   loadSessionFile,
   saveSessionFile,
+  loadSessionDir,
+  saveSessionDir,
+  findLatestSessionDir,
+  sessionDirFor,
+  extractMediaToDir,
+  resolveMediaPaths,
   buildSessionData,
   serializeSession,
   deserializeSession,
@@ -175,7 +181,7 @@ export {
   formatSessionBanner,
   emptyTotals,
 } from "./session/store.ts";
-export type { PersistedAgentSession, SessionTotals, SessionAgentLike } from "./session/store.ts";
+export type { PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir } from "./session/store.ts";
 
 // Utilities
 export { createSessionId } from "./utils/session.ts";

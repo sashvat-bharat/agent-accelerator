@@ -8,6 +8,9 @@ import {
   deserializeSession,
   loadSessionFile,
   saveSessionFile,
+  saveSessionDir,
+  loadSessionDir,
+  findLatestSessionDir,
   computeSessionTurnCost,
   getSessionContextWindow,
   formatSessionBanner,
@@ -150,5 +153,61 @@ describe("agent export/import + file round-trip", () => {
 
   it("loadSessionFile returns null when missing", () => {
     expect(loadSessionFile(path.join(process.cwd(), "src/data/.does-not-exist-12345.json"))).toBeNull();
+  });
+});
+
+describe("session directories with media/", () => {
+  it("extracts binary + data-URL media to files and reloads as paths", () => {
+    const root = fs.mkdtempSync(path.join(process.cwd(), "src/data/.sessdir-test-"));
+    try {
+      const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3]);
+      const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
+      a.context.messages = [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "look" },
+            { type: "image", image: pngBytes, mimeType: "image/png" },
+            { type: "image", image: "https://example.com/remote.png" },
+            { type: "file", file: "data:application/pdf;base64,AQID", mimeType: "application/pdf", filename: "doc.pdf" },
+          ],
+        } as any,
+      ];
+      const dir = saveSessionDir(root, a, new SessionTelemetry());
+      expect(fs.existsSync(path.join(dir, "session.json"))).toBe(true);
+      expect(fs.existsSync(path.join(dir, "media", "image-001.png"))).toBe(true);
+      expect(fs.existsSync(path.join(dir, "media", "file-001.pdf"))).toBe(true);
+
+      const stored = JSON.parse(fs.readFileSync(path.join(dir, "session.json"), "utf8"));
+      const mediaVals = stored.messages[0].content.filter((p: any) => p.type !== "text").map((p: any) => p.image ?? p.file);
+      expect(mediaVals[0]).toBe("media/image-001.png");
+      expect(mediaVals[1]).toBe("https://example.com/remote.png"); // remote refs untouched
+      expect(mediaVals[2]).toBe("media/file-001.pdf");
+
+      const loaded = loadSessionDir(dir);
+      expect(loaded?.session.messages).toHaveLength(1);
+      const reloaded = (loaded!.session.messages[0] as any).content[1];
+      expect(reloaded.image).toBe(path.join(dir, "media/image-001.png"));
+      expect(fs.existsSync(reloaded.image)).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("finds the latest session and loads legacy single files", () => {
+    const root = fs.mkdtempSync(path.join(process.cwd(), "src/data/.sessdir-latest-"));
+    try {
+      const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
+      const dir = saveSessionDir(root, a, null);
+      expect(findLatestSessionDir(root)).toBe(dir);
+      expect(findLatestSessionDir(path.join(root, "missing"))).toBeNull();
+      // legacy single-file path still loads through the dir loader
+      const file = path.join(root, "legacy.json");
+      saveSessionFile(file, a, null);
+      expect(loadSessionDir(file)?.session.sessionId).toBe(a.sessionId);
+      expect(loadSessionDir(path.join(root, "empty"))).toBeNull();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
