@@ -5,6 +5,9 @@ import type { ToolDefinition } from "../types/tool.ts";
 import type { SubAgentExecutionMetadata } from "../types/response.ts";
 import type { Agent } from "./agent.ts";
 import { resolveModel } from "../providers/registry.ts";
+import { hashSessionPart } from "../utils/session.ts";
+import { createTrackingId } from "../utils/session.ts";
+import type { SubAgentStep } from "../types/response.ts";
 
 /** Task descriptor accepted by the automatic `spawn_subagents` tool.
  *
@@ -26,14 +29,14 @@ export interface DynamicSubagentTask {
 }
 
 function sanitizeXmlTag(raw: string): string {
-  let s = raw.toUpperCase().replace(/[^A-Z0-9_.-]/g, "_");
-  if (!/^[A-Z_]/.test(s)) s = `AGENT_${s}`;
-  s = s.replace(/[.-]/g, "_");
+  let s = raw.toUpperCase().replace(/[^A-Z0-9.-]/g, "-");
+  if (!/^[A-Z]/.test(s)) s = `AGENT-${s}`;
+  s = s.replace(/[.]/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
   return s.slice(0, 64) || "SUBAGENT";
 }
 function sanitizeToolName(raw: string): string {
   const tag = sanitizeXmlTag(raw);
-  return tag.toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 64) || "sub_agent";
+  return tag.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-{2,}/g, "-").slice(0, 64) || "sub-agent";
 }
 
 function escapeXml(text: string): string {
@@ -45,7 +48,7 @@ function escapeXml(text: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function createChildSessionId(parentId: string, tag: string): string {
+export function createChildSessionId(parentId: string, tag: string): string {
   let rand: string;
   try {
     if (typeof globalThis !== "undefined" && (globalThis as any).crypto?.randomUUID) {
@@ -64,22 +67,126 @@ function createChildSessionId(parentId: string, tag: string): string {
   // `${parent}-sub-${tag}-${rand}` overflows (observed 65-72 chars → every
   // sub-agent 400s with 0 usage). Truncate the parent portion to fit, keeping
   // the tag + rand suffix intact for uniqueness/debuggability.
+  // Lineage binding: when truncation is needed, embed an 8-char hash of the
+  // full parent id so two distinct parents sharing a prefix still map to
+  // distinct child ids (previously they collided and shared provider routing).
   const cleanTag = tag.toLowerCase().slice(0, 16);
   const suffix = `-sub-${cleanTag}-${rand}`;
   const maxParent = Math.max(0, 64 - suffix.length);
-  const truncatedParent = parentId.slice(0, maxParent);
-  return `${truncatedParent}${suffix}`;
+  if (parentId.length <= maxParent) return `${parentId}${suffix}`;
+  const parentHash = hashSessionPart(parentId);
+  const baseLen = Math.max(0, maxParent - 9);
+  return `${parentId.slice(0, baseLen)}-${parentHash}${suffix}`;
 }
 
 /** Builds a deterministic fixed-subagent session id that fits 64 chars. */
-function createFixedChildSessionId(parentId: string, name: string): string {
+export function createFixedChildSessionId(parentId: string, name: string): string {
   const suffix = `-sub-${name}`;
   if ((parentId + suffix).length <= 64) return parentId + suffix;
-  // Truncate parent first (preserves full tool name for debugging); if still
-  // over (very long tool name), truncate the name tail as last resort.
+  // Truncate parent first (preserves full tool name for debugging), but embed
+  // the parent hash so distinct parents sharing a prefix stay distinct.
+  // If still over (very long tool name), truncate the name tail as last resort.
   const maxParent = Math.max(0, 64 - suffix.length);
+  if (maxParent > 9) {
+    const parentHash = hashSessionPart(parentId);
+    return `${parentId.slice(0, maxParent - 9)}-${parentHash}${suffix}`;
+  }
   if (maxParent > 0) return parentId.slice(0, maxParent) + suffix;
   return (`${parentId}-sub-${name}`).slice(0, 64);
+}
+
+/**
+ * True when `child` was derived from `parent` via the child-session helpers:
+ * either an untruncated `parent + suffix` prefix, or the embedded parent hash
+ * used when truncation was required. Used to validate lineage before pairing
+ * provider state across concurrent agents.
+ */
+export function isSessionDescendant(child: string, parent: string): boolean {
+  if (!child || !parent) return false;
+  if (child.startsWith(parent)) return true;
+  return child.includes(hashSessionPart(parent));
+}
+
+/** Live trace for one spawned worker, keyed by its TrackingID. */
+export interface SubAgentTrace {
+  /** Sub-agent TrackingID: system-generated 32-char hex. Displayed as `NAME-{TrackingID}`. */
+  trackingId: string;
+  name: string;
+  sessionId: string;
+  parentSessionId: string;
+  status: "running" | "done" | "error";
+  task: string;
+  role?: string;
+  model?: string;
+  provider?: string;
+  turns: number;
+  usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  steps: SubAgentStep[];
+  text?: string;
+  error?: string;
+}
+
+const subagentTraces = new Map<string, SubAgentTrace>();
+const subagentListeners = new Map<string, Set<(trace: SubAgentTrace) => void>>();
+
+function snapshotTrace(t: SubAgentTrace): SubAgentTrace {
+  return { ...t, steps: t.steps.map((s) => ({ ...s })), usage: t.usage ? { ...t.usage } : undefined };
+}
+
+function notifyTrace(trackingId: string): void {
+  const t = subagentTraces.get(trackingId);
+  if (!t) return;
+  const listeners = subagentListeners.get(trackingId);
+  if (!listeners || listeners.size === 0) return;
+  const snap = snapshotTrace(t);
+  for (const fn of [...listeners]) {
+    try { fn(snap); } catch {}
+  }
+}
+
+/**
+ * Returns a snapshot of one worker's trace by tracking id
+ * (`SUBAGENT-NAME-{32hex}` or the raw 32-hex suffix). Used by
+ * `agent.track(id)` for realtime inspection.
+ */
+export function getSubAgentTrace(id: string): SubAgentTrace | undefined {
+  if (!id) return undefined;
+  const direct = subagentTraces.get(id);
+  if (direct) return snapshotTrace(direct);
+  const lower = id.toLowerCase();
+  for (const t of subagentTraces.values()) {
+    if (t.trackingId.toLowerCase() === lower) return snapshotTrace(t);
+  }
+  return undefined;
+}
+
+/** Lists tracking ids of known worker traces (mainly for `track` misses). */
+export function listSubAgentTraceIds(): string[] {
+  return [...subagentTraces.keys()];
+}
+
+/**
+ * Subscribes to live updates of one worker trace. Returns an unsubscribe fn.
+ */
+export function subscribeToSubAgent(id: string, fn: (trace: SubAgentTrace) => void): () => void {
+  const t = subagentTraces.get(id) ?? [...subagentTraces.values()].find((x) => x.trackingId.toLowerCase() === id.toLowerCase());
+  const key = t ? t.trackingId : id;
+  let set = subagentListeners.get(key);
+  if (!set) {
+    set = new Set();
+    subagentListeners.set(key, set);
+  }
+  set.add(fn);
+  return () => { subagentListeners.get(key)?.delete(fn); };
+}
+
+/** Appends a step to a worker trace and notifies live subscribers. */
+export function appendSubAgentStep(trackingId: string, step: SubAgentStep): void {
+  const t = subagentTraces.get(trackingId);
+  if (!t) return;
+  t.steps.push(step);
+  t.turns = Math.max(t.turns, step.turn);
+  notifyTrace(trackingId);
 }
 
 function providerOf(modelStr: string | any | undefined): string | undefined {
@@ -127,8 +234,8 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
         ? `Worker-available tools: ${poolNames.join(", ")}. Grant each worker ONLY the tools its task needs via the per-task tools list; omit it for no tools. `
         : "No worker tools are available; omit the per-task tools list. ") +
       timeoutNote + " " +
-      "Every entry in tasks MUST include all of: name (UPPER_SNAKE tag), instructions (system prompt for the worker), task (concrete assignment for the worker). " +
-      "Example: {\"tasks\": [{\"name\": \"HBM_PRICING_ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst. Return sourced findings only.\", \"task\": \"Research HBM3E pricing, LTA structures, and supply constraints.\", \"tools\": [\"recent_news\"]}]}",
+      "Every entry in tasks MUST include all of: name (UPPER-KEBAB tag), instructions (system prompt for the worker), task (concrete assignment for the worker). " +
+      "Example: {\"tasks\": [{\"name\": \"HBM-PRICING-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst. Return sourced findings only.\", \"task\": \"Research HBM3E pricing, LTA structures, and supply constraints.\", \"tools\": [\"recent_news\"]}]}",
     input: z.object({
       tasks: z
         .array(
@@ -136,7 +243,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             name: z
               .string()
               .optional()
-              .describe("Unique UPPER_SNAKE role tag dynamically derived from task (e.g. RESEARCH_ANALYST, MARKET_ANALYST, CODE_REVIEWER). Auto-generated when omitted."),
+              .describe("Unique UPPER-KEBAB role tag dynamically derived from task (e.g. RESEARCH-ANALYST, MARKET-ANALYST, CODE-REVIEWER). Auto-generated when omitted."),
             role: z
               .string()
               .optional()
@@ -173,7 +280,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
     }),
     execute: async ({ tasks }, context) => {
       if (!tasks || tasks.length === 0) {
-        return "Error: tasks array is empty. Provide at least one entry shaped like {\"name\": \"HBM_PRICING_ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"<system prompt>\", \"task\": \"<concrete assignment>\"}. Fix the arguments and call spawn_subagents again.";
+        return "Error: tasks array is empty. Provide at least one entry shaped like {\"name\": \"HBM-PRICING-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"<system prompt>\", \"task\": \"<concrete assignment>\"}. Fix the arguments and call spawn_subagents again.";
       }
       const repaired = tasks.map((entry: Record<string, unknown>, index: number) => {
         const rec = (entry ?? {}) as Record<string, unknown>;
@@ -188,7 +295,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           "";
         const nameText =
           (typeof rec["name"] === "string" && (rec["name"] as string).trim()) ||
-          `SUBAGENT_${index + 1}`;
+          `SUBAGENT-${index + 1}`;
         const roleText =
           typeof rec["role"] === "string" ? ((rec["role"] as string).trim() || undefined) : undefined;
         const toolsList = Array.isArray(rec["tools"])
@@ -204,8 +311,8 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
         return (
           `Error: tasks[${invalid}].task is missing and could not be inferred. ` +
           `Received keys: [${keys}]. ` +
-          `Each tasks[] entry MUST include task (concrete assignment) plus instructions (system prompt) and name (UPPER_SNAKE tag). ` +
-          `Example: {\"name\": \"HBM_PRICING_ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst.\", \"task\": \"Research HBM3E pricing.\"}. ` +
+          `Each tasks[] entry MUST include task (concrete assignment) plus instructions (system prompt) and name (UPPER-KEBAB tag). ` +
+          `Example: {\"name\": \"HBM-PRICING-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst.\", \"task\": \"Research HBM3E pricing.\"}. ` +
           `Fix the entry and call spawn_subagents again.`
         );
       }
@@ -241,10 +348,15 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           let deduped = sanitized;
           let suffix = 1;
           while (seenNames.has(deduped)) {
-            deduped = `${sanitized}_${suffix++}`;
+            deduped = `${sanitized}-${suffix++}`;
           }
           seenNames.add(deduped);
           const subagentName = deduped;
+          // Stable tracking id: `SUBAGENT-NAME-{32hex}` addresses one worker
+          // among many concurrent ones for `agent.track(id)` + session logs.
+          const trackingId = createTrackingId();
+          const displayId = `${subagentName}-${trackingId}`;
+          let workerSessionId: string | undefined;
 
           // Fixed developer-configured worker model — never LLM-choosable.
           const chosenModel: any = parentAgent.subagentModel;
@@ -267,6 +379,106 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           const runWithModel = async (modelToUse: any, apiKey: string | undefined, baseUrl: string | undefined) => {
             if (context?.signal?.aborted) throw new Error("Aborted before spawn");
             const childSessionId = createChildSessionId(parentAgent.sessionId, subagentName);
+            workerSessionId = childSessionId;
+            // Register the live trace BEFORE the run so `agent.track(id)`
+            // sees every step in realtime, even while the worker runs.
+            const trace: SubAgentTrace = {
+              trackingId,
+              name: subagentName,
+              sessionId: childSessionId,
+              parentSessionId: parentAgent.sessionId,
+              status: "running",
+              task: t.task,
+              role: t.role,
+              turns: 0,
+              steps: [],
+            };
+            subagentTraces.set(trackingId, trace);
+            subagentTraces.set(displayId, trace);
+            try {
+              const parentTraces = ((parentAgent as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
+              parentTraces[trackingId] = trace;
+            } catch {}
+            const persistParent = () => {
+              try { (parentAgent as any).persistNow?.(); } catch {}
+            };
+            const onWorkerTurn = (turn: { turns: number; text?: string; thinking?: string; toolCalls?: Array<{ name: string }>; toolResults?: Array<{ name: string; isError?: boolean }> }) => {
+              try {
+                liveTurn = turn.turns;
+                // Finalize any partial streaming entry for this turn, then
+                // log structural steps (tool calls/results) as before.
+                const timestamp = Date.now();
+                const partialEntry = findPartial(liveTurn);
+                if (partialEntry) {
+                  if (turn.text) partialEntry.text = turn.text;
+                  if (turn.thinking) partialEntry.thinking = turn.thinking;
+                  delete (partialEntry as any).partial;
+                } else if (turn.text) {
+                  trace.steps.push({ turn: turn.turns, type: "assistant", text: turn.text.slice(0, 2000), timestamp });
+                }
+                for (const tc of turn.toolCalls ?? []) {
+                  trace.steps.push({ turn: turn.turns, type: "tool_call", name: tc.name, timestamp });
+                }
+                for (const tr of turn.toolResults ?? []) {
+                  trace.steps.push({ turn: turn.turns, type: "tool_result", name: tr.name, isError: tr.isError, timestamp });
+                }
+                trace.turns = Math.max(trace.turns, turn.turns);
+                notifyTrace(trackingId);
+                persistParent();
+              } catch {}
+            };
+            // Realtime thinking/text: the worker is streamed internally and
+            // every delta lands in the trace (partial entry, updated in
+            // place) so `agent.track(id)` shows generation as it happens —
+            // not just at turn end. Deltas also ride to the parent stream via
+            // `context.onSubagentEvent` (streaming parent runs only).
+            let liveTurn = 1;
+            let partialText = "";
+            let partialThinking = "";
+            const findPartial = (turn: number): SubAgentStep | undefined => {
+              for (let i = trace.steps.length - 1; i >= 0; i--) {
+                const s = trace.steps[i]!;
+                if (s.turn === turn && s.partial) return s;
+              }
+              return undefined;
+            };
+            const forwardDelta = (delta?: string, thinkingDelta?: string) => {
+              try {
+                context?.onSubagentEvent?.({
+                  trackingId: displayId,
+                  delta,
+                  thinkingDelta,
+                  partialText: partialText || undefined,
+                  partialThinking: partialThinking || undefined,
+                });
+              } catch {}
+            };
+            const onWorkerDelta = (delta?: string, thinkingDelta?: string) => {
+              try {
+                if (delta) {
+                  partialText = (partialText + delta).slice(-10000);
+                  let entry = findPartial(liveTurn);
+                  if (!entry) {
+                    entry = { turn: liveTurn, type: "assistant", text: "", partial: true, timestamp: Date.now() };
+                    trace.steps.push(entry);
+                  }
+                  entry.text = partialText;
+                  entry.timestamp = Date.now();
+                }
+                if (thinkingDelta) {
+                  partialThinking = (partialThinking + thinkingDelta).slice(-10000);
+                  let entry = findPartial(liveTurn);
+                  if (!entry) {
+                    entry = { turn: liveTurn, type: "assistant", text: "", partial: true, timestamp: Date.now() };
+                    trace.steps.push(entry);
+                  }
+                  entry.thinking = partialThinking;
+                  entry.timestamp = Date.now();
+                }
+                notifyTrace(trackingId);
+                forwardDelta(delta, thinkingDelta);
+              } catch {}
+            };
             // Grant ONLY the Main Agent-selected subset from the developer pool. Unknown names are dropped.
             // Matching is case/format-insensitive (same rules as tool execution): the model may emit
             // "RECENT_NEWS" or "recent news" for a registered "recent_news" tool.
@@ -299,6 +511,12 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               headers: parentAgent.customHeaders,
               maxTurns: parentAgent.maxTurns,
             });
+            // Lineage binding: child records its parent session so persisted
+            // snapshots and routing can tell siblings apart even when ids
+            // are truncated to 64 chars.
+            try {
+              (subAgent as any).parentSessionId = parentAgent.sessionId;
+            } catch {}
             let abortListener: (() => void) | null = null;
             // Per-worker controller: the parent signal alone cannot stop a
             // worker that hits its own timeout, so the timeout path aborts
@@ -333,7 +551,14 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
                   }, workerTimeout);
                 })
               : null;
-            const taskPromise = subAgent.run(t.task, { signal: workerController.signal } as any);
+            // Streamed internally (consumed to completion): same final result
+            // as run(), but text/thinking deltas flow into the trace live.
+            const workerStream = subAgent.stream(t.task, { signal: workerController.signal, onTurn: onWorkerTurn } as any);
+            const textListener = (e: any) => onWorkerDelta(e.delta, undefined);
+            const thinkingListener = (e: any) => onWorkerDelta(undefined, e.thinkingDelta);
+            workerStream.on("text_delta", textListener);
+            workerStream.on("thinking_delta", thinkingListener);
+            const taskPromise = workerStream.result();
             try {
               const racers: Promise<unknown>[] = [taskPromise as unknown as Promise<unknown>];
               if (abortPromise) racers.push(abortPromise);
@@ -342,6 +567,9 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               return res;
             } finally {
               if (timeoutId) clearTimeout(timeoutId);
+              try { workerStream.cancel(); } catch {}
+              try { workerStream.off("text_delta", textListener); } catch {}
+              try { workerStream.off("thinking_delta", thinkingListener); } catch {}
               if (abortListener && parentSignal) {
                 try { parentSignal.removeEventListener("abort", abortListener as any); } catch {}
               }
@@ -358,8 +586,24 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               ? rawText
               : `[Sub-agent ${subagentName} produced no output (empty response).]`;
 
+            const live = subagentTraces.get(trackingId);
+            if (live) {
+              live.status = "done";
+              live.model = (res as any).model;
+              live.provider = (res as any).provider;
+              live.turns = (res as any).turns ?? live.turns;
+              live.usage = (res as any).usage
+                ? { inputTokens: (res as any).usage.inputTokens ?? 0, outputTokens: (res as any).usage.outputTokens ?? 0, totalTokens: (res as any).usage.totalTokens ?? 0 }
+                : live.usage;
+              live.text = subagentText;
+              notifyTrace(trackingId);
+            }
+            try { (parentAgent as any).persistNow?.(); } catch {}
             const metadata: SubAgentExecutionMetadata = {
               name: subagentName,
+              trackingId: displayId,
+              sessionId: workerSessionId,
+              parentSessionId: parentAgent.sessionId,
               role: t.role,
               task: t.task,
               model: (res as any).model,
@@ -373,15 +617,26 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               thinking: (res as any).thinking,
               toolCalls: (res as any).toolCalls,
               raw: (res as any).raw,
+              steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
               isError: false,
             };
-            return { name: subagentName, text: subagentText, metadata };
+            return { name: subagentName, trackingId: displayId, text: subagentText, metadata };
           } catch (err: any) {
             const durationMs = Date.now() - startTime;
             const errorMessage = err?.message || String(err);
             const prov = attemptedProvider || providerOf(chosenModelStrForProvider) || providerOf(chosenModel as any) || "unknown";
+            const live = subagentTraces.get(trackingId);
+            if (live) {
+              live.status = "error";
+              live.error = errorMessage;
+              notifyTrace(trackingId);
+            }
+            try { (parentAgent as any).persistNow?.(); } catch {}
             const metadata: SubAgentExecutionMetadata = {
               name: subagentName,
+              trackingId: displayId,
+              sessionId: workerSessionId,
+              parentSessionId: parentAgent.sessionId,
               role: t.role,
               task: t.task,
               model: typeof chosenModel === "string" ? chosenModel : ((chosenModel as any)?.model ?? (chosenModel as any)?.id ?? "unknown"),
@@ -390,10 +645,11 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
               turns: 0,
               text: `Error executing sub-agent ${t.name}: ${errorMessage}`,
+              steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
               isError: true,
               error: errorMessage,
             };
-            return { name: subagentName, text: `Error executing sub-agent ${t.name}: ${errorMessage}`, metadata };
+            return { name: subagentName, trackingId: displayId, text: `Error executing sub-agent ${t.name}: ${errorMessage}`, metadata };
           }
         })
       );
@@ -436,7 +692,7 @@ export function agentToTool(
   const rawName =
     ("name" in input && (input as any).name) ||
     agentInstance.name ||
-    `sub_agent_${Math.random().toString(36).slice(2, 7)}`;
+    `sub-agent-${Math.random().toString(36).slice(2, 7)}`;
   const name = sanitizeToolName(rawName);
   const description =
     ("description" in input && (input as any).description) ||
@@ -451,13 +707,112 @@ export function agentToTool(
     }),
     execute: async ({ task }, ctx) => {
       const startTime = Date.now();
+      const trackingId = createTrackingId();
+      const displayId = `${name}-${trackingId}`;
       try {
         const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
         const subSessionId = createFixedChildSessionId(parentSessionId, sanitizeToolName(name));
-        const response: any = await agentInstance.run(task, { signal: ctx?.signal, sessionId: subSessionId } as any);
+        const trace: SubAgentTrace = {
+          trackingId,
+          name,
+          sessionId: subSessionId,
+          parentSessionId,
+          status: "running",
+          task,
+          turns: 0,
+          steps: [],
+        };
+        subagentTraces.set(trackingId, trace);
+        subagentTraces.set(displayId, trace);
+        const onWorkerTurn = (turn: { turns: number; text?: string; thinking?: string; toolCalls?: Array<{ name: string }>; toolResults?: Array<{ name: string; isError?: boolean }> }) => {
+          try {
+            liveTurn = turn.turns;
+            const timestamp = Date.now();
+            const partialEntry = findPartial(liveTurn);
+            if (partialEntry) {
+              if (turn.text) partialEntry.text = turn.text;
+              if (turn.thinking) partialEntry.thinking = turn.thinking;
+              delete (partialEntry as any).partial;
+            } else if (turn.text) {
+              trace.steps.push({ turn: turn.turns, type: "assistant", text: turn.text.slice(0, 2000), timestamp });
+            }
+            for (const tc of turn.toolCalls ?? []) trace.steps.push({ turn: turn.turns, type: "tool_call", name: tc.name, timestamp });
+            for (const tr of turn.toolResults ?? []) trace.steps.push({ turn: turn.turns, type: "tool_result", name: tr.name, isError: tr.isError, timestamp });
+            trace.turns = Math.max(trace.turns, turn.turns);
+            notifyTrace(trackingId);
+          } catch {}
+        };
+        let liveTurn = 1;
+        let partialText = "";
+        let partialThinking = "";
+        const findPartial = (turn: number): SubAgentStep | undefined => {
+          for (let i = trace.steps.length - 1; i >= 0; i--) {
+            const s = trace.steps[i]!;
+            if (s.turn === turn && s.partial) return s;
+          }
+          return undefined;
+        };
+        const onWorkerDelta = (delta?: string, thinkingDelta?: string) => {
+          try {
+            if (delta) {
+              partialText = (partialText + delta).slice(-10000);
+              let entry = findPartial(liveTurn);
+              if (!entry) {
+                entry = { turn: liveTurn, type: "assistant", text: "", partial: true, timestamp: Date.now() };
+                trace.steps.push(entry);
+              }
+              entry.text = partialText;
+              entry.timestamp = Date.now();
+            }
+            if (thinkingDelta) {
+              partialThinking = (partialThinking + thinkingDelta).slice(-10000);
+              let entry = findPartial(liveTurn);
+              if (!entry) {
+                entry = { turn: liveTurn, type: "assistant", text: "", partial: true, timestamp: Date.now() };
+                trace.steps.push(entry);
+              }
+              entry.thinking = partialThinking;
+              entry.timestamp = Date.now();
+            }
+            notifyTrace(trackingId);
+            try {
+              ctx?.onSubagentEvent?.({
+                trackingId: displayId,
+                delta,
+                thinkingDelta,
+                partialText: partialText || undefined,
+                partialThinking: partialThinking || undefined,
+              });
+            } catch {}
+          } catch {}
+        };
+        const workerStream = agentInstance.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: onWorkerTurn } as any);
+        const textListener = (e: any) => onWorkerDelta(e.delta, undefined);
+        const thinkingListener = (e: any) => onWorkerDelta(undefined, e.thinkingDelta);
+        workerStream.on("text_delta", textListener);
+        workerStream.on("thinking_delta", thinkingListener);
+        let response: any;
+        try {
+          response = await workerStream.result();
+        } finally {
+          try { workerStream.off("text_delta", textListener); } catch {}
+          try { workerStream.off("thinking_delta", thinkingListener); } catch {}
+        }
         const durationMs = Date.now() - startTime;
+        const live = subagentTraces.get(trackingId);
+        if (live) {
+          live.status = "done";
+          live.model = response.model;
+          live.provider = response.provider;
+          live.turns = response.turns ?? live.turns;
+          live.text = response.text;
+          notifyTrace(trackingId);
+        }
         const metadata: SubAgentExecutionMetadata = {
           name,
+          trackingId: displayId,
+          sessionId: subSessionId,
+          parentSessionId,
           task,
           model: response.model,
           provider: response.provider,
@@ -470,6 +825,7 @@ export function agentToTool(
           thinking: response.thinking,
           toolCalls: response.toolCalls,
           raw: response.raw,
+          steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
           isError: false,
         };
         const wrapper: any = {
@@ -481,8 +837,15 @@ export function agentToTool(
       } catch (err: any) {
         const durationMs = Date.now() - startTime;
         const msg = err?.message || String(err);
+        const live = subagentTraces.get(trackingId);
+        if (live) {
+          live.status = "error";
+          live.error = msg;
+          notifyTrace(trackingId);
+        }
         const metadata: SubAgentExecutionMetadata = {
           name,
+          trackingId: displayId,
           task,
           model: "unknown",
           provider: "unknown",
@@ -490,6 +853,7 @@ export function agentToTool(
           usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
           turns: 0,
           text: `Error in ${name}: ${msg}`,
+          steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
           isError: true,
           error: msg,
         };
@@ -521,7 +885,7 @@ export function buildAgentTools(
       let finalName = t.name;
       let n = 1;
       while (tools[finalName]) {
-        finalName = `${t.name}_${n++}`;
+        finalName = `${t.name}-${n++}`;
       }
       tools[finalName] = { ...t, name: finalName };
     }

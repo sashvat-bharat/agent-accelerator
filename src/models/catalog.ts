@@ -244,7 +244,7 @@ export function getModelThinkingInfo(provider: string, modelId: string): ModelTh
   if (!spec) {
     return {
       supportsThinking: true,
-      allowedLevels: ["none", "minimal", "low", "medium", "high", "xhigh", "dynamic"],
+      allowedLevels: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "dynamic"],
       supportsDisable: true,
       description: "Model not found in catalog; generic thinking levels allowed.",
     };
@@ -295,6 +295,7 @@ export function getModelThinkingInfo(provider: string, modelId: string): ModelTh
     allowed.add("medium");
     allowed.add("high");
     allowed.add("xhigh");
+    allowed.add("max");
   }
 
   // Fixed reasoning model (no reasoning_options) e.g. DeepSeek-R1, QwQ-32B
@@ -510,7 +511,7 @@ export {
 
 /**
  * Permissive placeholder so custom endpoints never fail preflight:
- * allows every ThinkingLevel (none -> xhigh + dynamic).
+ * allows every ThinkingLevel (none -> max + dynamic).
  * @example `const spec = createGenericModelSpec("groq", "llama-3.3-70b-versatile");`
  */
 export function createGenericModelSpec(provider: string, modelId: string): ModelSpec {
@@ -527,7 +528,7 @@ export function createGenericModelSpec(provider: string, modelId: string): Model
     reasoning: true,
     reasoning_options: [
       { type: "toggle" },
-      { type: "effort", values: ["minimal", "low", "medium", "high", "xhigh"] },
+      { type: "effort", values: ["minimal", "low", "medium", "high", "xhigh", "max"] },
       { type: "budget_tokens", min: 0, max: 128000 },
     ],
     tool_call: true,

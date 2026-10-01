@@ -9,7 +9,8 @@ export type ThinkingLevel =
   | "low"
   | "medium"
   | "high"
-  | "xhigh";
+  | "xhigh"
+  | "max";
 
 // Internal normalized config (SDK-internal, not exposed as Agent flag)
 /** Internal normalized reasoning configuration passed to providers. */

@@ -182,7 +182,7 @@ while (true) {
   if (q === "/help") {
     console.log(`\x1b[33mAvailable Commands:\x1b[0m`);
     console.log(`  /model "provider/model-id"  Switch active model in quotes (e.g. /model "google/gemini-3.5-flash-lite")`);
-    console.log(`  /level <lvl>               Set thinking level (none, minimal, low, medium, high, xhigh, dynamic)`);
+    console.log(`  /level <lvl>               Set thinking level (none, minimal, low, medium, high, xhigh, max, dynamic)`);
     console.log(`  /exit, /quit               Exit chat session\n`);
     continue;
   }

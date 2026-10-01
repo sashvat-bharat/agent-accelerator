@@ -28,6 +28,7 @@ import type { TokenUsage, ThinkingLevel, CacheConfig } from "../types/core.ts";
 import type { AgentResponse } from "../types/response.ts";
 import { base64ToBytes } from "../utils/base64.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
+import type { SubAgentStep } from "../types/response.ts";
 
 /** Cumulative per-session token + cost totals (JSON-safe). */
 export interface SessionTotals {
@@ -37,6 +38,24 @@ export interface SessionTotals {
   cacheWrite: number;
   reasoning: number;
   cost: number;
+}
+
+/** Persisted per-worker trace inside the same session file (dedicated section). */
+export interface PersistedSubAgentTrace {
+  trackingId: string;
+  name: string;
+  sessionId?: string;
+  parentSessionId?: string;
+  status: "running" | "done" | "error";
+  task: string;
+  role?: string;
+  model?: string;
+  provider?: string;
+  turns: number;
+  usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  steps: SubAgentStep[];
+  text?: string;
+  error?: string;
 }
 
 /** Single-file session snapshot (v1). Written as one JSON object. */
@@ -52,6 +71,10 @@ export interface PersistedAgentSession {
   cachedContentId?: string;
   messages: Message[];
   totals?: SessionTotals;
+  /** Parent session this snapshot was spawned from, when applicable. */
+  parentSessionId?: string;
+  /** Dedicated sub-agent traces, keyed by worker TrackingID (32-char hex). */
+  subagents?: Record<string, PersistedSubAgentTrace>;
 }
 
 export function emptyTotals(): SessionTotals {
@@ -261,7 +284,84 @@ export interface SessionAgentLike {
   thinkingConfig?: { level?: string };
   cacheConfig?: CacheConfig;
   instructions?: string;
+  parentSessionId?: unknown;
+  subagentTraces?: Record<string, PersistedSubAgentTrace>;
   context: { systemPrompt?: string; messages: Message[]; cachedContentId?: string };
+}
+
+function snapshotSubagents(traces: Record<string, PersistedSubAgentTrace> | undefined): Record<string, PersistedSubAgentTrace> | undefined {
+  if (!traces) return undefined;
+  const keys = Object.keys(traces);
+  if (keys.length === 0) return undefined;
+  // Key by raw TrackingID (32-hex): the live registry also holds display keys
+  // (`NAME-{id}`), but the file keeps one lean key per worker.
+  const byId = new Map<string, PersistedSubAgentTrace>();
+  for (const k of keys) {
+    const t = traces[k]!;
+    if (!t || typeof t !== "object") continue;
+    let id = (typeof t.trackingId === "string" && t.trackingId) || k;
+    // Normalize display ids (`NAME-{32hex}`) to the raw TrackingID so the
+    // live trace and its merged copy collapse to one entry.
+    const tail = id.split("-").pop() ?? "";
+    if (/^[0-9a-f]{32}$/.test(tail)) id = tail;
+    else if (/^[0-9a-f]{32}$/.test(k)) id = k;
+    if (!byId.has(id)) byId.set(id, t);
+  }
+  if (byId.size === 0) return undefined;
+  const lean: Record<string, PersistedSubAgentTrace> = {};
+  for (const [id, t] of byId) {
+    // Drop assistant step text that merely repeats the final answer: the
+    // step marker (turn/type/timestamp) stays, the full text lives on trace.text.
+    const steps = (t.steps ?? []).map((s) =>
+      s.type === "assistant" && typeof s.text === "string" && typeof t.text === "string" && s.text === t.text
+        ? { turn: s.turn, type: s.type, timestamp: s.timestamp }
+        : { ...s }
+    );
+    lean[id] = { ...t, steps };
+  }
+  try {
+    return JSON.parse(JSON.stringify(lean)) as Record<string, PersistedSubAgentTrace>;
+  } catch {
+    return lean;
+  }
+}
+
+/** Canonical JSON for deep comparison (sorted keys; safe values only). */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const entries = Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`);
+  return `{${entries.join(",")}}`;
+}
+
+/**
+ * Drops `rawArguments` from `tool_call` parts when it re-parses to the
+ * stored `arguments` (pure duplicate, the common case). Divergent or
+ * unparseable wire strings are kept — they carry info parsing lost.
+ */
+function stripRedundantRawArguments(messages: Message[]): Message[] {
+  return messages.map((m) => {
+    if (!Array.isArray((m as Message).content)) return m;
+    let changed = false;
+    const content = (m as Message).content as ContentPart[];
+    const next = content.map((p: any) => {
+      if (!p || p.type !== "tool_call" || typeof p.rawArguments !== "string") return p;
+      try {
+        const parsed: unknown = JSON.parse(p.rawArguments);
+        if (stableStringify(parsed) === stableStringify(p.arguments ?? {})) {
+          changed = true;
+          const { rawArguments: _dropped, ...rest } = p;
+          return rest;
+        }
+      } catch {
+        // unparseable wire — keep it
+      }
+      return p;
+    });
+    return changed ? { ...m, content: next } : m;
+  });
 }
 
 /** Builds a storable snapshot from a live agent + optional telemetry. */
@@ -274,6 +374,10 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
   const totals = telemetry instanceof SessionTelemetry
     ? telemetry.toJSON()
     : telemetry ?? undefined;
+  const parentSessionId =
+    typeof (agent as any)?.parentSessionId === "string" ? (agent as any).parentSessionId as string : undefined;
+  const subagents = snapshotSubagents((agent as any)?.subagentTraces as Record<string, PersistedSubAgentTrace> | undefined);
+  const messages = stripRedundantRawArguments(agent.context.messages);
   return {
     version: 1,
     sessionId: agent.sessionId,
@@ -284,8 +388,10 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
     ...(agent.instructions ? { instructions: agent.instructions } : {}),
     ...(agent.context.systemPrompt ? { systemPrompt: agent.context.systemPrompt } : {}),
     ...(agent.context.cachedContentId ? { cachedContentId: agent.context.cachedContentId } : {}),
-    messages: agent.context.messages,
+    messages,
     ...(totals ? { totals } : {}),
+    ...(parentSessionId ? { parentSessionId } : {}),
+    ...(subagents ? { subagents } : {}),
   };
 }
 
@@ -309,6 +415,8 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
       let cachedContentId: string | undefined;
       let systemPrompt: string | undefined;
       let instructions: string | undefined;
+      let parentSessionId: string | undefined;
+      let subagents: Record<string, PersistedSubAgentTrace> | undefined;
       const messages: Message[] = [];
       let totals: SessionTotals | undefined;
       for (const line of text.split("\n")) {
@@ -322,6 +430,8 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
             cachedContentId = obj.cachedContentId ?? cachedContentId;
             model = obj.model ?? model;
             thinkingLevel = obj.thinkingLevel ?? thinkingLevel;
+            parentSessionId = obj.parentSessionId ?? parentSessionId;
+            subagents = obj.subagents ?? subagents;
           } else if (obj.type === "mainModel") {
             model = obj.id ?? obj.model ?? model;
             thinkingLevel = obj.thinkingLevel ?? thinkingLevel;
@@ -358,6 +468,8 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
         ...(cachedContentId ? { cachedContentId } : {}),
         messages,
         ...(totals ? { totals } : {}),
+        ...(parentSessionId ? { parentSessionId } : {}),
+        ...(subagents ? { subagents } : {}),
       };
     }
     const obj: any = JSON.parse(text);
@@ -376,6 +488,8 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
         cachedContentId: obj.cachedContentId ?? obj.context.cachedContentId,
         messages: obj.context.messages as Message[],
         totals: obj.totals ?? obj.metrics,
+        parentSessionId: obj.parentSessionId,
+        subagents: obj.subagents,
       };
     }
     if (!obj.sessionId && !Array.isArray(obj.messages)) return null;
@@ -391,6 +505,8 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
       cachedContentId: obj.cachedContentId,
       messages: Array.isArray(obj.messages) ? (obj.messages as Message[]) : [],
       totals: obj.totals,
+      parentSessionId: obj.parentSessionId,
+      subagents: obj.subagents,
     };
   } catch {
     return null;
@@ -408,6 +524,24 @@ export function loadSessionFile(filePath: string): PersistedAgentSession | null 
   }
 }
 
+/** Atomic file write (temp + rename) so a crash never leaves half-written JSON. */
+export function writeFileAtomic(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {}
+  let tag = "tmp";
+  try {
+    const pid = (globalThis as any)?.process?.pid;
+    tag = `${typeof pid === "number" ? pid : "np"}-${Math.random().toString(36).slice(2, 8)}`;
+  } catch {
+    tag = Math.random().toString(36).slice(2, 8);
+  }
+  const tmp = `${filePath}.tmp-${tag}`;
+  fs.writeFileSync(tmp, content, "utf8");
+  fs.renameSync(tmp, filePath);
+}
+
 /** Saves an agent + telemetry snapshot as a pretty-printed `.json` document (2-space indent). */
 export function saveSessionFile(
   filePath: string,
@@ -415,12 +549,9 @@ export function saveSessionFile(
   telemetry?: SessionTelemetry | SessionTotals | null
 ): void {
   const resolved = path.resolve(filePath);
-  try {
-    fs.mkdirSync(path.dirname(resolved), { recursive: true });
-  } catch {}
   const data = buildSessionData(agent, telemetry);
   try {
-    fs.writeFileSync(resolved, serializeSession(data) + "\n", "utf8");
+    writeFileAtomic(resolved, serializeSession(data) + "\n");
   } catch {
     // persistence must never crash a chat turn
   }
@@ -605,7 +736,7 @@ export function saveSessionDir(
     telemetry
   );
   try {
-    fs.writeFileSync(path.join(sessionDir, "session.json"), serializeSession(data) + "\n", "utf8");
+    writeFileAtomic(path.join(sessionDir, "session.json"), serializeSession(data) + "\n");
   } catch {
     // persistence must never crash a chat turn
   }

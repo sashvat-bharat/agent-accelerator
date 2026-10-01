@@ -9,6 +9,8 @@ export interface ToolExecutionContext {
   signal?: AbortSignal;
   /** Session identifier associated with this invocation. */
   sessionId?: string;
+  /** Forwards live sub-agent deltas (used by `spawn_subagents` for realtime tracking). */
+  onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
 }
 
 export type ToolExecuteFn<TInput = any, TOutput = any> = (

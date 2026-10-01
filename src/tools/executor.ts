@@ -13,6 +13,8 @@ export interface ExecuteToolsOptions {
   parallel?: boolean;
   signal?: AbortSignal;
   sessionId?: string;
+  /** Forwards live sub-agent deltas (realtime worker thinking/text) to the caller. */
+  onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
 }
 
 const DEFAULT_TOOL_CONCURRENCY = 8;
@@ -233,7 +235,7 @@ async function executeAttempt(
 export async function executeToolCalls(
   options: ExecuteToolsOptions
 ): Promise<ToolResultRecord[]> {
-  const { tools, toolCalls, agentName, parallel = true, signal, sessionId } = options;
+  const { tools, toolCalls, agentName, parallel = true, signal, sessionId, onSubagentEvent } = options;
   const globalSemaphore = new Semaphore(DEFAULT_TOOL_CONCURRENCY);
   const perToolSemaphores = new Map<string, Semaphore>();
 
@@ -282,6 +284,7 @@ export async function executeToolCalls(
         agentName,
         signal,
         sessionId,
+        onSubagentEvent,
       };
 
       // Validate input if Zod schema is provided

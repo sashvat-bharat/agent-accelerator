@@ -108,7 +108,7 @@ export function clearSessionRouting(sessionId?: string): void {
 
 /**
  * Maps a canonical ThinkingLevel onto Google Interactions `thinking_level`.
- * Google values: minimal|low|medium|high (no off switch, no xhigh).
+ * Google values: minimal|low|medium|high (no off switch, no xhigh/max).
  */
 export function mapThinkingLevelToGoogle(
   level: ThinkingLevel | string | undefined
@@ -126,7 +126,7 @@ export function mapThinkingLevelToGoogle(
     });
     return {};
   }
-  if (norm === "xhigh") {
+  if (norm === "xhigh" || norm === "max") {
     emitProviderWarning({
       provider: "google",
       capability: "thinking level",
@@ -155,7 +155,7 @@ export function mapServiceTierToGoogle(tier: ServiceTier | undefined): "flex" | 
  * Completions documents `reasoning_effort: xhigh|high|medium|low|minimal|none`
  * (parameters.md) and live probes accept `xhigh` verbatim (`03`), so — unlike
  * the discontinued Responses skin, which clamped `xhigh` — everything passes
- * through. `dynamic` omits (server default).
+ * through. `max` rides the same verbatim path. `dynamic` omits (server default).
  */
 export function mapThinkingLevelToOpenRouterChat(
   level: ThinkingLevel | string | undefined
@@ -169,7 +169,8 @@ export function mapThinkingLevelToOpenRouterChat(
     norm === "low" ||
     norm === "medium" ||
     norm === "high" ||
-    norm === "xhigh"
+    norm === "xhigh" ||
+    norm === "max"
   ) {
     return { effort: norm };
   }
@@ -179,8 +180,8 @@ export function mapThinkingLevelToOpenRouterChat(
 /**
  * Maps a canonical ThinkingLevel onto OpenRouter Responses `reasoning.effort`.
  * Documented efforts: minimal|low|medium|high (server default medium).
- * Wire-validated extras: `none` disables reasoning output; `xhigh` is echoed
- * but is NOT a documented level, so it clamps to `high` with a warning.
+ * Wire-validated extras: `none` disables reasoning output; `xhigh`/`max` are
+ * echoed but are NOT documented levels, so they clamp to `high` with a warning.
  *
  * @deprecated The Responses skin is discontinued for OpenRouter
  * (`src/providers/openrouter-responses.ts`, archived). Use
@@ -194,7 +195,7 @@ export function mapThinkingLevelToOpenRouter(
   const norm = String(level).toLowerCase().trim();
   if (norm === "dynamic") return {}; // server default (medium)
   if (norm === "none") return { effort: "none" };
-  if (norm === "xhigh") {
+  if (norm === "xhigh" || norm === "max") {
     emitProviderWarning({
       provider: "openrouter",
       capability: "thinking level",
@@ -327,7 +328,7 @@ export function mapToolChoiceToOpenRouter(
  * Maps a canonical ThinkingLevel onto OpenAI Responses `reasoning.effort`.
  * Documented efforts: none|minimal|low|medium|high|xhigh|max (server default
  * medium). Unlike OpenRouter (which clamps xhigh), OpenAI documents xhigh
- * natively so it passes through verbatim. `dynamic` omits (server default).
+ * and max natively so they pass through verbatim. `dynamic` omits (server default).
  */
 export function mapThinkingLevelToOpenAI(
   level: ThinkingLevel | string | undefined
@@ -341,7 +342,8 @@ export function mapThinkingLevelToOpenAI(
     norm === "low" ||
     norm === "medium" ||
     norm === "high" ||
-    norm === "xhigh"
+    norm === "xhigh" ||
+    norm === "max"
   ) {
     return { effort: norm };
   }
