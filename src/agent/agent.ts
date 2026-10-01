@@ -10,8 +10,12 @@ import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
 import { convert_document_to_markdown } from "../utils/documents.ts";
 import { runAgentLoop, streamAgentLoop } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
+import { getSubAgentTrace, subscribeToSubAgent, listSubAgentTraceIds, type SubAgentTrace } from "./delegation.ts";
+import { saveSessionDir, saveSessionFile } from "../session/store.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
+import { buildSessionData, type PersistedAgentSession, type SessionTotals,} from "../session/store.ts";
+import { SessionTelemetry } from "../session/store.ts";
 
 /**
  * Resolves a per-run thinking override without mutating agent config.
@@ -120,6 +124,8 @@ export class Agent {
   readonly context: AgentContext;
   /** Whether history is cleared around each run. */
   readonly stateless: boolean;
+  /** Durable persistence target: session file rewritten after every step. */
+  readonly persistConfig?: { dir?: string; file?: string };
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -197,8 +203,15 @@ export class Agent {
     this.apiKey = (rawModel as any)?.apiKey || config.apiKey;
     this.baseUrl = (rawModel as any)?.baseUrl || config.baseUrl;
     this.customHeaders = config.headers;
-    this.maxTurns = config.maxTurns ?? 10;
+    this.maxTurns =
+      config.maxTurns === undefined || config.maxTurns === 0 || config.maxTurns === Infinity
+        ? Infinity
+        : Number.isFinite(config.maxTurns as number)
+          ? Math.max(1, Math.floor(config.maxTurns as number))
+          : Infinity;
     this.sessionId = config.sessionId || config.cache?.sessionId || createSessionId();
+    (this as any).subagentTraces = {};
+    this.persistConfig = config.persist;
 
     // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
     const mpThinking = (rawModel as any)?.thinkingLevel;
@@ -307,6 +320,173 @@ export class Agent {
     this.context.systemPrompt = this.getFullInstructions();
   }
 
+  /**
+   * Returns a snapshot of one sub-agent worker's trace by tracking id
+   * (`SUBAGENT-NAME-{32hex}` or the raw 32-hex suffix). Sees live running
+   * state: steps appear as the worker acts, not just after it finishes.
+   *
+   * @example `const trace = agent.track("RAM-RESEARCH-AGENT-9f2c…");`
+   */
+  track(trackingId: string): SubAgentTrace | undefined {
+    if (!trackingId) return undefined;
+    try {
+      const own = (this as any).subagentTraces as Record<string, SubAgentTrace> | undefined;
+      const hit = own?.[trackingId];
+      if (hit) return { ...hit, steps: hit.steps.map((s) => ({ ...s })) };
+    } catch {}
+    return getSubAgentTrace(trackingId);
+  }
+
+  /** Lists TrackingIDs of worker traces visible to this agent (deduped). */
+  listTrackedSubAgents(): string[] {
+    const rawOf = (id: string): string => {
+      const tail = id.split("-").pop() ?? "";
+      return /^[0-9a-f]{32}$/.test(tail) ? tail : id;
+    };
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const id of [...Object.keys((this as any).subagentTraces ?? {}), ...listSubAgentTraceIds()]) {
+      const raw = rawOf(id);
+      if (!seen.has(raw)) {
+        seen.add(raw);
+        out.push(raw);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Subscribes to live updates of one worker trace. The callback fires on
+   * every logged step; returns an unsubscribe fn.
+   *
+   * @example `const off = agent.subscribeToSubAgent(id, (t) => render(t));`
+   */
+  subscribeToSubAgent(trackingId: string, fn: (trace: SubAgentTrace) => void): () => void {
+    return subscribeToSubAgent(trackingId, fn);
+  }
+
+  /**
+   * Rewrites the configured session file now (when `persist` is set).
+   * Called automatically after every step during runs; safe to call
+   * manually. Never throws.
+   */
+  persistNow(): void {
+    const cfg = this.persistConfig;
+    if (!cfg || (!cfg.dir && !cfg.file)) return;
+    try {
+      if (cfg.dir) saveSessionDir(cfg.dir, this as any, null);
+      else if (cfg.file) saveSessionFile(cfg.file, this as any, null);
+    } catch {}
+  }
+
+  /** Merges completed worker metadata (incl. steps) into this agent's trace registry. */
+  private mergeSubagentTraces(subagents: Array<{ trackingId?: string; name: string; sessionId?: string; parentSessionId?: string; task: string; steps?: SubAgentTrace["steps"]; [k: string]: unknown }>): void {
+    if (!subagents || subagents.length === 0) return;
+    const rawOf = (id?: string): string | undefined => {
+      if (!id) return undefined;
+      const tail = id.split("-").pop() ?? "";
+      return /^[0-9a-f]{32}$/.test(tail) ? tail : id;
+    };
+    try {
+      const registry = ((this as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
+      for (const s of subagents) {
+        const raw = rawOf(s.trackingId);
+        const key = raw || s.name;
+        const existing = registry[key] ?? (raw ? registry[s.trackingId ?? ""] : undefined);
+        if (existing) {
+          existing.status = "done";
+          if (s.steps && s.steps.length > 0 && existing.steps.length === 0) {
+            existing.steps = s.steps.map((x) => ({ ...x }));
+          }
+          if (raw && !registry[raw]) registry[raw] = existing;
+        } else if (raw) {
+          registry[raw] = {
+            trackingId: raw,
+            name: s.name,
+            sessionId: s.sessionId || "",
+            parentSessionId: s.parentSessionId || this.sessionId,
+            status: "done",
+            task: s.task,
+            turns: 0,
+            steps: (s.steps ?? []).map((x) => ({ ...x })),
+          };
+        }
+      }
+    } catch {}
+  }
+
+  /**
+   * Exports this agent's conversation + config as a storable session snapshot.
+   * Pair with `importSession` / `loadSessionFile` / `saveSessionFile`.
+   *
+   * @example `saveSessionFile(".session.json", agent, telemetry)`
+   */
+  exportSession(telemetry?: SessionTelemetry | SessionTotals | null): PersistedAgentSession {
+    return buildSessionData(this as any, telemetry);
+  }
+
+  /**
+   * Restores conversation + config from `exportSession` / `loadSessionFile`.
+   * Restores messages, system prompt, cached content id, sub-agent traces,
+   * and (when present) session id, model, thinking level, instructions,
+   * cache, and worker model. No-ops on nullish input.
+   *
+   * @example `const saved = loadSessionFile(".session.json"); if (saved) agent.importSession(saved);`
+   */
+  importSession(data?: PersistedAgentSession | null): void {
+    if (!data) return;
+    if (data.sessionId) (this as any).sessionId = data.sessionId;
+    if ((data as any).parentSessionId) (this as any).parentSessionId = (data as any).parentSessionId;
+    if ((data as any).subagents && typeof (data as any).subagents === "object") {
+      try {
+        (this as any).subagentTraces = JSON.parse(JSON.stringify((data as any).subagents));
+      } catch {
+        (this as any).subagentTraces = { ...((data as any).subagents as object) };
+      }
+    }
+    if (data.model) (this as any).modelStringOrSpec = data.model;
+    if (data.thinkingLevel) {
+      const lvl = String(data.thinkingLevel);
+      (this as any).thinkingConfig =
+        lvl === "none"
+          ? { enabled: false, level: "none", budgetTokens: 0 }
+          : lvl === "dynamic"
+            ? { enabled: true, level: "dynamic", budgetTokens: -1 }
+            : { enabled: true, level: lvl };
+    }
+    if (typeof data.instructions === "string") this.instructions = data.instructions;
+    if (data.cache) {
+      (this as any).cacheConfig = {
+        ...this.cacheConfig,
+        ...data.cache,
+        sessionId: data.sessionId ?? this.sessionId,
+      };
+    }
+    if (data.subagentModel) {
+      (this as any).subagentModel = data.subagentModel;
+      const dyn = (this as any).dynamicSubagents;
+      if (dyn) dyn.model = data.subagentModel;
+    }
+    try {
+      const g: any = globalThis as any;
+      this.context.messages = Array.isArray(data.messages)
+        ? (typeof g.structuredClone === "function"
+            ? g.structuredClone(data.messages)
+            : JSON.parse(JSON.stringify(data.messages)))
+        : [];
+    } catch {
+      this.context.messages = Array.isArray(data.messages) ? [...data.messages] : [];
+    }
+    this.context.thoughtSignatures = [];
+    if (data.systemPrompt) {
+      this.context.systemPrompt = data.systemPrompt;
+    } else {
+      this.context.systemPrompt = this.getFullInstructions();
+    }
+    this.context.cachedContentId =
+      data.cachedContentId ?? (this.cacheConfig as any)?.cachedContentId;
+  }
+
   private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions): void {
     if (Array.isArray(prompt) && prompt.length === 0) {
       throw new Error(
@@ -394,6 +574,7 @@ export class Agent {
         validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
       }
       this.prepareTurn(prompt, options);
+      this.persistNow();
 
       const providerOptions = {
         apiKey: this.apiKey,
@@ -417,9 +598,12 @@ export class Agent {
         runOptions: options,
         maxTurns: this.maxTurns,
         bypassInputFileModality: this.bypassInputFileModality,
+        onProgress: () => this.persistNow(),
       };
 
       const res = await runAgentLoop(loopConfig);
+      this.mergeSubagentTraces(res.subagents as any);
+      this.persistNow();
       if (this.stateless) {
         this.context.messages = [];
         this.context.thoughtSignatures = [];
@@ -501,6 +685,7 @@ export class Agent {
       validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
     }
     this.prepareTurn(prompt, options);
+    this.persistNow();
 
     const providerOptions = {
       apiKey: this.apiKey,
@@ -524,9 +709,16 @@ export class Agent {
       runOptions: options,
       maxTurns: this.maxTurns,
       bypassInputFileModality: this.bypassInputFileModality,
+      onProgress: () => this.persistNow(),
     };
 
     const s = streamAgentLoop(loopConfig);
+    s.result().then((res) => {
+      try {
+        this.mergeSubagentTraces(res.subagents as any);
+        this.persistNow();
+      } catch {}
+    }).catch(() => {});
     if (this.stateless) {
       s.result().then(() => {
         this.context.messages = [];
@@ -704,7 +896,7 @@ export class Agent {
 
 /** Normalizes the public `thinkingLevel` flag into provider-neutral thinking settings. */
 export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): ThinkingConfig | undefined {
-  // DX4: only thinkingLevel, values: none, dynamic, minimal, low, medium, high, xhigh
+  // DX4: only thinkingLevel, values: none, dynamic, minimal, low, medium, high, xhigh, max
   const rawLevel = config.thinkingLevel ?? fallbackLevel;
   const level = rawLevel as ThinkingLevel | undefined;
 

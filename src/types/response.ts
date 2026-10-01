@@ -2,6 +2,19 @@ import type { TokenUsage } from "./core.ts";
 import type { ToolCallRecord, ToolResultRecord } from "./tool.ts";
 import type { ProviderRawData, ProviderId } from "./model.ts";
 
+/** One logged step inside a sub-agent worker run (surfaced via `agent.track(id)`). */
+export interface SubAgentStep {
+  turn: number;
+  type: "assistant" | "tool_call" | "tool_result";
+  name?: string;
+  text?: string;
+  thinking?: string;
+  isError?: boolean;
+  timestamp: number;
+  /** True while the worker is still streaming this step; finalized on turn end. */
+  partial?: boolean;
+}
+
 /** Per-worker result and usage metadata attached to an AgentResponse. */
 export interface SubAgentExecutionMetadata {
   name: string;
@@ -20,6 +33,14 @@ export interface SubAgentExecutionMetadata {
   raw?: ProviderRawData;
   isError?: boolean;
   error?: string;
+  /** Stable display id: `SUBAGENT-NAME-{TrackingID}` (32-char hex, see `createTrackingId`). */
+  trackingId?: string;
+  /** Provider session id used by this worker (≤64 chars, affinity-safe). */
+  sessionId?: string;
+  /** Parent session this worker was spawned from. */
+  parentSessionId?: string;
+  /** Ordered step log for this worker (also persisted in the session file). */
+  steps?: SubAgentStep[];
 }
 
 /** JSON representation returned by AgentResponse.toJSON(). */
@@ -136,6 +157,7 @@ export type StreamEventType =
   | "tool_call_complete"
   | "tool_result"
   | "subagent_complete"
+  | "subagent_delta"
   | "usage"
   | "done"
   | "error";
@@ -148,6 +170,8 @@ export interface StreamEvent {
   toolCall?: ToolCallRecord;
   toolResult?: ToolResultRecord;
   subagent?: SubAgentExecutionMetadata;
+  /** Tracking id of the worker emitting a `subagent_delta` event. */
+  subagentTrackingId?: string;
   usage?: TokenUsage;
   responseId?: string;
   finishReason?: string;

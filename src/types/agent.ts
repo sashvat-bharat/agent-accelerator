@@ -45,12 +45,20 @@ export interface AgentConfig {
   sessionId?: string;
   /** Headers merged into every provider request. */
   headers?: Record<string, string>;
-  /** Maximum model/tool turns per run. Defaults to 10. */
+  /** Maximum model/tool turns per run. `0` or omitted means infinite. */
   maxTurns?: number;
   /** Fixed worker agents exposed as delegation tools. */
   subagents?: (Agent | { name: string; description: string; agent: Agent })[];
   /** Clears conversation state before and after every run. */
   stateless?: boolean;
+  /**
+   * Durable session persistence: when set, the session file is rewritten
+   * after every step (user turn, assistant turn, tool batch, sub-agent
+   * step) so a crash loses at most the in-flight step. Pass `{ dir }` for
+   * `sessions/<sessionId>/session.json` layout or `{ file }` for a single
+   * pretty `.session.json` file. Writes are atomic and never fail a turn.
+   */
+  persist?: { dir?: string; file?: string };
 }
 
 /** Developer-configured policy for LLM-spawned dynamic sub-agents. */
@@ -91,4 +99,20 @@ export interface AgentRunOptions {
   onEvent?: (event: import("./response.ts").StreamEvent) => void;
   /** When true, wraps reasoning stream as <think>\n...\n</think>\n\n — no manual isThinking needed. */
   wrapThinking?: boolean;
+  /** Called after every model/tool turn with a turn summary (also drives sub-agent step logs + durable persistence). */
+  onTurn?: (turn: AgentTurnEvent) => void;
+}
+
+/** Turn summary emitted to `AgentRunOptions.onTurn` after each loop turn. */
+export interface AgentTurnEvent {
+  /** 1-based turn count within this run. */
+  turns: number;
+  /** Assistant text produced this turn, if any. */
+  text?: string;
+  /** Reasoning produced this turn, if any. */
+  thinking?: string;
+  /** Tool calls requested this turn, if any. */
+  toolCalls?: Array<{ id: string; name: string }>;
+  /** Tool results executed this turn, if any. */
+  toolResults?: Array<{ id: string; name: string; isError?: boolean }>;
 }

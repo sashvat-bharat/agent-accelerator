@@ -126,16 +126,17 @@ An `Agent` holds :
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Overridden by `dynamicSubagents.model`. Falls back to `SUB_AGENT_MODEL`. |
 | `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout? }`. See [Dynamic delegation](#dynamic-delegation). |
-| `thinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh`. Validated against the model catalog before a request.                                      |
+| `thinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`. Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
 | `bypassInputFileModality` | `boolean`                                      | When `true`, `file` parts are converted client-side to Markdown for models lacking native support. Capable models still receive files natively. Defaults to `false`. |
-| `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Defaults to `10`.                                                                                            |
+| `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Infinite by default (`0` or omitted = no limit). Hitting a finite limit with pending tool calls warns and sets `finishReason: "max_turns"`. |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
 | `apiKey`          | `string`                                             | Overrides environment-based API-key lookup for this agent.                                                                                                 |
 | `baseUrl`         | `string`                                             | Overrides the default endpoint for this agent.                                                                                                             |
 | `stateless`       | `boolean`                                            | When `true`, history is cleared before and after each `run`. Useful for one-shot evaluators. Defaults to `false`.                                          |
+| `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions: rewrites the session file after every step (user/assistant/tool/sub-agent). `{ dir }` uses `sessions/<sessionId>/session.json`, `{ file }` a single `.session.json`. Writes are atomic and never fail a turn. |
 
 When `dynamicSubagents.enabled` is set without a resolvable worker model, construction throws `SubAgentModelError`.
 
@@ -146,6 +147,12 @@ await agent.run(prompt, opts?) // non-streaming, or streaming when opts.stream i
 agent.ask(prompt, optsOrBool?) // string deltas when streaming, otherwise same as run
 agent.stream(prompt, opts?) // AssistantMessageEventStream
 agent.reset() // clears messages + signatures, keeps config
+agent.exportSession(telemetry?) // storable snapshot for saveSessionFile
+agent.importSession(saved) // restores messages + config from loadSessionFile
+agent.track(trackingId) // live snapshot of one sub-agent worker (`NAME-{TrackingID}`)
+agent.listTrackedSubAgents() // TrackingIDs of known workers
+agent.subscribeToSubAgent(id, fn) // live worker updates, returns unsubscribe fn
+agent.persistNow() // rewrites the persist target now (no-op unless persist is set)
 ```
 
 `prompt` accepts `string | ContentPart[]`.
@@ -159,8 +166,9 @@ Use `ContentPart[]` when sending images, audio, or video alongside text.
 | `stream`                        | When `true`, returns a stream instead of a regular response promise.                                                                            |
 | `onDelta(delta, event)`         | Called for each text chunk. Use to render answers live.                                                                                         |
 | `onThinkingDelta(delta, event)` | Called for each reasoning chunk. Use to render reasoning separately.                                                                            |
-| `onEvent(event)`                | Called for every event: `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `usage`, `done`, and `error`. |
+| `onEvent(event)`                | Called for every event: `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `subagent_delta`, `usage`, `done`, and `error`. |
 | `wrapThinking`                  | Wraps reasoning as `<think>\n...\n</think>\n\n`, allowing UIs to render it without maintaining separate state.                                  |
+| `onTurn(turn)`                  | Called after every model/tool turn with `{ turns, text?, thinking?, toolCalls?, toolResults? }`. Drives sub-agent step logs and persistence.   |
 | `additionalContext`             | Added only to the current user turn. Keeps the system prompt stable for better caching.                                                         |
 | `sessionId`                     | Per-run session override.                                                                                                                       |
 | `headers`                       | Per-run header merge.                                                                                                                           |
@@ -290,6 +298,8 @@ A `spawn_subagents` tool is injected with the following task shape:
 - `tools` — developer-owned pool. Workers get zero tools unless the Main Agent grants a per-task `tools` subset by name (unknown names are ignored), keeping worker context small.
 - `timeout` (ms) — `0` = no limit, `-1` = the Main Agent sets a per-task `timeoutMs`, `>0` = fixed limit for every worker. Timed-out workers report an error entry; the rest of the batch still completes.
 - Workers are stateless: one task in, one result out, then shut down. No history, no recursion. The Main Agent cannot choose worker models or reasoning levels.
+- Worker names use UPPER-KEBAB (`HBM-PRICING-ANALYST`). Each worker gets a system-generated 32-char TrackingID, displayed as `NAME-{TrackingID}` (e.g. `HBM-PRICING-ANALYST-9f2c…`).
+- Workers stream internally: thinking/text deltas update the worker trace live (`agent.track(id)`, `subscribeToSubAgent`) and surface on the parent stream as `subagent_delta` events.
 
 ```ts
 const res = await agent.run("Audit auth pipeline and write a threat model");
@@ -488,7 +498,7 @@ Turns chain statefully through `previous_interaction_id` per session, falling ba
 Thinking levels map to `thinking_level`, with `thinking_summaries` enabled whenever thinking is active:
 
 ```text
-minimal | low | medium | high   (xhigh clamps to high; none is unsupported and omitted; dynamic omits)
+minimal | low | medium | high   (xhigh/max clamp to high; none is unsupported and omitted; dynamic omits)
 ```
 
 Google-specific handling includes:
@@ -515,7 +525,7 @@ Every turn is stateless: the full history is sent explicitly with `store: false`
 Thinking levels map to `reasoning.effort` verbatim:
 
 ```text
-none | minimal | low | medium | high | xhigh   (dynamic omits — server default)
+none | minimal | low | medium | high | xhigh | max   (dynamic omits — server default)
 ```
 
 It also:
@@ -536,7 +546,7 @@ Session affinity is a top-level body `session_id` plus the `x-session-id` header
 Thinking levels map to `reasoning.effort` verbatim:
 
 ```text
-none | minimal | low | medium | high | xhigh   (dynamic omits — server default)
+none | minimal | low | medium | high | xhigh | max   (dynamic omits — server default)
 ```
 
 It also:
@@ -591,14 +601,15 @@ ThinkingLevel =
   | "low"
   | "medium"
   | "high"
-  | "xhigh";
+  | "xhigh"
+  | "max";
 ```
 
 ### Thinking Levels
 
 * `none` — disables thinking where supported.
 * `dynamic` — allows the model to decide.
-* `minimal`, `low`, `medium`, `high`, `xhigh` — request increasing levels of reasoning where supported.
+* `minimal`, `low`, `medium`, `high`, `xhigh`, `max` — request increasing levels of reasoning where supported.
 
 Thinking can be configured on the `Agent` or through `ModelProvider.*(..., { thinkingLevel })`.
 
@@ -729,6 +740,7 @@ StreamEvent {
   toolCall?,
   toolResult?,
   subagent?,
+  subagentTrackingId?,
   usage?,
   responseId?,
   finishReason?,
@@ -754,12 +766,13 @@ tool_call_delta
 tool_call_complete
 tool_result
 subagent_complete
+subagent_delta
 usage
 done
 error
 ```
 
-Emitted in practice: `start`, `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `usage`, `done`, `error`. The rest exist in the type for forward compatibility.
+Emitted in practice: `start`, `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `subagent_delta`, `usage`, `done`, `error`. The rest exist in the type for forward compatibility.
 
 Use:
 
@@ -767,6 +780,7 @@ Use:
 * `thinking_delta` for reasoning output.
 * `tool_call_complete` / `tool_result` for tool progress.
 * `subagent_complete` for each completed worker during streaming multi-agent runs.
+* `subagent_delta` for live worker thinking/text (`subagentTrackingId` + `delta`/`thinkingDelta` + partials). Render per-worker; never merge into the parent answer.
 * `usage` for interim usage counts.
 * `done` for final usage and completion information.
 
@@ -836,9 +850,32 @@ SubAgentExecutionMetadata {
   toolCalls?,
   raw?,
   isError?,
-  error?
+  error?,
+  trackingId?,
+  sessionId?,
+  parentSessionId?,
+  steps?
 }
 ```
+
+`finishReason` is `"max_turns"` when a finite `maxTurns` limit stopped the run with tool calls still pending (plus a console warning naming the dropped tools).
+
+### SubAgentStep
+
+```ts
+SubAgentStep {
+  turn,
+  type, // "assistant" | "tool_call" | "tool_result"
+  name?,
+  text?,
+  thinking?,
+  isError?,
+  timestamp,
+  partial? // true while the worker is still streaming this step
+}
+```
+
+`agent.track(id)` returns these live; `partial` entries finalize when the worker's turn completes.
 
 ### TokenUsage
 
@@ -1089,6 +1126,8 @@ never in the gitignored snapshot.
 ## Utils
 
 * `createSessionId(prefix="accel")` — creates a UUID-based session ID clamped to 64 characters for affinity.
+* `createTrackingId()` — system-generated 32-char TrackingID for one sub-agent worker (`NAME-{TrackingID}`).
+* `createChildSessionId(parentId, tag)` / `createFixedChildSessionId(parentId, name)` / `isSessionDescendant(child, parent)` — provider-safe (≤64 chars) child session IDs with parent-hash lineage.
 * `getEnv(key, fallback?)` — resolves an environment variable.
 * `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
@@ -1130,6 +1169,9 @@ bun run examples/08-multimodal_video.ts
 
 bun run examples/10-document_markdown.ts
 # document → Markdown preprocessing (any model, optional @firecrawl/anydoc peer)
+
+bun run examples/11-session-identity.ts
+# sub-agent TrackingIDs, live worker boxes, lineage, track(), durable sessions
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
@@ -1138,16 +1180,53 @@ so failures print one line and exit `1` — no stack dumps.
 The chat example persists conversations to:
 
 ```text
-.session.jsonl
+sessions/<sessionId>/session.json  (+ media/ for images, audio, video, files)
 ```
 
-It resumes from that file on next launch.
-
-It also displays per-turn:
+It resumes the most recent session on next launch (legacy `.session.json`/`.session.jsonl` files still load) and prints a resume banner:
 
 ```text
-input / output / cached / cost / context %
+↺ Previous session loaded • accel-1a2b… (.session.json) • 12 messages • google/gemini-3.5-flash-lite • total-CH82.4% • $0.013 total
 ```
+
+It also displays per-turn and session totals on one line:
+
+```text
+↑turn ↓turn CRturn turn-CH% | ↑total ↓total CRtotal total-CH% $total(+turn) ctx%/window
+```
+
+### Session persistence
+
+```ts
+import {
+  Agent,
+  loadSessionFile,
+  saveSessionFile,
+  SessionTelemetry,
+  formatSessionBanner,
+} from "agent-accelerator";
+
+const saved = loadSessionFile(".session.json");
+const telemetry = SessionTelemetry.fromSaved(saved);
+
+const agent = new Agent({
+  model: saved?.model ?? process.env.MODEL,
+  sessionId: saved?.sessionId,
+});
+
+if (saved) agent.importSession(saved);
+
+const res = await agent.run("Hello");
+telemetry.add(res.usage, agent.modelStringOrSpec as string);
+saveSessionFile(".session.json", agent, telemetry);
+```
+
+* `agent.exportSession(telemetry)` / `agent.importSession(saved)` round-trip messages, system prompt, model, thinking level, instructions, cache, worker model, and sub-agent traces without touching `AgentContext` internals.
+* `SessionTelemetry` accumulates `input / output / cacheRead / cacheWrite / reasoning / cost`, with clamped `turnHitRate()` / `totalHitRate()`, a dual `formatBar(res)`, and `formatSessionBanner(saved, telemetry, path)` for startup.
+* Files are pretty-printed JSON (2-space indent), written atomically (temp + rename). Cost prefers provider-reported totals and falls back to catalog pricing.
+* Binary media (bytes, data URLs, base64) is extracted to `media/` on save via `saveSessionDir("sessions", agent, telemetry)` → `sessions/<sessionId>/{session.json, media/*}`; remote URLs and local paths stay references. `loadSessionDir(dir)` resolves `media/…` refs back to absolute paths, and `findLatestSessionDir("sessions")` resumes the most recent session.
+* Sub-agent traces persist in a dedicated `subagents` section keyed by TrackingID (`{ trackingId, name, sessionId, parentSessionId, status, task, turns, usage, steps, text }`). Files stay lean: redundant `rawArguments` and repeated step text are dropped on save (rebuilt/kept live in memory).
+* With `persist: { dir }` or `{ file }`, the session file is rewritten after every step, so a crash loses at most the in-flight step.
 
 ---
 ## Scripts and Structure
@@ -1164,6 +1243,7 @@ bun run update-models # refresh model catalog cache (supports --force, --ttl=24h
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
+├── session/    # Session persistence + telemetry (snapshots, hit rates, .session.json store)
 ├── providers/  # native REST adapters (google/openai/openrouter/openai-compat) + registry + canonical contract
 ├── models/     # Dynamic catalog cache, parser, verified overrides
 ├── data/       # Dynamic model catalog cache (gitignored, excluded from bundle)

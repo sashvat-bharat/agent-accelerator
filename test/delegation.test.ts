@@ -10,7 +10,7 @@ import {
 describe("Multi-Agent Dynamic Delegation & Metadata", () => {
   it("should automatically inject subagents as tools on parent Agent", () => {
     const subAgent = new SubAgent({
-      name: "Domain_Specialist",
+      name: "Domain-Specialist",
       description: "Handles specialized domain tasks",
       model: "google/gemini-3.5-flash-lite",
       apiKey: "TEST_KEY",
@@ -22,13 +22,13 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
       subagents: [subAgent],
     });
 
-    expect(leadAgent.tools["domain_specialist"]).toBeDefined();
-    expect(leadAgent.tools["domain_specialist"]!.name).toBe("domain_specialist");
-    expect(leadAgent.tools["domain_specialist"]!.description).toBe("Handles specialized domain tasks");
-    expect(leadAgent.tools["domain_specialist"]!.input).toBeDefined();
+    expect(leadAgent.tools["domain-specialist"]).toBeDefined();
+    expect(leadAgent.tools["domain-specialist"]!.name).toBe("domain-specialist");
+    expect(leadAgent.tools["domain-specialist"]!.description).toBe("Handles specialized domain tasks");
+    expect(leadAgent.tools["domain-specialist"]!.input).toBeDefined();
 
     const toolsRecord = buildAgentTools([subAgent]);
-    expect(toolsRecord["domain_specialist"]).toBeDefined();
+    expect(toolsRecord["domain-specialist"]).toBeDefined();
   });
 
   it("should create a generic domain-agnostic subagent spawn tool", () => {
@@ -176,11 +176,11 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
 
     // Verify .asTool() and .toTool()
     const asToolDef = critique.asTool();
-    expect(asToolDef.name).toBe("code_critique");
+    expect(asToolDef.name).toBe("code-critique");
     expect(asToolDef.description).toBe("Reviews code architecture and edge cases");
 
-    const customToolDef = critique.toTool("custom_reviewer", "Custom override");
-    expect(customToolDef.name).toBe("custom_reviewer");
+    const customToolDef = critique.toTool("custom-reviewer", "Custom override");
+    expect(customToolDef.name).toBe("custom-reviewer");
     expect(customToolDef.description).toBe("Custom override");
   });
 
@@ -243,8 +243,8 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(lead.tools["get_status"]?.description).toBe("Check user authentication status.");
 
     // Sub-agents are registered into tools cleanly
-    expect(lead.tools["code_critique"]).toBeDefined();
-    expect(lead.tools["tech_researcher"]).toBeDefined();
+    expect(lead.tools["code-critique"]).toBeDefined();
+    expect(lead.tools["tech-researcher"]).toBeDefined();
   });
 
   it("should not accumulate conversation history when stateless: true is set", async () => {

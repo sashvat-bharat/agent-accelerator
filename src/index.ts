@@ -31,8 +31,14 @@ export {
   buildAgentTools,
   agentToTool,
   createSubagentSpawnTool,
+  createChildSessionId,
+  createFixedChildSessionId,
+  isSessionDescendant,
+  getSubAgentTrace,
+  listSubAgentTraceIds,
+  subscribeToSubAgent,
 } from "./agent/delegation.ts";
-export type { DynamicSubagentTask, AgentAsToolTarget } from "./agent/delegation.ts";
+export type { DynamicSubagentTask, AgentAsToolTarget, SubAgentTrace } from "./agent/delegation.ts";
 
 // Providers & Registry — unified multi-provider layer, all native REST
 export {
@@ -160,8 +166,32 @@ export { SSEParser } from "./streaming/sse-parser.ts";
 // Responses
 export { AgentResponse } from "./types/response.ts";
 
+// Session persistence & telemetry (conversation history + cost rollup)
+export {
+  SessionTelemetry,
+  loadSessionFile,
+  saveSessionFile,
+  loadSessionDir,
+  saveSessionDir,
+  writeFileAtomic,
+  findLatestSessionDir,
+  sessionDirFor,
+  extractMediaToDir,
+  resolveMediaPaths,
+  buildSessionData,
+  serializeSession,
+  deserializeSession,
+  getSessionContextWindow,
+  computeSessionTurnCost,
+  formatSessionTokens,
+  formatSessionCost,
+  formatSessionBanner,
+  emptyTotals,
+} from "./session/store.ts";
+export type { PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir, PersistedSubAgentTrace } from "./session/store.ts";
+
 // Utilities
-export { createSessionId } from "./utils/session.ts";
+export { createSessionId, hashSessionPart, createTrackingId } from "./utils/session.ts";
 export { getApiKey, getEnv } from "./utils/env.ts";
 export { buildSessionHeaders } from "./utils/headers.ts";
 export { normalizeMediaInput, inferMimeType } from "./utils/media.ts";
@@ -218,6 +248,7 @@ export type {
 export type {
   AgentResponseJSON,
   SubAgentExecutionMetadata,
+  SubAgentStep,
   StreamEvent,
   StreamEventType,
 } from "./types/response.ts";
@@ -225,6 +256,7 @@ export type {
 export type {
   AgentConfig,
   AgentRunOptions,
+  AgentTurnEvent,
   DynamicSubagentsConfig,
 } from "./types/agent.ts";
 

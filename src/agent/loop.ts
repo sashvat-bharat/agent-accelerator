@@ -22,6 +22,53 @@ export interface AgentLoopConfig {
   maxTurns?: number;
   /** Convert `file` parts client-side for pdf-incapable models (see Agent flag). */
   bypassInputFileModality?: boolean;
+  /** Called after every turn for durable persistence checkpoints (never fails a turn). */
+  onProgress?: () => void;
+}
+
+function emitTurn(
+  runOptions: AgentRunOptions | undefined,
+  turn: { turns: number; text?: string; thinking?: string; toolCalls?: ToolCallRecord[]; toolResults?: ToolResultRecord[] }
+): void {
+  try {
+    runOptions?.onTurn?.({
+      turns: turn.turns,
+      text: turn.text,
+      thinking: turn.thinking,
+      toolCalls: turn.toolCalls?.map((c) => ({ id: c.id, name: c.name })),
+      toolResults: turn.toolResults?.map((r) => ({ id: r.id, name: r.name, isError: r.isError })),
+    });
+  } catch {}
+}
+
+function emitProgress(config: { onProgress?: () => void }): void {
+  try { config.onProgress?.(); } catch {}
+}
+
+/**
+ * Normalizes `maxTurns` to a safe positive integer (default Infinity).
+ * `0` means infinite (no limit), matching the `timeout: 0` convention.
+ * Prevents silent zero-turn runs from negative values (clamped to 1).
+ */
+function normalizeMaxTurns(value?: number): number {
+  if (value === undefined) return Infinity;
+  if (value === 0 || value === Infinity) return Infinity;
+  if (!Number.isFinite(value as number)) return Infinity;
+  return Math.max(1, Math.floor(value as number));
+}
+
+/**
+ * Warns when an agent run stops because `maxTurns` was exhausted while
+ * the model still wanted to call tools. Without this, the loop simply
+ * returns the last tool-turn text (often empty) with `finishReason:
+ * "tool_calls"`, which looks like success while dropping pending work.
+ */
+function warnMaxTurnsHit(agentName: string | undefined, maxTurns: number, pendingTools: string[]): void {
+  const who = agentName ? `"${agentName}"` : "Agent";
+  const tools = pendingTools.length > 0 ? ` Pending tool calls dropped: ${pendingTools.join(", ")}.` : "";
+  // Leading newline: runs often end mid-line on streamed output; without it
+  // the warning glues onto the last streamed chunk.
+  console.warn(`\n[Agent Accelerator] WARNING [agent] ${who} hit maxTurns (${maxTurns}) with unfinished tool calls.${tools} Increase maxTurns or split the task.`);
 }
 
 export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec): TokenUsage["cost"] {
@@ -131,6 +178,7 @@ async function executeToolCallsWithRepeatGuard(options: {
   agentName?: string;
   signal?: AbortSignal;
   sessionId?: string;
+  onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
 }): Promise<{ results: ToolResultRecord[]; fingerprints: Set<string> }> {
   const { toolCalls, previousFingerprints } = options;
   const currentFingerprints = new Set<string>();
@@ -163,6 +211,7 @@ async function executeToolCallsWithRepeatGuard(options: {
         parallel: true,
         signal: options.signal,
         sessionId: options.sessionId,
+        onSubagentEvent: options.onSubagentEvent,
       })
     : [];
   const byId = new Map<string, ToolResultRecord[]>();
@@ -202,8 +251,9 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     tools,
     options,
     runOptions,
-    maxTurns = 10,
+    maxTurns: rawMaxTurns = Infinity,
   } = config;
+  const maxTurns = normalizeMaxTurns(rawMaxTurns);
 
   if (config.bypassInputFileModality) {
     await preprocessFilePartsForBypass(config.context.messages, {
@@ -289,6 +339,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     // If no tool calls, generation is complete!
     if (!genResult.toolCalls || genResult.toolCalls.length === 0) {
+      emitTurn(runOptions, { turns, text: genResult.text, thinking: genResult.thinking });
+      emitProgress(config);
       break;
     }
 
@@ -325,8 +377,29 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     allToolResults.push(...sanitizedResults);
     context.addToolResults(sanitizedResults);
+    emitTurn(runOptions, {
+      turns,
+      text: genResult.text,
+      thinking: genResult.thinking,
+      toolCalls: genResult.toolCalls,
+      toolResults: sanitizedResults,
+    });
+    emitProgress(config);
 
     if (runOptions?.signal?.aborted) break;
+  }
+
+  // maxTurns exhausted while the model still requested tools: the tool
+  // results above were never sent back, so the run is truncated — surface
+  // it via finishReason + warning instead of silently returning.
+  const truncatedByMaxTurns =
+    turns >= maxTurns && !!finalResult?.toolCalls && finalResult.toolCalls.length > 0;
+  if (truncatedByMaxTurns) {
+    warnMaxTurnsHit(
+      agentName,
+      maxTurns,
+      finalResult.toolCalls.map((c: ToolCallRecord) => c.name)
+    );
   }
 
   return new AgentResponse({
@@ -340,7 +413,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     responseId: finalResult?.responseId,
     model: modelId,
     provider: provider.id,
-    finishReason: finalResult?.finishReason,
+    finishReason: truncatedByMaxTurns ? "max_turns" : finalResult?.finishReason,
     durationMs: Date.now() - startTime,
     raw: finalResult?.raw,
     turns,
@@ -409,8 +482,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         tools,
         options,
         runOptions,
-        maxTurns = 10,
+        maxTurns: rawMaxTurns = Infinity,
       } = config;
+      const maxTurns = normalizeMaxTurns(rawMaxTurns);
 
       const standardTools = toStandardToolDeclarations(tools);
 
@@ -495,6 +569,8 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         );
 
         if (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) {
+          emitTurn(runOptions, { turns, text: turnResponse.text, thinking: turnResponse.thinking });
+          emitProgress(config);
           break;
         }
 
@@ -506,6 +582,18 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           agentName,
           signal: linked.signal,
           sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+          onSubagentEvent: (ev) => {
+            try {
+              outerStream.push({
+                type: "subagent_delta",
+                subagentTrackingId: ev.trackingId,
+                delta: ev.delta,
+                thinkingDelta: ev.thinkingDelta,
+                partialText: ev.partialText,
+                partialThinking: ev.partialThinking,
+              });
+            } catch {}
+          },
         });
         throwIfCancelled();
         const results = guarded.results;
@@ -541,7 +629,26 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 
         allToolResults.push(...sanitizedResults);
         context.addToolResults(sanitizedResults);
+        emitTurn(runOptions, {
+          turns,
+          text: turnResponse.text,
+          thinking: turnResponse.thinking,
+          toolCalls: turnResponse.toolCalls,
+          toolResults: sanitizedResults,
+        });
+        emitProgress(config);
       }
+
+      const truncatedByMaxTurns =
+        turns >= maxTurns && !!lastResponse?.toolCalls && lastResponse.toolCalls.length > 0;
+      if (truncatedByMaxTurns) {
+        warnMaxTurnsHit(
+          agentName,
+          maxTurns,
+          lastResponse!.toolCalls.map((c) => c.name)
+        );
+      }
+      const truncatedFinishReason = truncatedByMaxTurns ? "max_turns" : lastResponse?.finishReason;
 
       const finalAgentResponse = new AgentResponse({
         text: lastResponse?.text || "",
@@ -554,7 +661,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         responseId: lastResponse?.responseId,
         model: modelId,
         provider: provider.id,
-        finishReason: lastResponse?.finishReason,
+        finishReason: truncatedFinishReason,
         durationMs: Date.now() - startTime,
         raw: lastResponse?.raw as any,
         turns,
@@ -564,7 +671,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         type: "done",
         delta: "",
         usage: accumulatedUsage,
-        finishReason: lastResponse?.finishReason,
+        finishReason: truncatedFinishReason,
         responseId: lastResponse?.responseId,
       });
 
