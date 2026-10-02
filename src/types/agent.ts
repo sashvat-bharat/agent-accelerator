@@ -52,6 +52,14 @@ export interface AgentConfig {
   /** Clears conversation state before and after every run. */
   stateless?: boolean;
   /**
+   * Mid-session queue policy for new queries arriving while a run is active.
+   * - `{ mode: "steer" }`: only steer (inject into current turn) is allowed.
+   * - `{ mode: "queue" }`: only queue (next-turn follow-up) is allowed.
+   * - `{ mode: "auto" }` (default): caller picks per message via `enqueue` or `steer()`/`queue()`.
+   * `interrupt` (cancel stream now) is always available via `interrupt()`/`cancel()`/`AbortSignal`.
+   */
+  midSession?: MidSessionConfig;
+  /**
    * Durable session persistence: when set, the session file is rewritten
    * after every step (user turn, assistant turn, tool batch, sub-agent
    * step) so a crash loses at most the in-flight step. Pass `{ dir }` for
@@ -59,6 +67,22 @@ export interface AgentConfig {
    * pretty `.session.json` file. Writes are atomic and never fail a turn.
    */
   persist?: { dir?: string; file?: string };
+}
+
+/** Developer policy for mid-session new-query insertion while a run is active. */
+export type MidSessionMode = "steer" | "queue" | "auto";
+
+/** Developer-configured policy for LLM-spawned dynamic sub-agents. */
+export interface MidSessionConfig {
+  /**
+   * Which mid-session method is allowed while a run is active:
+   * - `"steer"`: only steer (inject into current turn) is allowed.
+   * - `"queue"`: only queue (next-turn follow-up) is allowed.
+   * - `"auto"` (default): caller/user picks per message via `enqueue` or `steer()`/`queue()`.
+   */
+  mode?: MidSessionMode;
+  /** Max queued (follow-up) requests buffered while busy. Extra `queue()` calls throw. Defaults to 20. */
+  maxQueued?: number;
 }
 
 /** Developer-configured policy for LLM-spawned dynamic sub-agents. */
@@ -89,6 +113,14 @@ export interface AgentRunOptions {
   sessionId?: string;
   /** Context added only to this user turn, preserving the stable system prompt. */
   additionalContext?: string;
+  /**
+   * Mid-session method to use when this call arrives while another run is active.
+   * Only honored when `midSession.mode` is `"auto"` (default). When the developer
+   * enforces `"steer"` or `"queue"`, that policy wins and this field is ignored.
+   * When idle, this field is ignored and the call runs immediately.
+   * Defaults to `"queue"` (finish current turn, run as next turn).
+   */
+  enqueue?: "steer" | "queue";
   /** Headers merged for this run only. */
   headers?: Record<string, string>;
   /** Called for each text delta as it streams (only when stream:true). */

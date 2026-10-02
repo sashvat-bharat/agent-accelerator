@@ -162,6 +162,7 @@ export type {
 // Streaming & Events
 export { AssistantMessageEventStream } from "./streaming/event-stream.ts";
 export { SSEParser } from "./streaming/sse-parser.ts";
+export type { SteerEntry } from "./agent/loop.ts";
 
 // Responses
 export { AgentResponse } from "./types/response.ts";
@@ -258,6 +259,8 @@ export type {
   AgentRunOptions,
   AgentTurnEvent,
   DynamicSubagentsConfig,
+  MidSessionConfig,
+  MidSessionMode,
 } from "./types/agent.ts";
 
  // Provider wire payload types (back-compat inspection of raw requests/responses,

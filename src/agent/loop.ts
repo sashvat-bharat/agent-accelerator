@@ -2,6 +2,7 @@ import type { Provider, ProviderRequestOptions, ModelSpec } from "../types/model
 import type { ToolDefinition, ToolCallRecord, ToolResultRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { AgentRunOptions } from "../types/agent.ts";
+import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type SubAgentExecutionMetadata, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
@@ -10,6 +11,12 @@ import { executeToolCalls } from "../tools/executor.ts";
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
 import { preprocessFilePartsForBypass } from "../utils/documents.ts";
 import { noteProviderTurn } from "../providers.ts";
+
+/** One mid-session steer request buffered while a run is active. */
+export interface SteerEntry {
+  prompt: string | ContentPart[];
+  options?: AgentRunOptions;
+}
 
 export interface AgentLoopConfig {
   agentName?: string;
@@ -24,6 +31,57 @@ export interface AgentLoopConfig {
   bypassInputFileModality?: boolean;
   /** Called after every turn for durable persistence checkpoints (never fails a turn). */
   onProgress?: () => void;
+  /**
+   * Shared steer inbox for mid-session redirection. Entries are drained
+   * between turns (after the current provider/tool work finishes) and
+   * injected into the *current* turn — same response, same turn budget.
+   * Mutated in place by `agent.steer()` / `run(..., { enqueue: "steer" })`.
+   */
+  steerInbox?: SteerEntry[];
+  /** Called after steer entries are injected (streaming loops also push `steer_injected` events). */
+  onSteerInjected?: (injectedPrompts: string[]) => void;
+}
+
+/** Short preview for `steer_injected` / `queued` event payloads (bounded, display-only). */
+function steerPreview(prompt: string | ContentPart[]): string {
+  if (typeof prompt === "string") return prompt.slice(0, 500);
+  try {
+    const texts = prompt
+      .filter((p) => (p as { type?: unknown }).type === "text")
+      .map((p) => (p as { text?: string }).text ?? "")
+      .join("\n");
+    return (texts || "[multipart]").slice(0, 500);
+  } catch {
+    return "[multipart]";
+  }
+}
+
+/**
+ * Drains pending steer entries into the conversation as new user messages.
+ * Returns display previews for events/telemetry. Never throws: invalid
+ * entries are skipped so one bad steer cannot fail the active turn.
+ */
+function drainSteerInbox(context: AgentContext, inbox?: SteerEntry[]): string[] {
+  if (!inbox || inbox.length === 0) return [];
+  const injected: string[] = [];
+  while (inbox.length > 0) {
+    const entry = inbox.shift()!;
+    try {
+      let prompt = entry.prompt as string | ContentPart[];
+      const opts = entry.options;
+      if (Array.isArray(prompt) && prompt.length === 0) continue;
+      if (opts?.additionalContext) {
+        const prefix = `[Additional Context]\n${opts.additionalContext}\n\n`;
+        if (typeof prompt === "string") prompt = prefix + prompt;
+        else prompt = [{ type: "text", text: prefix } as ContentPart, ...prompt];
+      }
+      context.addUserMessage(prompt);
+      injected.push(steerPreview(entry.prompt));
+    } catch {
+      continue;
+    }
+  }
+  return injected;
 }
 
 function emitTurn(
@@ -337,10 +395,29 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       genResult.thoughtSignature
     );
 
-    // If no tool calls, generation is complete!
+    // Mid-session steer: if new queries arrived during this provider turn,
+    // inject them now. Tool turns still execute first (see below) so the
+    // current action finishes before redirection.
+    const noToolSteered = (!genResult.toolCalls || genResult.toolCalls.length === 0)
+      ? drainSteerInbox(context, config.steerInbox)
+      : [];
+
+    // If no tool calls, generation is complete — unless steered, in which
+    // case the injected message extends the SAME run (no new response).
     if (!genResult.toolCalls || genResult.toolCalls.length === 0) {
       emitTurn(runOptions, { turns, text: genResult.text, thinking: genResult.thinking });
+      if (noToolSteered.length > 0) {
+        try { config.onSteerInjected?.(noToolSteered); } catch {}
+        if (config.bypassInputFileModality) {
+          await preprocessFilePartsForBypass(config.context.messages, {
+            providerId: provider.id,
+            modelId,
+            signal: runOptions?.signal,
+          });
+        }
+      }
       emitProgress(config);
+      if (noToolSteered.length > 0) continue;
       break;
     }
 
@@ -384,6 +461,20 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       toolCalls: genResult.toolCalls,
       toolResults: sanitizedResults,
     });
+    // Steer drain AFTER tool results so call/result pairs stay adjacent.
+    // The next loop iteration sends the injected user message to the model
+    // within the same run (same usage/turn budget).
+    const toolSteered = drainSteerInbox(context, config.steerInbox);
+    if (toolSteered.length > 0) {
+      try { config.onSteerInjected?.(toolSteered); } catch {}
+      if (config.bypassInputFileModality) {
+        await preprocessFilePartsForBypass(config.context.messages, {
+          providerId: provider.id,
+          modelId,
+          signal: runOptions?.signal,
+        });
+      }
+    }
     emitProgress(config);
 
     if (runOptions?.signal?.aborted) break;
@@ -568,9 +659,21 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           turnResponse.thoughtSignature
         );
 
+        const noToolSteered = (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0)
+          ? drainSteerInbox(context, config.steerInbox)
+          : [];
         if (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) {
           emitTurn(runOptions, { turns, text: turnResponse.text, thinking: turnResponse.thinking });
+          if (noToolSteered.length > 0) {
+            for (const preview of noToolSteered) {
+              try {
+                outerStream.push({ type: "steer_injected", injectedPrompt: preview } as any);
+              } catch {}
+            }
+            try { config.onSteerInjected?.(noToolSteered); } catch {}
+          }
           emitProgress(config);
+          if (noToolSteered.length > 0) continue;
           break;
         }
 
@@ -636,6 +739,15 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           toolCalls: turnResponse.toolCalls,
           toolResults: sanitizedResults,
         });
+        const toolSteered = drainSteerInbox(context, config.steerInbox);
+        if (toolSteered.length > 0) {
+          for (const preview of toolSteered) {
+            try {
+              outerStream.push({ type: "steer_injected", injectedPrompt: preview } as any);
+            } catch {}
+          }
+          try { config.onSteerInjected?.(toolSteered); } catch {}
+        }
         emitProgress(config);
       }
 
