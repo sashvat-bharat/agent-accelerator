@@ -158,6 +158,8 @@ export type StreamEventType =
   | "tool_result"
   | "subagent_complete"
   | "subagent_delta"
+  | "steer_injected"
+  | "queued"
   | "usage"
   | "done"
   | "error";
@@ -172,6 +174,12 @@ export interface StreamEvent {
   subagent?: SubAgentExecutionMetadata;
   /** Tracking id of the worker emitting a `subagent_delta` event. */
   subagentTrackingId?: string;
+  /** Steered prompt text injected via `steer()` (`steer_injected` events). */
+  injectedPrompt?: string;
+  /** Queued prompt text accepted as a next-turn follow-up (`queued` events). */
+  queuedPrompt?: string;
+  /** Pending queue length at the time of a `queued`/`steer_injected` event. */
+  queueLength?: number;
   usage?: TokenUsage;
   responseId?: string;
   finishReason?: string;

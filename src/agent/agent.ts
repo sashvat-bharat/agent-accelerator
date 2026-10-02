@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentRunOptions } from "../types/agent.ts";
+import type { AgentConfig, AgentRunOptions, MidSessionConfig } from "../types/agent.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { ThinkingLevel, ThinkingConfig, CacheConfig, ServiceTier } from "../types/core.ts";
 import type { ContentPart } from "../types/message.ts";
@@ -8,7 +8,7 @@ import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
 import { convert_document_to_markdown } from "../utils/documents.ts";
-import { runAgentLoop, streamAgentLoop } from "./loop.ts";
+import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
 import { getSubAgentTrace, subscribeToSubAgent, listSubAgentTraceIds, type SubAgentTrace } from "./delegation.ts";
 import { saveSessionDir, saveSessionFile } from "../session/store.ts";
@@ -126,6 +126,22 @@ export class Agent {
   readonly stateless: boolean;
   /** Durable persistence target: session file rewritten after every step. */
   readonly persistConfig?: { dir?: string; file?: string };
+  /** Mid-session queue policy for new queries arriving while a run is active. */
+  readonly midSessionConfig: Required<Pick<MidSessionConfig, "mode">> & MidSessionConfig;
+  private currentRun: {
+    steerInbox: SteerEntry[];
+    outerStream?: AssistantMessageEventStream;
+    runPromise?: Promise<AgentResponse>;
+    abortController: AbortController;
+  } | null = null;
+  private pendingQueue: Array<{
+    prompt: string | ContentPart[];
+    options?: AgentRunOptions;
+    isStream: boolean;
+    deferredStream?: AssistantMessageEventStream;
+    resolve: (res: AgentResponse) => void;
+    reject: (err: unknown) => void;
+  }> = [];
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -212,6 +228,15 @@ export class Agent {
     this.sessionId = config.sessionId || config.cache?.sessionId || createSessionId();
     (this as any).subagentTraces = {};
     this.persistConfig = config.persist;
+    const rawMode = config.midSession?.mode ?? "auto";
+    const normalizedMode = rawMode === "steer" || rawMode === "queue" ? rawMode : "auto";
+    const rawMaxQueued = (config.midSession as any)?.maxQueued;
+    this.midSessionConfig = {
+      mode: normalizedMode,
+      ...(Number.isFinite(rawMaxQueued) && (rawMaxQueued as number) >= 0
+        ? { maxQueued: Math.floor(rawMaxQueued as number) }
+        : { maxQueued: 20 }),
+    };
 
     // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
     const mpThinking = (rawModel as any)?.thinkingLevel;
@@ -318,6 +343,360 @@ export class Agent {
     this.context.thoughtSignatures = [];
     this.context.cachedContentId = (this.cacheConfig as any)?.cachedContentId;
     this.context.systemPrompt = this.getFullInstructions();
+  }
+
+  /**
+   * True while a `run()`/`stream()` turn is active on this agent.
+   * Use with `steer()` (current-turn redirect) vs `queue()` (next-turn follow-up).
+   */
+  get isBusy(): boolean {
+    return this.currentRun !== null;
+  }
+
+  /** Number of queued follow-up requests waiting for the active run to finish. */
+  get pendingCount(): number {
+    return this.pendingQueue.length;
+  }
+
+  /** Number of steer messages buffered for injection into the active turn. */
+  get steerPendingCount(): number {
+    return this.currentRun?.steerInbox.length ?? 0;
+  }
+
+  /** Effective mid-session policy (`steer` | `queue` | `auto`). */
+  get midSessionMode(): "steer" | "queue" | "auto" {
+    return this.midSessionConfig.mode;
+  }
+
+  private resolveEnqueueMode(requested?: "steer" | "queue"): "steer" | "queue" {
+    const enforced = this.midSessionConfig.mode;
+    if (enforced === "steer" || enforced === "queue") return enforced;
+    return requested === "steer" ? "steer" : "queue";
+  }
+
+  private assertPromptValid(prompt: string | ContentPart[]): void {
+    if (Array.isArray(prompt) && prompt.length === 0) {
+      throw new Error(
+        "[Agent Accelerator] Prompt cannot be empty: pass a non-empty string or at least one content part."
+      );
+    }
+  }
+
+  private previewPrompt(prompt: string | ContentPart[]): string {
+    if (typeof prompt === "string") return prompt.slice(0, 500);
+    try {
+      const texts = prompt
+        .filter((p) => (p as { type?: unknown }).type === "text")
+        .map((p) => (p as { text?: string }).text ?? "")
+        .join("\n");
+      return (texts || "[multipart]").slice(0, 500);
+    } catch {
+      return "[multipart]";
+    }
+  }
+
+  /**
+   * Interrupts the active run immediately (STOP. Do this instead).
+   * Cancels the active stream and aborts provider/tool/sub-agent work via
+   * the run's internal `AbortController`. No-op when idle. The interrupted
+   * run rejects with `AbortError`; queued follow-ups still run afterwards.
+   */
+  interrupt(reason?: unknown): void {
+    const active = this.currentRun;
+    if (!active) return;
+    try {
+      active.abortController.abort(reason instanceof Error ? reason : new Error("Agent interrupted"));
+    } catch {}
+    try {
+      active.outerStream?.cancel(reason);
+    } catch {}
+  }
+
+  /**
+   * Steers the active turn (While you're doing that, change direction).
+   * The current provider/tool work finishes first, then `prompt` is injected
+   * as a user message into the SAME run — same `AgentResponse`, same
+   * `maxTurns` budget. Resolves to the active run's final response.
+   * When idle, behaves like `run(prompt, options)`.
+   * Throws when the developer enforces `midSession: { mode: "queue" }`.
+   * Note: `options` only honors `additionalContext` mid-turn (thinking level,
+   * session, and streaming callbacks stay with the active run). For a
+   * streaming follow-up use `stream(prompt, { enqueue: "steer" })`.
+   */
+  steer(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse> {
+    this.assertPromptValid(prompt);
+    if (options?.stream === true) {
+      throw new Error(
+        '[Agent Accelerator] steer() is non-streaming. Use stream(prompt, { enqueue: "steer" }) for a streaming steer.'
+      );
+    }
+    if (this.midSessionConfig.mode === "queue") {
+      throw new Error(
+        '[Agent Accelerator] steer() is disabled by midSession.mode "queue". Use queue() or set mode to "auto"/"steer".'
+      );
+    }
+    const active = this.currentRun;
+    if (!active) return this.run(prompt, options) as Promise<AgentResponse>;
+    active.steerInbox.push({ prompt, options });
+    this.persistNow();
+    if (active.runPromise) return active.runPromise;
+    if (active.outerStream) return active.outerStream.result();
+    return this.run(prompt, options) as Promise<AgentResponse>;
+  }
+
+  /**
+   * Queues a follow-up for the next turn (When you're done, do this next).
+   * The active run finishes completely first; this prompt then starts a new
+   * run with its own turn budget and `AgentResponse`. Resolves to that next
+   * turn's response. When idle, behaves like `run(prompt, options)`.
+   * Throws when the developer enforces `midSession: { mode: "steer" }` or
+   * when `maxQueued` is exceeded. For a streaming follow-up use
+   * `stream(prompt, { enqueue: "queue" })`.
+   */
+  queue(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse> {
+    this.assertPromptValid(prompt);
+    if (options?.stream === true) {
+      throw new Error(
+        '[Agent Accelerator] queue() is non-streaming. Use stream(prompt, { enqueue: "queue" }) for a streaming follow-up.'
+      );
+    }
+    if (this.midSessionConfig.mode === "steer") {
+      throw new Error(
+        '[Agent Accelerator] queue() is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
+      );
+    }
+    if (!this.currentRun) return this.run(prompt, options) as Promise<AgentResponse>;
+    const max = this.midSessionConfig.maxQueued ?? 20;
+    if (this.pendingQueue.length >= max) {
+      throw new Error(
+        `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
+      );
+    }
+    return new Promise<AgentResponse>((resolve, reject) => {
+      this.pendingQueue.push({ prompt, options, isStream: false, resolve, reject });
+      try {
+        this.currentRun?.outerStream?.push({
+          type: "queued",
+          queuedPrompt: this.previewPrompt(prompt),
+          queueLength: this.pendingQueue.length,
+        } as any);
+      } catch {}
+    });
+  }
+
+  private pumpQueue(): void {
+    if (this.currentRun !== null) return;
+    const next = this.pendingQueue.shift();
+    if (!next) return;
+    if (next.isStream && next.deferredStream) {
+      const deferred = next.deferredStream;
+      try {
+        const real = this.startStreamingRun(next.prompt, next.options);
+        try { (deferred as any).__piped = true; } catch {}
+        const forward = (e: StreamEvent) => {
+          try { deferred.push(e); } catch {}
+        };
+        real.on("*", forward as any);
+        try {
+          deferred.onCancel(() => {
+            try { real.cancel(); } catch {}
+          });
+        } catch {}
+        real.result().then(
+          (res) => {
+            try { next.resolve(res); } catch {}
+            try { deferred.end(res); } catch {}
+          },
+          (err) => {
+            try { next.reject(err); } catch {}
+            // Pipe failures into the deferred stream so for-await sees them.
+            try { deferred.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
+          }
+        );
+      } catch (err) {
+        try { next.reject(err); } catch {}
+        try { deferred.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
+        // Keep draining even if starting failed.
+        queueMicrotask(() => this.pumpQueue());
+      }
+      return;
+    }
+    this.startNonStreamingRun(next.prompt, next.options).then(next.resolve, next.reject);
+  }
+
+  private finishCurrentRun(): void {
+    this.currentRun = null;
+    // Defer pump so the completing run's .then handlers settle first.
+    queueMicrotask(() => this.pumpQueue());
+  }
+
+  private mergeUserSignal(userSignal?: AbortSignal, runController?: AbortController): AbortSignal | undefined {
+    if (!runController) return userSignal;
+    if (!userSignal) return runController.signal;
+    if (userSignal.aborted) {
+      try {
+        runController.abort((userSignal as any).reason);
+      } catch {
+        try { runController.abort(); } catch {}
+      }
+      return runController.signal;
+    }
+    const forward = () => {
+      try {
+        runController.abort((userSignal as any).reason);
+      } catch {
+        try { runController.abort(); } catch {}
+      }
+    };
+    userSignal.addEventListener("abort", forward, { once: true });
+    // Detached on run completion via runController abort listener cleanup below.
+    // Store for removal: piggyback on abort event (once) + explicit removal in finally.
+    (runController as any).__forwardUserAbort = forward;
+    (runController as any).__userSignal = userSignal;
+    return runController.signal;
+  }
+
+  private startNonStreamingRun(
+    prompt: string | ContentPart[],
+    options?: AgentRunOptions
+  ): Promise<AgentResponse> {
+    const runController = new AbortController();
+    const steerInbox: SteerEntry[] = [];
+    const mergedSignal = this.mergeUserSignal(options?.signal, runController);
+    const runOptions = { ...options, signal: mergedSignal };
+    const task = (async (): Promise<AgentResponse> => {
+      await ensureModelCatalogFresh();
+      const resolved = resolveModel(this.modelStringOrSpec);
+      const effectiveLevel = runOptions?.thinkingLevel || this.thinkingConfig?.level;
+      if (effectiveLevel) {
+        validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
+      }
+      this.prepareTurn(prompt, runOptions);
+      this.persistNow();
+
+      const providerOptions = {
+        apiKey: this.apiKey,
+        baseUrl: this.baseUrl,
+        headers: { ...(this.customHeaders ?? {}), ...(runOptions?.headers ?? {}) },
+        thinking: resolveEffectiveThinking(this.thinkingConfig, runOptions?.thinkingLevel),
+        cache: this.stateless
+          ? { sessionId: runOptions?.sessionId || this.sessionId }
+          : { ...this.cacheConfig, sessionId: runOptions?.sessionId || this.sessionId },
+        serviceTier: this.serviceTier,
+        sessionId: runOptions?.sessionId || this.sessionId,
+      };
+
+      const loopConfig = {
+        agentName: this.name,
+        provider: resolved.provider,
+        modelId: resolved.modelId,
+        context: this.context,
+        tools: this.tools,
+        options: providerOptions,
+        runOptions,
+        maxTurns: this.maxTurns,
+        bypassInputFileModality: this.bypassInputFileModality,
+        onProgress: () => this.persistNow(),
+        steerInbox,
+        onSteerInjected: () => this.persistNow(),
+      };
+
+      const res = await runAgentLoop(loopConfig);
+      this.mergeSubagentTraces(res.subagents as any);
+      this.persistNow();
+      if (this.stateless) {
+        this.context.messages = [];
+        this.context.thoughtSignatures = [];
+      }
+      return res;
+    })();
+
+    this.currentRun = { steerInbox, abortController: runController, runPromise: task };
+    const cleanup = () => {
+      try {
+        const userSignal = (runController as any).__userSignal as AbortSignal | undefined;
+        const forward = (runController as any).__forwardUserAbort as (() => void) | undefined;
+        if (userSignal && forward) userSignal.removeEventListener("abort", forward);
+      } catch {}
+      if (this.currentRun?.runPromise === task) this.finishCurrentRun();
+    };
+    task.then(cleanup, cleanup);
+    return task;
+  }
+
+  private startStreamingRun(
+    prompt: string | ContentPart[],
+    options?: AgentRunOptions
+  ): AssistantMessageEventStream {
+    const resolved = resolveModel(this.modelStringOrSpec);
+    const effectiveLevel = options?.thinkingLevel || this.thinkingConfig?.level;
+    if (effectiveLevel) {
+      validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
+    }
+    this.prepareTurn(prompt, options);
+    this.persistNow();
+
+    const runController = new AbortController();
+    const mergedSignal = this.mergeUserSignal(options?.signal, runController);
+    const runOptions = { ...options, signal: mergedSignal };
+    const steerInbox: SteerEntry[] = [];
+
+    const providerOptions = {
+      apiKey: this.apiKey,
+      baseUrl: this.baseUrl,
+      headers: { ...(this.customHeaders ?? {}), ...(runOptions?.headers ?? {}) },
+      thinking: resolveEffectiveThinking(this.thinkingConfig, runOptions?.thinkingLevel),
+      cache: this.stateless
+        ? { sessionId: runOptions?.sessionId || this.sessionId }
+        : { ...this.cacheConfig, sessionId: runOptions?.sessionId || this.sessionId },
+      serviceTier: this.serviceTier,
+      sessionId: runOptions?.sessionId || this.sessionId,
+    };
+
+    const loopConfig = {
+      agentName: this.name,
+      provider: resolved.provider,
+      modelId: resolved.modelId,
+      context: this.context,
+      tools: this.tools,
+      options: providerOptions,
+      runOptions,
+      maxTurns: this.maxTurns,
+      bypassInputFileModality: this.bypassInputFileModality,
+      onProgress: () => this.persistNow(),
+      steerInbox,
+      onSteerInjected: () => this.persistNow(),
+    };
+
+    const s = streamAgentLoop(loopConfig);
+    this.currentRun = { steerInbox, outerStream: s, abortController: runController };
+    s.result().then(
+      (res) => {
+        try {
+          this.mergeSubagentTraces(res.subagents as any);
+          this.persistNow();
+        } catch {}
+        try {
+          const userSignal = (runController as any).__userSignal as AbortSignal | undefined;
+          const forward = (runController as any).__forwardUserAbort as (() => void) | undefined;
+          if (userSignal && forward) userSignal.removeEventListener("abort", forward);
+        } catch {}
+        if (this.stateless) {
+          this.context.messages = [];
+          this.context.thoughtSignatures = [];
+        }
+        if (this.currentRun?.outerStream === s) this.finishCurrentRun();
+      },
+      () => {
+        try {
+          const userSignal = (runController as any).__userSignal as AbortSignal | undefined;
+          const forward = (runController as any).__forwardUserAbort as (() => void) | undefined;
+          if (userSignal && forward) userSignal.removeEventListener("abort", forward);
+        } catch {}
+        if (this.currentRun?.outerStream === s) this.finishCurrentRun();
+      }
+    );
+    return s;
   }
 
   /**
@@ -564,52 +943,50 @@ export class Agent {
       return s;
     }
 
-    return (async (): Promise<AgentResponse> => {
-      // Refresh the catalog BEFORE thinking validation so levels are checked
-      // against live data instead of a possibly-empty cold cache.
-      await ensureModelCatalogFresh();
-      const resolved = resolveModel(this.modelStringOrSpec);
-      const effectiveLevel = options?.thinkingLevel || this.thinkingConfig?.level;
-      if (effectiveLevel) {
-        validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
+    // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
+    if (this.currentRun) {
+      const enforced = this.midSessionConfig.mode;
+      const requested = options?.enqueue;
+      if (requested && (enforced === "steer" || enforced === "queue") && requested !== enforced) {
+        throw new Error(
+          `[Agent Accelerator] enqueue "${requested}" is disabled by midSession.mode "${enforced}". Use ${enforced}() or set mode to "auto"/"${requested}".`
+        );
       }
-      this.prepareTurn(prompt, options);
-      this.persistNow();
-
-      const providerOptions = {
-        apiKey: this.apiKey,
-        baseUrl: this.baseUrl,
-        headers: { ...(this.customHeaders ?? {}), ...(options?.headers ?? {}) },
-        thinking: resolveEffectiveThinking(this.thinkingConfig, options?.thinkingLevel),
-        cache: this.stateless
-          ? { sessionId: options?.sessionId || this.sessionId }
-          : { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
-        serviceTier: this.serviceTier,
-        sessionId: options?.sessionId || this.sessionId,
-      };
-
-      const loopConfig = {
-        agentName: this.name,
-        provider: resolved.provider,
-        modelId: resolved.modelId,
-        context: this.context,
-        tools: this.tools,
-        options: providerOptions,
-        runOptions: options,
-        maxTurns: this.maxTurns,
-        bypassInputFileModality: this.bypassInputFileModality,
-        onProgress: () => this.persistNow(),
-      };
-
-      const res = await runAgentLoop(loopConfig);
-      this.mergeSubagentTraces(res.subagents as any);
-      this.persistNow();
-      if (this.stateless) {
-        this.context.messages = [];
-        this.context.thoughtSignatures = [];
+      const mode = this.resolveEnqueueMode(requested);
+      if (mode === "steer") {
+        this.assertPromptValid(prompt);
+        this.currentRun.steerInbox.push({ prompt, options });
+        this.persistNow();
+        const active = this.currentRun;
+        if (active.runPromise) return active.runPromise;
+        if (active.outerStream) return active.outerStream.result();
+      } else {
+        if (this.midSessionConfig.mode === "steer") {
+          throw new Error(
+            '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
+          );
+        }
+        this.assertPromptValid(prompt);
+        const max = this.midSessionConfig.maxQueued ?? 20;
+        if (this.pendingQueue.length >= max) {
+          throw new Error(
+            `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
+          );
+        }
+        return new Promise<AgentResponse>((resolve, reject) => {
+          this.pendingQueue.push({ prompt, options, isStream: false, resolve, reject });
+          try {
+            this.currentRun?.outerStream?.push({
+              type: "queued",
+              queuedPrompt: this.previewPrompt(prompt),
+              queueLength: this.pendingQueue.length,
+            } as any);
+          } catch {}
+        });
       }
-      return res;
-    })();
+    }
+
+    return this.startNonStreamingRun(prompt, options);
   }
 
   /**
@@ -679,52 +1056,138 @@ export class Agent {
     prompt: string | ContentPart[],
     options?: AgentRunOptions
   ): AssistantMessageEventStream {
-    const resolved = resolveModel(this.modelStringOrSpec);
-    const effectiveLevel = options?.thinkingLevel || this.thinkingConfig?.level;
-    if (effectiveLevel) {
-      validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
-    }
-    this.prepareTurn(prompt, options);
-    this.persistNow();
-
-    const providerOptions = {
-      apiKey: this.apiKey,
-      baseUrl: this.baseUrl,
-      headers: { ...(this.customHeaders ?? {}), ...(options?.headers ?? {}) },
-      thinking: resolveEffectiveThinking(this.thinkingConfig, options?.thinkingLevel),
-      cache: this.stateless
-        ? { sessionId: options?.sessionId || this.sessionId }
-        : { ...this.cacheConfig, sessionId: options?.sessionId || this.sessionId },
-      serviceTier: this.serviceTier,
-      sessionId: options?.sessionId || this.sessionId,
-    };
-
-    const loopConfig = {
-      agentName: this.name,
-      provider: resolved.provider,
-      modelId: resolved.modelId,
-      context: this.context,
-      tools: this.tools,
-      options: providerOptions,
-      runOptions: options,
-      maxTurns: this.maxTurns,
-      bypassInputFileModality: this.bypassInputFileModality,
-      onProgress: () => this.persistNow(),
-    };
-
-    const s = streamAgentLoop(loopConfig);
-    s.result().then((res) => {
-      try {
-        this.mergeSubagentTraces(res.subagents as any);
+    // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
+    if (this.currentRun) {
+      const enforcedStream = this.midSessionConfig.mode;
+      const requestedStream = options?.enqueue;
+      if (requestedStream && (enforcedStream === "steer" || enforcedStream === "queue") && requestedStream !== enforcedStream) {
+        throw new Error(
+          `[Agent Accelerator] enqueue "${requestedStream}" is disabled by midSession.mode "${enforcedStream}". Use ${enforcedStream}() or set mode to "auto"/"${requestedStream}".`
+        );
+      }
+      const mode = this.resolveEnqueueMode(requestedStream);
+      if (mode === "steer") {
+        this.assertPromptValid(prompt);
+        this.currentRun.steerInbox.push({ prompt, options });
         this.persistNow();
+        const activeStream = this.currentRun.outerStream;
+        if (activeStream) {
+          this.wireStreamCallbacks(activeStream, options);
+          return activeStream;
+        }
+        // Active run is non-streaming: attach a lightweight stream that ends
+        // with the same final response so streaming callers still get events.
+        const stub = new AssistantMessageEventStream();
+        this.wireStreamCallbacks(stub, options);
+        const activePromise = this.currentRun.runPromise;
+        if (activePromise) {
+          activePromise.then(
+            (res) => {
+              try {
+                stub.push({ type: "done", delta: "", usage: res.usage, finishReason: res.finishReason, responseId: res.responseId } as any);
+              } catch {}
+              try { stub.end(res); } catch {}
+            },
+            (err) => {
+              try { stub.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
+            }
+          );
+        } else {
+          try { stub.fail(new Error("[Agent Accelerator] No active run to steer.")); } catch {}
+        }
+        return stub;
+      }
+      if (this.midSessionConfig.mode === "steer") {
+        throw new Error(
+          '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
+        );
+      }
+      this.assertPromptValid(prompt);
+      const max = this.midSessionConfig.maxQueued ?? 20;
+      if (this.pendingQueue.length >= max) {
+        throw new Error(
+          `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
+        );
+      }
+      const deferred = new AssistantMessageEventStream();
+      this.wireStreamCallbacks(deferred, options);
+      // Notify the active stream (if any) that a follow-up was queued.
+      try {
+        this.currentRun.outerStream?.push({
+          type: "queued",
+          queuedPrompt: this.previewPrompt(prompt),
+          queueLength: this.pendingQueue.length + 1,
+        } as any);
       } catch {}
-    }).catch(() => {});
-    if (this.stateless) {
-      s.result().then(() => {
-        this.context.messages = [];
-        this.context.thoughtSignatures = [];
-      }).catch(() => {});
+      const queuedEntry: {
+        prompt: string | ContentPart[];
+        options?: AgentRunOptions;
+        isStream: boolean;
+        deferredStream?: AssistantMessageEventStream;
+        resolve: (res: AgentResponse) => void;
+        reject: (err: unknown) => void;
+      } = {
+        prompt,
+        options,
+        isStream: true,
+        deferredStream: deferred,
+        resolve: () => {},
+        reject: () => {},
+      };
+      const done = new Promise<AgentResponse>((resolve, reject) => {
+        queuedEntry.resolve = resolve;
+        queuedEntry.reject = reject;
+      });
+      // Keep result() in sync: deferred ends when the queued turn completes.
+      done.then(
+        () => {},
+        () => {}
+      );
+      // Forward cancellation before start: drop from queue and fail.
+      deferred.onCancel(() => {
+        try {
+          const idx = this.pendingQueue.indexOf(queuedEntry as any);
+          if (idx >= 0) {
+            this.pendingQueue.splice(idx, 1);
+            queuedEntry.reject(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
+            try { deferred.fail(Object.assign(new Error("Stream aborted"), { name: "AbortError" })); } catch {}
+          }
+        } catch {}
+      });
+      this.pendingQueue.push(queuedEntry as any);
+      // Attach deferred completion to queued promise without exposing it.
+      // Real events are piped in pumpQueue() when the turn starts.
+      void done.then(
+        (res) => {
+          // If pump already piped via real stream, deferred is already ended.
+          // Otherwise (edge), end it here.
+          try {
+            if ((deferred as any).__piped !== true) {
+              deferred.push({ type: "done", delta: "", usage: res.usage, finishReason: res.finishReason, responseId: res.responseId } as any);
+              deferred.end(res);
+            }
+          } catch {}
+        },
+        (err) => {
+          try {
+            if ((deferred as any).__piped !== true) {
+              deferred.fail(err instanceof Error ? err : new Error(String(err)));
+            }
+          } catch {}
+        }
+      );
+      return deferred;
     }
+
+    const s = this.startStreamingRun(prompt, options);
+    this.wireStreamCallbacks(s, options);
+    return s;
+  }
+
+  private wireStreamCallbacks(
+    s: AssistantMessageEventStream,
+    options?: AgentRunOptions
+  ): void {
     // Wire one-liner callbacks so `stream:true` + onDelta is enough — no manual for-await needed
     if (options?.wrapThinking) {
       // Auto-wrap reasoning as <think>…</think> per-turn — clean boundaries across multi-turn agent runs.
@@ -890,7 +1353,6 @@ export class Agent {
       if (options?.onDelta) s.on("text_delta", (e: any) => options.onDelta!(e.delta!, e));
       if (options?.onThinkingDelta) s.on("thinking_delta", (e: any) => options.onThinkingDelta!(e.thinkingDelta!, e));
     }
-    return s;
   }
 }
 
