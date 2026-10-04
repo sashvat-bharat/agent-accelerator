@@ -2,12 +2,16 @@ import { Agent, tool, z } from "agent-accelerator";
 import { fail } from "./_shared";
 
 const get_status = tool({
-  timeoutMs: 50,
+  timeoutMs: 5_000,
+  maxAttempts: 2,
+  idempotent: true,
+  repeatable: true,
+  maxResultChars: 20_000,
   name: "get_status",
   description: "Check user authentication status.",
   input: z.object({ username: z.string() }),
-  execute: async ({ username }) => username === "Akshat Dwivedi"
-    ? "Valid username. Welcome home, Sir!"
+  execute: async ({ username }) => username === "alice"
+    ? "Valid username. Welcome!"
     : "Invalid username",
 });
 
@@ -16,12 +20,13 @@ const agent = new Agent({
   instructions: "Verify users via get_status. Be concise.",
   model: process.env.MODEL,
   tools: { get_status },
-  thinkingLevel: "medium",
+  thinking: "medium",
+  retry: { maxRetries: 2 },
 });
 
-console.log("→ Checking Akshat Dwivedi...\n");
+console.log("→ Checking alice...\n");
 
-const response = await agent.run("Check status for username: Akshat Dwivedi", {
+const response = await agent.run("Check status for username: alice", {
   stream: true,
   wrapThinking: true,
   onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),

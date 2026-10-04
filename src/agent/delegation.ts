@@ -1,13 +1,21 @@
 import { z } from "zod";
 import { tool } from "../tools/tool.ts";
 import { normalizeToolName } from "../tools/executor.ts";
+import { escapeXml } from "../utils/serialization.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { SubAgentExecutionMetadata } from "../types/response.ts";
 import type { Agent } from "./agent.ts";
+import type { Budget, BudgetState } from "../types/agent.ts";
+import { BudgetExceededError } from "../types/errors.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { hashSessionPart } from "../utils/session.ts";
 import { createTrackingId } from "../utils/session.ts";
+import { nowMs } from "../utils/session.ts";
+import { newRunId } from "../utils/session.ts";
+import { newTurnId } from "../utils/session.ts";
 import type { SubAgentStep } from "../types/response.ts";
+
+export { escapeXml };
 
 /** Task descriptor accepted by the automatic `spawn_subagents` tool.
  *
@@ -37,15 +45,6 @@ function sanitizeXmlTag(raw: string): string {
 function sanitizeToolName(raw: string): string {
   const tag = sanitizeXmlTag(raw);
   return tag.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-{2,}/g, "-").slice(0, 64) || "sub-agent";
-}
-
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
 }
 
 export function createChildSessionId(parentId: string, tag: string): string {
@@ -103,8 +102,11 @@ export function createFixedChildSessionId(parentId: string, name: string): strin
  */
 export function isSessionDescendant(child: string, parent: string): boolean {
   if (!child || !parent) return false;
-  if (child.startsWith(parent)) return true;
-  return child.includes(hashSessionPart(parent));
+  if (child === parent) return true;
+  if (child.startsWith(parent + "-")) return true;
+  // Q-34: hash includes() is collision-prone; require delimited match to reduce spoofing. Explicit {rootSessionId,parentSessionId} lineage is Q-61 future.
+  const h = hashSessionPart(parent);
+  return child.includes(`-${h}-`) || child.endsWith(`-${h}`);
 }
 
 /** Live trace for one spawned worker, keyed by its TrackingID. */
@@ -129,6 +131,116 @@ export interface SubAgentTrace {
 const subagentTraces = new Map<string, SubAgentTrace>();
 const subagentListeners = new Map<string, Set<(trace: SubAgentTrace) => void>>();
 
+/** Max trace keys held (LRU, evicts oldest whole trace on insert) (Q-30). */
+export const MAX_SUBAGENT_TRACES = 500;
+/** Trace TTL: 1h wall-clock, lazily expired on read (Q-30). */
+export const SUBAGENT_TRACE_TTL_MS = 60 * 60 * 1000;
+/** Max steps retained per trace; oldest steps are dropped beyond this (Q-30). */
+export const MAX_SUBAGENT_STEPS_PER_TRACE = 100;
+/** Live subscriptions auto-expire after 5min (Q-30). */
+export const SUBAGENT_SUBSCRIBE_TTL_MS = 5 * 60 * 1000;
+
+/** Last-write wall-clock per canonical trackingId (drives TTL; reads do not extend it). */
+const traceTouchedAt = new Map<string, number>();
+
+function canonicalOf(trace: SubAgentTrace): string {
+  return trace.trackingId;
+}
+
+function deleteTraceByCanonical(canonical: string): void {
+  for (const [key, t] of [...subagentTraces]) {
+    if (t.trackingId === canonical) subagentTraces.delete(key);
+  }
+  traceTouchedAt.delete(canonical);
+  subagentListeners.delete(canonical);
+}
+
+function isTraceExpired(canonical: string, now = Date.now()): boolean {
+  const touched = traceTouchedAt.get(canonical);
+  if (touched === undefined) return false;
+  return now - touched > SUBAGENT_TRACE_TTL_MS;
+}
+
+function touchTrace(canonical: string, now = Date.now()): void {
+  traceTouchedAt.set(canonical, now);
+}
+
+/**
+ * Evicts expired traces, then oldest whole traces while over budget (Q-30).
+ * Called on every insert. Whole-trace eviction removes both the canonical
+ * key and its display-id alias.
+ */
+export function pruneTraces(now = Date.now()): void {
+  for (const canonical of [...new Set([...subagentTraces.values()].map((t) => t.trackingId))]) {
+    if (isTraceExpired(canonical, now)) deleteTraceByCanonical(canonical);
+  }
+  while (subagentTraces.size > MAX_SUBAGENT_TRACES) {
+    const oldestKey = subagentTraces.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    const oldest = subagentTraces.get(oldestKey);
+    if (!oldest) {
+      subagentTraces.delete(oldestKey);
+      continue;
+    }
+    deleteTraceByCanonical(oldest.trackingId);
+  }
+}
+
+/** Drops oldest steps beyond {@link MAX_SUBAGENT_STEPS_PER_TRACE} (Q-30). */
+export function trimTraceSteps(trace: SubAgentTrace): void {
+  if (trace.steps.length > MAX_SUBAGENT_STEPS_PER_TRACE) {
+    trace.steps.splice(0, trace.steps.length - MAX_SUBAGENT_STEPS_PER_TRACE);
+  }
+}
+
+function insertTrace(trace: SubAgentTrace, displayId: string, now = Date.now()): void {
+  pruneTraces(now);
+  trimTraceSteps(trace);
+  subagentTraces.set(trace.trackingId, trace);
+  subagentTraces.set(displayId, trace);
+  touchTrace(trace.trackingId, now);
+  // Keep LRU order: newest at the end (re-set moves existing keys).
+  const canonical = subagentTraces.get(trace.trackingId);
+  if (canonical) {
+    subagentTraces.delete(trace.trackingId);
+    subagentTraces.set(trace.trackingId, canonical);
+  }
+  const alias = subagentTraces.get(displayId);
+  if (alias && displayId !== trace.trackingId) {
+    subagentTraces.delete(displayId);
+    subagentTraces.set(displayId, alias);
+  }
+  pruneTraces(now);
+}
+
+function lookupTrace(id: string): SubAgentTrace | undefined {
+  if (!id) return undefined;
+  const direct = subagentTraces.get(id);
+  if (direct) {
+    if (isTraceExpired(direct.trackingId)) {
+      deleteTraceByCanonical(direct.trackingId);
+      return undefined;
+    }
+    // LRU touch (order only; TTL is write-based).
+    subagentTraces.delete(id);
+    subagentTraces.set(id, direct);
+    return direct;
+  }
+  const lower = id.toLowerCase();
+  for (const [key, t] of subagentTraces) {
+    if (t.trackingId.toLowerCase() === lower) {
+      if (isTraceExpired(t.trackingId)) {
+        deleteTraceByCanonical(t.trackingId);
+        return undefined;
+      }
+      subagentTraces.delete(key);
+      subagentTraces.set(key, t);
+      return t;
+    }
+  }
+  return undefined;
+}
+
 function snapshotTrace(t: SubAgentTrace): SubAgentTrace {
   return { ...t, steps: t.steps.map((s) => ({ ...s })), usage: t.usage ? { ...t.usage } : undefined };
 }
@@ -148,28 +260,42 @@ function notifyTrace(trackingId: string): void {
  * Returns a snapshot of one worker's trace by tracking id
  * (`SUBAGENT-NAME-{32hex}` or the raw 32-hex suffix). Used by
  * `agent.track(id)` for realtime inspection.
+ *
+ * Prefer {@link getSubAgentTraceScoped} when the parent session is known:
+ * this compat lookup matches any parent and can confuse sibling workers
+ * whose display names collide across sessions.
  */
 export function getSubAgentTrace(id: string): SubAgentTrace | undefined {
-  if (!id) return undefined;
-  const direct = subagentTraces.get(id);
-  if (direct) return snapshotTrace(direct);
-  const lower = id.toLowerCase();
-  for (const t of subagentTraces.values()) {
-    if (t.trackingId.toLowerCase() === lower) return snapshotTrace(t);
-  }
-  return undefined;
+  const t = lookupTrace(id);
+  return t ? snapshotTrace(t) : undefined;
+}
+
+/**
+ * Scoped trace lookup (Q-30, preferred): like {@link getSubAgentTrace} but
+ * only matches when `trace.parentSessionId === parentSessionId`. Use this
+ * from `Agent.track` (or any parent-bound caller) so truncated/aliased ids
+ * cannot leak across sessions.
+ */
+export function getSubAgentTraceScoped(id: string, parentSessionId: string): SubAgentTrace | undefined {
+  if (!id || !parentSessionId) return undefined;
+  const t = lookupTrace(id);
+  if (!t) return undefined;
+  if (t.parentSessionId !== parentSessionId) return undefined;
+  return snapshotTrace(t);
 }
 
 /** Lists tracking ids of known worker traces (mainly for `track` misses). */
 export function listSubAgentTraceIds(): string[] {
+  pruneTraces();
   return [...subagentTraces.keys()];
 }
 
 /**
  * Subscribes to live updates of one worker trace. Returns an unsubscribe fn.
+ * Subscriptions auto-expire after 5min to avoid listener leaks (Q-30).
  */
 export function subscribeToSubAgent(id: string, fn: (trace: SubAgentTrace) => void): () => void {
-  const t = subagentTraces.get(id) ?? [...subagentTraces.values()].find((x) => x.trackingId.toLowerCase() === id.toLowerCase());
+  const t = lookupTrace(id);
   const key = t ? t.trackingId : id;
   let set = subagentListeners.get(key);
   if (!set) {
@@ -177,16 +303,175 @@ export function subscribeToSubAgent(id: string, fn: (trace: SubAgentTrace) => vo
     subagentListeners.set(key, set);
   }
   set.add(fn);
-  return () => { subagentListeners.get(key)?.delete(fn); };
+  const timer = setTimeout(() => {
+    try { subagentListeners.get(key)?.delete(fn); } catch {}
+  }, SUBAGENT_SUBSCRIBE_TTL_MS);
+  try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    try { clearTimeout(timer); } catch {}
+    try { subagentListeners.get(key)?.delete(fn); } catch {}
+  };
 }
 
 /** Appends a step to a worker trace and notifies live subscribers. */
 export function appendSubAgentStep(trackingId: string, step: SubAgentStep): void {
-  const t = subagentTraces.get(trackingId);
+  const t = subagentTraces.get(trackingId) ?? lookupTrace(trackingId);
   if (!t) return;
+  if (isTraceExpired(t.trackingId)) {
+    deleteTraceByCanonical(t.trackingId);
+    return;
+  }
   t.steps.push(step);
+  trimTraceSteps(t);
   t.turns = Math.max(t.turns, step.turn);
+  touchTrace(t.trackingId);
   notifyTrace(trackingId);
+}
+
+// ---------------------------------------------------------------------------
+// Budgets (Q-39): unenforced counters + guards. The loop owner wires
+// per-turn charging; the spawn tool below enforces `maxTotalSubagents` and
+// charges completed worker usage. Durations use the monotonic `nowMs()`
+// clock; TTL timestamps above use wall-clock `Date.now()`.
+// ---------------------------------------------------------------------------
+
+function readBudget(parentAgent: Agent): Budget | undefined {
+  return (parentAgent as unknown as { budget?: Budget }).budget;
+}
+
+function readBudgetState(parentAgent: Agent): BudgetState | undefined {
+  return (parentAgent as unknown as { budgetState?: BudgetState }).budgetState;
+}
+
+function ensureBudgetState(parentAgent: Agent): BudgetState {
+  const host = parentAgent as unknown as { budgetState?: BudgetState };
+  if (!host.budgetState) {
+    host.budgetState = { spawned: 0, totalTokens: 0, totalCostUsd: 0, startedAtMs: nowMs() };
+  }
+  return host.budgetState;
+}
+
+function usageTokens(usage: unknown): number {
+  const u = usage as { totalTokens?: unknown; inputTokens?: unknown; outputTokens?: unknown } | undefined;
+  if (!u || typeof u !== "object") return 0;
+  if (typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens)) return Math.max(0, Math.floor(u.totalTokens));
+  const inp = typeof u.inputTokens === "number" && Number.isFinite(u.inputTokens) ? u.inputTokens : 0;
+  const out = typeof u.outputTokens === "number" && Number.isFinite(u.outputTokens) ? u.outputTokens : 0;
+  return Math.max(0, Math.floor(inp + out));
+}
+
+function usageCostUsd(usage: unknown): number {
+  const cost = (usage as { cost?: { totalCost?: unknown } } | undefined)?.cost;
+  const v = cost?.totalCost;
+  return typeof v === "number" && Number.isFinite(v) ? Math.max(0, v) : 0;
+}
+
+/**
+ * Throws {@link BudgetExceededError} (with `partial` usage) when any budget
+ * limit is exceeded. Pure check — does not mutate state.
+ */
+export function checkBudget(
+  budget: Budget | undefined,
+  state: BudgetState | undefined,
+  opts?: { usage?: unknown; now?: number }
+): void {
+  if (!budget) return;
+  const now = opts?.now ?? nowMs();
+  const spawned = state?.spawned ?? 0;
+  const totalTokens = (state?.totalTokens ?? 0) + (opts?.usage !== undefined ? usageTokens(opts.usage) : 0);
+  const totalCostUsd = (state?.totalCostUsd ?? 0) + (opts?.usage !== undefined ? usageCostUsd(opts.usage) : 0);
+  const elapsedMs = state ? Math.max(0, now - state.startedAtMs) : 0;
+  const partial = {
+    usage: { inputTokens: 0, outputTokens: 0, totalTokens },
+    turns: 0 as number,
+    text: undefined as string | undefined,
+  };
+  if (budget.maxTotalSubagents !== undefined && spawned > budget.maxTotalSubagents) {
+    throw new BudgetExceededError(
+      `Sub-agent budget exceeded: spawned ${spawned} > maxTotalSubagents ${budget.maxTotalSubagents}.`,
+      { context: { partial } }
+    );
+  }
+  if (budget.maxTotalTokens !== undefined && totalTokens > budget.maxTotalTokens) {
+    throw new BudgetExceededError(
+      `Token budget exceeded: ${totalTokens} > maxTotalTokens ${budget.maxTotalTokens}.`,
+      { context: { partial } }
+    );
+  }
+  if (budget.maxCostUsd !== undefined && totalCostUsd > budget.maxCostUsd) {
+    throw new BudgetExceededError(
+      `Cost budget exceeded: $${totalCostUsd.toFixed(6)} > maxCostUsd $${budget.maxCostUsd}.`,
+      { context: { partial } }
+    );
+  }
+  if (budget.maxDurationMs !== undefined && state && elapsedMs > budget.maxDurationMs) {
+    throw new BudgetExceededError(
+      `Duration budget exceeded: ${Math.round(elapsedMs)}ms > maxDurationMs ${budget.maxDurationMs}ms.`,
+      { context: { partial } }
+    );
+  }
+}
+
+/**
+ * Adds worker usage to the parent's budget counters (Q-39). Never throws;
+ * call {@link checkBudget} afterwards to enforce.
+ */
+export function chargeBudgetUsage(parentAgent: Agent, usage: unknown): BudgetState {
+  const state = ensureBudgetState(parentAgent);
+  state.totalTokens += usageTokens(usage);
+  state.totalCostUsd += usageCostUsd(usage);
+  return state;
+}
+
+/**
+ * Reserves `count` spawns against `maxTotalSubagents` (Q-39). Increments the
+ * parent's `budgetState.spawned` and throws {@link BudgetExceededError} when
+ * the reservation would exceed the budget. Call before spawning.
+ */
+export function reserveSpawn(parentAgent: Agent, count = 1): BudgetState {
+  const state = ensureBudgetState(parentAgent);
+  const budget = readBudget(parentAgent);
+  const next = state.spawned + Math.max(0, Math.floor(count));
+  if (budget?.maxTotalSubagents !== undefined && next > budget.maxTotalSubagents) {
+    throw new BudgetExceededError(
+      `Sub-agent budget exceeded: spawning ${count} would reach ${next} > maxTotalSubagents ${budget.maxTotalSubagents}.`,
+      {
+        context: {
+          partial: {
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: state.totalTokens },
+            turns: 0,
+          },
+        },
+      }
+    );
+  }
+  state.spawned = next;
+  checkBudget(budget, state);
+  return state;
+}
+
+// ---------------------------------------------------------------------------
+// Single core loop note + streaming-loop guard (Q-44, partial).
+// The canonical run/stream loops live in `loop.ts` + `agent.ts` (other
+// owners) and are intentionally NOT duplicated here. This guard exists so
+// future consolidation can branch on streaming handles without importing
+// the loop.
+// ---------------------------------------------------------------------------
+
+/** Minimal shape of a streaming run handle (has subscribe + terminal promise). */
+export interface StreamingLoopHandle {
+  on: (...args: unknown[]) => unknown;
+  result: (...args: unknown[]) => Promise<unknown>;
+}
+
+/** Type guard for streaming-loop handles (Q-44). */
+export function isStreamingLoop(value: unknown): value is StreamingLoopHandle {
+  if (!value || typeof value !== "object") return false;
+  const r = value as Record<string, unknown>;
+  return typeof r["on"] === "function" && typeof r["result"] === "function";
 }
 
 function providerOf(modelStr: string | any | undefined): string | undefined {
@@ -235,7 +520,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
         : "No worker tools are available; omit the per-task tools list. ") +
       timeoutNote + " " +
       "Every entry in tasks MUST include all of: name (UPPER-KEBAB tag), instructions (system prompt for the worker), task (concrete assignment for the worker). " +
-      "Example: {\"tasks\": [{\"name\": \"HBM-PRICING-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst. Return sourced findings only.\", \"task\": \"Research HBM3E pricing, LTA structures, and supply constraints.\", \"tools\": [\"recent_news\"]}]}",
+      "Example: {\"tasks\": [{\"name\": \"RESEARCH-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst. Return sourced findings only.\", \"task\": \"Research market pricing and supply constraints.\", \"tools\": [\"recent_news\"]}]}",
     input: z.object({
       tasks: z
         .array(
@@ -275,12 +560,11 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           })
         )
         .min(1)
-        .max(maxSpawn)
         .describe(`Array of sub-agents to spawn (max ${maxSpawn} per call) — each gets a personalized prompt and runs statelessly on the developer-configured model`),
     }),
     execute: async ({ tasks }, context) => {
       if (!tasks || tasks.length === 0) {
-        return "Error: tasks array is empty. Provide at least one entry shaped like {\"name\": \"HBM-PRICING-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"<system prompt>\", \"task\": \"<concrete assignment>\"}. Fix the arguments and call spawn_subagents again.";
+        return "Error: tasks array is empty. Provide at least one entry shaped like {\"name\": \"RESEARCH-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"<system prompt>\", \"task\": \"<concrete assignment>\"}. Fix the arguments and call spawn_subagents again.";
       }
       const repaired = tasks.map((entry: Record<string, unknown>, index: number) => {
         const rec = (entry ?? {}) as Record<string, unknown>;
@@ -312,7 +596,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           `Error: tasks[${invalid}].task is missing and could not be inferred. ` +
           `Received keys: [${keys}]. ` +
           `Each tasks[] entry MUST include task (concrete assignment) plus instructions (system prompt) and name (UPPER-KEBAB tag). ` +
-          `Example: {\"name\": \"HBM-PRICING-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst.\", \"task\": \"Research HBM3E pricing.\"}. ` +
+          `Example: {\"name\": \"RESEARCH-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst.\", \"task\": \"Research market pricing.\"}. ` +
           `Fix the entry and call spawn_subagents again.`
         );
       }
@@ -341,9 +625,19 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
 
       // maxSpawn: trim extras safely — only the first N tasks run.
       const limitedTasks = repaired.slice(0, effectiveMax);
+      // Q-39: reserve spawns against maxTotalSubagents before running.
+      reserveSpawn(parentAgent, limitedTasks.length);
+      // Q-42: batch run id for lineage; per-worker ids attach to metadata.
+      const batchRunId = newRunId();
+      const parentRunId =
+        (parentAgent as unknown as { currentRunId?: unknown; runId?: unknown }).currentRunId ??
+        (parentAgent as unknown as { runId?: unknown }).runId;
+      const rootRunId =
+        (parentAgent as unknown as { rootRunId?: unknown }).rootRunId ?? parentRunId;
       const executedResults = await Promise.all(
         limitedTasks.map(async (t) => {
-          const startTime = Date.now();
+          const startTime = nowMs();
+          const workerTurnId = newTurnId();
           let sanitized = sanitizeXmlTag(t.name);
           let deduped = sanitized;
           let suffix = 1;
@@ -393,8 +687,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               turns: 0,
               steps: [],
             };
-            subagentTraces.set(trackingId, trace);
-            subagentTraces.set(displayId, trace);
+            insertTrace(trace, displayId);
             try {
               const parentTraces = ((parentAgent as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
               parentTraces[trackingId] = trace;
@@ -423,6 +716,8 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
                   trace.steps.push({ turn: turn.turns, type: "tool_result", name: tr.name, isError: tr.isError, timestamp });
                 }
                 trace.turns = Math.max(trace.turns, turn.turns);
+                trimTraceSteps(trace);
+                touchTrace(trace.trackingId);
                 notifyTrace(trackingId);
                 persistParent();
               } catch {}
@@ -475,6 +770,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
                   entry.thinking = partialThinking;
                   entry.timestamp = Date.now();
                 }
+                trimTraceSteps(trace);
                 notifyTrace(trackingId);
                 forwardDelta(delta, thinkingDelta);
               } catch {}
@@ -580,7 +876,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           try {
             const res: any = await runWithModel(chosenModel, apiKeyToUse, baseUrlToUse);
 
-            const durationMs = Date.now() - startTime;
+            const durationMs = Math.max(0, nowMs() - startTime);
             const rawText = (res as any).text;
             const subagentText = typeof rawText === "string" && rawText.trim().length > 0
               ? rawText
@@ -596,9 +892,26 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
                 ? { inputTokens: (res as any).usage.inputTokens ?? 0, outputTokens: (res as any).usage.outputTokens ?? 0, totalTokens: (res as any).usage.totalTokens ?? 0 }
                 : live.usage;
               live.text = subagentText;
+              trimTraceSteps(live);
+              touchTrace(live.trackingId);
               notifyTrace(trackingId);
             }
             try { (parentAgent as any).persistNow?.(); } catch {}
+            // Q-39: charge completed worker usage, then enforce token/cost/duration budgets.
+            try { chargeBudgetUsage(parentAgent, (res as any).usage); } catch {}
+            try {
+              checkBudget(readBudget(parentAgent), readBudgetState(parentAgent), { usage: undefined });
+            } catch (budgetErr) {
+              const be = budgetErr as { context?: { partial?: Record<string, unknown> } };
+              try {
+                if (be && typeof be === "object" && be.context?.partial) {
+                  (be.context.partial as Record<string, unknown>)["text"] = subagentText;
+                  (be.context.partial as Record<string, unknown>)["turns"] = (res as any).turns ?? 0;
+                  (be.context.partial as Record<string, unknown>)["usage"] = (res as any).usage;
+                }
+              } catch {}
+              throw budgetErr;
+            }
             const metadata: SubAgentExecutionMetadata = {
               name: subagentName,
               trackingId: displayId,
@@ -620,9 +933,21 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
               isError: false,
             };
+            // Q-42 lineage (untyped: response.ts is owned elsewhere) + Q-43 provider meta passthrough.
+            try {
+              const m = metadata as unknown as Record<string, unknown>;
+              m["runId"] = newRunId();
+              m["turnId"] = workerTurnId;
+              if (parentRunId !== undefined) m["parentRunId"] = parentRunId;
+              if (rootRunId !== undefined) m["rootRunId"] = rootRunId;
+              else if (parentRunId !== undefined) m["rootRunId"] = parentRunId;
+              else m["rootRunId"] = batchRunId;
+              if ((res as any).meta !== undefined) m["meta"] = (res as any).meta;
+            } catch {}
             return { name: subagentName, trackingId: displayId, text: subagentText, metadata };
           } catch (err: any) {
-            const durationMs = Date.now() - startTime;
+            if (err && (err as { code?: unknown }).code === "budget_exceeded") throw err;
+            const durationMs = Math.max(0, nowMs() - startTime);
             const errorMessage = err?.message || String(err);
             const prov = attemptedProvider || providerOf(chosenModelStrForProvider) || providerOf(chosenModel as any) || "unknown";
             const live = subagentTraces.get(trackingId);
@@ -649,6 +974,15 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               isError: true,
               error: errorMessage,
             };
+            try {
+              const m = metadata as unknown as Record<string, unknown>;
+              m["runId"] = newRunId();
+              m["turnId"] = workerTurnId;
+              if (parentRunId !== undefined) m["parentRunId"] = parentRunId;
+              if (rootRunId !== undefined) m["rootRunId"] = rootRunId;
+              else if (parentRunId !== undefined) m["rootRunId"] = parentRunId;
+              else m["rootRunId"] = batchRunId;
+            } catch {}
             return { name: subagentName, trackingId: displayId, text: `Error executing sub-agent ${t.name}: ${errorMessage}`, metadata };
           }
         })
@@ -706,9 +1040,12 @@ export function agentToTool(
       task: z.string().describe("The detailed instruction or prompt to pass to this sub-agent."),
     }),
     execute: async ({ task }, ctx) => {
-      const startTime = Date.now();
+      const startTime = nowMs();
       const trackingId = createTrackingId();
       const displayId = `${name}-${trackingId}`;
+      // Q-42 lineage for fixed-delegation calls.
+      const callRunId = newRunId();
+      const callTurnId = newTurnId();
       try {
         const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
         const subSessionId = createFixedChildSessionId(parentSessionId, sanitizeToolName(name));
@@ -722,8 +1059,7 @@ export function agentToTool(
           turns: 0,
           steps: [],
         };
-        subagentTraces.set(trackingId, trace);
-        subagentTraces.set(displayId, trace);
+        insertTrace(trace, displayId);
         const onWorkerTurn = (turn: { turns: number; text?: string; thinking?: string; toolCalls?: Array<{ name: string }>; toolResults?: Array<{ name: string; isError?: boolean }> }) => {
           try {
             liveTurn = turn.turns;
@@ -739,6 +1075,8 @@ export function agentToTool(
             for (const tc of turn.toolCalls ?? []) trace.steps.push({ turn: turn.turns, type: "tool_call", name: tc.name, timestamp });
             for (const tr of turn.toolResults ?? []) trace.steps.push({ turn: turn.turns, type: "tool_result", name: tr.name, isError: tr.isError, timestamp });
             trace.turns = Math.max(trace.turns, turn.turns);
+            trimTraceSteps(trace);
+            touchTrace(trace.trackingId);
             notifyTrace(trackingId);
           } catch {}
         };
@@ -774,6 +1112,7 @@ export function agentToTool(
               entry.thinking = partialThinking;
               entry.timestamp = Date.now();
             }
+            trimTraceSteps(trace);
             notifyTrace(trackingId);
             try {
               ctx?.onSubagentEvent?.({
@@ -798,7 +1137,7 @@ export function agentToTool(
           try { workerStream.off("text_delta", textListener); } catch {}
           try { workerStream.off("thinking_delta", thinkingListener); } catch {}
         }
-        const durationMs = Date.now() - startTime;
+        const durationMs = Math.max(0, nowMs() - startTime);
         const live = subagentTraces.get(trackingId);
         if (live) {
           live.status = "done";
@@ -806,6 +1145,8 @@ export function agentToTool(
           live.provider = response.provider;
           live.turns = response.turns ?? live.turns;
           live.text = response.text;
+          trimTraceSteps(live);
+          touchTrace(live.trackingId);
           notifyTrace(trackingId);
         }
         const metadata: SubAgentExecutionMetadata = {
@@ -828,6 +1169,12 @@ export function agentToTool(
           steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
           isError: false,
         };
+        try {
+          const m = metadata as unknown as Record<string, unknown>;
+          m["runId"] = callRunId;
+          m["turnId"] = callTurnId;
+          if (response.meta !== undefined) m["meta"] = response.meta;
+        } catch {}
         const wrapper: any = {
           xml: response.text,
           _subagentMetadata: [metadata],
@@ -835,12 +1182,14 @@ export function agentToTool(
         };
         return wrapper;
       } catch (err: any) {
-        const durationMs = Date.now() - startTime;
+        const durationMs = Math.max(0, nowMs() - startTime);
         const msg = err?.message || String(err);
         const live = subagentTraces.get(trackingId);
         if (live) {
           live.status = "error";
           live.error = msg;
+          trimTraceSteps(live);
+          touchTrace(live.trackingId);
           notifyTrace(trackingId);
         }
         const metadata: SubAgentExecutionMetadata = {
@@ -857,6 +1206,11 @@ export function agentToTool(
           isError: true,
           error: msg,
         };
+        try {
+          const m = metadata as unknown as Record<string, unknown>;
+          m["runId"] = callRunId;
+          m["turnId"] = callTurnId;
+        } catch {}
         const wrapper: any = {
           xml: `Error in ${name}: ${msg}`,
           _subagentMetadata: [metadata],

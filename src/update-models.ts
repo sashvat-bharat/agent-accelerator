@@ -8,10 +8,12 @@
  *   bun src/update-models.ts --ttl=24h
  */
 
-import { refreshModelCatalog, getCatalogStatus } from "./index.ts";
+import { refreshModelCatalog } from "./index.ts";
+import { ConfigError } from "./types/errors.ts";
 
 const args = process.argv.slice(2);
-const force = args.includes("--force") || !args.some((a) => a.startsWith("--ttl"));
+// Q-34: force is true only with explicit --force (previously also true when no --ttl).
+const force = args.includes("--force");
 
 let customTtlMs: number | undefined;
 for (const arg of args) {
@@ -23,6 +25,10 @@ for (const arg of args) {
       customTtlMs = parseFloat(val) * 60 * 1000;
     } else {
       customTtlMs = parseFloat(val);
+    }
+    // Q-34: reject non-numeric TTLs (e.g. --ttl=abc) instead of silently caching NaN.
+    if (!Number.isFinite(customTtlMs)) {
+      throw new ConfigError(`Invalid --ttl value "${val}": expected a number with optional h/m suffix (e.g. --ttl=24h).`);
     }
   }
 }

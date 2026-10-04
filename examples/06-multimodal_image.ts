@@ -9,6 +9,7 @@ const agent = new Agent({
   name: "Vision",
   instructions: "Describe what you see concisely.",
   model: process.env.MODEL,
+  fileAccess: { roots: ["./examples/files"] },
 });
 
 const res = await agent.run([{ type: "text", text: "What is in this image? One paragraph." }, { type: "image", image }]).catch(fail);

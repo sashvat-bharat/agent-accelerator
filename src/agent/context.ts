@@ -1,6 +1,8 @@
 import type { Message, ContentPart } from "../types/message.ts";
 import type { ToolCallRecord, ToolResultRecord } from "../types/tool.ts";
 import { safeStringify } from "../utils/serialization.ts";
+import { clearSessionRouting } from "../providers.ts";
+import { clearInteractionChains } from "../providers/google.ts";
 
 const USER_PART_TYPES = new Set(["text", "image", "audio", "video", "file"]);
 
@@ -158,5 +160,38 @@ export class AgentContext {
     next.thoughtSignatures = [...this.thoughtSignatures];
     next.cachedContentId = this.cachedContentId;
     return next;
+  }
+
+  /**
+   * Captures a JSON snapshot of conversation state for run-level rollback
+   * (Q-19). Returns stringified payloads so the checkpoint is detached from
+   * live mutation.
+   */
+  checkpoint(): { messages: string; signatures: string } {
+    return {
+      messages: JSON.stringify(this.messages),
+      signatures: JSON.stringify(this.thoughtSignatures),
+    };
+  }
+
+  /**
+   * Restores a checkpoint captured by `checkpoint()`. Corrupt checkpoints
+   * are ignored (current state kept). When `sessionId` is provided, also
+   * clears session-scoped provider state (Q-25) so a rollback never resumes
+   * a stale interaction chain.
+   */
+  rollback(cp: { messages: string; signatures: string }, sessionId?: string): void {
+    try {
+      const msgs = JSON.parse(cp.messages);
+      if (Array.isArray(msgs)) this.messages = msgs;
+    } catch {}
+    try {
+      const sigs = JSON.parse(cp.signatures);
+      if (Array.isArray(sigs)) this.thoughtSignatures = sigs;
+    } catch {}
+    if (sessionId) {
+      try { clearInteractionChains(sessionId); } catch {}
+      try { clearSessionRouting(sessionId); } catch {}
+    }
   }
 }

@@ -83,12 +83,14 @@ const agent = new Agent({
     enabled: true,
     model: saved?.subagentModel ?? process.env.SUB_AGENT_MODEL,
     maxSpawn: 4,
-    timeout: 60000,
+    workerTimeoutMs: 60000,
   },
-  thinkingLevel: initialThinking as any,
+  thinking: initialThinking as any,
   cache: (saved?.cache as any) ?? { retention: "implicit" as const },
   sessionId: saved?.sessionId,
   maxTurns: 10,
+  captureRaw: "redacted",
+  persist: undefined,
 });
 
 // Restores messages, system prompt, model/thinking/session when present.

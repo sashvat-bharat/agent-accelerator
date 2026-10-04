@@ -46,12 +46,22 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { getApiKey, getEnv } from "../utils/env.ts";
-import { buildSessionHeaders } from "../utils/headers.ts";
+import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { clampCacheKey } from "../utils/cache.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOnResponses } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
+import {
+  parseArguments,
+  normalizeThinkingParts,
+  newToolCallId,
+  redactedHeaders,
+  readErrorPayload,
+  incompleteStreamError,
+  combinedSignal,
+  timeoutFor,
+} from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider } from "../models/catalog.ts";
 import {
@@ -130,6 +140,12 @@ interface ResponsesObject {
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
+
+/** Q-18: Responses transport never echoes thought signatures (no wire field).
+ * Local helper documents the namespacing decision per provider file. */
+function withProviderSignature(_sig: string | undefined): { thoughtSignature?: undefined } {
+  return {};
+}
 
 /** Internal headers that must never leak onto native REST requests. */
 const INTERNAL_HEADERS = new Set([
@@ -305,7 +321,7 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
         const queue = (m.name && idsByName.get(m.name)) || [];
         items.push({
           type: "function_call_output",
-          call_id: queue.shift() || "call_0",
+          call_id: queue.shift() || newToolCallId(),
           output: m.content,
         });
         continue;
@@ -345,27 +361,6 @@ function mapUsage(raw?: ResponsesObject["usage"]): TokenUsage {
   };
 }
 
-function parseArguments(raw: string | undefined): Record<string, unknown> {
-  if (!raw) return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return { raw };
-  } catch {
-    return { raw };
-  }
-}
-
-/** Trims/collapses assembled thinking parts (no edge-tripling). */
-function normalizeThinkingParts(parts: string[]): string | undefined {
-  const cleaned = parts
-    .map((p) => p.replace(/\n{3,}/g, "\n\n").trim())
-    .filter((p) => p.length > 0);
-  return cleaned.length > 0 ? cleaned.join("\n") : undefined;
-}
-
 function parseResponse(
   response: ResponsesObject,
   modelId: string,
@@ -384,6 +379,7 @@ function parseResponse(
   }
 
   let text = "";
+  let refusalText = "";
   const thinkingParts: string[] = [];
   const toolCalls: ToolCallRecord[] = [];
 
@@ -391,6 +387,15 @@ function parseResponse(
     if (item.type === "message") {
       for (const block of item.content ?? []) {
         if (block.type === "output_text" && block.text) text += block.text;
+        else if (block.type === "refusal" && block.text) {
+          text += block.text;
+          refusalText += block.text;
+        }
+      }
+      const itemRefusal = (item as { refusal?: unknown }).refusal;
+      if (typeof itemRefusal === "string" && itemRefusal) {
+        text += itemRefusal;
+        refusalText += itemRefusal;
       }
     } else if (item.type === "reasoning") {
       for (const block of item.content ?? []) {
@@ -404,7 +409,7 @@ function parseResponse(
     } else if (item.type === "function_call") {
       const args = parseArguments(item.arguments);
       toolCalls.push({
-        id: item.id || item.call_id || `call_${Math.random().toString(36).slice(2, 9)}`,
+        id: item.id || item.call_id || newToolCallId(),
         callId: item.call_id,
         name: item.name || "unknown",
         arguments: args,
@@ -413,6 +418,17 @@ function parseResponse(
     }
   }
 
+  // Q-23: `incomplete` -> length (content-filter truncations surface as
+  // refusal when refusal text is present).
+  const incompleteReason = (response as { incomplete_details?: { reason?: string } }).incomplete_details?.reason;
+  const finishReason =
+    toolCalls.length > 0
+      ? "tool_calls"
+      : refusalText || incompleteReason === "content_filter"
+        ? "refusal"
+        : response.status === "incomplete"
+          ? "length"
+          : "stop";
   return {
     text,
     // Trim/collapse reasoning assembly (provider summaries can trail with
@@ -422,39 +438,13 @@ function parseResponse(
     thoughtSignature: undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     usage: mapUsage(response.usage),
-    finishReason: toolCalls.length > 0 ? "tool_calls" : response.status === "incomplete" ? "length" : "stop",
+    finishReason,
     responseId: response.id,
     model: modelId,
     provider: "openai",
     raw,
     durationMs,
   };
-}
-
-function redactedHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    out[k] = k.toLowerCase() === "authorization" ? "[REDACTED]" : v;
-  }
-  return out;
-}
-
-function readErrorPayload(bodyText: string): { message: string; code?: string | number; errorType?: string } {
-  try {
-    const parsed: unknown = JSON.parse(bodyText);
-    const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const err = (first as { error?: { message?: string; code?: string | number; type?: string } })?.error;
-    if (err && typeof err.message === "string") {
-      return {
-        message: err.message,
-        code: err.code,
-        ...(typeof err.type === "string" ? { errorType: err.type } : {}),
-      };
-    }
-    return { message: bodyText.slice(0, 300) };
-  } catch {
-    return { message: bodyText.slice(0, 300) };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -545,8 +535,10 @@ export class OpenAIResponsesProvider implements Provider {
     for (const [k, v] of Object.entries(headers)) {
       if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
     }
-    headers["Content-Type"] = "application/json";
-    headers["Authorization"] = `Bearer ${apiKey}`;
+    // Case-insensitive merge so a lowercase `authorization` custom header
+    // never coexists with the canonical bearer.
+    setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
+    setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
@@ -558,13 +550,18 @@ export class OpenAIResponsesProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, signal));
-    const text = await res.text();
-    const headers: Record<string, string> = {};
-    res.headers.forEach((v, k) => {
-      headers[k] = v;
-    });
-    return { status: res.status, statusText: res.statusText, headers, text };
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
+    try {
+      const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, effective));
+      const text = await res.text();
+      const headers: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        headers[k] = v;
+      });
+      return { status: res.status, statusText: res.statusText, headers, text };
+    } finally {
+      cleanup();
+    }
   }
 
   private throwIfError(
@@ -728,7 +725,22 @@ export class OpenAIResponsesProvider implements Provider {
           body,
         };
 
-        const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
+        // Q-17: optional per-call timeout races the linked abort signal.
+        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutTimer =
+          streamTimeoutMs && streamTimeoutMs > 0
+            ? setTimeout(() => {
+                try {
+                  linked.abort();
+                } catch {}
+              }, streamTimeoutMs)
+            : undefined;
+        let res: Response;
+        try {
+          res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
+        } finally {
+          if (streamTimeoutTimer) clearTimeout(streamTimeoutTimer);
+        }
         if (!res.ok || !res.body) {
           const text = !res.ok ? await res.text().catch(() => "") : "";
           if (!res.ok) this.throwIfError(res.status, url, text, clean);
@@ -738,7 +750,7 @@ export class OpenAIResponsesProvider implements Provider {
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
         });
-        const responseMeta = { status: res.status, statusText: res.statusText, headers: responseHeaders };
+        const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         const parser = new SSEParser();
@@ -750,6 +762,11 @@ export class OpenAIResponsesProvider implements Provider {
         const calls = new Map<number, { itemId: string; callId: string; name: string; startArgs: string; deltaArgs: string }>();
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
+        let sawFinishReason = false;
+        let sawUsage = false;
+        let refusalSeen = false;
+        let badFrames = 0;
+        let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
         let aborted = false;
@@ -765,11 +782,16 @@ export class OpenAIResponsesProvider implements Provider {
         );
 
         const handleMessage = (data: string): void => {
-          if (!data || data === "[DONE]") return;
+          if (!data || data === "[DONE]") {
+            if (data === "[DONE]") sawFinishReason = sawFinishReason || completedBody !== undefined || sawUsage;
+            return;
+          }
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
+            framesSeen += 1;
           } catch {
+            badFrames += 1;
             return;
           }
           const type = msg["type"] as string;
@@ -790,6 +812,17 @@ export class OpenAIResponsesProvider implements Provider {
           } else if (type === "response.output_text.delta" && typeof msg["delta"] === "string") {
             text += msg["delta"] as string;
             eventStream.push({ type: "text_delta", delta: msg["delta"] as string, partialText: text });
+          } else if (
+            type === "response.refusal.delta" ||
+            type === "response.output_refusal.delta"
+          ) {
+            // Q-23: refusal deltas carry the filter text; surface as text and
+            // remember for a `refusal` finish reason.
+            if (typeof msg["delta"] === "string" && msg["delta"]) {
+              text += msg["delta"] as string;
+              refusalSeen = true;
+              eventStream.push({ type: "text_delta", delta: msg["delta"] as string, partialText: text });
+            }
           } else if (
             (type === "response.reasoning_text.delta" || type === "response.reasoning.delta") &&
             typeof msg["delta"] === "string"
@@ -827,7 +860,11 @@ export class OpenAIResponsesProvider implements Provider {
             const response = (msg["response"] as ResponsesObject) ?? {};
             completedBody = msg["response"];
             if (response.id) responseId = response.id;
-            if (response.usage) usage = mapUsage(response.usage);
+            if (response.usage) {
+              usage = mapUsage(response.usage);
+              sawUsage = true;
+            }
+            sawFinishReason = true;
             if (type === "response.failed" || response.status === "failed") {
               const message =
                 (response.error && typeof response.error.message === "string" && response.error.message) ||
@@ -839,7 +876,12 @@ export class OpenAIResponsesProvider implements Provider {
             }
             // Non-streaming maps `incomplete` → `length` (max tokens). Streaming
             // must do the same — otherwise truncated turns misreport `stop`.
-            if (response.status === "incomplete") finishReason = "length";
+            // Q-23: content-filter incompletes surface as `refusal`.
+            const incompleteReason = (response as { incomplete_details?: { reason?: string } }).incomplete_details?.reason;
+            if (response.status === "incomplete") {
+              finishReason = incompleteReason === "content_filter" ? "refusal" : "length";
+              sawFinishReason = true;
+            }
             // Merge any full tool items delivered at completion (authoritative
             // when present) so nothing depends solely on delta assembly.
             for (const item of response.output ?? []) {
@@ -876,6 +918,17 @@ export class OpenAIResponsesProvider implements Provider {
                 }
               }
             }
+            // Merge completed refusal text (filter truncations often arrive only
+            // here with no preceding refusal delta).
+            for (const item of response.output ?? []) {
+              if (item.type !== "message") continue;
+              for (const block of item.content ?? []) {
+                if (block.type === "refusal" && block.text) {
+                  if (!text.includes(block.text)) text += block.text;
+                  refusalSeen = true;
+                }
+              }
+            }
             eventStream.push({ type: "usage", usage });
           }
         };
@@ -905,7 +958,7 @@ export class OpenAIResponsesProvider implements Provider {
         for (const c of calls.values()) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const record: ToolCallRecord = {
-            id: c.itemId || c.callId || `call_${Math.random().toString(36).slice(2, 9)}`,
+            id: c.itemId || c.callId || newToolCallId(),
             callId: c.callId || undefined,
             name: c.name,
             arguments: args,
@@ -916,9 +969,33 @@ export class OpenAIResponsesProvider implements Provider {
         }
 
         noteProviderTurn(sessionId, "openai");
-        if (toolCalls.length > 0) finishReason = "tool_calls";
+        if (toolCalls.length > 0) {
+          finishReason = "tool_calls";
+          sawFinishReason = true;
+        } else if (refusalSeen && finishReason !== "length") {
+          finishReason = "refusal";
+          sawFinishReason = true;
+        }
 
-        const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        // Q-23: terminal-state guard. Loops ending with no completed body, no
+        // finish_reason, and no usage while carrying no content must fail as
+        // `incomplete_stream` (retryable) instead of resolving empty success.
+        // Skipped for non-SSE payloads (e.g. JSON mocks in delegation tests)
+        // where no SSE frames were ever seen — those preserve legacy empty
+        // success rather than failing the caller on a mock artifact.
+        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
+        const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
+        const isSSEPayload =
+          (typeof ctEntry?.[1] === "string" && ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
+          framesSeen > 0 ||
+          badFrames > 0;
+        if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
+          eventStream.fail(incompleteStreamError("openai", clean));
+          return;
+        }
+
+        const cleanThinking = cleanThinkingEarly;
         const finalResponse = new AgentResponse({
           text,
           thinking: cleanThinking || undefined,
@@ -929,7 +1006,10 @@ export class OpenAIResponsesProvider implements Provider {
           responseId,
           model: clean,
           provider: "openai",
-          raw: { request: rawRequest, response: { ...responseMeta, body: completedBody } },
+          raw: {
+            request: rawRequest,
+            response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
+          },
           durationMs: Date.now() - startTime,
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });

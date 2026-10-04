@@ -98,19 +98,20 @@ function printBoxFooter(box: WorkerBox, note: string): void {
 // ---------------------------------------------------------------------------
 const agent = new Agent({
   name: "Identity Lead",
-  instructions: "You coordinate parallel research. Always delegate via spawn_subagents, then synthesize. Name workers with UPPER-KEBAB tags (e.g. HBM-PRICING-ANALYST).",
+  instructions: "You coordinate parallel research. Always delegate via spawn_subagents, then synthesize. Name workers with UPPER-KEBAB tags (e.g. RESEARCH-ANALYST).",
   model: MODEL,
   dynamicSubagents: {
     enabled: true,
     model: SUB_AGENT_MODEL,
     maxSpawn: 2,
     thinkingLevel: "medium",
-    timeout: 60000,
+    workerTimeoutMs: 60000,
   },
-  thinkingLevel: "medium",
+  thinking: "medium",
   // Durable persistence: the session file is rewritten after every step,
   // so a crash loses at most the in-flight step.
   persist: { dir: "sessions" },
+  captureRaw: "redacted",
 });
 
 console.log(CYAN + "parent session: " + agent.sessionId + RESET);
@@ -118,7 +119,7 @@ console.log(GREY + "(working — output prints when the final response lands)" +
 
 const res = await agent
   .run(
-    "Spawn 2 sub-agents in ONE spawn_subagents call: one researches HBM pricing in one sentence, the other researches AI power demand in one sentence. Then merge both into a 3-line report."
+    "Spawn 2 sub-agents in ONE spawn_subagents call: one researches battery pricing in one sentence, the other researches AI power demand in one sentence. Then merge both into a 3-line report."
   )
   .catch(fail);
 

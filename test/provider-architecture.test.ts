@@ -16,11 +16,10 @@ import {
   OPENAI_MODELS,
   OPENROUTER_MODELS,
 } from "../src/index.ts";
-import type {
-  GoogleGenerateContentRequest,
-  OpenAIChatCompletionRequest,
-  OpenRouterChatRequest,
-} from "../src/types/provider-payloads.ts";
+// Minimalist core: legacy wire types removed; structural records used instead.
+type GoogleGenerateContentRequest = Record<string, unknown>;
+type OpenAIChatCompletionRequest = Record<string, unknown>;
+type OpenRouterChatRequest = Record<string, unknown>;
 
 describe("Single-File Provider Architecture & Provider-Specific Types", () => {
   it("should have all providers defined in single .ts files and registered", () => {

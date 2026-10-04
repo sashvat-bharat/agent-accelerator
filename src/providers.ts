@@ -50,9 +50,8 @@ export function emitProviderWarning(options: {
   // Leading newline: warnings fire at the start of a turn's request build,
   // when the previous turn's streamed text may have left the terminal cursor
   // mid-line. Without it the warning glues onto streamed output.
-  console.warn(
-    `\n[Agent Accelerator] WARNING [${options.provider}] ${options.capability}${requested}: ${options.reason} Using ${options.fallback} instead.`
-  );
+  // Q-41 dual: telemetry bus (new) + console.warn (compat for existing captureWarnings tests; /cli logger replaces in 0.5).
+  { const msg = `[Agent Accelerator] WARNING [${options.provider}] ${options.capability}${requested}: ${options.reason} Using ${options.fallback} instead.`; try { (globalThis as any).__agentAccelTelemetry?.emitWarning?.({ code: "provider_warning", provider: options.provider, capability: options.capability, message: msg }); } catch {} try { (globalThis as any).__agentAccelWarnSink?.(msg, options); } catch {} try { console.warn(msg); } catch {} }
 }
 
 /** Clears deduped-warning state (mainly for tests). */
@@ -184,7 +183,7 @@ export function mapThinkingLevelToOpenRouterChat(
  * echoed but are NOT documented levels, so they clamp to `high` with a warning.
  *
  * @deprecated The Responses skin is discontinued for OpenRouter
- * (`src/providers/openrouter-responses.ts`, archived). Use
+ * (removed from core). Use
  * {@link mapThinkingLevelToOpenRouterChat} with the stable Chat Completions
  * transport instead.
  */

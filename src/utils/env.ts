@@ -2,16 +2,14 @@
  * Safe environment lookup for API keys and configurations
  */
 /**
- * Reads an environment/global value without assuming a Node-only runtime.
+ * Reads an environment value. Process env only. No globalThis fallback:
+ * DOM-clobberable in browsers (Q-05).
  *
  * @example `const apiKey = getEnv("OPENAI_API_KEY");`
  */
 export function getEnv(key: string, fallback?: string): string | undefined {
   if (typeof process !== "undefined" && process.env && process.env[key]) {
     return process.env[key];
-  }
-  if (typeof globalThis !== "undefined" && (globalThis as any)[key]) {
-    return (globalThis as any)[key];
   }
   return fallback;
 }
@@ -53,8 +51,6 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
       return getEnv("OPENROUTER_API_KEY");
     case "openai":
       return getEnv("OPENAI_BASE_API_KEY") || getEnv("OPENAI_API_KEY");
-    case "anthropic":
-      return getEnv("ANTHROPIC_API_KEY");
     default:
       return getEnv(`${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`);
   }

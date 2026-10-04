@@ -18,14 +18,117 @@ export function isBrowserRuntime(): boolean {
   }
 }
 
+/** Package version for User-Agent strings. Reads the npm-injected env first. */
+export function getPackageVersion(): string {
+  try {
+    const v = (globalThis as any).process?.env?.npm_package_version;
+    if (typeof v === "string" && v) return v;
+  } catch {}
+  return "0.4.0";
+}
+
 function getAgentAccelUserAgent(): string {
+  const version = getPackageVersion();
   try {
     const os = (globalThis as any).process?.getBuiltinModule?.("node:os") ?? null;
     if (os) {
-      return `agent-accel (${os.platform()} ${os.release()}; ${os.arch()})`;
+      return `agent-accel/${version} (${os.platform()} ${os.release()}; ${os.arch()})`;
     }
   } catch {}
-  return "agent-accel (linux; x64)";
+  return `agent-accel/${version} (linux; x64)`;
+}
+
+// Re-exported for tests/diagnostics (unused by wire headers directly).
+export const AGENT_ACCEL_USER_AGENT = getAgentAccelUserAgent;
+
+// ---------------------------------------------------------------------------
+// Attribution (Q-17): configurable, default none except OpenRouter legacy.
+// ---------------------------------------------------------------------------
+
+/** Configurable attribution headers (OpenRouter `HTTP-Referer` / `X-Title`). */
+export interface AttributionConfig {
+  referer?: string;
+  title?: string;
+  userAgent?: string;
+}
+
+let attribution: AttributionConfig = {};
+
+/**
+ * Configures global attribution headers. Defaults to none (no hardcoded
+ * site); OpenRouter keeps its legacy `sashvat.com` / `Agent Accelerator`
+ * fallback when no custom attribution is set (backward compat).
+ * @example `setAttribution({ referer: "https://example.com", title: "My App" });`
+ */
+export function setAttribution(cfg: AttributionConfig): void {
+  attribution = { ...attribution, ...cfg };
+  if (cfg.referer === undefined && cfg.title === undefined && cfg.userAgent === undefined) {
+    // Explicit empty reset: `setAttribution({})` clears prior values.
+    if (Object.keys(cfg).length === 0) attribution = {};
+  }
+}
+
+/** Returns a copy of the current attribution config (default `{}`). */
+export function getAttribution(): AttributionConfig {
+  return { ...attribution };
+}
+
+/** First-class providers with documented session-affinity headers. */
+const FIRST_CLASS = new Set(["google", "openai", "openrouter"]);
+
+/** Case-insensitive header lookup. */
+function findHeaderKey(headers: Record<string, string>, name: string): string | undefined {
+  const lower = name.toLowerCase();
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === lower) return k;
+  }
+  return undefined;
+}
+
+/**
+ * Sets a header case-insensitively (removes any case-variant duplicate
+ * first). Use when applying canonical `Authorization` / `Content-Type` over
+ * user-supplied `customHeaders` so `authorization` + `Authorization` never
+ * coexist on the wire.
+ * @example `setHeaderCaseInsensitive(headers, "Authorization", "Bearer k");`
+ */
+export function setHeaderCaseInsensitive(
+  headers: Record<string, string>,
+  name: string,
+  value: string
+): void {
+  const existing = findHeaderKey(headers, name);
+  if (existing !== undefined && existing !== name) delete headers[existing];
+  headers[name] = value;
+}
+
+// ---------------------------------------------------------------------------
+// Thought-signature namespacing (Q-18).
+// ---------------------------------------------------------------------------
+
+/**
+ * Tags a captured thought signature with its issuing provider so history
+ * builders echo it only on the same provider. Untagged (legacy) signatures
+ * echo everywhere for backward compat.
+ */
+export function withProviderSignature(
+  sig: string | undefined,
+  provider: string
+): { thoughtSignature?: string; thoughtSignatureProvider?: string } {
+  if (!sig) return {};
+  return { thoughtSignature: sig, thoughtSignatureProvider: provider };
+}
+
+/**
+ * Returns true when a stored signature may be echoed on `currentProvider`:
+ * untagged (legacy) echoes everywhere, tagged echoes only on a match.
+ */
+export function shouldEchoSignature(
+  storedProvider: unknown,
+  currentProvider: string
+): boolean {
+  if (!storedProvider) return true;
+  return storedProvider === currentProvider;
 }
 
 const BROWSER_DROPPED = new Set([
@@ -48,6 +151,13 @@ function stripForBrowser(headers: Record<string, string>): Record<string, string
 /**
  * Builds provider-specific session, cache-affinity, and attribution headers.
  *
+ * Q-17: attribution is configurable via `setAttribution()` (default none).
+ * OpenRouter keeps its legacy `https://sashvat.com` / `Agent Accelerator`
+ * fallback when no custom attribution is set. Custom (non-first-class)
+ * prefixes receive minimal `x-session-id`/`x-client-request-id` affinity only
+ * (no `session_id` alias, no attribution) when a session id is present.
+ * `customHeaders` merge case-insensitively against canonical names.
+ *
  * Browser note: custom `x-*` session/affinity headers force a CORS preflight
  * (`OPTIONS`) and providers only allow-list their own documented headers, so a
  * preflight failure surfaces as a bare `TypeError: Failed to fetch`. In browser
@@ -63,35 +173,59 @@ export function buildSessionHeaders(
   explicitSessionId?: string
 ): Record<string, string> {
   const browser = isBrowserRuntime();
-  const headers: Record<string, string> = {
-    ...(browser ? {} : { "User-Agent": "Agent-Accelerator/1.0" }),
-    ...(customHeaders ?? {}),
-  };
+  const attr = getAttribution();
+  const headers: Record<string, string> = {};
+  if (!browser) {
+    setHeaderCaseInsensitive(headers, "User-Agent", attr.userAgent ?? `Agent-Accelerator/${getPackageVersion()}`);
+  }
+  for (const [k, v] of Object.entries(customHeaders ?? {})) {
+    const existing = findHeaderKey(headers, k);
+    if (existing !== undefined && existing !== k) delete headers[existing];
+    headers[k] = v;
+  }
 
   const rawSessionId = explicitSessionId || cache?.sessionId;
   const sessionId = clampCacheKey(rawSessionId);
+  const isFirstClass = FIRST_CLASS.has(provider);
+
+  const getHeader = (name: string): string | undefined => {
+    const key = findHeaderKey(headers, name);
+    return key !== undefined ? headers[key] : undefined;
+  };
 
   if (sessionId && !browser) {
     if (provider === "openrouter") {
-      headers["x-session-id"] = sessionId;
-      headers["x-client-request-id"] = sessionId;
-      headers["HTTP-Referer"] = "https://sashvat.com";
-      headers["X-Title"] = "Agent Accelerator";
+      setHeaderCaseInsensitive(headers, "x-session-id", sessionId);
+      setHeaderCaseInsensitive(headers, "x-client-request-id", sessionId);
+      const referer = attr.referer ?? "https://sashvat.com";
+      const title = attr.title ?? "Agent Accelerator";
+      if (getHeader("HTTP-Referer") === undefined) headers["HTTP-Referer"] = referer;
+      if (getHeader("X-Title") === undefined) headers["X-Title"] = title;
     } else if (provider === "google") {
-      headers["x-goog-api-client"] = "agent-accel/1.0";
-      headers["x-session-id"] = sessionId;
-      headers["x-client-request-id"] = sessionId;
+      if (getHeader("x-goog-api-client") === undefined) {
+        headers["x-goog-api-client"] = "agent-accel/1.0";
+      }
+      setHeaderCaseInsensitive(headers, "x-session-id", sessionId);
+      setHeaderCaseInsensitive(headers, "x-client-request-id", sessionId);
+    } else if (isFirstClass) {
+      setHeaderCaseInsensitive(headers, "x-session-id", sessionId);
+      setHeaderCaseInsensitive(headers, "x-client-request-id", sessionId);
+      setHeaderCaseInsensitive(headers, "session_id", sessionId);
     } else {
-      headers["x-session-id"] = sessionId;
-      headers["x-client-request-id"] = sessionId;
-      headers["session_id"] = sessionId;
+      // Custom OpenAI-compatible prefix: headers-only affinity. Bodies carry
+      // no affinity key on strict endpoints, so only the minimal pair is
+      // sent (no `session_id` alias, no attribution).
+      setHeaderCaseInsensitive(headers, "x-session-id", sessionId);
+      setHeaderCaseInsensitive(headers, "x-client-request-id", sessionId);
     }
   } else if (provider === "openrouter") {
-    if (!headers["HTTP-Referer"]) headers["HTTP-Referer"] = "https://sashvat.com";
-    if (!headers["X-Title"]) headers["X-Title"] = "Agent Accelerator";
+    const referer = attr.referer ?? "https://sashvat.com";
+    const title = attr.title ?? "Agent Accelerator";
+    if (getHeader("HTTP-Referer") === undefined) headers["HTTP-Referer"] = referer;
+    if (getHeader("X-Title") === undefined) headers["X-Title"] = title;
   }
 
-  if (provider === "google" && !browser && !headers["x-goog-api-client"]) {
+  if (provider === "google" && !browser && getHeader("x-goog-api-client") === undefined) {
     headers["x-goog-api-client"] = "agent-accel/1.0";
   }
 

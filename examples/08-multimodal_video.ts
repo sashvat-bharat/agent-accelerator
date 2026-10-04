@@ -9,6 +9,7 @@ const agent = new Agent({
   name: "Watcher",
   instructions: "Describe what you see concisely.",
   model: process.env.MODEL,
+  fileAccess: { roots: ["./examples/files"] },
 });
 
 const res = await agent.run([

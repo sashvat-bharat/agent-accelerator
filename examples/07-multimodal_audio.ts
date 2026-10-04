@@ -5,6 +5,7 @@ const agent = new Agent({
   name: "Listener",
   instructions: "Describe what you hear concisely.",
   model: process.env.MODEL,
+  fileAccess: { roots: ["./examples/files"] },
 });
 
 const res = await agent.run([

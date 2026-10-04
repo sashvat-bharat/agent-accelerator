@@ -15,10 +15,12 @@ try {
       model: process.env.SUB_AGENT_MODEL,
       maxSpawn: 3,
       thinkingLevel: (process.env.SUB_AGENT_THINKING_LEVEL as any) ?? "low",
-      timeout: 60000,
+      workerTimeoutMs: 60000,
     },
-    thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
+    thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
     cache: { retention: (process.env.CACHE_RETENTION as any) ?? "implicit" },
+    budget: { maxCostUsd: 5, maxTotalSubagents: 12 },
+    limits: { requestTimeoutMs: 300_000 },
   });
 } catch (err: any) {
   console.error(`\n${err.message}\n`);

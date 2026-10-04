@@ -126,8 +126,19 @@ describe("modality guard (catalog-driven)", () => {
     ).not.toThrow();
   });
 
-  it("accepts pdf on space-bunny-alpha via live-verified override", async () => {
-    const { assertNoVideoPartsOnResponses } = await import("../src/index.ts");
+  it("accepts pdf on space-bunny-alpha via user-registered override", async () => {
+    const { assertNoVideoPartsOnResponses, registerModel, clearCustomModels } = await import("../src/index.ts");
+    clearCustomModels();
+    registerModel({
+      id: "stealth/space-bunny-alpha",
+      provider: "openrouter",
+      name: "space-bunny-alpha",
+      contextWindow: 128000,
+      maxOutputTokens: 8192,
+      modalities: { input: ["text", "image", "video", "pdf"], output: ["text"] },
+      capabilities: {},
+    } as any);
+    try {
     expect(() =>
       assertModalitiesSupported(
         ctx({ type: "file", file: "https://example.com/d.pdf", mimeType: "application/pdf" }),
@@ -143,6 +154,9 @@ describe("modality guard (catalog-driven)", () => {
     expect(() =>
       assertNoVideoPartsOnResponses(ctx({ type: "video", video: "https://x/y.mp4" }), "openai", "gpt-4o")
     ).toThrow(/unsupported video input/);
+    } finally {
+      clearCustomModels();
+    }
     expect(() =>
       assertNoVideoPartsOnResponses(ctx({ type: "text", text: "x" }), "openai", "gpt-4o")
     ).not.toThrow();

@@ -1,5 +1,5 @@
 import type { ThinkingConfig, CacheConfig, ServiceTier, TokenUsage } from "./core.ts";
-import type { ProviderContext, Message, ContentPart } from "./message.ts";
+import type { ProviderContext } from "./message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "./tool.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 
