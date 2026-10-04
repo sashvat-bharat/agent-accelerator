@@ -1,4 +1,4 @@
-import { Agent, SubAgent, tool, z } from "agent-accelerator";
+import { Agent, agentToTool, tool, z } from "agent-accelerator";
 import { fail } from "./_shared";
 
 // 1. Standard Function Tool (Tools are strictly deterministic functions)
@@ -8,6 +8,8 @@ const get_topic_brief = tool({
   input: z.object({
     topic: z.string().describe("Topic or technology to retrieve the briefing for"),
   }),
+  idempotent: true,
+  maxAttempts: 2,
   execute: async ({ topic }) => {
     return {
       topic,
@@ -64,20 +66,22 @@ const get_topic_brief = tool({
   },
 });
 
-// 2. Sub-Agent 1: In-depth Technical Researcher
-const researcher = new SubAgent({
+// 2. Sub-Agent 1: In-depth Technical Researcher (v0.4.0: Agent + agentToTool, SubAgent deprecated)
+// See agentToTool usage below; fixed workers run as isolated Sessions per call.
+const researcherAgent = new Agent({
   name: "deep_researcher",
   description: "Conducts deep technical and market research on complex topics.",
   instructions:
     "You are an exhaustive research specialist. Investigate the topic thoroughly, " +
     "providing deep technical breakthroughs, quantifiable metrics, and positive growth indicators.",
   model: process.env.SUB_AGENT_MODEL,
-  thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
-  cache: { retention: "short" },
+  thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
+  cache: { retention: "implicit" },
 });
+// agentToTool(researcherAgent) available for manual tool registration; subagents[] below uses isolated Sessions.
 
 // 3. Sub-Agent 2: Adversarial Critic
-const critic = new SubAgent({
+const criticAgent = new Agent({
   name: "adversarial_critic",
   description: "Critiques research findings, challenges assumptions, and identifies hidden risks.",
   instructions:
@@ -85,9 +89,10 @@ const critic = new SubAgent({
     "expose hidden economic bottlenecks, unverified assumptions, regulatory barriers, and potential failure points.",
   model: process.env.SUB_AGENT_MODEL,
   stateless: true, // One-shot evaluation mode: does not persist history across turns
-  thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
-  cache: { retention: "short" },
+  thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
+  cache: { retention: "implicit" },
 });
+
 
 // 4. Main Lead Agent
 // Demonstrates clean separation: tools in `tools: { ... }` and subagents in `subagents: [ ... ]`
@@ -101,11 +106,14 @@ const lead = new Agent({
     "4. Synthesize both viewpoints into an objective, executive-level decision report with a comparison table.\n" +
     "In your final turn, output your complete executive report directly as your final response.",
   model: process.env.MODEL,
-  // Clean separation of concerns:
+  // Clean separation of concerns (v0.4.0: fixed workers as isolated Sessions per call):
   tools: { get_topic_brief },
-  subagents: [researcher, critic],
-  thinkingLevel: "high",
-  cache: { retention: "short" },
+  subagents: [
+    { name: "deep_researcher", description: "Deep technical researcher", agent: researcherAgent },
+    { name: "adversarial_critic", description: "Adversarial critic", agent: criticAgent },
+  ],
+  thinking: "high",
+  cache: { retention: "implicit" },
 });
 
 // 5. Execution Pipeline with Streaming & Telemetry

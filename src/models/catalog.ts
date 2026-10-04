@@ -39,12 +39,6 @@ const MODALITY_OVERRIDES: Record<string, { input?: string[]; output?: string[] }
   // OpenRouter routes this free model to an endpoint that parses PDFs,
   // verified end-to-end via examples/08. If routing changes, the runtime
   // 404 still surfaces as a one-line error.
-  "openrouter/nvidia/nemotron-3.5-lightning:free": { input: ["text", "pdf"] },
-  // Live-verified 2026-09-24: `stealth/space-bunny-alpha` accepts PDF
-  // `input_file` over Responses and PDFs via the file-parser plugin over Chat
-  // Completions (Berkshire letter + sample-files PDF both completed), though
-  // models.dev lists text/image/video only.
-  "openrouter/stealth/space-bunny-alpha": { input: ["text", "image", "video", "pdf"] },
 };
 
 function applyModalityOverrides(provider: string, modelId: string, base: ModelModalities): ModelModalities {
@@ -68,9 +62,71 @@ function normalizeModelIdForLookup(modelId: string): string {
 
 // ---------------------------------------------------------------------------
 // Internal cache — battle-tested: avoid repeated global scans (7487 models)
+// Bound lookupCache to 1000 entries LRU (Q-33): evict oldest on overflow.
 // ---------------------------------------------------------------------------
 const lookupCache = new Map<string, ModelSpec | undefined>();
 const providerModelsCache = new Map<string, ModelSpec[]>();
+
+/** Bounded LRU set for lookupCache (Q-33): keeps at most 1000 entries. */
+function setLookupCache(key: string, value: ModelSpec | undefined): void {
+  if (lookupCache.has(key)) lookupCache.delete(key);
+  else if (lookupCache.size >= 1000) {
+    const oldest = lookupCache.keys().next();
+    if (!oldest.done) lookupCache.delete(oldest.value);
+  }
+  lookupCache.set(key, value);
+}
+
+// Custom-registered models (Q-33): checked first in getModelFromCatalog.
+const customModelRegistry = new Map<string, ModelSpec>();
+
+function customRegistryKey(provider: string, modelId: string): string {
+  return `${provider.toLowerCase()}::${modelId.toLowerCase()}`;
+}
+
+/**
+ * Registers a custom model spec that takes precedence over the catalog (Q-33).
+ * Stored in a separate map, checked first in `getModelFromCatalog`.
+ */
+export function registerModel(spec: ModelSpec): void {
+  if (!spec || typeof spec.id !== "string" || typeof spec.provider !== "string") {
+    throw new Error("[Agent Accelerator] registerModel requires spec.id and spec.provider strings");
+  }
+  customModelRegistry.set(customRegistryKey(String(spec.provider), String(spec.id)), { ...spec });
+  // Invalidate derived caches so the custom model is visible immediately.
+  lookupCache.clear();
+  providerModelsCache.clear();
+  globalIndex = null;
+}
+
+/** Clears custom-registered models (primarily for tests). */
+export function clearCustomModels(): void {
+  customModelRegistry.clear();
+  lookupCache.clear();
+  providerModelsCache.clear();
+  globalIndex = null;
+}
+
+/**
+ * Returns where a model resolves from without touching frozen types (Q-33):
+ * `"override"` for custom-registered or MODALITY_OVERRIDES-covered models,
+ * `"catalog"` for plain catalog hits, `"unknown"` when unresolvable.
+ */
+export function getModelSource(provider: string, modelId: string): "catalog" | "override" | "unknown" {
+  const p = String(provider ?? "").toLowerCase();
+  const m = String(modelId ?? "");
+  const norm = normalizeModelIdForLookup(m);
+  if (customModelRegistry.has(customRegistryKey(p, m)) || customModelRegistry.has(customRegistryKey(p, norm))) {
+    return "override";
+  }
+  if (
+    MODALITY_OVERRIDES[`${p}/${m}`] !== undefined ||
+    MODALITY_OVERRIDES[`${p}/${norm}`] !== undefined
+  ) {
+    return "override";
+  }
+  return getModelFromCatalog(provider, modelId) ? "catalog" : "unknown";
+}
 
 function mapCapabilities(raw: any, cost: ModelCost, reasoning: boolean, toolCall: boolean, modalities: ModelModalities) {
   return {
@@ -180,6 +236,16 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
   const modelId = modelIdInput.trim();
   let result: ModelSpec | undefined;
 
+  // Q-33: custom-registered models win over the catalog.
+  const customHit =
+    customModelRegistry.get(customRegistryKey(provider, modelId)) ??
+    customModelRegistry.get(customRegistryKey(provider, normalizeModelIdForLookup(modelId)));
+  if (customHit) {
+    result = { ...customHit };
+    setLookupCache(cacheKey, result);
+    return result;
+  }
+
   const aliasProviders = PROVIDER_ALIASES[provider] || [provider];
   const tryProviders = [...new Set([...aliasProviders, provider, provider.replace("-zen", ""), provider.replace("-go", "")])];
   const catalog = getActiveCatalog();
@@ -197,14 +263,17 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
       const raw = providerData.models[cand];
       if (raw) {
         result = mapModelSpec(p as ProviderId, cand, raw);
-        lookupCache.set(cacheKey, result);
+        setLookupCache(cacheKey, result);
         return result;
       }
     }
+    // Q-33: tightened fuzzy match — exact, `endsWith("/"+modelId)` boundary,
+    // or normalized equality. The old loose `modelId.endsWith(key)` is removed
+    // (e.g. "gpt-4o-mini-extra" must not match "mini").
     for (const [key, raw] of Object.entries(providerData.models as Record<string, any>)) {
-      if (key === modelId || key.endsWith(`/${modelId}`) || modelId.endsWith(key) || normalizeModelIdForLookup(key) === normalizeModelIdForLookup(modelId)) {
+      if (key === modelId || key.endsWith(`/${modelId}`) || normalizeModelIdForLookup(key) === normalizeModelIdForLookup(modelId)) {
         result = mapModelSpec(p as ProviderId, key, raw as any);
-        lookupCache.set(cacheKey, result);
+        setLookupCache(cacheKey, result);
         return result;
       }
     }
@@ -217,11 +286,11 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
   const hit = index.get(lowerModelId) || index.get(strippedLower);
   if (hit) {
     result = mapModelSpec(hit.provider, hit.key, hit.raw);
-    lookupCache.set(cacheKey, result);
+    setLookupCache(cacheKey, result);
     return result;
   }
 
-  lookupCache.set(cacheKey, undefined);
+  setLookupCache(cacheKey, undefined);
   return undefined;
 }
 
@@ -349,16 +418,16 @@ export class ThinkingLevelError extends Error {
     remedy?: string;
   }) {
     const remedyLines = opts.remedy
-      ? `\n\n  \x1b[36m💡 How to fix:\x1b[0m\n    ${opts.remedy}`
+      ? `\n\n  How to fix:\n    ${opts.remedy}`
       : "";
     const allowedLine = opts.allowedLevels.length > 0
-      ? `\n  \x1b[1mAllowed Levels:\x1b[0m  [${opts.allowedLevels.map((l) => `"${l}"`).join(", ")}]`
+      ? `\n  Allowed Levels:  [${opts.allowedLevels.map((l) => `"${l}"`).join(", ")}]`
       : "";
 
     const formattedMessage =
-      `\x1b[31m[Agent Accelerator] ThinkingLevel Mismatch for "${opts.provider}/${opts.modelId}":\x1b[0m\n` +
-      `  \x1b[1mRequested Level:\x1b[0m "${opts.requestedLevel}"\n` +
-      `  \x1b[1mIssue:\x1b[0m           ${opts.reason}` +
+      `[Agent Accelerator] ThinkingLevel Mismatch for "${opts.provider}/${opts.modelId}":\n` +
+      `  Requested Level: "${opts.requestedLevel}"\n` +
+      `  Issue:           ${opts.reason}` +
       allowedLine +
       remedyLines;
 
@@ -454,7 +523,7 @@ export function validateModelThinking(provider: string, modelId: string, request
  * @example `const googleModels = getModelsForProvider("google");`
  */
 export function getModelsForProvider(provider: string): ModelSpec[] {
-  if (providerModelsCache.has(provider)) return providerModelsCache.get(provider)!;
+  if (providerModelsCache.has(provider)) return [...providerModelsCache.get(provider)!];
   const aliases = PROVIDER_ALIASES[provider] || [provider];
   const seen = new Set<string>();
   const out: ModelSpec[] = [];
@@ -468,9 +537,19 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
       out.push(mapModelSpec(alias as ProviderId, key, raw));
     }
   }
+  // Q-33: include custom-registered models for this provider/alias set.
+  for (const spec of customModelRegistry.values()) {
+    if (aliases.includes(String(spec.provider)) || String(spec.provider) === provider) {
+      if (!seen.has(spec.id)) {
+        seen.add(spec.id);
+        out.push({ ...spec });
+      }
+    }
+  }
   // Also include our internal provider id mapping
+  // Q-33: return copies — cache the canonical array, hand out a fresh copy.
   providerModelsCache.set(provider, out);
-  return out;
+  return [...out];
 }
 
 export const GOOGLE_MODELS: ModelSpec[] = [...getModelsForProvider("google")];

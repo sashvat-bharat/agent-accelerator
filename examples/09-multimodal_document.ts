@@ -5,6 +5,8 @@ const agent = new Agent({
   name: "Reader",
   instructions: "Summarize documents concisely.",
   model: process.env.MODEL,
+  fileAccess: { roots: ["./examples/files"] },
+  captureRaw: "redacted",
 });
 
 const res = await agent.run([

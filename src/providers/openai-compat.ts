@@ -55,11 +55,21 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { getApiKey, getEnv } from "../utils/env.ts";
-import { buildSessionHeaders } from "../utils/headers.ts";
+import { buildSessionHeaders, setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
+import {
+  parseArguments,
+  normalizeThinkingParts,
+  newToolCallId,
+  redactedHeaders,
+  readErrorPayload,
+  incompleteStreamError,
+  combinedSignal,
+  timeoutFor,
+} from "./shared.ts";
 import { getModelFromCatalog, createGenericModelSpec } from "../models/catalog.ts";
 import {
   applyCacheForCustom,
@@ -189,8 +199,6 @@ function resolveBaseUrl(
     getEnv(`${envPrefix}_BASE_URL`) ||
     getEnv(`${envPrefix}_BASEURL`) ||
     getEnv(`${envPrefix}_API_BASE`) ||
-    getEnv("OPENAI_BASE_URL") ||
-    getEnv("OPENAI_API_BASE") ||
     DEFAULT_BASE_URL
   ).replace(/\/+$/, "");
 }
@@ -206,32 +214,36 @@ function resolveApiKey(
     configuredApiKey ||
     options?.env?.[`${envPrefix}_API_KEY`] ||
     options?.env?.[`${envPrefix}_BASE_API_KEY`] ||
-    options?.env?.["OPENAI_BASE_API_KEY"] ||
-    options?.env?.["OPENAI_API_KEY"] ||
     getEnv(`${envPrefix}_API_KEY`) ||
     getEnv(`${envPrefix}_BASE_API_KEY`) ||
-    getEnv("OPENAI_BASE_API_KEY") ||
-    getEnv("OPENAI_API_KEY") ||
     getApiKey(prefix, undefined, options?.env) ||
     undefined
   );
 }
 
-/** Local endpoints (loopback / LAN / *.local) may omit the API key. */
+/** Local endpoints (loopback / LAN / *.local) may omit the API key. Literal IPs only; hostnames like 10.evil.com are not local. */
 function isLocalEndpoint(baseUrl: string): boolean {
   try {
-    const host = new URL(baseUrl).hostname.toLowerCase();
+    let host = new URL(baseUrl).hostname.toLowerCase();
+    if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
     if (
       host === "localhost" ||
       host === "127.0.0.1" ||
       host === "0.0.0.0" ||
       host === "::1" ||
+      host === "0:0:0:0:0:0:0:1" ||
       host.endsWith(".local")
     ) {
       return true;
     }
-    if (/^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
-      return true;
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      const parts = host.split(".").map(Number);
+      const [a, b] = parts as number[];
+      if (a === 10) return true;
+      if (a === 172 && b !== undefined && b >= 16 && b <= 31) return true;
+      if (a === 192 && b === 168) return true;
+      if (a === 127) return true;
+      return false;
     }
     return false;
   } catch {
@@ -362,6 +374,10 @@ function resultToOutput(result: unknown): string {
  * transport: every turn carries everything). Prior-turn reasoning is NOT
  * resent — except echoed Gemini thought signatures, which strict
  * OpenAI-compatible endpoints require on tool calls they generated.
+ *
+ * Q-18: signatures are namespaced — only echo when the stored provider is
+ * `google` (or untagged legacy). Signatures minted by other providers never
+ * leak onto this transport.
  */
 async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessage[]> {
   const pairing = new Map<string, string>();
@@ -417,8 +433,9 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
           // Echo provider-issued thought signatures verbatim so endpoints
           // that minted them (Gemini behind a compat proxy) keep working.
           // Only present when a previous turn captured one — other endpoints
-          // never see this field.
-          if (part.thoughtSignature) {
+          // never see this field. Q-18: echo only google/untagged signatures.
+          const storedProvider = (part as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
+          if (part.thoughtSignature && shouldEchoSignature(storedProvider, "google")) {
             call.extra_content = { google: { thought_signature: part.thoughtSignature } };
           }
           calls.push(call);
@@ -473,32 +490,17 @@ function mapUsage(raw?: ChatResponse["usage"]): TokenUsage {
   return usage;
 }
 
-function parseArguments(raw: string | undefined): Record<string, unknown> {
-  if (!raw) return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return { raw };
-  } catch {
-    return { raw };
-  }
-}
-
-/** Trims/collapses assembled thinking parts (no edge-tripling). */
-function normalizeThinkingParts(parts: string[]): string | undefined {
-  const cleaned = parts
-    .map((p) => p.replace(/\n{3,}/g, "\n\n").trim())
-    .filter((p) => p.length > 0);
-  return cleaned.length > 0 ? cleaned.join("\n") : undefined;
-}
-
 function extractSignature(rawTc: {
   extra_content?: { google?: { thought_signature?: string } };
 }): string | undefined {
   const sig = rawTc?.extra_content?.google?.thought_signature;
   return typeof sig === "string" && sig ? sig : undefined;
+}
+
+/** Tags a captured compat signature with its issuing provider (`google`, Q-18). */
+function withCompatSignature(sig: string | undefined): { thoughtSignature?: string; thoughtSignatureProvider?: string } {
+  if (!sig) return {};
+  return { thoughtSignature: sig, thoughtSignatureProvider: "google" };
 }
 
 function throwResponseError(
@@ -528,7 +530,9 @@ function parseResponse(
 
   const choice = response.choices?.[0];
   const message = choice?.message;
-  const text = typeof message?.content === "string" ? message.content : "";
+  // Q-23: refusal content surfaces as text with a `refusal` finish reason.
+  const refusal = typeof message?.refusal === "string" && message.refusal ? message.refusal : "";
+  const text = typeof message?.content === "string" && message.content ? message.content : refusal;
   // Thinking tolerance: plain `reasoning` plus per-block texts (deepseek-style
   // `reasoning_details`). Details win when both ride along; both are
   // display-only here — never resent.
@@ -547,53 +551,32 @@ function parseResponse(
     const args = parseArguments(tc.function?.arguments);
     const sig = extractSignature(tc);
     toolCalls.push({
-      id: tc.id || `call_${Math.random().toString(36).slice(2, 9)}`,
+      id: tc.id || newToolCallId(),
       name: tc.function?.name || "unknown",
       arguments: args,
       rawArguments:
         typeof tc.function?.arguments === "string"
           ? tc.function.arguments
           : JSON.stringify(tc.function?.arguments ?? {}),
-      ...(sig ? { thoughtSignature: sig } : {}),
-    });
+      ...withCompatSignature(sig),
+    } as ToolCallRecord);
   }
 
   const wireReason = choice?.finish_reason ?? undefined;
+  const finishReason = toolCalls.length > 0 ? "tool_calls" : refusal ? "refusal" : wireReason || "stop";
   return {
     text,
     thinking: normalizeThinkingParts(thinkingParts),
     thoughtSignature: toolCalls.map((c) => c.thoughtSignature).find(Boolean),
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     usage: mapUsage(response.usage),
-    finishReason: toolCalls.length > 0 ? "tool_calls" : wireReason || "stop",
+    finishReason,
     responseId: response.id,
     model: modelId,
     provider: prefix as ProviderId,
     raw,
     durationMs,
   };
-}
-
-function redactedHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    out[k] = k.toLowerCase() === "authorization" ? "[REDACTED]" : v;
-  }
-  return out;
-}
-
-function readErrorPayload(bodyText: string): { message: string; code?: string | number } {
-  try {
-    const parsed: unknown = JSON.parse(bodyText);
-    const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const err = (first as { error?: { message?: string; code?: string | number } })?.error;
-    if (err && typeof err.message === "string") {
-      return { message: err.message, code: err.code };
-    }
-    return { message: bodyText.slice(0, 300) };
-  } catch {
-    return { message: bodyText.slice(0, 300) };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +699,19 @@ export class OpenAICompatibleChatProvider implements Provider {
     }
     // No reasoning / service_tier / session / cache body primitives: strict
     // endpoints reject unknown properties. Affinity is headers-only.
+    // Q-38: request usage on streams where supported so terminal accounting
+    // arrives on the final chunk. Strict servers that reject unknown fields
+    // opt out via `COMPAT_NO_STREAM_OPTIONS=1`; an explicit per-call
+    // `(options as any).streamOptions === false` also skips it.
+    if (stream) {
+      const noStreamOptions =
+        (options as { streamOptions?: unknown } | undefined)?.streamOptions === false ||
+        getEnv("COMPAT_NO_STREAM_OPTIONS") === "1" ||
+        (options?.env?.["COMPAT_NO_STREAM_OPTIONS"] === "1");
+      if (!noStreamOptions) {
+        (body as unknown as Record<string, unknown>)["stream_options"] = { include_usage: true };
+      }
+    }
     return body;
   }
 
@@ -735,8 +731,8 @@ export class OpenAICompatibleChatProvider implements Provider {
     for (const [k, v] of Object.entries(headers)) {
       if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
     }
-    headers["Content-Type"] = "application/json";
-    if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+    setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
+    if (apiKey) setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
@@ -748,13 +744,18 @@ export class OpenAICompatibleChatProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, signal));
-    const text = await res.text();
-    const headers: Record<string, string> = {};
-    res.headers.forEach((v, k) => {
-      headers[k] = v;
-    });
-    return { status: res.status, statusText: res.statusText, headers, text };
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
+    try {
+      const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, effective));
+      const text = await res.text();
+      const headers: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        headers[k] = v;
+      });
+      return { status: res.status, statusText: res.statusText, headers, text };
+    } finally {
+      cleanup();
+    }
   }
 
   private throwIfError(
@@ -764,13 +765,14 @@ export class OpenAICompatibleChatProvider implements Provider {
     modelId: string
   ): void {
     if (status >= 200 && status < 300) return;
-    const { message, code } = readErrorPayload(bodyText);
+    const { message, code, errorType } = readErrorPayload(bodyText);
     const err: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
     (err as Record<string, unknown>)["statusCode"] = status;
     (err as Record<string, unknown>)["status"] = status;
     (err as Record<string, unknown>)["responseBody"] = bodyText.slice(0, 500);
     (err as Record<string, unknown>)["url"] = url.split("?")[0];
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
+    if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
     throw toConciseProviderError(err, this.prefix, modelId);
   }
 
@@ -904,7 +906,21 @@ export class OpenAICompatibleChatProvider implements Provider {
           body,
         };
 
-        const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
+        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutTimer =
+          streamTimeoutMs && streamTimeoutMs > 0
+            ? setTimeout(() => {
+                try {
+                  linked.abort();
+                } catch {}
+              }, streamTimeoutMs)
+            : undefined;
+        let res: Response;
+        try {
+          res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
+        } finally {
+          if (streamTimeoutTimer) clearTimeout(streamTimeoutTimer);
+        }
         if (!res.ok || !res.body) {
           const text = !res.ok ? await res.text().catch(() => "") : "";
           if (!res.ok) this.throwIfError(res.status, url, text, clean);
@@ -914,7 +930,7 @@ export class OpenAICompatibleChatProvider implements Provider {
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
         });
-        const responseMeta = { status: res.status, statusText: res.statusText, headers: responseHeaders };
+        const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         const parser = new SSEParser();
@@ -928,6 +944,11 @@ export class OpenAICompatibleChatProvider implements Provider {
         const signatures = new Map<number, string>();
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
+        let sawFinishReason = false;
+        let sawUsage = false;
+        let refusalSeen = false;
+        let badFrames = 0;
+        let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
         let aborted = false;
@@ -943,11 +964,17 @@ export class OpenAICompatibleChatProvider implements Provider {
         );
 
         const handleMessage = (data: string): void => {
-          if (!data || data === "[DONE]") return;
+          if (!data) return;
+          if (data === "[DONE]") {
+            sawFinishReason = sawFinishReason || completedBody !== undefined || sawUsage;
+            return;
+          }
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
+            framesSeen += 1;
           } catch {
+            badFrames += 1;
             return;
           }
           // Mid-stream provider error: top-level `error`, HTTP stays 200.
@@ -969,6 +996,13 @@ export class OpenAICompatibleChatProvider implements Provider {
           const choice = (Array.isArray(msg["choices"]) ? (msg["choices"] as Record<string, unknown>[])[0] : undefined) ?? {};
           const delta = (choice["delta"] as Record<string, unknown>) ?? {};
           // Text delta (content-free accounting frames carry "" — ignored).
+          // Q-23: refusal deltas surface as text with a `refusal` finish.
+          const deltaRefusal = delta["refusal"];
+          if (typeof deltaRefusal === "string" && deltaRefusal) {
+            text += deltaRefusal;
+            refusalSeen = true;
+            eventStream.push({ type: "text_delta", delta: deltaRefusal, partialText: text });
+          }
           if (typeof delta["content"] === "string" && delta["content"]) {
             text += delta["content"] as string;
             eventStream.push({ type: "text_delta", delta: delta["content"] as string, partialText: text });
@@ -1042,10 +1076,12 @@ export class OpenAICompatibleChatProvider implements Provider {
               throw toConciseProviderError(failure, prefix, clean);
             }
             finishReason = fr;
+            sawFinishReason = true;
           }
           const chunkUsage = msg["usage"] as ChatResponse["usage"] | undefined;
           if (chunkUsage) {
             usage = mapUsage(chunkUsage);
+            sawUsage = true;
             completedBody = completedBody ?? msg;
             eventStream.push({ type: "usage", usage });
           }
@@ -1077,20 +1113,41 @@ export class OpenAICompatibleChatProvider implements Provider {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const sig = signatures.get(index);
           const record: ToolCallRecord = {
-            id: c.id || `call_${Math.random().toString(36).slice(2, 9)}`,
+            id: c.id || newToolCallId(),
             name: c.name,
             arguments: args,
             rawArguments: c.startArgs + c.deltaArgs,
-            ...(sig ? { thoughtSignature: sig } : {}),
-          };
+            ...withCompatSignature(sig),
+          } as ToolCallRecord;
           toolCalls.push(record);
           eventStream.push({ type: "tool_call_complete", toolCall: record });
         }
 
         noteProviderTurn(sessionId, prefix);
-        if (toolCalls.length > 0) finishReason = "tool_calls";
+        if (toolCalls.length > 0) {
+          finishReason = "tool_calls";
+          sawFinishReason = true;
+        } else if (refusalSeen) {
+          finishReason = "refusal";
+          sawFinishReason = true;
+        }
 
-        const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
+        // instead of resolving empty success. Skipped for non-SSE payloads
+        // (JSON mocks) where no SSE frames were ever seen.
+        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
+        const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
+        const isSSEPayload =
+          (typeof ctEntry?.[1] === "string" && ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
+          framesSeen > 0 ||
+          badFrames > 0;
+        if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
+          eventStream.fail(incompleteStreamError(prefix, clean));
+          return;
+        }
+
+        const cleanThinking = cleanThinkingEarly;
         const finalThoughtSignature = toolCalls.map((c) => c.thoughtSignature).find(Boolean);
         const finalResponse = new AgentResponse({
           text,
@@ -1102,7 +1159,10 @@ export class OpenAICompatibleChatProvider implements Provider {
           responseId,
           model: clean,
           provider: prefix as ProviderId,
-          raw: { request: rawRequest, response: { ...responseMeta, body: completedBody } },
+          raw: {
+            request: rawRequest,
+            response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
+          },
           durationMs: Date.now() - startTime,
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });

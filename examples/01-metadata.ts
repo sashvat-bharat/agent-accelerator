@@ -30,6 +30,9 @@ const get_system_metrics = tool({
   input: z.object({
     clusterId: z.string().describe("Target cluster ID, e.g. 'us-east-prod-1'"),
   }),
+  idempotent: true,
+  maxAttempts: 2,
+  maxResultChars: 20_000,
   execute: async ({ clusterId }) => {
     // Simulated tool execution
     return {
@@ -60,10 +63,13 @@ try {
       enabled: true,
       model: process.env.SUB_AGENT_MODEL || "google/gemini-3.5-flash-lite",
       maxSpawn: 4,
-      timeout: 0,
+      workerTimeoutMs: 0,
     },
-    thinkingLevel: (process.env.THINKING_LEVEL as any) ?? "medium",
-    cache: { retention: "short" },
+    thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
+    cache: { retention: "implicit" },
+    captureRaw: "redacted",
+    budget: { maxCostUsd: 2 },
+    limits: { requestTimeoutMs: 300_000, streamIdleTimeoutMs: 300_000 },
     tools: { get_system_metrics },
   });
 } catch (err: any) {

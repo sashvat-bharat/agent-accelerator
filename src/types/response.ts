@@ -43,6 +43,61 @@ export interface SubAgentExecutionMetadata {
   steps?: SubAgentStep[];
 }
 
+/** Canonical finish reasons surfaced on AgentResponse (provider-agnostic).
+ * Vendors use varied strings (`end_turn`, `stop_sequence`, `max_tokens`,
+ * `tool_use`, ...); adapters map them to these values and preserve the
+ * original in `rawFinishReason`. Unknown non-empty reasons map to `"error"`.
+ * The `(string & {})` extension keeps vendor passthrough assignable at
+ * provider call sites that forward raw strings (normalize with
+ * `normalizeFinishReason` to canonicalize). */
+export type FinishReason =
+  | "stop"
+  | "tool_calls"
+  | "length"
+  | "content_filter"
+  | "refusal"
+  | "max_turns"
+  | "error"
+  | (string & {});
+
+/** Maps a vendor finish reason to canonical FinishReason + raw passthrough.
+ * Known aliases collapse to the canonical set; empty/undefined stays
+ * undefined; any other non-empty string maps to `"error"` with the original
+ * preserved in `rawFinishReason` (Q-04). */
+export function normalizeFinishReason(raw?: string): {
+  finishReason?: FinishReason;
+  rawFinishReason?: string;
+} {
+  if (raw === undefined || raw === null || raw === "") return {};
+  const r = String(raw);
+  const lower = r.toLowerCase();
+  const map: Record<string, FinishReason> = {
+    stop: "stop",
+    end_turn: "stop",
+    stop_sequence: "stop",
+    completed: "stop",
+    complete: "stop",
+    done: "stop",
+    tool_calls: "tool_calls",
+    tool_use: "tool_calls",
+    function_call: "tool_calls",
+    tool_call: "tool_calls",
+    length: "length",
+    max_tokens: "length",
+    max_turns: "max_turns",
+    content_filter: "content_filter",
+    refusal: "refusal",
+    refused: "refusal",
+    error: "error",
+    failed: "error",
+    cancelled: "error",
+    canceled: "error",
+  };
+  const mapped = map[lower] ?? map[r];
+  if (mapped) return r === mapped ? { finishReason: mapped } : { finishReason: mapped, rawFinishReason: r };
+  return { finishReason: "error", rawFinishReason: r };
+}
+
 /** JSON representation returned by AgentResponse.toJSON(). */
 export interface AgentResponseJSON {
   text: string;
@@ -55,7 +110,9 @@ export interface AgentResponseJSON {
   responseId?: string;
   model: string;
   provider: ProviderId | string;
-  finishReason?: string;
+  finishReason?: FinishReason;
+  /** Original vendor finish string when it differs from canonical `finishReason` (Q-04). */
+  rawFinishReason?: string;
   durationMs: number;
   raw: ProviderRawData;
   turns: number;
@@ -73,7 +130,9 @@ export class AgentResponse {
   readonly responseId?: string;
   readonly model: string;
   readonly provider: ProviderId | string;
-  readonly finishReason?: string;
+  readonly finishReason?: FinishReason;
+  /** Original vendor finish string when it differs from canonical `finishReason` (Q-04). */
+  readonly rawFinishReason?: string;
   readonly durationMs: number;
   readonly raw: ProviderRawData;
   readonly turns: number;
@@ -96,7 +155,8 @@ export class AgentResponse {
     responseId?: string;
     model: string;
     provider: ProviderId | string;
-    finishReason?: string;
+    finishReason?: FinishReason;
+    rawFinishReason?: string;
     durationMs: number;
     raw: ProviderRawData;
     turns?: number;
@@ -112,6 +172,7 @@ export class AgentResponse {
     this.model = data.model;
     this.provider = data.provider;
     this.finishReason = data.finishReason;
+    this.rawFinishReason = data.rawFinishReason;
     this.durationMs = data.durationMs;
     this.raw = data.raw;
     this.turns = data.turns ?? 1;
@@ -136,6 +197,7 @@ export class AgentResponse {
       model: this.model,
       provider: this.provider,
       finishReason: this.finishReason,
+      rawFinishReason: this.rawFinishReason,
       durationMs: this.durationMs,
       raw: this.raw,
       turns: this.turns,
@@ -156,6 +218,8 @@ export type StreamEventType =
   | "tool_call_delta"
   | "tool_call_complete"
   | "tool_result"
+  | "tool_start"
+  | "tool_end"
   | "subagent_complete"
   | "subagent_delta"
   | "steer_injected"
@@ -167,10 +231,16 @@ export type StreamEventType =
 /** Payload for one streaming text, thinking, tool, usage, or lifecycle event. */
 export interface StreamEvent {
   type: StreamEventType;
+  /** Schema version for typed consumers (Q-40). Currently always 1 when present. */
+  schemaVersion?: 1;
   delta?: string;
   thinkingDelta?: string;
   toolCall?: ToolCallRecord;
   toolResult?: ToolResultRecord;
+  /** Batch tool calls for `tool_start` events (Q-40). */
+  toolCalls?: ToolCallRecord[];
+  /** Batch tool results for `tool_end` events (Q-40). */
+  toolResults?: ToolResultRecord[];
   subagent?: SubAgentExecutionMetadata;
   /** Tracking id of the worker emitting a `subagent_delta` event. */
   subagentTrackingId?: string;
@@ -182,9 +252,54 @@ export interface StreamEvent {
   queueLength?: number;
   usage?: TokenUsage;
   responseId?: string;
+  /** Canonical finish reason when known; vendor strings pass through as-is
+   * for provider compat (normalize with `normalizeFinishReason`). */
   finishReason?: string;
+  /** Original vendor finish string when it differs from canonical (Q-04). */
+  rawFinishReason?: string;
   error?: Error | unknown;
   partialText?: string;
   partialThinking?: string;
   raw?: ProviderRawData;
 }
+
+/** Typed (discriminated) stream event schema, version 1 (Q-40).
+ * `StreamEvent` stays the permissive compat shape; use this union when you
+ * want exhaustive switching (e.g. `tool_start`/`tool_end` lifecycle). */
+export type StreamEventV2 =
+  | { schemaVersion: 1; type: "start"; responseId?: string }
+  | { schemaVersion: 1; type: "text_start"; responseId?: string }
+  | { schemaVersion: 1; type: "text_delta"; delta: string; partialText?: string }
+  | { schemaVersion: 1; type: "text_end"; partialText?: string }
+  | { schemaVersion: 1; type: "thinking_start"; responseId?: string }
+  | { schemaVersion: 1; type: "thinking_delta"; thinkingDelta: string; partialThinking?: string }
+  | { schemaVersion: 1; type: "thinking_end"; partialThinking?: string }
+  | { schemaVersion: 1; type: "tool_call_start"; toolCall: ToolCallRecord }
+  | { schemaVersion: 1; type: "tool_call_delta"; toolCall: ToolCallRecord; delta?: string }
+  | { schemaVersion: 1; type: "tool_call_complete"; toolCall: ToolCallRecord }
+  | { schemaVersion: 1; type: "tool_result"; toolResult: ToolResultRecord }
+  | { schemaVersion: 1; type: "tool_start"; toolCalls: ToolCallRecord[] }
+  | { schemaVersion: 1; type: "tool_end"; toolResults: ToolResultRecord[] }
+  | { schemaVersion: 1; type: "subagent_complete"; subagent: SubAgentExecutionMetadata }
+  | {
+      schemaVersion: 1;
+      type: "subagent_delta";
+      subagentTrackingId: string;
+      delta?: string;
+      thinkingDelta?: string;
+      partialText?: string;
+      partialThinking?: string;
+    }
+  | { schemaVersion: 1; type: "steer_injected"; injectedPrompt: string; queueLength?: number }
+  | { schemaVersion: 1; type: "queued"; queuedPrompt: string; queueLength?: number }
+  | { schemaVersion: 1; type: "usage"; usage: TokenUsage }
+  | {
+      schemaVersion: 1;
+      type: "done";
+      delta?: string;
+      usage?: TokenUsage;
+      finishReason?: FinishReason | string;
+      rawFinishReason?: string;
+      responseId?: string;
+    }
+  | { schemaVersion: 1; type: "error"; error: Error | unknown };

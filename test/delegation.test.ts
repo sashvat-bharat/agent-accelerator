@@ -101,12 +101,9 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(taskShape.model).toBeUndefined();
     expect(taskShape.tools).toBeDefined();
     expect(taskShape.timeoutMs).toBeDefined();
-    // maxSpawn is enforced at the schema level: 3 tasks with maxSpawn 2 must fail parsing
-    let threw = false;
-    try {
-      (spawn.input as any).parse({ tasks: [{ task: "a" }, { task: "b" }, { task: "c" }] });
-    } catch { threw = true; }
-    expect(threw).toBe(true);
+    // Q-34: maxSpawn enforced at execution (extras trimmed), schema allows oversize for forward-compat
+    const parsed = (spawn.input as any).parse({ tasks: [{ task: "a" }, { task: "b" }, { task: "c" }] });
+    expect(parsed.tasks.length).toBe(3);
   });
 
   it("should expose detailed sub-agent metadata breakdown in AgentResponse JSON", () => {

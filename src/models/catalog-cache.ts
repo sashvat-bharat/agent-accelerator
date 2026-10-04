@@ -1,13 +1,21 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 import { getEnv } from "../utils/env.ts";
 
 /** Default TTL: 12 Hours (in milliseconds). */
 export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
 
+/** Max accepted models.dev payload size: 15MB (Q-16a). Larger payloads are rejected before parse. */
+export const MAX_CATALOG_PAYLOAD_BYTES = 15 * 1024 * 1024;
+
 let globalCatalogTtlMs = DEFAULT_CATALOG_TTL_MS;
 
-/** Sets the global model catalog cache TTL in milliseconds. */
+/** Sets the global model catalog cache TTL in milliseconds.
+ * Note (Q-16a): cache files carry their own `ttlMs`. A global `setCatalogTTL`
+ * does not rewrite in-flight file TTLs; it takes effect on the next refresh
+ * (fresh download) or when the cached file has no `ttlMs` of its own.
+ */
 export function setCatalogTTL(ttlMs: number): void {
   if (Number.isFinite(ttlMs) && ttlMs > 0) {
     globalCatalogTtlMs = ttlMs;
@@ -77,9 +85,9 @@ export function getCacheDir(): string {
   return path.resolve(process.cwd(), "src/data");
 }
 
-/** Non-configurable cache file path: src/data/models.dev.json */
+/** Cache file path: `<cacheDir>/models.dev.json`, honoring AGENT_CACHE_DIR (Q-16a/Q-34). */
 export function getCacheFilePath(): string {
-  return path.resolve(process.cwd(), "src/data/models.dev.json");
+  return path.join(getCacheDir(), "models.dev.json");
 }
 
 function readJsonFileSync(filePath: string): any {
@@ -97,7 +105,20 @@ function writeJsonFileSync(filePath: string, data: any): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(filePath, JSON.stringify(data), "utf-8");
+  // Atomic tmp+rename with 0600 so a crash never leaves half-written JSON (Q-16a).
+  const rand = Math.random().toString(36).slice(2, 10);
+  const tmp = `${filePath}.tmp-${process.pid}-${rand}`;
+  fs.writeFileSync(tmp, JSON.stringify(data), { encoding: "utf-8", mode: 0o600 });
+  try { fs.chmodSync(tmp, 0o600); } catch {}
+  fs.renameSync(tmp, filePath);
+}
+
+/** Verifies optional sha256 pin from MODELS_DEV_SHA256 (Q-16a). Returns false on mismatch. */
+export function verifyCatalogSha256(text: string): boolean {
+  const pin = getEnv("MODELS_DEV_SHA256")?.trim().toLowerCase();
+  if (!pin) return true;
+  const hex = createHash("sha256").update(text, "utf8").digest("hex").toLowerCase();
+  return hex === pin;
 }
 
 // In-memory catalog state
@@ -225,6 +246,17 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let freshData: Record<string, any>;
 
+  const fallbackToDiskCache = (): void => {
+    const existing = readJsonFileSync(cachePath);
+    if (existing && existing.data) {
+      activeCatalog = existing.data;
+      activeFetchedAt = existing.fetchedAt;
+      activeTtlMs = existing.ttlMs || effectiveTtl;
+      activeFromCache = true;
+      notifyUpdateListeners();
+    }
+  };
+
   try {
     const res = await fetch(apiUrl, {
       headers: {
@@ -238,33 +270,40 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
       throw new Error(`HTTP ${res.status} ${res.statusText}`);
     }
 
-    freshData = (await res.json()) as Record<string, any>;
+    // Q-16a: size-cap before parse (check text length, reject >15MB).
+    const text = await res.text();
+    if (text.length > MAX_CATALOG_PAYLOAD_BYTES) {
+      clearTimeout(timer);
+      fallbackToDiskCache();
+      return getCatalogStatus();
+    }
+    // Q-16a: optional sha256 pin via MODELS_DEV_SHA256.
+    if (!verifyCatalogSha256(text)) {
+      clearTimeout(timer);
+      fallbackToDiskCache();
+      return getCatalogStatus();
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      clearTimeout(timer);
+      fallbackToDiskCache();
+      return getCatalogStatus();
+    }
+    freshData = parsed as Record<string, any>;
 
     // Never let a non-catalog payload (mocked fetch, proxy error page,
     // chat-completion stub) overwrite the good on-disk cache.
     if (!isValidCatalogPayload(freshData)) {
       clearTimeout(timer);
-      const existing = readJsonFileSync(cachePath);
-      if (existing && existing.data) {
-        activeCatalog = existing.data;
-        activeFetchedAt = existing.fetchedAt;
-        activeTtlMs = existing.ttlMs || effectiveTtl;
-        activeFromCache = true;
-        notifyUpdateListeners();
-      }
+      fallbackToDiskCache();
       return getCatalogStatus();
     }
   } catch (err: any) {
     clearTimeout(timer);
     // If download fails, retain disk cache if available
-    const existing = readJsonFileSync(cachePath);
-    if (existing && existing.data) {
-      activeCatalog = existing.data;
-      activeFetchedAt = existing.fetchedAt;
-      activeTtlMs = existing.ttlMs || effectiveTtl;
-      activeFromCache = true;
-      notifyUpdateListeners();
-    }
+    fallbackToDiskCache();
     return getCatalogStatus();
   } finally {
     clearTimeout(timer);
@@ -281,19 +320,23 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
 
   // Update in-memory state FIRST so a read-only filesystem still serves the
   // fresh catalog for this process; disk persistence below is best-effort.
+  // Q-34: a real download is NOT from cache.
   activeCatalog = freshData;
   activeFetchedAt = fetchedAt;
   activeTtlMs = effectiveTtl;
-  activeFromCache = true;
+  activeFromCache = false;
 
   // Save to src/data/models.dev.json (or the AGENT_CACHE_DIR override)
   try {
     writeJsonFileSync(cachePath, cachePayload);
   } catch (err) {
     activeFromCache = false;
-    console.warn(
-      `[Agent Accelerator] Could not write model catalog cache to ${cachePath} (${err instanceof Error ? err.message : String(err)}). Continuing with the in-memory catalog.`
-    );
+    try {
+      (globalThis as any).__agentAccelTelemetry?.emitWarning?.({
+        code: "catalog_cache_write_failed",
+        message: `[Agent Accelerator] Could not write model catalog cache (${err instanceof Error ? err.message : String(err)}). Continuing with the in-memory catalog.`,
+      });
+    } catch {}
   }
 
   notifyUpdateListeners();

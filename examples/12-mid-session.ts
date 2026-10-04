@@ -19,6 +19,8 @@ const slow_tool = tool({
   name: "slow_tool",
   description: "Call exactly once per task, then answer from its result.",
   input: z.object({}),
+  idempotent: false,
+  repeatable: false,
   execute: async () => {
     await new Promise((r) => setTimeout(r, 1200));
     return "slow action done";
@@ -31,7 +33,7 @@ const agent = new Agent({
   model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
   tools: { slow_tool },
   // "auto" = each message picks steer vs queue. Use "steer"/"queue" to enforce one.
-  midSession: { mode: "auto", maxQueued: 10 },
+  midSession: { mode: "auto", whenBusy: "auto", maxQueued: 10 },
 });
 
 const live = () => ({

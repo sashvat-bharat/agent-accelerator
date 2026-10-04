@@ -23,7 +23,8 @@ const web_search = tool({
   description: "Search the live web for current information. Returns ranked web sources with titles, snippets, and URLs. Use this when you need fresh information, documentation, research, news, or facts that may have changed.",
   input: z.object({ query: z.string().min(1).describe("The web search query") }),
   timeoutMs: 15_000,
-  maxTries: 2,
+  maxAttempts: 2,
+  idempotent: true,
 
   execute: async ({ query }) => {
     const apiKey = TINYFISH_API_KEY;
@@ -70,8 +71,10 @@ const web_search = tool({
 const agent = new Agent({
   name: "Main Agent",
   tools: {web_search},
-  thinkingLevel: "medium",
+  thinking: "medium",
   model: process.env.MODEL,
+  budget: { maxCostUsd: 2, maxTotalSubagents: 6 },
+  limits: { requestTimeoutMs: 120_000 },
 
   instructions: `
 You are a main research agent. You can search the live web using the web_search tool.
@@ -91,7 +94,7 @@ When answering research questions:
     thinkingLevel: "medium",
     // Workers get zero tools unless granted here — research workers need search.
     tools: { web_search },
-    timeout: 0,
+    workerTimeoutMs: 0,
   },
 });
 

@@ -1,23 +1,19 @@
 import { toConciseProviderError } from "./errors.ts";
+import { isAbortError } from "../types/errors.ts";
 
-/**
- * Checks whether a provider error is a cancellation (never retried).
- */
-export function isAbortError(error: unknown): boolean {
-  const err = error as { name?: unknown; message?: unknown } | null;
-  if (!err || typeof err !== "object") return false;
-  if ((err as { name?: unknown }).name === "AbortError") return true;
-  return /abort|cancell?ed/i.test(String((err as { message?: unknown }).message ?? error));
-}
+export { isAbortError };
 
 /**
  * Checks whether a provider error is transient and safe to retry.
+ * Structured-data only: status / code / transient flag. Never message text,
+ * so a 400 mentioning "512 tokens" is not retried (Q-24).
  */
 export function isTransientError(error: unknown): boolean {
   if (!error) return false;
   if (isAbortError(error)) return false;
   const err = error as Record<string, unknown>;
   if (err["transient"] === true) return true;
+  if ((err as { retryable?: unknown }).retryable === true) return true;
   const status = Number(
     (err["status"] as number | undefined) ??
       (err["statusCode"] as number | undefined) ??
@@ -30,9 +26,19 @@ export function isTransientError(error: unknown): boolean {
   if (["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT", "EPIPE", "ETIMEDOUT"].includes(code)) {
     return true;
   }
-  return /(?:timed?\s?out|temporar(?:y|ily)|connection reset|connection refused|service unavailable|rate limit|\b5\d\d\b|overloaded)/i.test(
-    String((err["message"] as string | undefined) ?? error)
-  );
+  return false;
+}
+
+function readRetryAfterMs(error: unknown): number | undefined {
+  const err = error as Record<string, unknown>;
+  const raw =
+    (err["retryAfterMs"] as unknown) ??
+    ((err["response"] as Record<string, unknown> | undefined)?.["headers"] as Record<string, unknown> | undefined)?.["retry-after"] ??
+    ((err["headers"] as Record<string, unknown> | undefined)?.["retry-after"]);
+  if (raw === undefined) return undefined;
+  const secs = Number(Array.isArray(raw) ? raw[0] : raw);
+  if (!Number.isFinite(secs) || secs < 0) return undefined;
+  return Math.min(60_000, secs * 1000);
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -56,6 +62,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 /**
  * Runs a provider call with bounded retries for transient failures.
+ * Honors Retry-After up to 60s cap. Streams retry only before first byte
+ * (callers must not retry after partial output).
  */
 export async function withRetries<T>(
   fn: () => Promise<T> | PromiseLike<T>,
@@ -64,10 +72,13 @@ export async function withRetries<T>(
     maxRetryDelayMs?: number;
     signal?: AbortSignal;
     label?: { providerId?: string; modelId?: string };
+    retryBudgetMs?: number;
   }
 ): Promise<T> {
   const maxRetries = options?.maxRetries ?? 2;
   const maxDelay = options?.maxRetryDelayMs ?? 5000;
+  const budgetMs = options?.retryBudgetMs ?? 30_000;
+  const started = Date.now();
   const fail = (error: unknown): never => {
     if (options?.label?.providerId && options?.label?.modelId) {
       throw toConciseProviderError(error, options.label.providerId, options.label.modelId);
@@ -81,7 +92,10 @@ export async function withRetries<T>(
     } catch (error) {
       if (options?.signal?.aborted || isAbortError(error)) throw error;
       if (attempt >= maxRetries || !isTransientError(error)) fail(error);
-      const delay = Math.min(maxDelay, 250 * 2 ** attempt + Math.random() * 100);
+      if (Date.now() - started >= budgetMs) fail(error);
+      const retryAfter = readRetryAfterMs(error);
+      const backoff = Math.min(maxDelay, 250 * 2 ** attempt + Math.random() * 100);
+      const delay = retryAfter !== undefined ? Math.min(maxDelay, Math.max(backoff, retryAfter)) : backoff;
       attempt += 1;
       await sleep(delay, options?.signal);
     }

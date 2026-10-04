@@ -8,11 +8,42 @@ import { getSubModel, getModel } from "../utils/env.ts";
 export interface SubAgentConfig extends AgentConfig {}
 
 /**
+ * Canonical env-based construction (Q-56): builds an `Agent` reading
+ * `MODEL`/`SUB_AGENT_MODEL` only for the fields the caller omits, via
+ * `getModel()`/`getSubModel()`. Explicit config always wins; constructing an
+ * `Agent` with an explicit `model` reads no env for routing. The static
+ * `Agent.fromEnv()` (attached below without touching `agent.ts`, owned by
+ * another audit lane) delegates here.
+ */
+export function agentFromEnv(
+  config?: Omit<AgentConfig, "model"> & { model?: AgentConfig["model"] }
+): Agent {
+  return new Agent({
+    ...config,
+    model: config?.model ?? getModel() ?? getSubModel(),
+  } as AgentConfig);
+}
+
+/**
  * SubAgent is a specialized Agent designed for modular delegation,
  * evaluation, reviewing, or parallel task execution.
  *
+ * @deprecated Prefer composing a plain `Agent` and exposing it via
+ * `agentToTool()`/`buildAgentTools()` (or `subagents: [...]`) instead of
+ * subclassing. `SubAgent` stays for compat and receives no new features.
+ *
  * It inherits 100% of the capabilities of Agent, defaults to SUB_AGENT_MODEL,
  * and provides .asTool() and .toTool() for seamless registration into parent agents.
+ *
+ * Model fallback chain (Q-56, canonical): explicit `config.model` ??
+ * `SUB_AGENT_MODEL` (`getSubModel()`) ?? `MODEL` (`getModel()`). Missing
+ * everything throws. Constructing any `Agent`/`SubAgent` with an explicit
+ * `model` reads no env for routing.
+ *
+ * Q-47 decomposition boundary: this class stays a thin wrapper. The run/stream
+ * loops live in `agent.ts`/`loop.ts`, spawning in `delegation.ts`
+ * (`agentToTool`), and model parsing in `utils/session.ts` (`parseModelRef`).
+ * No loop, transport, or formatting logic is duplicated here.
  *
  * @example
  * ```ts
@@ -80,4 +111,32 @@ export class SubAgent extends Agent {
   toTool(nameOverride?: string, descriptionOverride?: string): ToolDefinition {
     return this.asTool(nameOverride, descriptionOverride);
   }
+}
+
+// Q-56: `Agent.fromEnv()` static without touching `agent.ts` (owned by
+// another lane). Wired at module load; typed via the declaration below so
+// `Agent.fromEnv({...})` typechecks wherever this module is imported.
+declare module "./agent.ts" {
+  namespace Agent {
+    /**
+     * Builds an `Agent` from env (`MODEL`/`SUB_AGENT_MODEL`) for omitted
+     * fields. Explicit config always wins. See `agentFromEnv`.
+     */
+    function fromEnv(
+      config?: Omit<import("../types/agent.ts").AgentConfig, "model"> & {
+        model?: import("../types/agent.ts").AgentConfig["model"];
+      }
+    ): Agent;
+  }
+}
+
+try {
+  const Ctor = Agent as unknown as {
+    fromEnv?: (config?: SubAgentConfig) => Agent;
+  };
+  if (typeof Ctor.fromEnv !== "function") {
+    Ctor.fromEnv = (config?: SubAgentConfig) => agentFromEnv(config);
+  }
+} catch {
+  // why: static attachment must never break module load (host may freeze Agent).
 }

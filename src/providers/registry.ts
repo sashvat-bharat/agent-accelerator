@@ -80,12 +80,25 @@ export function ensureCustomProvider(
 ): Provider {
   assertProviderNotRemoved(prefix);
   const id = normalizeProviderPrefix(prefix) as ProviderId;
+  if (FIRST_CLASS.has(id.toLowerCase())) {
+    if (opts?.baseUrl !== undefined || opts?.apiKey !== undefined) {
+      throw new Error(
+        `[Agent Accelerator] Provider "${id}" is first-class and cannot be replaced with custom baseUrl/apiKey. Pass baseUrl/apiKey per-Agent instead.`
+      );
+    }
+    return providerRegistry.get(id)!;
+  }
   const existing = providerRegistry.get(id);
-  if (existing && !FIRST_CLASS.has(id.toLowerCase())) return existing;
-  if (existing && opts?.baseUrl === undefined && opts?.apiKey === undefined) {
+  if (existing) {
+    const prevBase = (existing as { configuredBaseUrl?: string }).configuredBaseUrl;
+    if (opts?.baseUrl !== undefined && prevBase !== undefined && prevBase !== opts.baseUrl) {
+      throw new Error(
+        `[Agent Accelerator] Conflicting re-registration for provider "${id}". Registry is immutable after creation.`
+      );
+    }
     return existing;
   }
-  const created = new OpenAICompatibleChatProvider(id, opts);
+  const created = new OpenAICompatibleChatProvider(id, { baseUrl: opts?.baseUrl, name: opts?.name });
   providerRegistry.set(id, created);
   return created;
 }
@@ -199,11 +212,6 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
         parts.length === 2 && modelStr.includes(":") && !hasDedicatedEnv;
 
       if (!looksLikeOpenRouterScope) {
-        if (hasCustomOpenAIBase && !hasDedicatedEnv) {
-          const p = getProvider("openai");
-          const spec = p.getModel(remainingModel) || getModelFromCatalog(remainingModel, remainingModel);
-          return { provider: p, modelId: remainingModel, modelSpec: spec as ModelSpec };
-        }
         const custom = ensureCustomProvider(providerPrefix);
         const spec =
           custom.getModel(remainingModel) ||
@@ -372,10 +380,6 @@ export const ModelProvider = {
     options?: { thinkingLevel?: ThinkingLevel; baseUrl?: string }
   ): ModelProviderInstance {
     const normalized = model.includes("/") ? model : `custom/${model}`;
-    const prefix = normalized.split("/")[0]!;
-    try {
-      ensureCustomProvider(prefix, { baseUrl: options?.baseUrl, apiKey });
-    } catch {}
     return {
       model: normalized,
       apiKey,

@@ -12,6 +12,8 @@ import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
 import { getSubAgentTrace, subscribeToSubAgent, listSubAgentTraceIds, type SubAgentTrace } from "./delegation.ts";
 import { saveSessionDir, saveSessionFile } from "../session/store.ts";
+import { clearSessionRouting } from "../providers.ts";
+import { clearInteractionChains } from "../providers/google.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
 import { buildSessionData, type PersistedAgentSession, type SessionTotals,} from "../session/store.ts";
@@ -30,8 +32,49 @@ export function resolveEffectiveThinking(
   return { enabled: true, level: overrideLevel as ThinkingConfig["level"] };
 }
 
+import { ConfigError } from "../types/errors.ts";
+
+/**
+ * Disposers for the manual user-signal forward listeners (Q-21 fallback when
+ * `AbortSignal.any` is unavailable). Keyed by run controller so no expando
+ * properties are attached to AbortController instances.
+ */
+const mergeDisposers = new WeakMap<AbortController, () => void>();
+
+/** Max named sessions kept per Agent (Q-19a LRU). */
+const SESSION_LRU_MAX = 100;
+/** Idle TTL for named sessions (Q-19a). */
+const SESSION_TTL_MS = 60 * 60 * 1000;
+
+/** Normalized per-run limits (Q-22). Sub-agents inherit these unless overridden. */
+export interface AgentRunLimits {
+  maxTurns?: number;
+  deadlineMs?: number;
+  maxToolCallsPerRun?: number;
+  requestTimeoutMs: number;
+  firstByteTimeoutMs: number;
+  streamIdleTimeoutMs: number;
+}
+
+/** Resolves `(config as any).limits` with Q-22 defaults (timeouts tolerate reasoning). */
+function resolveAgentLimits(config: { limits?: Record<string, unknown> }): AgentRunLimits {
+  const raw = (config as { limits?: Record<string, unknown> }).limits ?? {};
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  return {
+    ...(num(raw.maxTurns) !== undefined ? { maxTurns: Math.max(1, Math.floor(num(raw.maxTurns)!)) } : {}),
+    ...(num(raw.deadlineMs) !== undefined ? { deadlineMs: num(raw.deadlineMs)! } : {}),
+    ...(num(raw.maxToolCallsPerRun) !== undefined
+      ? { maxToolCallsPerRun: Math.max(1, Math.floor(num(raw.maxToolCallsPerRun)!)) }
+      : {}),
+    requestTimeoutMs: num(raw.requestTimeoutMs) ?? 300_000,
+    firstByteTimeoutMs: num(raw.firstByteTimeoutMs) ?? 120_000,
+    streamIdleTimeoutMs: num(raw.streamIdleTimeoutMs) ?? 300_000,
+  };
+}
+
 /** Thrown when dynamic sub-agent spawning is enabled without an explicit model. */
-export class SubAgentModelError extends Error {
+export class SubAgentModelError extends ConfigError {
   readonly parentModel?: string;
 
   /**
@@ -43,20 +86,12 @@ export class SubAgentModelError extends Error {
   constructor(parentModel?: string) {
     const parentName = parentModel || "your main model";
     const formatted =
-      `\x1b[31m[Agent Accelerator] Missing Configuration: a sub-agent model is required when dynamic sub-agents are enabled\x1b[0m\n` +
-      `  \x1b[1mMain Agent Model:\x1b[0m ${parentName}\n` +
-      `  \x1b[1mIssue:\x1b[0m            Dynamic sub-agent delegation was enabled (dynamicSubagents.enabled), but no model was assigned for sub-agents.\n` +
-      `                    Sub-agents must never run on unverified models or default implicitly.\n\n` +
-      `  \x1b[36m💡 How to fix:\x1b[0m\n` +
-      `    1. Pass a model in your Agent configuration:\n` +
-      `       const agent = new Agent({\n` +
-      `         model: "${parentName}",\n` +
-      `         dynamicSubagents: { enabled: true, model: "provider/model-id" },\n` +
-      `       });\n\n` +
-      `    2. Or set the SUB_AGENT_MODEL environment variable in your .env or shell:\n` +
-      `       SUB_AGENT_MODEL="provider/model-id"`;
+      `[Agent Accelerator] Missing Configuration: a sub-agent model is required when dynamic sub-agents are enabled. ` +
+      `Main Agent Model: ${parentName}. ` +
+      `Dynamic sub-agent delegation was enabled (dynamicSubagents.enabled), but no model was assigned for sub-agents. ` +
+      `Fix: pass dynamicSubagents.model in Agent config or set SUB_AGENT_MODEL.`;
 
-    super(formatted);
+    super(formatted, { parentModel: parentName });
     this.name = "SubAgentModelError";
     this.parentModel = parentModel;
 
@@ -127,7 +162,16 @@ export class Agent {
   /** Durable persistence target: session file rewritten after every step. */
   readonly persistConfig?: { dir?: string; file?: string };
   /** Mid-session queue policy for new queries arriving while a run is active. */
-  readonly midSessionConfig: Required<Pick<MidSessionConfig, "mode">> & MidSessionConfig;
+  readonly midSessionConfig: Required<Pick<MidSessionConfig, "mode">> & MidSessionConfig & { maxSteers?: number };
+  /** Max buffered steer entries per run (Q-20, default 20). */
+  readonly maxSteers: number;
+  /**
+   * Normalized run limits (Q-22). Read from `(config as any).limits`;
+   * sub-agents inherit these unless overridden. `maxTurns`/`deadlineMs`/
+   * `maxToolCallsPerRun` default to unlimited; timeouts default to
+   * request 300s / first-byte 120s / idle 300s (tolerate reasoning).
+   */
+  readonly runLimits: AgentRunLimits;
   private currentRun: {
     steerInbox: SteerEntry[];
     outerStream?: AssistantMessageEventStream;
@@ -142,6 +186,10 @@ export class Agent {
     resolve: (res: AgentResponse) => void;
     reject: (err: unknown) => void;
   }> = [];
+  /** Named session contexts for `sessionId` runs (Q-19a, LRU 100 + TTL). */
+  private sessions = new Map<string, { context: AgentContext; lastAccess: number }>();
+  /** Coalesced persistence single-flight flag (Q-28). */
+  private persistScheduled = false;
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -231,12 +279,20 @@ export class Agent {
     const rawMode = config.midSession?.mode ?? "auto";
     const normalizedMode = rawMode === "steer" || rawMode === "queue" ? rawMode : "auto";
     const rawMaxQueued = (config.midSession as any)?.maxQueued;
+    const rawMaxSteers = (config.midSession as any)?.maxSteers;
     this.midSessionConfig = {
       mode: normalizedMode,
       ...(Number.isFinite(rawMaxQueued) && (rawMaxQueued as number) >= 0
         ? { maxQueued: Math.floor(rawMaxQueued as number) }
         : { maxQueued: 20 }),
+      ...(Number.isFinite(rawMaxSteers) && (rawMaxSteers as number) >= 0
+        ? { maxSteers: Math.floor(rawMaxSteers as number) }
+        : { maxSteers: 20 }),
     };
+    // Q-20: bound on buffered steer entries (default 20).
+    this.maxSteers = this.midSessionConfig.maxSteers ?? 20;
+    // Q-22: run limits (sub-agents inherit unless overridden).
+    this.runLimits = resolveAgentLimits(config as unknown as { limits?: Record<string, unknown> });
 
     // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
     const mpThinking = (rawModel as any)?.thinkingLevel;
@@ -339,10 +395,111 @@ export class Agent {
 
   /** Clears conversation messages and provider thought signatures while keeping configuration. */
   reset(): void {
+    const sid = this.sessionId;
     this.context.messages = [];
     this.context.thoughtSignatures = [];
     this.context.cachedContentId = (this.cacheConfig as any)?.cachedContentId;
     this.context.systemPrompt = this.getFullInstructions();
+    // Q-25: reset also drops session-scoped provider chaining/routing.
+    try { clearInteractionChains(sid); } catch {}
+    try { clearSessionRouting(sid); } catch {}
+  }
+
+  /**
+   * Returns a named session handle (Q-19a). `session()` creates an isolated
+   * `AgentContext` bound to `id` (separate histories per id); `agent.run`
+   * with `{ sessionId }` selects/creates the same entry. Sessions are
+   * ephemeral in-memory (LRU 100 + 1h TTL). `agent.run`/`stream` without a
+   * `sessionId` remain sugar over the default session for compat.
+   */
+  session(id?: string): { id: string; context: AgentContext; runController: AbortController | null } {
+    const sid = id || this.sessionId;
+    const ctx = this.getSessionContext(sid);
+    return { id: sid, context: ctx, runController: null };
+  }
+
+  /** Drops one named session (Q-19a). No-op for unknown ids. */
+  disposeSession(id: string): void {
+    try { this.sessions.delete(id); } catch {}
+    try { clearInteractionChains(id); } catch {}
+    try { clearSessionRouting(id); } catch {}
+  }
+
+  /** Drops all named sessions except the default context (Q-19a). */
+  clearSessions(): void {
+    try {
+      for (const id of [...this.sessions.keys()]) {
+        try { clearInteractionChains(id); } catch {}
+        try { clearSessionRouting(id); } catch {}
+      }
+      this.sessions.clear();
+    } catch {}
+  }
+
+  /** Resolves the context for a `sessionId` run (default session = `this.context`). */
+  private getSessionContext(sessionId?: string): AgentContext {
+    const sid = sessionId || this.sessionId;
+    if (sid === this.sessionId) return this.context;
+    const now = Date.now();
+    // TTL eviction.
+    try {
+      for (const [key, entry] of [...this.sessions.entries()]) {
+        if (now - entry.lastAccess > SESSION_TTL_MS) {
+          this.sessions.delete(key);
+          try { clearInteractionChains(key); } catch {}
+          try { clearSessionRouting(key); } catch {}
+        }
+      }
+    } catch {}
+    const existing = this.sessions.get(sid);
+    if (existing) {
+      existing.lastAccess = now;
+      return existing.context;
+    }
+    const fresh = new AgentContext(this.getFullInstructions());
+    try {
+      const cached = (this.cacheConfig as unknown as { cachedContentId?: string })?.cachedContentId;
+      if (cached) fresh.cachedContentId = cached;
+    } catch {}
+    this.sessions.set(sid, { context: fresh, lastAccess: now });
+    // LRU eviction (oldest lastAccess first).
+    try {
+      while (this.sessions.size > SESSION_LRU_MAX) {
+        let oldest: string | undefined;
+        let oldestTs = Infinity;
+        for (const [key, entry] of this.sessions) {
+          if (entry.lastAccess < oldestTs) { oldestTs = entry.lastAccess; oldest = key; }
+        }
+        if (!oldest) break;
+        this.sessions.delete(oldest);
+        try { clearInteractionChains(oldest); } catch {}
+        try { clearSessionRouting(oldest); } catch {}
+      }
+    } catch {}
+    return fresh;
+  }
+
+  /** Rejects + drops all queued follow-ups (Q-20). Returns the cleared count. */
+  clearQueue(): number {
+    const n = this.pendingQueue.length;
+    if (n === 0) return 0;
+    const err = Object.assign(new Error("Queue cleared"), { name: "AbortError" });
+    const pending = this.pendingQueue.splice(0);
+    for (const entry of pending) {
+      try { entry.reject(err); } catch {}
+      try { entry.deferredStream?.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
+    }
+    return n;
+  }
+
+  /** Throws when the steer inbox is at its Q-20 bound. */
+  private assertSteerRoom(inbox: SteerEntry[]): void {
+    const max = this.maxSteers ?? 20;
+    if (inbox.length >= max) {
+      throw new Error(
+        `[Agent Accelerator] Steer inbox is full (${inbox.length}/${max}). Wait for the active run to drain or increase midSession.maxSteers.`
+      );
+    }
   }
 
   /**
@@ -437,6 +594,7 @@ export class Agent {
     }
     const active = this.currentRun;
     if (!active) return this.run(prompt, options) as Promise<AgentResponse>;
+    this.assertSteerRoom(active.steerInbox);
     active.steerInbox.push({ prompt, options });
     this.persistNow();
     if (active.runPromise) return active.runPromise;
@@ -488,6 +646,20 @@ export class Agent {
     if (this.currentRun !== null) return;
     const next = this.pendingQueue.shift();
     if (!next) return;
+    // Q-20: reject queued items whose signal aborted before start.
+    try {
+      if ((next.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+        const reason = ((next.options as { signal?: AbortSignal }).signal as unknown as { reason?: unknown })?.reason;
+        const abortErr = Object.assign(
+          reason instanceof Error ? reason : new Error("Queued run aborted before start"),
+          { name: "AbortError" }
+        );
+        try { next.reject(abortErr); } catch {}
+        try { next.deferredStream?.fail(abortErr instanceof Error ? abortErr : new Error(String(abortErr))); } catch {}
+        queueMicrotask(() => this.pumpQueue());
+        return;
+      }
+    } catch {}
     if (next.isStream && next.deferredStream) {
       const deferred = next.deferredStream;
       try {
@@ -525,9 +697,40 @@ export class Agent {
   }
 
   private finishCurrentRun(): void {
+    // Q-20: leftover steer entries become queued follow-ups instead of dropping.
+    let leftover: SteerEntry[] = [];
+    try { leftover = this.currentRun?.steerInbox?.splice(0) ?? []; } catch { leftover = []; }
     this.currentRun = null;
+    if (leftover.length > 0) {
+      try {
+        const max = this.midSessionConfig.maxQueued ?? 20;
+        for (const entry of leftover) {
+          try {
+            if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) continue;
+          } catch { continue; }
+          if (this.pendingQueue.length >= max) break;
+          this.pendingQueue.push({
+            prompt: entry.prompt,
+            options: entry.options,
+            isStream: false,
+            resolve: () => {},
+            reject: () => {},
+          });
+        }
+      } catch {}
+    }
     // Defer pump so the completing run's .then handlers settle first.
     queueMicrotask(() => this.pumpQueue());
+  }
+
+  private cleanupMerge(runController: AbortController): void {
+    try {
+      const dispose = mergeDisposers.get(runController);
+      if (dispose) {
+        try { dispose(); } catch {}
+        mergeDisposers.delete(runController);
+      }
+    } catch {}
   }
 
   private mergeUserSignal(userSignal?: AbortSignal, runController?: AbortController): AbortSignal | undefined {
@@ -541,6 +744,14 @@ export class Agent {
       }
       return runController.signal;
     }
+    // Q-21: prefer AbortSignal.any (no expando, no listener leak).
+    try {
+      const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+      if (typeof anyFn === "function") {
+        return anyFn.call(AbortSignal, [userSignal, runController.signal]);
+      }
+    } catch {}
+    // Fallback: manual forward without expando (disposer in WeakMap).
     const forward = () => {
       try {
         runController.abort((userSignal as any).reason);
@@ -548,11 +759,12 @@ export class Agent {
         try { runController.abort(); } catch {}
       }
     };
-    userSignal.addEventListener("abort", forward, { once: true });
-    // Detached on run completion via runController abort listener cleanup below.
-    // Store for removal: piggyback on abort event (once) + explicit removal in finally.
-    (runController as any).__forwardUserAbort = forward;
-    (runController as any).__userSignal = userSignal;
+    try { userSignal.addEventListener("abort", forward, { once: true }); } catch {}
+    try {
+      mergeDisposers.set(runController, () => {
+        try { userSignal.removeEventListener("abort", forward); } catch {}
+      });
+    } catch {}
     return runController.signal;
   }
 
@@ -564,6 +776,8 @@ export class Agent {
     const steerInbox: SteerEntry[] = [];
     const mergedSignal = this.mergeUserSignal(options?.signal, runController);
     const runOptions = { ...options, signal: mergedSignal };
+    // Q-19a: route to the named session context (default = this.context).
+    const targetContext = this.getSessionContext(runOptions?.sessionId || this.sessionId);
     const task = (async (): Promise<AgentResponse> => {
       await ensureModelCatalogFresh();
       const resolved = resolveModel(this.modelStringOrSpec);
@@ -571,7 +785,7 @@ export class Agent {
       if (effectiveLevel) {
         validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
       }
-      this.prepareTurn(prompt, runOptions);
+      this.prepareTurn(prompt, runOptions, targetContext);
       this.persistNow();
 
       const providerOptions = {
@@ -590,7 +804,7 @@ export class Agent {
         agentName: this.name,
         provider: resolved.provider,
         modelId: resolved.modelId,
-        context: this.context,
+        context: targetContext,
         tools: this.tools,
         options: providerOptions,
         runOptions,
@@ -599,25 +813,23 @@ export class Agent {
         onProgress: () => this.persistNow(),
         steerInbox,
         onSteerInjected: () => this.persistNow(),
+        // Q-22: loop enforces these (plus local timeout races).
+        limits: { ...this.runLimits },
       };
 
       const res = await runAgentLoop(loopConfig);
       this.mergeSubagentTraces(res.subagents as any);
       this.persistNow();
       if (this.stateless) {
-        this.context.messages = [];
-        this.context.thoughtSignatures = [];
+        targetContext.messages = [];
+        targetContext.thoughtSignatures = [];
       }
       return res;
     })();
 
     this.currentRun = { steerInbox, abortController: runController, runPromise: task };
     const cleanup = () => {
-      try {
-        const userSignal = (runController as any).__userSignal as AbortSignal | undefined;
-        const forward = (runController as any).__forwardUserAbort as (() => void) | undefined;
-        if (userSignal && forward) userSignal.removeEventListener("abort", forward);
-      } catch {}
+      try { this.cleanupMerge(runController); } catch {}
       if (this.currentRun?.runPromise === task) this.finishCurrentRun();
     };
     task.then(cleanup, cleanup);
@@ -633,7 +845,9 @@ export class Agent {
     if (effectiveLevel) {
       validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
     }
-    this.prepareTurn(prompt, options);
+    // Q-19a: named session routing (default session for compat).
+    const targetContext = this.getSessionContext(options?.sessionId || this.sessionId);
+    this.prepareTurn(prompt, options, targetContext);
     this.persistNow();
 
     const runController = new AbortController();
@@ -657,7 +871,7 @@ export class Agent {
       agentName: this.name,
       provider: resolved.provider,
       modelId: resolved.modelId,
-      context: this.context,
+      context: targetContext,
       tools: this.tools,
       options: providerOptions,
       runOptions,
@@ -666,6 +880,8 @@ export class Agent {
       onProgress: () => this.persistNow(),
       steerInbox,
       onSteerInjected: () => this.persistNow(),
+      // Q-22: loop enforces these (plus local timeout races).
+      limits: { ...this.runLimits },
     };
 
     const s = streamAgentLoop(loopConfig);
@@ -676,23 +892,15 @@ export class Agent {
           this.mergeSubagentTraces(res.subagents as any);
           this.persistNow();
         } catch {}
-        try {
-          const userSignal = (runController as any).__userSignal as AbortSignal | undefined;
-          const forward = (runController as any).__forwardUserAbort as (() => void) | undefined;
-          if (userSignal && forward) userSignal.removeEventListener("abort", forward);
-        } catch {}
+        try { this.cleanupMerge(runController); } catch {}
         if (this.stateless) {
-          this.context.messages = [];
-          this.context.thoughtSignatures = [];
+          targetContext.messages = [];
+          targetContext.thoughtSignatures = [];
         }
         if (this.currentRun?.outerStream === s) this.finishCurrentRun();
       },
       () => {
-        try {
-          const userSignal = (runController as any).__userSignal as AbortSignal | undefined;
-          const forward = (runController as any).__forwardUserAbort as (() => void) | undefined;
-          if (userSignal && forward) userSignal.removeEventListener("abort", forward);
-        } catch {}
+        try { this.cleanupMerge(runController); } catch {}
         if (this.currentRun?.outerStream === s) this.finishCurrentRun();
       }
     );
@@ -747,15 +955,41 @@ export class Agent {
   /**
    * Rewrites the configured session file now (when `persist` is set).
    * Called automatically after every step during runs; safe to call
-   * manually. Never throws.
+   * manually. Never throws (failures route to `onPersistError`).
+   *
+   * Q-28: stateless agents skip persistence unless
+   * `(persist as any).allowStateless` is set. Calls in the same tick are
+   * coalesced via a `queueMicrotask` single flight.
    */
   persistNow(): void {
     const cfg = this.persistConfig;
     if (!cfg || (!cfg.dir && !cfg.file)) return;
+    // Q-28: no stateless persist by default.
+    try {
+      if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
+    } catch {}
+    if (this.persistScheduled) return;
+    this.persistScheduled = true;
+    queueMicrotask(() => {
+      this.persistScheduled = false;
+      this.doPersist();
+    });
+  }
+
+  /** Synchronous persistence write behind the coalesced `persistNow()` gate. */
+  private doPersist(): void {
+    const cfg = this.persistConfig;
+    if (!cfg || (!cfg.dir && !cfg.file)) return;
+    try {
+      if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
+    } catch {}
     try {
       if (cfg.dir) saveSessionDir(cfg.dir, this as any, null);
       else if (cfg.file) saveSessionFile(cfg.file, this as any, null);
-    } catch {}
+    } catch (err) {
+      // Q-28: surface via hook instead of swallowing silently.
+      try { (cfg as unknown as { onPersistError?: (e: unknown) => void }).onPersistError?.(err); } catch {}
+    }
   }
 
   /** Merges completed worker metadata (incl. steps) into this agent's trace registry. */
@@ -814,6 +1048,7 @@ export class Agent {
    */
   importSession(data?: PersistedAgentSession | null): void {
     if (!data) return;
+    const prevSid = this.sessionId;
     if (data.sessionId) (this as any).sessionId = data.sessionId;
     if ((data as any).parentSessionId) (this as any).parentSessionId = (data as any).parentSessionId;
     if ((data as any).subagents && typeof (data as any).subagents === "object") {
@@ -864,37 +1099,47 @@ export class Agent {
     }
     this.context.cachedContentId =
       data.cachedContentId ?? (this.cacheConfig as any)?.cachedContentId;
+    // Q-25: importing a snapshot invalidates prior provider chaining/routing
+    // for both the previous and the restored session.
+    try { clearInteractionChains(prevSid); } catch {}
+    try { clearSessionRouting(prevSid); } catch {}
+    try { clearInteractionChains(this.sessionId); } catch {}
+    try { clearSessionRouting(this.sessionId); } catch {}
   }
 
-  private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions): void {
+  private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): void {
+    // Q-20: prompt validation throws synchronously in both run() and
+    // stream() (same timing; documented here).
     if (Array.isArray(prompt) && prompt.length === 0) {
       throw new Error(
         "[Agent Accelerator] Prompt cannot be empty: pass a non-empty string or at least one content part."
       );
     }
+    const ctx = target ?? this.getSessionContext(options?.sessionId || this.sessionId);
     if (this.stateless) {
-      this.context.messages = [];
-      this.context.thoughtSignatures = [];
+      // Q-19a: stateless runs use a fresh ephemeral context (never shared).
+      ctx.messages = [];
+      ctx.thoughtSignatures = [];
     }
     const fullInstructions = this.getFullInstructions();
     // C13: keep systemPrompt stable for Google implicit cache; additionalContext goes as user prefix, not system mutation
     if (options?.additionalContext) {
       // Preserve stable instructions as systemPrompt
-      this.context.systemPrompt = fullInstructions;
+      ctx.systemPrompt = fullInstructions;
       const prefix = `[Additional Context]\n${options.additionalContext}\n\n`;
       if (typeof prompt === "string") {
         prompt = prefix + prompt;
       } else if (Array.isArray(prompt)) {
         prompt = [{ type: "text", text: prefix } as ContentPart, ...prompt];
       }
-    } else if (this.context.systemPrompt !== fullInstructions) {
-      this.context.systemPrompt = fullInstructions;
+    } else if (ctx.systemPrompt !== fullInstructions) {
+      ctx.systemPrompt = fullInstructions;
     }
     // C11: keep context cachedContentId in sync with cacheConfig if updated via options
-    if (options?.headers && (this.cacheConfig as any)?.cachedContentId && !this.context.cachedContentId) {
-      this.context.cachedContentId = (this.cacheConfig as any).cachedContentId;
+    if (options?.headers && (this.cacheConfig as any)?.cachedContentId && !ctx.cachedContentId) {
+      ctx.cachedContentId = (this.cacheConfig as any).cachedContentId;
     }
-    this.context.addUserMessage(prompt);
+    ctx.addUserMessage(prompt);
   }
 
   /**
@@ -921,6 +1166,9 @@ export class Agent {
     prompt: string | ContentPart[],
     options?: AgentRunOptions
   ): Promise<AgentResponse> | AssistantMessageEventStream {
+    // Q-20: prompt validation throws synchronously in both run() and
+    // stream() (same timing; async work starts only after validation).
+    this.assertPromptValid(prompt);
     const isStream = options?.stream === true;
     if (isStream) {
       const hasCallbacks = !!(options?.onDelta || options?.onThinkingDelta || options?.onEvent);
@@ -955,6 +1203,7 @@ export class Agent {
       const mode = this.resolveEnqueueMode(requested);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
+        this.assertSteerRoom(this.currentRun.steerInbox);
         this.currentRun.steerInbox.push({ prompt, options });
         this.persistNow();
         const active = this.currentRun;
@@ -1056,6 +1305,8 @@ export class Agent {
     prompt: string | ContentPart[],
     options?: AgentRunOptions
   ): AssistantMessageEventStream {
+    // Q-20: same sync validation timing as run().
+    this.assertPromptValid(prompt);
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
     if (this.currentRun) {
       const enforcedStream = this.midSessionConfig.mode;
@@ -1068,6 +1319,7 @@ export class Agent {
       const mode = this.resolveEnqueueMode(requestedStream);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
+        this.assertSteerRoom(this.currentRun.steerInbox);
         this.currentRun.steerInbox.push({ prompt, options });
         this.persistNow();
         const activeStream = this.currentRun.outerStream;

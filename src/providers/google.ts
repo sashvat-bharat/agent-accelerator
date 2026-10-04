@@ -40,6 +40,15 @@ import { safeStringify } from "../utils/serialization.ts";
 import { stripSchemaForGoogle } from "../tools/schema.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
+import { setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
+import {
+  newToolCallId,
+  redactedHeaders,
+  readErrorPayload,
+  incompleteStreamError,
+  combinedSignal,
+  timeoutFor,
+} from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider } from "../models/catalog.ts";
 import {
@@ -304,9 +313,16 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       const texts: string[] = [];
       for (const part of m.content) {
         if (part.type === "thinking" && part.thinking) {
+          // Q-18: preserve namespaced signatures only — foreign-provider
+          // signatures never echo here; untagged legacy echoes (compat).
+          const partProvider = (part as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
+          const msgProvider = (m as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
+          const sig = shouldEchoSignature(partProvider ?? msgProvider, "google")
+            ? part.thoughtSignature || m.thoughtSignature || ""
+            : "";
           steps.push({
             type: "thought",
-            signature: part.thoughtSignature || m.thoughtSignature || "",
+            signature: sig,
             summary: [{ type: "text", text: part.thinking }],
           });
         } else if (part.type === "tool_call") {
@@ -328,7 +344,11 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       } else if (m.thoughtSignature && !steps.some((s) => s.type === "thought")) {
         // Preserve a signature-only thought so stateless chaining keeps
         // reasoning continuity even when no summary text was retained.
-        steps.push({ type: "thought", signature: m.thoughtSignature });
+        // Q-18: only for google/untagged signatures.
+        const msgProvider = (m as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
+        if (shouldEchoSignature(msgProvider, "google")) {
+          steps.push({ type: "thought", signature: m.thoughtSignature });
+        }
       }
     } else if (m.role === "tool") {
       if (!Array.isArray(m.content)) continue;
@@ -408,7 +428,7 @@ function parseInteraction(
       const args =
         step.arguments && typeof step.arguments === "object" ? step.arguments : { raw: step.arguments };
       toolCalls.push({
-        id: step.id || `call_${Math.random().toString(36).slice(2, 9)}`,
+        id: step.id || newToolCallId(),
         name: step.name || "unknown",
         arguments: args as Record<string, unknown>,
         rawArguments: JSON.stringify(args),
@@ -431,26 +451,11 @@ function parseInteraction(
   };
 }
 
-function redactedHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    out[k] = k.toLowerCase() === "x-goog-api-key" ? "[REDACTED]" : v;
-  }
-  return out;
-}
-
-function readErrorPayload(bodyText: string): { message: string; code?: string | number } {
-  try {
-    const parsed: unknown = JSON.parse(bodyText);
-    const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const err = (first as { error?: { message?: string; code?: string | number; status?: string } })?.error;
-    if (err && typeof err.message === "string") {
-      return { message: err.message, code: err.code ?? err.status };
-    }
-    return { message: bodyText.slice(0, 300) };
-  } catch {
-    return { message: bodyText.slice(0, 300) };
-  }
+/** Local per-provider signature tag (Q-18): google history preserves only
+ * google/untagged signatures; foreign-provider signatures never echo here. */
+function withGoogleSignature(sig: string | undefined): { thoughtSignature?: string; thoughtSignatureProvider?: string } {
+  if (!sig) return {};
+  return { thoughtSignature: sig, thoughtSignatureProvider: "google" };
 }
 
 // ---------------------------------------------------------------------------
@@ -557,7 +562,10 @@ export class GoogleInteractionsProvider implements Provider {
     for (const [k, v] of Object.entries(options?.headers ?? {})) {
       if (!INTERNAL_HEADERS.has(k.toLowerCase())) headers[k] = v;
     }
-    headers["x-goog-api-key"] = apiKey;
+    // Q-17: key travels as the `x-goog-api-key` header (never `?key=` in the
+    // URL, which would leak into logs). Case-insensitive merge so a custom
+    // `X-Goog-Api-Key` never duplicates the canonical header.
+    setHeaderCaseInsensitive(headers, "x-goog-api-key", apiKey);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
@@ -568,13 +576,18 @@ export class GoogleInteractionsProvider implements Provider {
     apiKey: string,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const res = await fetch(url, this.requestInit(body, options, apiKey, signal));
-    const text = await res.text();
-    const headers: Record<string, string> = {};
-    res.headers.forEach((v, k) => {
-      headers[k] = v;
-    });
-    return { status: res.status, statusText: res.statusText, headers, text };
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
+    try {
+      const res = await fetch(url, this.requestInit(body, options, apiKey, effective));
+      const text = await res.text();
+      const headers: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        headers[k] = v;
+      });
+      return { status: res.status, statusText: res.statusText, headers, text };
+    } finally {
+      cleanup();
+    }
   }
 
   private throwIfError(
@@ -585,13 +598,14 @@ export class GoogleInteractionsProvider implements Provider {
     modelId: string
   ): void {
     if (status >= 200 && status < 300) return;
-    const { message, code } = readErrorPayload(bodyText);
+    const { message, code, errorType } = readErrorPayload(bodyText);
     const err: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
     (err as Record<string, unknown>)["statusCode"] = status;
     (err as Record<string, unknown>)["status"] = status;
     (err as Record<string, unknown>)["responseBody"] = bodyText.slice(0, 500);
     (err as Record<string, unknown>)["url"] = url.split("?")[0];
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
+    if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
     throw toConciseProviderError(err, "google", modelId);
   }
 
@@ -733,7 +747,21 @@ export class GoogleInteractionsProvider implements Provider {
           body,
         };
 
-        const res = await fetch(url, this.requestInit(body, options, apiKey, linked.signal));
+        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutTimer =
+          streamTimeoutMs && streamTimeoutMs > 0
+            ? setTimeout(() => {
+                try {
+                  linked.abort();
+                } catch {}
+              }, streamTimeoutMs)
+            : undefined;
+        let res: Response;
+        try {
+          res = await fetch(url, this.requestInit(body, options, apiKey, linked.signal));
+        } finally {
+          if (streamTimeoutTimer) clearTimeout(streamTimeoutTimer);
+        }
         if (!res.ok || !res.body) {
           const text = !res.ok ? await res.text().catch(() => "") : "";
           if (!res.ok) this.throwIfError(res.status, res.statusText, url, text, clean);
@@ -743,7 +771,7 @@ export class GoogleInteractionsProvider implements Provider {
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
         });
-        const responseMeta = { status: res.status, statusText: res.statusText, headers: responseHeaders };
+        const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         const parser = new SSEParser();
@@ -755,6 +783,10 @@ export class GoogleInteractionsProvider implements Provider {
         const calls = new Map<number, { id: string; name: string; startArgs: string; deltaArgs: string }>();
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
+        let sawFinishReason = false;
+        let sawUsage = false;
+        let badFrames = 0;
+        let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
         let aborted = false;
@@ -770,11 +802,17 @@ export class GoogleInteractionsProvider implements Provider {
         );
 
         const handleMessage = (event: string | undefined, data: string): void => {
-          if (!data || data === "[DONE]") return;
+          if (!data) return;
+          if (data === "[DONE]") {
+            sawFinishReason = sawFinishReason || completedBody !== undefined || sawUsage;
+            return;
+          }
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
+            framesSeen += 1;
           } catch {
+            badFrames += 1;
             return;
           }
           const type = (msg["event_type"] as string) || event;
@@ -826,7 +864,7 @@ export class GoogleInteractionsProvider implements Provider {
               const args = step["arguments"];
               const startArgs = typeof args === "string" ? args : args ? JSON.stringify(args) : "";
               calls.set(index, {
-                id: (step["id"] as string) || `call_${Math.random().toString(36).slice(2, 9)}`,
+                id: (step["id"] as string) || newToolCallId(),
                 name: (step["name"] as string) || "unknown",
                 startArgs,
                 deltaArgs: "",
@@ -836,8 +874,12 @@ export class GoogleInteractionsProvider implements Provider {
             const interaction = (msg["interaction"] as InteractionObject) ?? {};
             completedBody = msg["interaction"];
             if (interaction.id) responseId = interaction.id;
-            if (interaction.usage) usage = mapUsage(interaction.usage);
+            if (interaction.usage) {
+              usage = mapUsage(interaction.usage);
+              sawUsage = true;
+            }
             finishReason = mapFinishReason(interaction.status);
+            sawFinishReason = true;
             eventStream.push({ type: "usage", usage });
           }
         };
@@ -882,10 +924,25 @@ export class GoogleInteractionsProvider implements Provider {
         }
         noteProviderTurn(sessionId, "google");
 
+        // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
+        // instead of resolving empty success. Skipped for non-SSE payloads
+        // (JSON mocks) where no SSE frames were ever seen.
+        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
         // Trim provider trailing blank lines from finalized thinking (live
         // deltas already emitted raw; display collapse happens in the
         // wrapThinking presentation layer). Stateful bodies unaffected.
-        const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
+        const isSSEPayload =
+          (typeof ctEntry?.[1] === "string" && ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
+          framesSeen > 0 ||
+          badFrames > 0;
+        if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
+          eventStream.fail(incompleteStreamError("google", clean));
+          return;
+        }
+
+        const cleanThinking = cleanThinkingEarly;
         const finalResponse = new AgentResponse({
           text,
           thinking: cleanThinking || undefined,
@@ -896,7 +953,10 @@ export class GoogleInteractionsProvider implements Provider {
           responseId,
           model: clean,
           provider: "google",
-          raw: { request: rawRequest, response: { ...responseMeta, body: completedBody } },
+          raw: {
+            request: rawRequest,
+            response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
+          },
           durationMs: Date.now() - startTime,
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });

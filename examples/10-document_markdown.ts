@@ -25,6 +25,7 @@ const analyst = new Agent({
   name: "Analyst",
   instructions: "Answer using only the provided document excerpt.",
   model: MODEL,
+  fileAccess: { roots: ["./examples/files"] },
 });
 
 const direct = await analyst.run(`Which fruit is cheapest?\n\n${md}`).catch(fail);
@@ -37,6 +38,7 @@ const agent = new Agent({
   name: "Doc Agent",
   instructions: "Use convert_document_to_markdown for document questions.",
   model: MODEL,
+  fileAccess: { roots: ["./examples/files"] },
   tools: { convert_document_to_markdown },
 });
 
@@ -84,7 +86,9 @@ const resilient = new Agent({
   name: "Resilient",
   instructions: "Answer using only the attached document.",
   model: MODEL,
+  fileAccess: { roots: ["./examples/files"] },
   bypassInputFileModality: true,
+  tools: { convert_document_to_markdown },
 });
 
 const viaFlag = await resilient

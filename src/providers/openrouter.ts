@@ -10,7 +10,7 @@
  * `references/testings/openrouter/CAPABILITY-MATRIX.md`.
  *
  * This is the STABLE transport. The beta Responses skin
- * (`src/providers/openrouter-responses.ts`) is discontinued: no video shape,
+ * was removed from core: no video shape,
  * lossy error codes, beta event-vocabulary drift.
  *
  * Notes:
@@ -40,11 +40,21 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { getApiKey, getEnv } from "../utils/env.ts";
-import { buildSessionHeaders } from "../utils/headers.ts";
+import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
+import {
+  parseArguments,
+  normalizeThinkingParts,
+  newToolCallId,
+  redactedHeaders,
+  readErrorPayload,
+  incompleteStreamError,
+  combinedSignal,
+  timeoutFor,
+} from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider } from "../models/catalog.ts";
 import {
@@ -155,6 +165,12 @@ interface ChatResponse {
 }
 
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
+
+/** Q-18: Chat transport never echoes thought signatures (no wire field).
+ * Local helper documents the namespacing decision per provider file. */
+function withProviderSignature(_sig: string | undefined): { thoughtSignature?: undefined } {
+  return {};
+}
 
 /** Internal headers that must never leak onto native REST requests. */
 const INTERNAL_HEADERS = new Set([
@@ -382,7 +398,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
         const queue = (m.name && idsByName.get(m.name)) || [];
         messages.push({
           role: "tool",
-          tool_call_id: queue.shift() || "call_0",
+          tool_call_id: queue.shift() || newToolCallId(),
           content: m.content,
           name: m.name,
         });
@@ -429,27 +445,6 @@ function mapUsage(raw?: ChatResponse["usage"]): TokenUsage {
   return usage;
 }
 
-function parseArguments(raw: string | undefined): Record<string, unknown> {
-  if (!raw) return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return { raw };
-  } catch {
-    return { raw };
-  }
-}
-
-/** Trims/collapses assembled thinking parts (no edge-tripling). */
-function normalizeThinkingParts(parts: string[]): string | undefined {
-  const cleaned = parts
-    .map((p) => p.replace(/\n{3,}/g, "\n\n").trim())
-    .filter((p) => p.length > 0);
-  return cleaned.length > 0 ? cleaned.join("\n") : undefined;
-}
-
 function throwResponseError(response: ChatResponse, modelId: string): void {
   const message =
     response.error && typeof response.error.message === "string" && response.error.message
@@ -476,7 +471,9 @@ function parseResponse(
 
   const choice = response.choices?.[0];
   const message = choice?.message;
-  const text = typeof message?.content === "string" ? message.content : "";
+  // Q-23: refusal content surfaces as text with a `refusal` finish reason.
+  const refusal = typeof message?.refusal === "string" && message.refusal ? message.refusal : "";
+  const text = typeof message?.content === "string" && message.content ? message.content : refusal;
   // Thinking: `reasoning_details[].text` duplicates `message.reasoning` when
   // both ride along (observed live) — prefer details, else the plain field.
   const thinkingParts: string[] = [];
@@ -493,7 +490,7 @@ function parseResponse(
   for (const tc of message?.tool_calls ?? []) {
     const args = parseArguments(tc.function?.arguments);
     toolCalls.push({
-      id: tc.id || `call_${Math.random().toString(36).slice(2, 9)}`,
+      id: tc.id || newToolCallId(),
       name: tc.function?.name || "unknown",
       arguments: args,
       rawArguments:
@@ -504,48 +501,23 @@ function parseResponse(
   }
 
   // Normalized finish reasons: tool_calls|stop|length|content_filter|error.
+  // Q-23: refusal content forces `refusal` (even when the wire says stop).
   const wireReason = choice?.finish_reason ?? undefined;
+  const finishReason =
+    toolCalls.length > 0 ? "tool_calls" : refusal ? "refusal" : wireReason || "stop";
   return {
     text,
     thinking: normalizeThinkingParts(thinkingParts),
     thoughtSignature: undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     usage: mapUsage(response.usage),
-    finishReason:
-      toolCalls.length > 0 ? "tool_calls" : wireReason || "stop",
+    finishReason,
     responseId: response.id,
     model: modelId,
     provider: "openrouter",
     raw,
     durationMs,
   };
-}
-
-function redactedHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    out[k] = k.toLowerCase() === "authorization" ? "[REDACTED]" : v;
-  }
-  return out;
-}
-
-function readErrorPayload(bodyText: string): { message: string; code?: string | number; errorType?: string } {
-  try {
-    const parsed: unknown = JSON.parse(bodyText);
-    const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const err = (first as { error?: { message?: string; code?: string | number; metadata?: { error_type?: string } } })?.error;
-    if (err && typeof err.message === "string") {
-      const errorType = (err as { metadata?: { error_type?: string } })?.metadata?.error_type;
-      return {
-        message: err.message,
-        code: err.code,
-        ...(typeof errorType === "string" ? { errorType } : {}),
-      };
-    }
-    return { message: bodyText.slice(0, 300) };
-  } catch {
-    return { message: bodyText.slice(0, 300) };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -635,8 +607,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     for (const [k, v] of Object.entries(headers)) {
       if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
     }
-    headers["Content-Type"] = "application/json";
-    headers["Authorization"] = `Bearer ${apiKey}`;
+    setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
+    setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
@@ -648,13 +620,18 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, signal));
-    const text = await res.text();
-    const headers: Record<string, string> = {};
-    res.headers.forEach((v, k) => {
-      headers[k] = v;
-    });
-    return { status: res.status, statusText: res.statusText, headers, text };
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
+    try {
+      const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, effective));
+      const text = await res.text();
+      const headers: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        headers[k] = v;
+      });
+      return { status: res.status, statusText: res.statusText, headers, text };
+    } finally {
+      cleanup();
+    }
   }
 
   private throwIfError(
@@ -814,7 +791,21 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           body,
         };
 
-        const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
+        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutTimer =
+          streamTimeoutMs && streamTimeoutMs > 0
+            ? setTimeout(() => {
+                try {
+                  linked.abort();
+                } catch {}
+              }, streamTimeoutMs)
+            : undefined;
+        let res: Response;
+        try {
+          res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
+        } finally {
+          if (streamTimeoutTimer) clearTimeout(streamTimeoutTimer);
+        }
         if (!res.ok || !res.body) {
           const text = !res.ok ? await res.text().catch(() => "") : "";
           if (!res.ok) this.throwIfError(res.status, url, text, clean);
@@ -824,7 +815,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
         });
-        const responseMeta = { status: res.status, statusText: res.statusText, headers: responseHeaders };
+        const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         const parser = new SSEParser();
@@ -839,6 +830,11 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         let lastToolIndex = 0;
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
+        let sawFinishReason = false;
+        let sawUsage = false;
+        let refusalSeen = false;
+        let badFrames = 0;
+        let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
         let aborted = false;
@@ -854,11 +850,17 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         );
 
         const handleMessage = (data: string): void => {
-          if (!data || data === "[DONE]") return;
+          if (!data) return;
+          if (data === "[DONE]") {
+            sawFinishReason = sawFinishReason || completedBody !== undefined || sawUsage;
+            return;
+          }
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
+            framesSeen += 1;
           } catch {
+            badFrames += 1;
             return;
           }
           // Mid-stream provider error: top-level `error`, HTTP stays 200.
@@ -881,6 +883,13 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           const choice = (Array.isArray(msg["choices"]) ? (msg["choices"] as Record<string, unknown>[])[0] : undefined) ?? {};
           const delta = (choice["delta"] as Record<string, unknown>) ?? {};
           // Text delta (content-free accounting frames carry "" — ignored).
+          // Q-23: refusal deltas surface as text with a `refusal` finish.
+          const deltaRefusal = delta["refusal"];
+          if (typeof deltaRefusal === "string" && deltaRefusal) {
+            text += deltaRefusal;
+            refusalSeen = true;
+            eventStream.push({ type: "text_delta", delta: deltaRefusal, partialText: text });
+          }
           if (typeof delta["content"] === "string" && delta["content"]) {
             text += delta["content"] as string;
             eventStream.push({ type: "text_delta", delta: delta["content"] as string, partialText: text });
@@ -950,10 +959,12 @@ export class OpenRouterChatCompletionsProvider implements Provider {
               throw toConciseProviderError(failure, "openrouter", clean);
             }
             finishReason = fr;
+            sawFinishReason = true;
           }
           const chunkUsage = msg["usage"] as ChatResponse["usage"] | undefined;
           if (chunkUsage) {
             usage = mapUsage(chunkUsage);
+            sawUsage = true;
             completedBody = completedBody ?? msg;
             eventStream.push({ type: "usage", usage });
           }
@@ -984,7 +995,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         for (const c of calls.values()) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const record: ToolCallRecord = {
-            id: c.id || `call_${Math.random().toString(36).slice(2, 9)}`,
+            id: c.id || newToolCallId(),
             name: c.name,
             arguments: args,
             rawArguments: c.startArgs + c.deltaArgs,
@@ -994,9 +1005,30 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         }
 
         noteProviderTurn(sessionId, "openrouter");
-        if (toolCalls.length > 0) finishReason = "tool_calls";
+        if (toolCalls.length > 0) {
+          finishReason = "tool_calls";
+          sawFinishReason = true;
+        } else if (refusalSeen && finishReason !== "content_filter") {
+          finishReason = "refusal";
+          sawFinishReason = true;
+        }
 
-        const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
+        // instead of resolving empty success. Skipped for non-SSE payloads
+        // (JSON mocks) where no SSE frames were ever seen.
+        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
+        const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
+        const isSSEPayload =
+          (typeof ctEntry?.[1] === "string" && ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
+          framesSeen > 0 ||
+          badFrames > 0;
+        if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
+          eventStream.fail(incompleteStreamError("openrouter", clean));
+          return;
+        }
+
+        const cleanThinking = cleanThinkingEarly;
         const finalResponse = new AgentResponse({
           text,
           thinking: cleanThinking || undefined,
@@ -1007,7 +1039,10 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           responseId,
           model: clean,
           provider: "openrouter",
-          raw: { request: rawRequest, response: { ...responseMeta, body: completedBody } },
+          raw: {
+            request: rawRequest,
+            response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
+          },
           durationMs: Date.now() - startTime,
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
