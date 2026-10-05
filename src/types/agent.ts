@@ -7,6 +7,7 @@ import type {
 } from "./core.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
 import type { Agent } from "../agent/agent.ts";
+import type { z } from "zod";
 
 // ---------------------------------------------------------------------------
 // Q-52/Q-53/Q-54 canonical option types (all additive; nothing renamed).
@@ -60,6 +61,17 @@ export type ToolChoiceOption =
 
 /** Canonical stop control (Q-54): sequence(s) halting generation. */
 export type StopOption = string | string[];
+
+/** Canonical structured-output input (Q-61). Zod, JSON Schema, or explicit form. */
+export type StructuredOutputOption =
+  | z.ZodType
+  | Record<string, unknown>
+  | {
+      name?: string;
+      description?: string;
+      schema: z.ZodType | Record<string, unknown>;
+      strict?: boolean;
+    };
 
 /** Configuration used to construct an {@link Agent}. */
 export interface AgentConfig {
@@ -142,9 +154,12 @@ export interface AgentConfig {
   /** Deterministic seed, when the provider supports it. */
   seed?: number;
   /**
-   * Optional output schema (Zod or JSON Schema, stored as `unknown` so `zod`
+   * Optional output schema (Zod, JSON Schema, or `{ name, schema, strict }`,
+   * see `StructuredOutputOption`, stored as `unknown` so `zod`
    * stays optional for type-only consumers). Agent-level only; per-run
-   * overrides are intentionally unsupported.
+   * overrides are intentionally unsupported. When set, the model answer is
+   * constrained to the schema on all providers and `AgentResponse.parsed`
+   * carries the validated value.
    */
   output?: unknown;
   /** Retry policy for provider calls. */

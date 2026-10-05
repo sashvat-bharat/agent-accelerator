@@ -12,7 +12,8 @@ import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
 import { getSubAgentTrace, subscribeToSubAgent, listSubAgentTraceIds, type SubAgentTrace } from "./delegation.ts";
 import { saveSessionDir, saveSessionFile } from "../session/store.ts";
-import { clearSessionRouting } from "../providers.ts";
+import { clearSessionRouting, normalizeStructuredOutput } from "../providers.ts";
+import type { StructuredOutputSpec } from "../types/model.ts";
 import { clearInteractionChains } from "../providers/google.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
@@ -139,6 +140,10 @@ export class Agent {
   readonly tools: Record<string, ToolDefinition> = {};
   /** Normalized reasoning configuration. */
   readonly thinkingConfig?: ThinkingConfig;
+  /** Canonical structured-output request (raw `AgentConfig.output`). */
+  readonly output?: unknown;
+  /** Normalized structured-output spec sent to providers. */
+  readonly outputSpec?: StructuredOutputSpec;
   /** Cache retention/session settings. */
   readonly cacheConfig?: CacheConfig;
   /** Provider service tier. */
@@ -297,6 +302,12 @@ export class Agent {
     // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
     const mpThinking = (rawModel as any)?.thinkingLevel;
     this.thinkingConfig = normalizeThinking(config, mpThinking);
+
+    // Structured outputs: validate early so invalid schemas fail fast at construction.
+    if (config.output !== undefined && config.output !== null) {
+      this.output = config.output;
+      this.outputSpec = normalizeStructuredOutput(config.output);
+    }
 
     // DX5: cache retention short|medium|long, undefined = no explicit
     this.cacheConfig = {
@@ -798,6 +809,7 @@ export class Agent {
           : { ...this.cacheConfig, sessionId: runOptions?.sessionId || this.sessionId },
         serviceTier: this.serviceTier,
         sessionId: runOptions?.sessionId || this.sessionId,
+        ...(this.outputSpec ? { output: this.outputSpec } : {}),
       };
 
       const loopConfig = {
@@ -815,6 +827,7 @@ export class Agent {
         onSteerInjected: () => this.persistNow(),
         // Q-22: loop enforces these (plus local timeout races).
         limits: { ...this.runLimits },
+        ...(this.output !== undefined ? { output: this.output } : {}),
       };
 
       const res = await runAgentLoop(loopConfig);
@@ -865,6 +878,7 @@ export class Agent {
         : { ...this.cacheConfig, sessionId: runOptions?.sessionId || this.sessionId },
       serviceTier: this.serviceTier,
       sessionId: runOptions?.sessionId || this.sessionId,
+      ...(this.outputSpec ? { output: this.outputSpec } : {}),
     };
 
     const loopConfig = {
@@ -882,6 +896,7 @@ export class Agent {
       onSteerInjected: () => this.persistNow(),
       // Q-22: loop enforces these (plus local timeout races).
       limits: { ...this.runLimits },
+      ...(this.output !== undefined ? { output: this.output } : {}),
     };
 
     const s = streamAgentLoop(loopConfig);

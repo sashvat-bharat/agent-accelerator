@@ -1098,19 +1098,28 @@ export type PricedCost = NonNullable<TokenUsage["cost"]> & {
 };
 
 /**
- * Service-tier price multipliers (Q-36). ESTIMATES, not vendor guarantees:
- * `flex` batches trade latency for ~0.5x price, `priority` reserves capacity
- * at ~1.5x. Standard/default is 1.0. Documented as estimates because vendors
- * do not publish exact tier multipliers in the catalog.
+ * Service-tier price multipliers (Q-36). Aligned with pi
+ * (`api/openai-responses.ts:387`): `flex` trades latency for ~0.5x price,
+ * `priority`/`fast` reserve capacity at ~2x (`2.5x` for `gpt-5.5`).
+ * Standard/default is 1.0. Estimates because vendors do not publish exact
+ * tier multipliers in the catalog.
  */
 const SERVICE_TIER_MULTIPLIERS: Record<string, number> = {
   flex: 0.5,
-  priority: 1.5,
+  priority: 2,
+  fast: 2,
 };
 
-function serviceTierMultiplier(serviceTier?: string): { multiplier: number; tier?: string } {
+function serviceTierMultiplier(serviceTier?: string, modelId?: string): { multiplier: number; tier?: string } {
   if (!serviceTier) return { multiplier: 1 };
-  const m = SERVICE_TIER_MULTIPLIERS[serviceTier.toLowerCase()];
+  const lower = serviceTier.toLowerCase();
+  if (lower === "priority" || lower === "fast") {
+    if (typeof modelId === "string" && modelId.includes("gpt-5.5")) {
+      return { multiplier: 2.5, tier: serviceTier };
+    }
+    return { multiplier: 2, tier: serviceTier };
+  }
+  const m = SERVICE_TIER_MULTIPLIERS[lower];
   return m !== undefined ? { multiplier: m, tier: serviceTier } : { multiplier: 1, tier: serviceTier };
 }
 
@@ -1190,7 +1199,7 @@ function resolveEffectivePricing(
 export function priceUsage(
   usage: TokenUsage,
   spec?: ModelSpec,
-  opts?: { serviceTier?: ServiceTier | string }
+  opts?: { serviceTier?: ServiceTier | string; modelId?: string }
 ): PricedCost | undefined {
   const reported = usage?.cost;
   if (reported && typeof reported.totalCost === "number" && reported.totalCost > 0) {
@@ -1233,7 +1242,7 @@ export function priceUsage(
   if (!pricing.input && !pricing.output && !pricing.cacheRead && !pricing.cacheWrite && !pricing.audio) {
     return undefined;
   }
-  const { multiplier, tier: serviceTier } = serviceTierMultiplier(opts?.serviceTier);
+  const { multiplier, tier: serviceTier } = serviceTierMultiplier(opts?.serviceTier, opts?.modelId ?? spec?.id);
   const nonCachedInput = Math.max(0, inputTokens - cachedTokens);
   // Integer micro-USD accumulation: microUSD = tokens * pricePerMillion
   // ($P per 1M tokens == $P/1e6 per token == P micro-USD per token).

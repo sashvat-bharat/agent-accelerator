@@ -10,6 +10,9 @@
  * redesigning this abstraction — only new per-provider mappers/adapters.
  */
 import type { CacheConfig, ServiceTier, ThinkingLevel } from "./types/core.ts";
+import type { StructuredOutputSpec } from "./types/model.ts";
+import { zodToJsonSchema } from "./tools/schema.ts";
+import { ValidationError } from "./types/errors.ts";
 
 /** Classification of a canonical capability on a given provider. */
 export type ProviderCapabilityStatus =
@@ -357,17 +360,17 @@ export function mapServiceTierToOpenAI(tier: ServiceTier | undefined): "flex" | 
 
 /**
  * Applies canonical cache config for OpenAI. Session affinity flows via
- * `prompt_cache_key` (handled by the adapter); explicit retention control
- * lives in `prompt_cache_options` (gpt-5.6+ explicit breakpoints) which is
- * out of scope for the most-important subset, so retention/cachedContentId
- * are UNSUPPORTED: warn and drop. `prompt_cache_retention` is deprecated.
+ * `prompt_cache_key` (handled by the adapter); `long` retention maps to
+ * `prompt_cache_retention: "24h"` when the catalog supports it (handled by
+ * the adapter, pi `api/openai-responses.ts:97` rule). Other explicit
+ * retention modes and `cachedContentId` are UNSUPPORTED: warn and drop.
  */
 export function applyCacheForOpenAI(
   cache: CacheConfig | undefined,
   modelRef: string
 ): void {
   if (!cache) return;
-  if (cache.retention && cache.retention !== "implicit") {
+  if (cache.retention && cache.retention !== "implicit" && cache.retention !== "long") {
     emitProviderWarning({
       provider: "openai",
       capability: "cache retention",
@@ -488,4 +491,252 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
     }
   }
   return { raw: startText + deltaText };
+}
+
+// ---------------------------------------------------------------------------
+// Structured outputs (canonical, pure, no I/O)
+// ---------------------------------------------------------------------------
+
+function isZodLike(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["safeParse"] === "function" ||
+    typeof v["parse"] === "function" ||
+    "_def" in v ||
+    "~standard" in v
+  );
+}
+
+function looksLikeJsonSchema(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["type"] === "string" ||
+    isPlainObject(v["properties"]) ||
+    Array.isArray(v["anyOf"]) ||
+    Array.isArray(v["oneOf"]) ||
+    Array.isArray(v["allOf"]) ||
+    typeof v["$schema"] === "string" ||
+    isPlainObject(v["$defs"]) ||
+    isPlainObject(v["definitions"])
+  );
+}
+
+function sanitizeOutputName(raw: unknown): string {
+  const base = typeof raw === "string" && raw.trim() ? raw.trim() : "structured_output";
+  const cleaned = base.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "structured_output";
+  return cleaned;
+}
+
+function schemaToJsonSchema(schema: unknown, what: string): Record<string, unknown> {
+  if (isZodLike(schema)) {
+    try {
+      const converted = zodToJsonSchema(schema);
+      if (isPlainObject(converted)) return converted;
+    } catch {
+      // fall through to error below
+    }
+  }
+  if (isPlainObject(schema)) return schema as Record<string, unknown>;
+  throw new ValidationError(
+    `[Agent Accelerator] Invalid structured output ${what}: expected a Zod schema, a JSON Schema object, or { name, schema, strict }.`
+  );
+}
+
+/**
+ * Normalizes `AgentConfig.output` into a provider-agnostic spec.
+ *
+ * Accepts a Zod schema, a JSON Schema object, or an explicit
+ * `{ name?, description?, schema, strict? }` wrapper. Returns `undefined`
+ * when no output was requested. Throws `ValidationError` for invalid shapes.
+ *
+ * @example `normalizeStructuredOutput(z.object({ city: z.string() }))`
+ */
+export function normalizeStructuredOutput(output: unknown): StructuredOutputSpec | undefined {
+  if (output === undefined || output === null) return undefined;
+  if (isPlainObject(output) && "schema" in (output as Record<string, unknown>)) {
+    const rec = output as Record<string, unknown>;
+    const schema = schemaToJsonSchema(rec["schema"], "`output.schema`");
+    return {
+      name: sanitizeOutputName(rec["name"]),
+      schema,
+      strict: typeof rec["strict"] === "boolean" ? (rec["strict"] as boolean) : true,
+      ...(typeof rec["description"] === "string" && (rec["description"] as string).trim()
+        ? { description: (rec["description"] as string).trim() }
+        : {}),
+    };
+  }
+  if (isZodLike(output) || looksLikeJsonSchema(output)) {
+    return {
+      name: "structured_output",
+      schema: schemaToJsonSchema(output, "`output`"),
+      strict: true,
+    };
+  }
+  throw new ValidationError(
+    "[Agent Accelerator] Invalid structured output: expected a Zod schema, a JSON Schema object, or { name, schema, strict }."
+  );
+}
+
+/**
+ * Extracts the original Zod validator from a canonical output option, when
+ * present (bare Zod schema or `{ schema: Zod }`). Used by the loop for
+ * post-parse validation; `undefined` means JSON-parse only.
+ */
+export function extractOutputValidator(output: unknown): { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } } | undefined {
+  if (!output) return undefined;
+  if (isZodLike(output) && typeof (output as { safeParse?: unknown }).safeParse === "function") {
+    return output as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } };
+  }
+  if (isPlainObject(output) && isZodLike((output as Record<string, unknown>)["schema"])) {
+    const inner = (output as Record<string, unknown>)["schema"] as { safeParse?: unknown };
+    if (typeof inner.safeParse === "function") {
+      return inner as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } };
+    }
+  }
+  return undefined;
+}
+
+function stripCodeFences(text: string): string {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/i);
+  if (fenced && typeof fenced[1] === "string") return fenced[1].trim();
+  return trimmed;
+}
+
+/**
+ * Parses and validates a final answer against a canonical output option.
+ * Strips markdown fences, requires valid JSON, then applies the Zod validator
+ * when the original option carried one. Throws `ValidationError` on mismatch.
+ *
+ * @example `parseStructuredOutput('{"city":"Paris"}', z.object({ city: z.string() }))`
+ */
+export function parseStructuredOutput(text: string, output: unknown): unknown {
+  const cleaned = stripCodeFences(typeof text === "string" ? text : String(text ?? ""));
+  if (!cleaned) {
+    throw new ValidationError(
+      "[Agent Accelerator] Structured output validation failed: model returned empty text, expected JSON matching the output schema."
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    throw new ValidationError(
+      `[Agent Accelerator] Structured output validation failed: model text is not valid JSON (${cleaned.slice(0, 120)}).`
+    );
+  }
+  const validator = extractOutputValidator(output);
+  if (validator) {
+    const res = validator.safeParse(parsed);
+    if (!res.success) {
+      const detail = res.error?.message ? ` ${res.error.message}`.slice(0, 500) : "";
+      throw new ValidationError(
+        `[Agent Accelerator] Structured output validation failed: JSON does not match the output schema.${detail}`
+      );
+    }
+    return res.data ?? parsed;
+  }
+  return parsed;
+}
+
+/**
+ * Maps a normalized spec onto OpenAI Responses `text.format`.
+ * `{ type: json_schema, name, schema, strict }` (docs: responses/create).
+ */
+export function mapOutputToOpenAI(
+  spec: StructuredOutputSpec | undefined
+): { format: { type: "json_schema"; name: string; schema: Record<string, unknown>; strict: boolean; description?: string } } | undefined {
+  if (!spec) return undefined;
+  return {
+    format: {
+      type: "json_schema",
+      name: spec.name,
+      schema: spec.schema,
+      strict: spec.strict ?? true,
+      ...(spec.description ? { description: spec.description } : {}),
+    },
+  };
+}
+
+/**
+ * Maps a normalized spec onto Google Interactions `response_format`.
+ * `{ type: text, mime_type: application/json, schema }` (docs: structured-output).
+ */
+export function mapOutputToGoogle(
+  spec: StructuredOutputSpec | undefined
+): { responseFormat: { type: "text"; mime_type: "application/json"; schema: Record<string, unknown> } } | undefined {
+  if (!spec) return undefined;
+  return {
+    responseFormat: {
+      type: "text",
+      mime_type: "application/json",
+      schema: spec.schema,
+    },
+  };
+}
+
+/** Chat Completions `response_format` wire shape (OpenRouter + compat). */
+export type ChatCompletionsResponseFormat =
+  | { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
+
+/**
+ * Maps a normalized spec onto Chat Completions `response_format`.
+ * `{ type: json_schema, json_schema: { name, schema, strict } }`
+ * (docs: openai completions/create, openrouter parameters).
+ */
+export function mapOutputToOpenRouterChat(
+  spec: StructuredOutputSpec | undefined
+): { response_format: ChatCompletionsResponseFormat } | undefined {
+  if (!spec) return undefined;
+  return {
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: spec.name,
+        schema: spec.schema,
+        strict: spec.strict ?? true,
+        ...(spec.description ? { description: spec.description } : {}),
+      },
+    },
+  };
+}
+
+/**
+ * Maps a normalized spec onto generic compat Chat Completions
+ * `response_format` (same standard shape as OpenRouter Chat).
+ */
+export function mapOutputToCompatChat(
+  spec: StructuredOutputSpec | undefined
+): { response_format: ChatCompletionsResponseFormat } | undefined {
+  return mapOutputToOpenRouterChat(spec);
+}
+
+/**
+ * Builds the emulated structured-output instruction for models without
+ * native `response_format` support (catalog `structured_output: false`).
+ * Appended to the system prompt so the model still targets JSON; the loop
+ * still validates into `AgentResponse.parsed`.
+ *
+ * @example `augmentSystemPromptWithStructuredOutput(sys, spec)`
+ */
+export function buildStructuredOutputInstruction(spec: StructuredOutputSpec): string {
+  return `Return ONLY valid JSON matching this JSON Schema, with no markdown fences, no commentary, no extra text.\nSchema: ${JSON.stringify(spec.schema)}`;
+}
+
+/**
+ * Returns a system prompt with the emulated structured-output instruction
+ * appended (stable per Agent since `output` is agent-level, so prefix-cache
+ * affinity is preserved). No-op when spec is undefined.
+ */
+export function augmentSystemPromptWithStructuredOutput(
+  systemPrompt: string | undefined,
+  spec: StructuredOutputSpec | undefined
+): string | undefined {
+  if (!spec) return systemPrompt;
+  const instruction = `[Structured Output]\n${buildStructuredOutputInstruction(spec)}`;
+  if (!systemPrompt) return instruction;
+  if (systemPrompt.includes("[Structured Output]")) return systemPrompt;
+  return `${systemPrompt}\n\n${instruction}`;
 }

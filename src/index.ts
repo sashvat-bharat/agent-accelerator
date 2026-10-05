@@ -210,6 +210,15 @@ export {
   mapToolChoiceToOpenAI,
   normalizeToolChoice,
   parseStreamedToolArguments,
+  normalizeStructuredOutput,
+  extractOutputValidator,
+  parseStructuredOutput,
+  mapOutputToOpenAI,
+  mapOutputToGoogle,
+  mapOutputToOpenRouterChat,
+  mapOutputToCompatChat,
+  buildStructuredOutputInstruction,
+  augmentSystemPromptWithStructuredOutput,
 } from "./providers.ts";
 export type {
   ProviderCapabilityStatus,
@@ -217,13 +226,21 @@ export type {
   OpenRouterToolChoice,
   OpenRouterChatToolChoice,
   OpenAIToolChoice,
+  ChatCompletionsResponseFormat,
 } from "./providers.ts";
 
 export {
   GOOGLE_MODELS,
   OPENAI_MODELS,
   OPENROUTER_MODELS,
+  modelSupportsStructuredOutput,
 } from "./models/catalog.ts";
+export {
+  hasAuthHeader,
+  clampToolCallId,
+  hasTruncatedToolArguments,
+  shortHashId,
+} from "./providers/shared.ts";
 
 export {
   isValidThoughtSignature,
@@ -368,6 +385,7 @@ export type {
   ProviderRequestOptions,
   ProviderGenerateResult,
   ProviderRawData,
+  StructuredOutputSpec,
 } from "./types/model.ts";
 
 export type {
@@ -388,6 +406,7 @@ export type {
   WhenBusyMode,
   ModelRef,
   ThinkingOption,
+  StructuredOutputOption,
   SamplingConfig,
   RetryPolicyConfig,
   AgentLogger,

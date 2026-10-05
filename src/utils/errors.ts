@@ -54,7 +54,18 @@ export function toConciseProviderError(error: unknown, providerId: string, model
   const err = error as any;
   const status = readStatus(err);
   const url = readUrl(err);
-  const detail = readProviderMessage(err);
+  let detail = readProviderMessage(err);
+  // Append OpenRouter-style raw metadata once (pi api/openai-completions.ts:719
+  // rule): normalize already stringifies error.error, so only append raw when
+  // absent to avoid double-printing.
+  const rawMeta =
+    (typeof err?.raw === "string" && err.raw.trim() ? err.raw.trim() : undefined) ??
+    (typeof err?.error?.metadata?.raw === "string" && err.error.metadata.raw.trim()
+      ? err.error.metadata.raw.trim()
+      : undefined);
+  if (rawMeta && !detail.includes(rawMeta.slice(0, 80))) {
+    detail = `${detail}\n${rawMeta.slice(0, 500)}`.slice(0, 800);
+  }
   const concise = new Error(
     `[${displayModel(providerId, modelId)}] request failed${status ? ` (${status})` : ""}: ${detail}`
   );
@@ -74,6 +85,9 @@ export function toConciseProviderError(error: unknown, providerId: string, model
     // helpers never strip it.
     ...(typeof err?.errorType === "string"
       ? { errorType: { value: err.errorType, enumerable: false } }
+      : {}),
+    ...(typeof (err as { raw?: unknown })?.raw === "string"
+      ? { raw: { value: (err as { raw: string }).raw.slice(0, 500), enumerable: false } }
       : {}),
   });
   return concise;

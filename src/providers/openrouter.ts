@@ -52,11 +52,14 @@ import {
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
+  hasTruncatedToolArguments,
   combinedSignal,
   timeoutFor,
+  hasAuthHeader,
+  clampToolCallId,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
-import { getModelFromCatalog, getModelsForProvider } from "../models/catalog.ts";
+import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
   mapThinkingLevelToOpenRouterChat,
   mapServiceTierToOpenRouter,
@@ -64,6 +67,10 @@ import {
   mapToolChoiceToOpenRouterChat,
   noteProviderTurn,
   parseStreamedToolArguments,
+  mapOutputToOpenRouterChat,
+  normalizeStructuredOutput,
+  augmentSystemPromptWithStructuredOutput,
+  emitProviderWarning,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -102,6 +109,7 @@ interface ChatRequestBody {
   service_tier?: string;
   session_id?: string;
   plugins?: Array<{ id: string }>;
+  response_format?: { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
   stream?: boolean;
   [k: string]: unknown;
 }
@@ -193,7 +201,10 @@ function resolveBaseUrl(options?: ProviderRequestOptions): string {
 }
 
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
-  return options?.apiKey || getApiKey("openrouter", undefined, options?.env);
+  const key = getApiKey("openrouter", options?.apiKey, options?.env);
+  if (key) return key;
+  if (hasAuthHeader(options?.headers)) return "unused";
+  return undefined;
 }
 
 /**
@@ -352,11 +363,17 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
     messages.push({ role: "system", content: context.systemPrompt });
   }
   let hasFiles = false;
+  let lastRole: string | null = "system";
   for (const m of context.messages) {
     if (m.role === "system") continue;
     if (m.role === "user") {
+      // Strict routes reject `user` directly after `tool`: bridge with a
+      // synthetic assistant turn (pi api/openai-completions.ts:1233).
+      if (lastRole === "tool") {
+        messages.push({ role: "assistant", content: "I have processed the tool results." });
+      }
       if (typeof m.content === "string") {
-        if (m.content) messages.push({ role: "user", content: m.content });
+        if (m.content) { messages.push({ role: "user", content: m.content }); lastRole = "user"; }
       } else {
         const { blocks, fileUrls, hasFiles: hf } = await contentPartsToBlocks(m.content);
         if (hf) hasFiles = true;
@@ -364,7 +381,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
         for (const url of fileUrls) {
           blocks.push({ type: "text", text: url });
         }
-        if (blocks.length > 0) messages.push({ role: "user", content: blocks });
+        if (blocks.length > 0) { messages.push({ role: "user", content: blocks }); lastRole = "user"; }
       }
     } else if (m.role === "assistant") {
       if (typeof m.content === "string") {
@@ -378,7 +395,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
       for (const part of m.content) {
         if (part.type === "tool_call") {
           calls.push({
-            id: part.callId || part.id,
+            id: clampToolCallId(part.callId || part.id),
             type: "function",
             function: { name: part.name, arguments: JSON.stringify(part.arguments || {}) },
           });
@@ -388,20 +405,25 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
         // Prior-turn reasoning is NOT resent: chat history is messages +
         // tool calls only (documented decision; avoids strict-route 400s).
       }
+      // Skip empty assistant turns (no text + no tool calls): strict
+      // routes reject them, and they carry no signal (pi drop rule).
+      if (texts.length === 0 && calls.length === 0) continue;
       messages.push({
         role: "assistant",
         content: texts.length > 0 ? texts.join("\n") : null,
         ...(calls.length > 0 ? { tool_calls: calls } : {}),
       });
+      lastRole = "assistant";
     } else if (m.role === "tool") {
       if (typeof m.content === "string") {
         const queue = (m.name && idsByName.get(m.name)) || [];
         messages.push({
           role: "tool",
-          tool_call_id: queue.shift() || newToolCallId(),
+          tool_call_id: clampToolCallId(queue.shift() || newToolCallId()),
           content: m.content,
           name: m.name,
         });
+        lastRole = "tool";
         continue;
       }
       if (!Array.isArray(m.content)) continue;
@@ -409,10 +431,11 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
         if (part.type === "tool_result") {
           messages.push({
             role: "tool",
-            tool_call_id: pairing.get(part.id) || part.id,
+            tool_call_id: clampToolCallId(pairing.get(part.id) || part.id),
             content: resultToOutput(part.result),
             name: part.name,
           });
+          lastRole = "tool";
         }
       }
     }
@@ -490,7 +513,7 @@ function parseResponse(
   for (const tc of message?.tool_calls ?? []) {
     const args = parseArguments(tc.function?.arguments);
     toolCalls.push({
-      id: tc.id || newToolCallId(),
+      id: tc.id && !tc.id.includes("|") && tc.id.length <= 40 ? tc.id : clampToolCallId(tc.id || newToolCallId()),
       name: tc.function?.name || "unknown",
       arguments: args,
       rawArguments:
@@ -559,7 +582,33 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     const serviceTier = mapServiceTierToOpenRouter(options?.serviceTier);
     applyCacheForOpenRouter(options?.cache, `openrouter/${modelId}`);
 
-    const { messages, hasFiles } = await fullHistoryMessages(context);
+    // Structured outputs: native `response_format` when supported, else
+    // emulated via system-prompt instruction + client validation (catalog
+    // `structured_output: false` models would 400 on the wire shape).
+    let effectiveContext = context;
+    let outputEmulated = false;
+    let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
+    try {
+      outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+    } catch {
+      // why: invalid output shapes fail fast at Agent construction/loop validation.
+      outputSpec = undefined;
+    }
+    if (outputSpec && !modelSupportsStructuredOutput("openrouter", modelId)) {
+      outputEmulated = true;
+      effectiveContext = {
+        ...context,
+        systemPrompt: augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec),
+      };
+      emitProviderWarning({
+        provider: "openrouter",
+        capability: "structured output",
+        requested: `${outputSpec.name} (openrouter/${modelId})`,
+        reason: "the catalog reports structured_output: false for this model, so native response_format is unsupported.",
+        fallback: "emulated JSON instruction + client validation (no response_format is sent)",
+      });
+    }
+    const { messages, hasFiles } = await fullHistoryMessages(effectiveContext);
     const body: ChatRequestBody = {
       model: modelId,
       messages,
@@ -573,12 +622,23 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;
+    // Structured outputs: Chat Completions `response_format{type:json_schema,json_schema}`.
+    // Skipped when emulated (unsupported model): instruction already in messages.
+    if (outputSpec && !outputEmulated) {
+      try {
+        const mapped = mapOutputToOpenRouterChat(outputSpec);
+        if (mapped) body.response_format = mapped.response_format;
+      } catch {
+        // why: invalid output shapes fail fast at Agent construction/loop validation.
+      }
+    }
     // PDF ingestion is a documented plugin, not a message shape: enable it
     // only when file parts are present (never by default).
     if (hasFiles) body.plugins = [{ id: "file-parser" }];
-    // No temperature/top_p/max_tokens/stop/response_format/user/seed knobs
+    // No temperature/top_p/max_tokens/stop/user/seed knobs
     // (no canonical options exist; omitting also keeps provider cache keys
-    // stable). No store/previous_response_id/conversation: they do not exist
+    // stable). `response_format` above is the sole structured-output exception.
+    // No store/previous_response_id/conversation: they do not exist
     // on this endpoint.
     // Session affinity: top-level `session_id` is the documented sticky-routing
     // key on Chat Completions (prompt-caching guide) and takes precedence over
@@ -608,7 +668,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
     }
     setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
-    setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
+    if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
@@ -641,14 +701,21 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     modelId: string
   ): void {
     if (status >= 200 && status < 300) return;
-    const { message, code, errorType } = readErrorPayload(bodyText);
-    const err: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
+    const { message, code, errorType, raw } = readErrorPayload(bodyText);
+    const hint =
+      status === 401
+        ? " Check OPENROUTER_API_KEY (no quotes/spaces, correct provider) and that the key is loaded (bun --env-file=.env.local)."
+        : "";
+    const fullMessage = `${message}${hint}`;
+    const err: Record<string, unknown> & Error = new Error(fullMessage) as Record<string, unknown> & Error;
     (err as Record<string, unknown>)["statusCode"] = status;
     (err as Record<string, unknown>)["status"] = status;
     (err as Record<string, unknown>)["responseBody"] = bodyText.slice(0, 500);
     (err as Record<string, unknown>)["url"] = url.split("?")[0];
+    (err as Record<string, unknown>)["data"] = { error: { message: fullMessage } };
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
     if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
+    if (raw) (err as Record<string, unknown>)["raw"] = raw;
     throw toConciseProviderError(err, "openrouter", modelId);
   }
 
@@ -995,7 +1062,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         for (const c of calls.values()) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const record: ToolCallRecord = {
-            id: c.id || newToolCallId(),
+            id: c.id && !c.id.includes("|") && c.id.length <= 40 ? c.id : clampToolCallId(c.id || newToolCallId()),
             name: c.name,
             arguments: args,
             rawArguments: c.startArgs + c.deltaArgs,
@@ -1024,6 +1091,13 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           framesSeen > 0 ||
           badFrames > 0;
         if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
+          eventStream.fail(incompleteStreamError("openrouter", clean));
+          return;
+        }
+        // Refuse unfinished tool calls whose args never parsed (output_item.done
+        // never arrived): truncated `{raw}` must not reach the executor (pi
+        // api/openai-responses-shared.ts:766 rule). Non-SSE mocks preserve legacy.
+        if (!hasTerminal && toolCalls.some((c) => hasTruncatedToolArguments(c.arguments)) && isSSEPayload) {
           eventStream.fail(incompleteStreamError("openrouter", clean));
           return;
         }

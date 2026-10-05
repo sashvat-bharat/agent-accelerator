@@ -87,6 +87,7 @@ export interface ModelCapabilities {
   supportsLongCacheRetention?: boolean;
   supportsParallelToolCalls?: boolean;
   supportsStreaming?: boolean;
+  supportsStructuredOutput?: boolean;
   modalities?: ("text" | "image" | "audio" | "video" | "pdf")[];
   // derived
   supportsReasoningToggle?: boolean;
@@ -139,6 +140,24 @@ export interface ModelSpec {
 }
 
 // ---------------------------------------------------------------------------
+// Structured outputs — normalized, provider-agnostic spec.
+// Canonical input is `AgentConfig.output` (Zod, JSON Schema, or explicit
+// `{ name, schema, strict }`); `normalizeStructuredOutput` in
+// `src/providers.ts` produces this shape for adapters.
+// ---------------------------------------------------------------------------
+/** Normalized structured-output request passed from Agent to providers. */
+export interface StructuredOutputSpec {
+  /** Format name (1-64 chars, `[a-zA-Z0-9_-]`). Defaults to `structured_output`. */
+  name: string;
+  /** JSON Schema for the final answer (already converted from Zod when needed). */
+  schema: Record<string, unknown>;
+  /** Strict schema adherence (OpenAI/OpenRouter only; ignored by Google). Defaults to true. */
+  strict?: boolean;
+  /** Optional description of what the format is for. */
+  description?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Provider plumbing — unchanged API
 // ---------------------------------------------------------------------------
 /** Request controls passed from Agent to a provider implementation. */
@@ -156,6 +175,8 @@ export interface ProviderRequestOptions {
   env?: Record<string, string>;
   maxRetries?: number;
   maxRetryDelayMs?: number;
+  /** Normalized structured-output spec (see `normalizeStructuredOutput`). */
+  output?: StructuredOutputSpec;
 }
 
 /** Auditable request/response wire payload captured in AgentResponse. */

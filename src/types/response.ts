@@ -101,6 +101,8 @@ export function normalizeFinishReason(raw?: string): {
 /** JSON representation returned by AgentResponse.toJSON(). */
 export interface AgentResponseJSON {
   text: string;
+  /** Validated structured-output value when `AgentConfig.output` was set. */
+  parsed?: unknown;
   thinking?: string;
   thoughtSignature?: string;
   toolCalls?: ToolCallRecord[];
@@ -121,6 +123,8 @@ export interface AgentResponseJSON {
 /** Normalized final result returned by every Agent run. */
 export class AgentResponse {
   readonly text: string;
+  /** Validated structured-output value when `AgentConfig.output` was set. */
+  readonly parsed?: unknown;
   readonly thinking?: string;
   readonly thoughtSignature?: string;
   readonly toolCalls: ToolCallRecord[];
@@ -146,6 +150,7 @@ export class AgentResponse {
    */
   constructor(data: {
     text: string;
+    parsed?: unknown;
     thinking?: string;
     thoughtSignature?: string;
     toolCalls?: ToolCallRecord[];
@@ -162,6 +167,7 @@ export class AgentResponse {
     turns?: number;
   }) {
     this.text = data.text;
+    if (data.parsed !== undefined) (this as { parsed?: unknown }).parsed = data.parsed;
     this.thinking = data.thinking;
     this.thoughtSignature = data.thoughtSignature;
     this.toolCalls = data.toolCalls ?? [];
@@ -187,6 +193,7 @@ export class AgentResponse {
   toJSON(): AgentResponseJSON {
     return {
       text: this.text,
+      ...(this.parsed !== undefined ? { parsed: this.parsed } : {}),
       thinking: this.thinking,
       thoughtSignature: this.thoughtSignature,
       toolCalls: this.toolCalls.length > 0 ? this.toolCalls : undefined,

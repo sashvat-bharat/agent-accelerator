@@ -48,9 +48,11 @@ import {
   incompleteStreamError,
   combinedSignal,
   timeoutFor,
+  hasAuthHeader,
+  clampToolCallId,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
-import { getModelFromCatalog, getModelsForProvider } from "../models/catalog.ts";
+import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
   mapThinkingLevelToGoogle,
   mapServiceTierToGoogle,
@@ -59,6 +61,10 @@ import {
   lastProviderFor,
   noteProviderTurn,
   parseStreamedToolArguments,
+  mapOutputToGoogle,
+  normalizeStructuredOutput,
+  augmentSystemPromptWithStructuredOutput,
+  emitProviderWarning,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -176,7 +182,10 @@ function resolveBaseUrl(options?: ProviderRequestOptions): string {
 }
 
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
-  return options?.apiKey || getApiKey("google", undefined, options?.env);
+  const key = getApiKey("google", options?.apiKey, options?.env);
+  if (key) return key;
+  if (hasAuthHeader(options?.headers)) return "unused";
+  return undefined;
 }
 
 function cleanModelId(model: string | ModelSpec): string {
@@ -517,11 +526,43 @@ export class GoogleInteractionsProvider implements Provider {
         input: "",
         ...(stream ? { stream: true } : {}),
       };
-      if (context.systemPrompt) body.system_instruction = context.systemPrompt;
+      // Structured outputs: native `response_format` when supported, else
+      // emulated via system instruction (catalog `structured_output: false`
+      // would 400 on the wire shape).
+      let outputEmulated = false;
+      let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
+      try {
+        outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+      } catch {
+        outputSpec = undefined;
+      }
+      let effectiveSystemPrompt = context.systemPrompt;
+      if (outputSpec && !modelSupportsStructuredOutput("google", modelId)) {
+        outputEmulated = true;
+        effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec);
+        emitProviderWarning({
+          provider: "google",
+          capability: "structured output",
+          requested: `${outputSpec.name} (google/${modelId})`,
+          reason: "the catalog reports structured_output: false for this model, so native response_format is unsupported.",
+          fallback: "emulated JSON instruction + client validation (no response_format is sent)",
+        });
+      }
+      if (effectiveSystemPrompt) body.system_instruction = effectiveSystemPrompt;
       const googleTools = toGoogleTools(tools);
       if (googleTools) body.tools = googleTools;
       if (Object.keys(generationConfig).length > 0) body.generation_config = generationConfig;
       if (serviceTier) body.service_tier = serviceTier;
+      // Structured outputs: Interactions `response_format{type:text,mime_type:application/json,schema}`.
+      // Skipped when emulated (instruction already in `system_instruction`).
+      if (outputSpec && !outputEmulated) {
+        try {
+          const mapped = mapOutputToGoogle(outputSpec);
+          if (mapped) (body as unknown as Record<string, unknown>)["response_format"] = mapped.responseFormat;
+        } catch {
+          // why: invalid output shapes fail fast at Agent construction/loop validation.
+        }
+      }
 
       const prevProvider = lastProviderFor(sessionId);
       const switched = !!prevProvider && prevProvider !== "google";
@@ -564,8 +605,9 @@ export class GoogleInteractionsProvider implements Provider {
     }
     // Q-17: key travels as the `x-goog-api-key` header (never `?key=` in the
     // URL, which would leak into logs). Case-insensitive merge so a custom
-    // `X-Goog-Api-Key` never duplicates the canonical header.
-    setHeaderCaseInsensitive(headers, "x-goog-api-key", apiKey);
+    // `X-Goog-Api-Key` never duplicates the canonical header. Proxy flows
+    // (`apiKey === "unused"`) preserve custom auth instead of overwriting.
+    if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "x-goog-api-key", apiKey);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
@@ -598,14 +640,21 @@ export class GoogleInteractionsProvider implements Provider {
     modelId: string
   ): void {
     if (status >= 200 && status < 300) return;
-    const { message, code, errorType } = readErrorPayload(bodyText);
-    const err: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
+    const { message, code, errorType, raw } = readErrorPayload(bodyText);
+    const hint =
+      status === 401
+        ? " Check GEMINI_API_KEY/GOOGLE_API_KEY (no quotes/spaces, correct provider), GOOGLE_BASE_URL, and that the key is loaded (bun --env-file=.env.local)."
+        : "";
+    const fullMessage = `${message}${hint}`;
+    const err: Record<string, unknown> & Error = new Error(fullMessage) as Record<string, unknown> & Error;
     (err as Record<string, unknown>)["statusCode"] = status;
     (err as Record<string, unknown>)["status"] = status;
     (err as Record<string, unknown>)["responseBody"] = bodyText.slice(0, 500);
     (err as Record<string, unknown>)["url"] = url.split("?")[0];
+    (err as Record<string, unknown>)["data"] = { error: { message: fullMessage } };
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
     if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
+    if (raw) (err as Record<string, unknown>)["raw"] = raw;
     throw toConciseProviderError(err, "google", modelId);
   }
 

@@ -12,7 +12,7 @@ import { toStandardToolDeclarations } from "../tools/tool.ts";
 import { executeToolCalls } from "../tools/executor.ts";
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
 import { preprocessFilePartsForBypass } from "../utils/documents.ts";
-import { noteProviderTurn } from "../providers.ts";
+import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
 
 /** One mid-session steer request buffered while a run is active. */
 export interface SteerEntry {
@@ -42,6 +42,12 @@ export interface AgentLoopConfig {
   steerInbox?: SteerEntry[];
   /** Called after steer entries are injected (streaming loops also push `steer_injected` events). */
   onSteerInjected?: (injectedPrompts: string[]) => void;
+  /**
+   * Canonical structured-output request (raw `AgentConfig.output`).
+   * Normalized per turn for the provider wire; validated once at the end
+   * into `AgentResponse.parsed`. Agent-level only.
+   */
+  output?: unknown;
 }
 
 /** Short preview for `steer_injected` / `queued` event payloads (bounded, display-only). */
@@ -103,6 +109,30 @@ function emitTurn(
 
 function emitProgress(config: { onProgress?: () => void }): void {
   try { config.onProgress?.(); } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Structured outputs (canonical output wiring for the loop).
+// ---------------------------------------------------------------------------
+
+function resolveLoopOutput(config: AgentLoopConfig): { raw: unknown; spec: import("../types/model.ts").StructuredOutputSpec | undefined } {
+  const raw = (config as { output?: unknown }).output;
+  const fromOptions = (config.options as { output?: import("../types/model.ts").StructuredOutputSpec } | undefined)?.output;
+  if (raw !== undefined && raw !== null) {
+    // Throws ValidationError for invalid shapes — caught by run/stream catch
+    // with partial attached, same as other config validation.
+    const spec = normalizeStructuredOutput(raw);
+    return { raw, spec };
+  }
+  if (fromOptions) return { raw: fromOptions, spec: fromOptions };
+  return { raw: undefined, spec: undefined };
+}
+
+function parseFinalStructuredOutput(text: string, raw: unknown, spec: import("../types/model.ts").StructuredOutputSpec | undefined): unknown | undefined {
+  if (raw === undefined && spec === undefined) return undefined;
+  // Strict-fail when opted in: invalid JSON/schema throws ValidationError.
+  // Tool turns skip this (called only for final no-tool text).
+  return parseStructuredOutput(text, raw ?? spec);
 }
 
 /**
@@ -493,6 +523,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   const fallbackMaxTurns = normalizeMaxTurns(rawMaxTurns);
   const limits = resolveLoopLimits(config, fallbackMaxTurns);
   const maxTurns = limits.maxTurns;
+  // Structured outputs: normalize once (throws ValidationError for bad shapes).
+  const loopOutput = resolveLoopOutput(config);
   // Q-19: pre-run checkpoint for onFailure rollback.
   const preRunCp = context.checkpoint();
   const sessionIdForRollback = loopSessionId(config);
@@ -544,6 +576,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       cache: options?.cache,
       tools: standardTools.length > 0 ? standardTools : undefined,
       signal: runOptions?.signal,
+      ...(loopOutput.spec ? { output: loopOutput.spec } : {}),
     };
     // Q-22: per-request timeout pass-through (providers honor timeoutMs).
     try {
@@ -720,8 +753,16 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     );
   }
 
+  // Structured outputs: validate final text only (tool turns skip this).
+  // Strict-fail throws ValidationError with partial attached via catch below.
+  let parsedOutput: unknown | undefined;
+  if (loopOutput.raw !== undefined && !truncatedByMaxTurns) {
+    parsedOutput = parseFinalStructuredOutput(finalResult?.text || "", loopOutput.raw, loopOutput.spec);
+  }
+
   return new AgentResponse({
     text: finalResult?.text || "",
+    ...(parsedOutput !== undefined ? { parsed: parsedOutput } : {}),
     thinking: finalResult?.thinking,
     thoughtSignature: finalResult?.thoughtSignature,
     toolCalls: allToolCalls,
@@ -869,6 +910,17 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       const maxTurns = streamLimits.maxTurns;
 
       const standardTools = toStandardToolDeclarations(tools);
+      // Structured outputs: normalize once for the whole stream run.
+      let streamOutputRaw: unknown;
+      let streamOutputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
+      try {
+        const resolved = resolveLoopOutput(config);
+        streamOutputRaw = resolved.raw;
+        streamOutputSpec = resolved.spec;
+      } catch (err) {
+        outerStream.fail(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
 
       accumulatedUsage = {
         inputTokens: 0,
@@ -900,6 +952,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           cache: options?.cache,
           tools: standardTools.length > 0 ? standardTools : undefined,
           signal: linked.signal,
+          ...(streamOutputSpec ? { output: streamOutputSpec } : {}),
         };
         try {
           if (Number.isFinite(streamLimits.requestTimeoutMs) && streamLimits.requestTimeoutMs !== Infinity) {
@@ -1137,8 +1190,28 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       }
       const truncatedFinish = canonicalFinishReason(lastResponse?.finishReason, truncatedByMaxTurns);
 
+      let streamParsed: unknown | undefined;
+      if (streamOutputRaw !== undefined && !truncatedByMaxTurns) {
+        try {
+          streamParsed = parseFinalStructuredOutput(lastResponse?.text || "", streamOutputRaw, streamOutputSpec);
+        } catch (err) {
+          const raw = err instanceof Error ? err : new Error(String(err));
+          try { (raw as unknown as { partial?: unknown }).partial ??= {
+            usage: accumulatedUsage,
+            cost: accumulatedUsage.cost,
+            turns,
+            toolCalls: allToolCalls,
+            toolResults: allToolResults,
+            text: lastResponse?.text,
+          }; } catch {}
+          outerStream.fail(raw);
+          return;
+        }
+      }
+
       const finalAgentResponse = new AgentResponse({
         text: lastResponse?.text || "",
+        ...(streamParsed !== undefined ? { parsed: streamParsed } : {}),
         thinking: lastResponse?.thinking,
         thoughtSignature: lastResponse?.thoughtSignature,
         toolCalls: allToolCalls,

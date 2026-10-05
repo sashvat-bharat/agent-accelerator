@@ -9,7 +9,10 @@
  */
 export function getEnv(key: string, fallback?: string): string | undefined {
   if (typeof process !== "undefined" && process.env && process.env[key]) {
-    return process.env[key];
+    // Trim quotes/whitespace from .env files (`sk-..."\n` -> 401 otherwise).
+    const raw = String(process.env[key]);
+    const trimmed = raw.trim().replace(/^["']|["']$/g, "").trim();
+    if (trimmed) return trimmed;
   }
   return fallback;
 }
@@ -22,20 +25,31 @@ export type ProviderEnv = Record<string, string>;
  * @example `const key = getApiKey("google");`
  */
 export function getApiKey(provider: string, explicitKey?: string, env?: ProviderEnv): string | undefined {
-  if (explicitKey) return explicitKey;
+  const clean = (v: unknown): string | undefined => {
+    if (typeof v !== "string") return undefined;
+    const t = v.trim().replace(/^["']|["']$/g, "").trim();
+    return t || undefined;
+  };
+  const cleanedExplicit = clean(explicitKey);
+  if (cleanedExplicit) return cleanedExplicit;
   // ProviderEnv override takes precedence (agent-accel inspiration, SDK-light)
   if (env) {
     const upper = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
-    if (env[upper]) return env[upper];
+    const fromEnv = clean(env[upper]);
+    if (fromEnv) return fromEnv;
     // google aliases
     if (provider.toLowerCase().startsWith("google") || provider.toLowerCase() === "gemini") {
-      if (env["GEMINI_API_KEY"]) return env["GEMINI_API_KEY"];
-      if (env["GOOGLE_API_KEY"]) return env["GOOGLE_API_KEY"];
+      const g1 = clean(env["GEMINI_API_KEY"]);
+      if (g1) return g1;
+      const g2 = clean(env["GOOGLE_API_KEY"]);
+      if (g2) return g2;
     }
     // openai aliases
     if (provider.toLowerCase() === "openai") {
-      if (env["OPENAI_BASE_API_KEY"]) return env["OPENAI_BASE_API_KEY"];
-      if (env["OPENAI_API_KEY"]) return env["OPENAI_API_KEY"];
+      const o1 = clean(env["OPENAI_BASE_API_KEY"]);
+      if (o1) return o1;
+      const o2 = clean(env["OPENAI_API_KEY"]);
+      if (o2) return o2;
     }
   }
 

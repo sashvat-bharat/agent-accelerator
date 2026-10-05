@@ -1,6 +1,6 @@
 {
   "name": "agent-accelerator",
-  "version": "0.4.0",
+  "version": "0.4.5",
   "description": "High-performance SDK for AI agents with a unified API across AI providers. Optimized for high cache hit rates, observability, and seamless agent orchestration. Built to power production-grade agentic systems and harnesses for teams at any scale.",
   "license": "MIT",
   "author": "Sashvat Bharat",

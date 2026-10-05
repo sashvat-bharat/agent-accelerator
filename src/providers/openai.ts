@@ -59,11 +59,14 @@ import {
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
+  hasTruncatedToolArguments,
   combinedSignal,
   timeoutFor,
+  hasAuthHeader,
+  clampToolCallId,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
-import { getModelFromCatalog, getModelsForProvider } from "../models/catalog.ts";
+import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
   mapThinkingLevelToOpenAI,
   mapServiceTierToOpenAI,
@@ -71,6 +74,10 @@ import {
   mapToolChoiceToOpenAI,
   noteProviderTurn,
   parseStreamedToolArguments,
+  mapOutputToOpenAI,
+  normalizeStructuredOutput,
+  augmentSystemPromptWithStructuredOutput,
+  emitProviderWarning,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -102,6 +109,7 @@ interface ResponsesRequestBody {
   prompt_cache_key?: string;
   store?: boolean;
   stream?: boolean;
+  text?: { format: { type: "json_schema"; name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
   [k: string]: unknown;
 }
 
@@ -170,7 +178,10 @@ function resolveBaseUrl(options?: ProviderRequestOptions): string {
 }
 
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
-  return options?.apiKey || getApiKey("openai", undefined, options?.env);
+  const key = getApiKey("openai", options?.apiKey, options?.env);
+  if (key) return key;
+  if (hasAuthHeader(options?.headers)) return "unused";
+  return undefined;
 }
 
 /** Strips ONLY the `openai/` prefix. Bare ids pass through untouched. */
@@ -251,6 +262,20 @@ function resultToOutput(result: unknown): string {
   return safeStringify(result);
 }
 
+function normalizeResponsesIdPart(part: string): string {
+  const sanitized = String(part ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
+  const truncated = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
+  return truncated.replace(/_+$/, "") || "fc_unknown";
+}
+
+function normalizeResponsesItemId(itemId: string): string {
+  let norm = normalizeResponsesIdPart(itemId);
+  if (!norm.startsWith("fc_")) {
+    norm = normalizeResponsesIdPart(`fc_${norm}`);
+  }
+  return norm;
+}
+
 /**
  * Builds the FULL explicit history (stateless — no server state, no
  * chaining). Assistant items intentionally carry no provider `id`/`status`:
@@ -300,10 +325,25 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
       const texts: string[] = [];
       for (const part of m.content) {
         if (part.type === "tool_call") {
+          // Cross-provider pipe IDs (`callId|itemId`) are split and
+          // normalized (64-char, `fc_` prefix) so replay never 400s.
+          const rawId = String(part.id ?? "");
+          const rawCallId = String(part.callId ?? part.id ?? "");
+          let itemId = rawId;
+          let callId = rawCallId;
+          if (rawId.includes("|")) {
+            const [c, i] = rawId.split("|");
+            if (c) callId = c;
+            if (i) itemId = i;
+          }
+          if (callId.includes("|")) {
+            const [c] = callId.split("|");
+            if (c) callId = c;
+          }
           items.push({
             type: "function_call",
-            id: part.id,
-            call_id: part.callId || part.id,
+            id: normalizeResponsesItemId(itemId),
+            call_id: normalizeResponsesIdPart(callId),
             name: part.name,
             arguments: JSON.stringify(part.arguments || {}),
           });
@@ -319,9 +359,11 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
     } else if (m.role === "tool") {
       if (typeof m.content === "string") {
         const queue = (m.name && idsByName.get(m.name)) || [];
+        const rawPair = queue.shift() || newToolCallId();
+        const rawCall = rawPair.includes("|") ? rawPair.split("|")[0]! : rawPair;
         items.push({
           type: "function_call_output",
-          call_id: queue.shift() || newToolCallId(),
+          call_id: normalizeResponsesIdPart(rawCall),
           output: m.content,
         });
         continue;
@@ -329,9 +371,11 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
+          const rawPair = pairing.get(part.id) || part.id;
+          const rawCall = rawPair.includes("|") ? rawPair.split("|")[0]! : rawPair;
           items.push({
             type: "function_call_output",
-            call_id: pairing.get(part.id) || part.id,
+            call_id: normalizeResponsesIdPart(rawCall),
             output: resultToOutput(part.result),
           });
         }
@@ -486,16 +530,38 @@ export class OpenAIResponsesProvider implements Provider {
     const serviceTier = mapServiceTierToOpenAI(options?.serviceTier);
     applyCacheForOpenAI(options?.cache, `openai/${modelId}`);
 
+    // Structured outputs: native `text.format` when supported, else emulated
+    // via instructions (catalog `structured_output: false` would 400).
+    let effectiveSystemPrompt = context.systemPrompt;
+    let outputEmulated = false;
+    let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
+    try {
+      outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+    } catch {
+      outputSpec = undefined;
+    }
+    if (outputSpec && !modelSupportsStructuredOutput("openai", modelId)) {
+      outputEmulated = true;
+      effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec);
+      emitProviderWarning({
+        provider: "openai",
+        capability: "structured output",
+        requested: `${outputSpec.name} (openai/${modelId})`,
+        reason: "the catalog reports structured_output: false for this model, so native text.format is unsupported.",
+        fallback: "emulated JSON instruction + client validation (no text.format is sent)",
+      });
+    }
+
     const body: ResponsesRequestBody = {
       model: modelId,
-      input: await fullHistoryInput(context),
+      input: await fullHistoryInput({ ...context, systemPrompt: effectiveSystemPrompt }),
       // Stateless by design: the server defaults store:true, so opt out
       // explicitly. Full history is always sent, so no chaining is needed
       // and provider switching stays trivial.
       store: false,
       ...(stream ? { stream: true } : {}),
     };
-    if (context.systemPrompt) body.instructions = context.systemPrompt;
+    if (effectiveSystemPrompt) body.instructions = effectiveSystemPrompt;
     const aiTools = toOpenAITools(tools);
     if (aiTools) body.tools = aiTools;
     const toolChoice = mapToolChoiceToOpenAI(
@@ -504,8 +570,17 @@ export class OpenAIResponsesProvider implements Provider {
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;
+    // Structured outputs: Responses `text.format{type:json_schema,name,schema,strict}`.
+    // Skipped when emulated (instruction already in `instructions`).
+    if (outputSpec && !outputEmulated) {
+      try {
+        const mapped = mapOutputToOpenAI(outputSpec);
+        if (mapped) body.text = { format: mapped.format };
+      } catch {
+        // why: invalid output shapes fail fast at Agent construction/loop validation.
+      }
+    }
     // Cache affinity: prompt_cache_key replaces the legacy `user` field.
-    // (prompt_cache_options explicit breakpoints are out of scope.)
     // OpenAI enforces max 64 chars — clamp defensively so child session ids
     // (`parent-sub-tag-rand`) and user-supplied long ids never 400. Headers
     // are clamped the same way via buildSessionHeaders, keeping affinity
@@ -513,6 +588,29 @@ export class OpenAIResponsesProvider implements Provider {
     if (sessionId) {
       const cacheKey = clampCacheKey(sessionId);
       if (cacheKey) body.prompt_cache_key = cacheKey;
+    }
+    // Long retention: `prompt_cache_retention: "24h"` when the catalog
+    // supports it (pi api/openai-responses.ts:97 rule). Other explicit modes
+    // stay warn+drop via applyCacheForOpenAI above.
+    if (options?.cache?.retention === "long") {
+      let supportsLong = true;
+      try {
+        const spec = getModelFromCatalog("openai", modelId);
+        if (spec && typeof spec.capabilities?.supportsLongCacheRetention === "boolean") {
+          supportsLong = spec.capabilities.supportsLongCacheRetention;
+        }
+      } catch {}
+      if (supportsLong) {
+        (body as Record<string, unknown>)["prompt_cache_retention"] = "24h";
+      } else {
+        emitProviderWarning({
+          provider: "openai",
+          capability: "cache retention",
+          requested: `long (openai/${modelId})`,
+          reason: "the catalog reports no long-cache support for this model.",
+          fallback: "default caching with prompt_cache_key affinity (no retention payload is sent)",
+        });
+      }
     }
     // Stateless API use: previous_response_id / background / conversation are
     // NEVER sent (server state would break provider-agnostic switching).
@@ -536,9 +634,10 @@ export class OpenAIResponsesProvider implements Provider {
       if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
     }
     // Case-insensitive merge so a lowercase `authorization` custom header
-    // never coexists with the canonical bearer.
+    // never coexists with the canonical bearer. Proxy flows
+    // (`apiKey === "unused"`) preserve custom auth instead of overwriting.
     setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
-    setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
+    if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
@@ -571,14 +670,23 @@ export class OpenAIResponsesProvider implements Provider {
     modelId: string
   ): void {
     if (status >= 200 && status < 300) return;
-    const { message, code, errorType } = readErrorPayload(bodyText);
-    const err: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
+    const { message, code, errorType, raw } = readErrorPayload(bodyText);
+    const hint =
+      status === 401
+        ? " Check OPENAI_API_KEY (no quotes/spaces, correct provider), OPENAI_BASE_URL, and that the key is loaded (bun --env-file=.env.local)."
+        : "";
+    const fullMessage = `${message}${hint}`;
+    const err: Record<string, unknown> & Error = new Error(fullMessage) as Record<string, unknown> & Error;
     (err as Record<string, unknown>)["statusCode"] = status;
     (err as Record<string, unknown>)["status"] = status;
     (err as Record<string, unknown>)["responseBody"] = bodyText.slice(0, 500);
     (err as Record<string, unknown>)["url"] = url.split("?")[0];
+    // Preserve hint through toConciseProviderError re-wrap (it prefers
+    // data.error.message over responseBody).
+    (err as Record<string, unknown>)["data"] = { error: { message: fullMessage } };
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
     if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
+    if (raw) (err as Record<string, unknown>)["raw"] = raw;
     throw toConciseProviderError(err, "openai", modelId);
   }
 
@@ -991,6 +1099,13 @@ export class OpenAIResponsesProvider implements Provider {
           framesSeen > 0 ||
           badFrames > 0;
         if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
+          eventStream.fail(incompleteStreamError("openai", clean));
+          return;
+        }
+        // Refuse unfinished tool calls whose args never parsed (output_item.done
+        // never arrived): truncated `{raw}` must not reach the executor (pi
+        // api/openai-responses-shared.ts:766 rule). Non-SSE mocks preserve legacy.
+        if (!hasTerminal && toolCalls.some((c) => hasTruncatedToolArguments(c.arguments)) && isSSEPayload) {
           eventStream.fail(incompleteStreamError("openai", clean));
           return;
         }

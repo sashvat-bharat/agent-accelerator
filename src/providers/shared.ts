@@ -44,25 +44,30 @@ export function redactedHeaders(headers: Record<string, string>): Record<string,
 }
 
 /**
- * Extracts `{ message, code, errorType }` from a non-2xx JSON body. Handles
- * OpenAI `type`, OpenRouter `metadata.error_type`, and Google `status` code
- * shapes; unknown bodies degrade to a 300-char slice.
+ * Extracts `{ message, code, errorType, raw }` from a non-2xx JSON body. Handles
+ * OpenAI `type`, OpenRouter `metadata.error_type` + `metadata.raw`, and Google
+ * `status` code shapes; unknown bodies degrade to a 300-char slice.
  */
 export function readErrorPayload(
   bodyText: string
-): { message: string; code?: string | number; errorType?: string } {
+): { message: string; code?: string | number; errorType?: string; raw?: string } {
   try {
     const parsed: unknown = JSON.parse(bodyText);
     const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const err = (first as { error?: { message?: string; code?: string | number; type?: string; status?: string | number; metadata?: { error_type?: string } } })?.error;
+    const err = (first as { error?: { message?: string; code?: string | number; type?: string; status?: string | number; metadata?: { error_type?: string; raw?: unknown } } })?.error;
     if (err && typeof err.message === "string") {
       const code = err.code ?? err.status;
       const errorType =
         err.type ?? err.metadata?.error_type ?? (first as { error_type?: string })?.error_type;
+      const rawCandidate =
+        (err as { metadata?: { raw?: unknown } }).metadata?.raw ??
+        (first as { metadata?: { raw?: unknown } })?.metadata?.raw;
+      const raw = typeof rawCandidate === "string" && rawCandidate.trim() ? rawCandidate.trim().slice(0, 500) : undefined;
       return {
         message: err.message,
         ...(code !== undefined ? { code } : {}),
         ...(typeof errorType === "string" ? { errorType } : {}),
+        ...(raw ? { raw } : {}),
       };
     }
     return { message: bodyText.slice(0, 300) };
@@ -129,4 +134,57 @@ export function newToolCallId(prefix = "call"): string {
     if (nc?.randomUUID) return `${prefix}_${nc.randomUUID().replace(/-/g, "").slice(0, 12)}`;
   } catch {}
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * True when custom headers already carry auth (proxy/Copilot flows).
+ * Case-insensitive, non-empty `Authorization` or `cf-aig-authorization`.
+ * Callers return `"unused"` instead of throwing missing-key.
+ */
+export function hasAuthHeader(headers: Record<string, string> | undefined): boolean {
+  if (!headers) return false;
+  for (const [k, v] of Object.entries(headers)) {
+    const lower = k.toLowerCase();
+    if ((lower === "authorization" || lower === "cf-aig-authorization") && typeof v === "string" && v.trim().length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** True for truncated streamed tool args (`{ raw }` marker from `parseStreamedToolArguments`). */
+export function hasTruncatedToolArguments(args: unknown): boolean {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+  const keys = Object.keys(args as Record<string, unknown>);
+  return keys.length === 1 && keys[0] === "raw" && typeof (args as Record<string, unknown>).raw === "string";
+}
+
+/** Short hash for tool-ID clamping (FNV-1a, 8 hex chars, no deps). */
+export function shortHashId(value: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    h ^= value.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Clamps a tool-call ID to the 40-char OpenAI limit (pi `api/openai-completions.ts:1194`).
+ * Pipe IDs (`callId|itemId`) become `callId_itemHash`; overlong IDs truncate
+ * with hash suffix. Plain IDs pass through (truncated if needed).
+ */
+export function clampToolCallId(id: string): string {
+  const clean = String(id ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
+  if (!clean.includes("|")) {
+    return clean.length > 40 ? clean.slice(0, 40) : clean || "call_unknown";
+  }
+  const sep = clean.indexOf("|");
+  const callId = clean.slice(0, sep).replace(/_+$/, "") || "call";
+  const itemId = clean.slice(sep + 1).replace(/_+$/, "");
+  const combined = itemId ? `${callId}_${itemId}` : callId;
+  if (combined.length <= 40) return combined;
+  const hash = shortHashId(id).slice(0, 8);
+  const prefix = callId.slice(0, Math.max(1, 40 - hash.length - 1));
+  return `${prefix}_${hash}`;
 }

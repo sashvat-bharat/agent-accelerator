@@ -67,16 +67,22 @@ import {
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
+  hasTruncatedToolArguments,
   combinedSignal,
   timeoutFor,
+  hasAuthHeader,
+  clampToolCallId,
 } from "./shared.ts";
-import { getModelFromCatalog, createGenericModelSpec } from "../models/catalog.ts";
+import { getModelFromCatalog, createGenericModelSpec, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
   applyCacheForCustom,
   mapToolChoiceToOpenAI,
   emitProviderWarning,
   noteProviderTurn,
   parseStreamedToolArguments,
+  mapOutputToCompatChat,
+  normalizeStructuredOutput,
+  augmentSystemPromptWithStructuredOutput,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -110,6 +116,7 @@ interface ChatRequestBody {
   messages: ChatMessage[];
   tools?: Array<Record<string, unknown>>;
   tool_choice?: string | { type: "function"; function: { name: string } };
+  response_format?: { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
   stream?: boolean;
   [k: string]: unknown;
 }
@@ -208,17 +215,23 @@ function resolveApiKey(
   configuredApiKey: string | undefined,
   options?: ProviderRequestOptions
 ): string | undefined {
+  const clean = (v: unknown): string | undefined => {
+    if (typeof v !== "string") return undefined;
+    const t = v.trim().replace(/^["']|["']$/g, "").trim();
+    return t || undefined;
+  };
   const envPrefix = envPrefixOf(prefix);
-  return (
-    options?.apiKey ||
-    configuredApiKey ||
-    options?.env?.[`${envPrefix}_API_KEY`] ||
-    options?.env?.[`${envPrefix}_BASE_API_KEY`] ||
-    getEnv(`${envPrefix}_API_KEY`) ||
-    getEnv(`${envPrefix}_BASE_API_KEY`) ||
+  const key = (
+    clean(options?.apiKey) ||
+    clean(configuredApiKey) ||
+    clean(options?.env?.[`${envPrefix}_API_KEY`]) ||
+    clean(options?.env?.[`${envPrefix}_BASE_API_KEY`]) ||
     getApiKey(prefix, undefined, options?.env) ||
     undefined
   );
+  if (key) return key;
+  if (hasAuthHeader(options?.headers)) return "unused";
+  return undefined;
 }
 
 /** Local endpoints (loopback / LAN / *.local) may omit the API key. Literal IPs only; hostnames like 10.evil.com are not local. */
@@ -395,14 +408,18 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
   if (context.systemPrompt) {
     messages.push({ role: "system", content: context.systemPrompt });
   }
+  let lastRole: string | null = "system";
   for (const m of context.messages) {
     if (m.role === "system") continue;
     if (m.role === "user") {
+      if (lastRole === "tool") {
+        messages.push({ role: "assistant", content: "I have processed the tool results." });
+      }
       if (typeof m.content === "string") {
-        if (m.content) messages.push({ role: "user", content: m.content });
+        if (m.content) { messages.push({ role: "user", content: m.content }); lastRole = "user"; }
       } else {
         const blocks = await contentPartsToBlocks(m.content);
-        if (blocks.length > 0) messages.push({ role: "user", content: blocks });
+        if (blocks.length > 0) { messages.push({ role: "user", content: blocks }); lastRole = "user"; }
       }
     } else if (m.role === "assistant") {
       if (typeof m.content === "string") {
@@ -426,7 +443,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
             function: { name: string; arguments: string };
             extra_content?: { google: { thought_signature: string } };
           } = {
-            id: part.callId || part.id,
+            id: clampToolCallId(part.callId || part.id),
             type: "function",
             function: { name: part.name, arguments: JSON.stringify(part.arguments || {}) },
           };
@@ -443,21 +460,26 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
           texts.push(part.text);
         }
       }
+      // Skip empty assistant turns (no text + no tool calls): strict
+      // routes reject them, and they carry no signal (pi drop rule).
+      if (texts.length === 0 && calls.length === 0) continue;
       messages.push({
         role: "assistant",
         content: texts.length > 0 ? texts.join("\n") : null,
         ...(calls.length > 0 ? { tool_calls: calls } : {}),
       });
+      lastRole = "assistant";
     } else if (m.role === "tool") {
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
           messages.push({
             role: "tool",
-            tool_call_id: pairing.get(part.id) || part.id,
+            tool_call_id: clampToolCallId(pairing.get(part.id) || part.id),
             content: resultToOutput(part.result),
             name: part.name,
           });
+          lastRole = "tool";
         }
       }
     }
@@ -551,7 +573,7 @@ function parseResponse(
     const args = parseArguments(tc.function?.arguments);
     const sig = extractSignature(tc);
     toolCalls.push({
-      id: tc.id || newToolCallId(),
+      id: tc.id && !tc.id.includes("|") && tc.id.length <= 40 ? tc.id : clampToolCallId(tc.id || newToolCallId()),
       name: tc.function?.name || "unknown",
       arguments: args,
       rawArguments:
@@ -678,7 +700,32 @@ export class OpenAICompatibleChatProvider implements Provider {
     }
     applyCacheForCustom(this.prefix, options?.cache, `${this.prefix}/${modelId}`);
 
-    const messages = await fullHistoryMessages(context);
+    // Structured outputs: native `response_format` when supported, else
+    // emulated via system prompt (strict endpoints would 400 on json_schema
+    // for catalog `structured_output: false` models).
+    let effectiveContext = context;
+    let outputEmulated = false;
+    let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
+    try {
+      outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+    } catch {
+      outputSpec = undefined;
+    }
+    if (outputSpec && !modelSupportsStructuredOutput(this.prefix, modelId)) {
+      outputEmulated = true;
+      effectiveContext = {
+        ...context,
+        systemPrompt: augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec),
+      };
+      emitProviderWarning({
+        provider: this.prefix,
+        capability: "structured output",
+        requested: `${outputSpec.name} (${this.prefix}/${modelId})`,
+        reason: "the catalog reports structured_output: false for this model, so native response_format is unsupported.",
+        fallback: "emulated JSON instruction + client validation (no response_format is sent)",
+      });
+    }
+    const messages = await fullHistoryMessages(effectiveContext);
     const body: ChatRequestBody = {
       model: modelId,
       messages,
@@ -697,8 +744,19 @@ export class OpenAICompatibleChatProvider implements Provider {
           ? { type: "function", function: { name: (toolChoice as { name: string }).name } }
           : (toolChoice as ChatRequestBody["tool_choice"]);
     }
-    // No reasoning / service_tier / session / cache body primitives: strict
-    // endpoints reject unknown properties. Affinity is headers-only.
+    // Structured outputs use the standard Chat Completions `response_format`
+    // (safe on strict endpoints). Skipped when emulated (instruction already
+    // in messages). No reasoning / service_tier / session /
+    // cache body primitives: strict endpoints reject unknown properties.
+    // Affinity stays headers-only.
+    if (outputSpec && !outputEmulated) {
+      try {
+        const mapped = mapOutputToCompatChat(outputSpec);
+        if (mapped) body.response_format = mapped.response_format;
+      } catch {
+        // why: invalid output shapes fail fast at Agent construction/loop validation.
+      }
+    }
     // Q-38: request usage on streams where supported so terminal accounting
     // arrives on the final chunk. Strict servers that reject unknown fields
     // opt out via `COMPAT_NO_STREAM_OPTIONS=1`; an explicit per-call
@@ -731,8 +789,26 @@ export class OpenAICompatibleChatProvider implements Provider {
     for (const [k, v] of Object.entries(headers)) {
       if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
     }
+    // Strict-endpoint opt-out (pi sendSessionAffinityHeaders pattern):
+    // `COMPAT_NO_SESSION_HEADERS=1` or per-call `sendSessionHeaders:false`
+    // drops affinity headers that trigger CORS preflights / strict 400s.
+    // Body `session_id` is already omitted on compat (headers-only affinity).
+    try {
+      const noAffinity =
+        (options as { sendSessionHeaders?: unknown } | undefined)?.sendSessionHeaders === false ||
+        getEnv("COMPAT_NO_SESSION_HEADERS") === "1" ||
+        options?.env?.["COMPAT_NO_SESSION_HEADERS"] === "1";
+      if (noAffinity) {
+        for (const k of Object.keys(headers)) {
+          const lower = k.toLowerCase();
+          if (lower === "x-session-id" || lower === "x-client-request-id" || lower === "session_id") {
+            delete headers[k];
+          }
+        }
+      }
+    } catch {}
     setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
-    if (apiKey) setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
+    if (apiKey && apiKey !== "unused") setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
@@ -765,14 +841,21 @@ export class OpenAICompatibleChatProvider implements Provider {
     modelId: string
   ): void {
     if (status >= 200 && status < 300) return;
-    const { message, code, errorType } = readErrorPayload(bodyText);
-    const err: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
+    const { message, code, errorType, raw } = readErrorPayload(bodyText);
+    const hint =
+      status === 401
+        ? ` Check ${envPrefixOf(this.prefix)}_API_KEY (no quotes/spaces, correct provider) and that the key is loaded (bun --env-file=.env.local).`
+        : "";
+    const fullMessage = `${message}${hint}`;
+    const err: Record<string, unknown> & Error = new Error(fullMessage) as Record<string, unknown> & Error;
     (err as Record<string, unknown>)["statusCode"] = status;
     (err as Record<string, unknown>)["status"] = status;
     (err as Record<string, unknown>)["responseBody"] = bodyText.slice(0, 500);
     (err as Record<string, unknown>)["url"] = url.split("?")[0];
+    (err as Record<string, unknown>)["data"] = { error: { message: fullMessage } };
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
     if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
+    if (raw) (err as Record<string, unknown>)["raw"] = raw;
     throw toConciseProviderError(err, this.prefix, modelId);
   }
 
@@ -1113,7 +1196,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const sig = signatures.get(index);
           const record: ToolCallRecord = {
-            id: c.id || newToolCallId(),
+            id: c.id && !c.id.includes("|") && c.id.length <= 40 ? c.id : clampToolCallId(c.id || newToolCallId()),
             name: c.name,
             arguments: args,
             rawArguments: c.startArgs + c.deltaArgs,
@@ -1143,6 +1226,13 @@ export class OpenAICompatibleChatProvider implements Provider {
           framesSeen > 0 ||
           badFrames > 0;
         if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
+          eventStream.fail(incompleteStreamError(prefix, clean));
+          return;
+        }
+        // Refuse unfinished tool calls whose args never parsed (output_item.done
+        // never arrived): truncated `{raw}` must not reach the executor (pi
+        // api/openai-responses-shared.ts:766 rule). Non-SSE mocks preserve legacy.
+        if (!hasTerminal && toolCalls.some((c) => hasTruncatedToolArguments(c.arguments)) && isSSEPayload) {
           eventStream.fail(incompleteStreamError(prefix, clean));
           return;
         }

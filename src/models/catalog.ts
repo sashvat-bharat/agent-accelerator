@@ -138,6 +138,7 @@ function mapCapabilities(raw: any, cost: ModelCost, reasoning: boolean, toolCall
     supportsExplicitCaching: cost.cache_read !== undefined,
     supportsParallelToolCalls: toolCall,
     supportsStreaming: true,
+    supportsStructuredOutput: raw.structured_output === undefined ? true : !!raw.structured_output,
     supportsReasoningToggle: Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "toggle"),
     supportsReasoningEffort: Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "effort"),
     modalities: [...(modalities.input || []), ...(modalities.output || [])].filter((v: any, i: any, a: any) => a.indexOf(v) === i),
@@ -589,6 +590,30 @@ export {
 } from "./catalog-cache.ts";
 
 /**
+ * True when the model can enforce `response_format`/`text.format` natively.
+ * Unknown models (custom endpoints, dynamic routers) count as capable —
+ * the provider verdict stands, matching `assertModalitiesSupported`.
+ * Models with catalog `structured_output: false` return false so callers can
+ * emulate via prompt instruction + client validation instead of 400ing.
+ *
+ * @example `modelSupportsStructuredOutput("openrouter", "inclusionai/ling-3.0-flash-sante:free")`
+ */
+export function modelSupportsStructuredOutput(provider: string, modelId: string): boolean {
+  try {
+    const spec = getModelFromCatalog(provider, modelId);
+    if (!spec) return true;
+    if (typeof spec.capabilities?.supportsStructuredOutput === "boolean") {
+      return spec.capabilities.supportsStructuredOutput;
+    }
+    const raw = (spec as { raw?: { structured_output?: unknown } }).raw;
+    if (raw && typeof raw.structured_output === "boolean") return raw.structured_output;
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Permissive placeholder so custom endpoints never fail preflight:
  * allows every ThinkingLevel (none -> max + dynamic).
  * @example `const spec = createGenericModelSpec("groq", "llama-3.3-70b-versatile");`
@@ -622,6 +647,7 @@ export function createGenericModelSpec(provider: string, modelId: string): Model
       supportsLongCacheRetention: false,
       supportsParallelToolCalls: true,
       supportsStreaming: true,
+      supportsStructuredOutput: true,
       modalities: ["text"],
     },
     pricing: {},
