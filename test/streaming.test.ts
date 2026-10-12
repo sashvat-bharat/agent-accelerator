@@ -168,8 +168,9 @@ describe("Streaming & SSE Parser", () => {
       expect(thinkingShown).not.toContain("\n\n\n");
       expect(thinkingShown.startsWith("<think>\nA")).toBe(true);
       // Trailing provider newlines are buffered and dropped at close: no
-      // blank line before the tag.
-      expect(thinkingShown).toBe("<think>\nA\n\nB\n</think>\n\n");
+      // blank line before the tag. Close emits a single trailing newline
+      // (display-only; history/request bodies untouched).
+      expect(thinkingShown).toBe("<think>\nA\n\nB\n</think>\n");
       // Stored thinking is trimmed (no provider trailing blanks).
       expect(res.thinking).toBe("A\n\nB");
       expect(textOut.join("")).toContain("Hi");

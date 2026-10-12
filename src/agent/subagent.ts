@@ -2,7 +2,8 @@ import { Agent } from "./agent.ts";
 import type { AgentConfig } from "../types/agent.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import { agentToTool } from "./delegation.ts";
-import { getSubModel, getModel } from "../utils/env.ts";
+import { resolveSubAgentModel } from "./worker.ts";
+import { getModel, getSubModel } from "../utils/env.ts";
 
 /** AgentConfig alias for a delegated worker agent. */
 export interface SubAgentConfig extends AgentConfig {}
@@ -76,17 +77,8 @@ export class SubAgent extends Agent {
    * ```
    */
   constructor(config: SubAgentConfig) {
-    const resolvedModel =
-      config.model ??
-      getSubModel() ??
-      getModel();
-
-    if (!resolvedModel) {
-      throw new Error(
-        `[Agent Accelerator] SubAgent '${config.name || "subagent"}' requires a model. ` +
-        `Specify 'model' in SubAgent config, or set SUB_AGENT_MODEL or MODEL in environment variables.`
-      );
-    }
+    // Unified model chain (shared with Agent): explicit > SUB_AGENT_MODEL > MODEL.
+    const resolvedModel = resolveSubAgentModel(config);
 
     super({
       ...config,

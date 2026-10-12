@@ -7,6 +7,11 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
+import {
+  normalizeToolMap,
+  resolveDynamicModelInput,
+  resolveMainModel,
+} from "./worker.ts";
 import { convert_document_to_markdown } from "../utils/documents.ts";
 import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
 import { createSessionId } from "../utils/session.ts";
@@ -15,7 +20,6 @@ import { saveSessionDir, saveSessionFile } from "../session/store.ts";
 import { clearSessionRouting, normalizeStructuredOutput } from "../providers.ts";
 import type { StructuredOutputSpec } from "../types/model.ts";
 import { clearInteractionChains } from "../providers/google.ts";
-import { getModel, getSubModel } from "../utils/env.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
 import { buildSessionData, type PersistedAgentSession, type SessionTotals,} from "../session/store.ts";
 import { SessionTelemetry } from "../session/store.ts";
@@ -220,49 +224,24 @@ export class Agent {
     this.description = config.description || "AI Agent powered by Agent Accelerator";
     // DX1: only instructions (no systemPrompt alias)
     this.instructions = config.instructions || "";
-    const rawModel: any = (config.model as any)?.model ? (config.model as any) : config.model;
-    // Support ModelProviderInstance {model, apiKey, baseUrl, thinkingLevel} and ModelSpec {id, provider}
-    if (rawModel && typeof rawModel === "object" && "model" in rawModel) {
-      this.modelStringOrSpec = rawModel.model;
-    } else if (rawModel && typeof rawModel === "object" && "id" in rawModel && "provider" in rawModel) {
-      this.modelStringOrSpec = rawModel;
-    } else {
-      this.modelStringOrSpec = rawModel || getModel();
-    }
+    // Unified model resolution (shared with SubAgent/workers): supports
+    // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
+    const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
+    this.modelStringOrSpec = modelStringOrSpec as string | any;
     const dynRaw = config.dynamicSubagents;
-    const dynModelRaw = (dynRaw as any)?.model ?? config.subagentModel;
-    let dynModel: string | any | undefined;
-    if (dynModelRaw && typeof dynModelRaw === "object" && "model" in dynModelRaw) {
-      dynModel = (dynModelRaw as any).model;
-    } else if (dynModelRaw && typeof dynModelRaw === "object" && "id" in dynModelRaw && "provider" in dynModelRaw) {
-      dynModel = dynModelRaw;
-    } else {
-      dynModel = (dynModelRaw as any) || getSubModel();
-    }
-    this.subagentModel = dynModel;
+    // Unified worker-model chain: dynamicSubagents.model > subagentModel > SUB_AGENT_MODEL.
+    const dynModel = resolveDynamicModelInput(dynRaw, config.subagentModel);
+    this.subagentModel = dynModel as string | any | undefined;
     const dynEnabled = dynRaw ? (dynRaw.enabled ?? true) : false;
     if (dynRaw) {
-      const rawTools = (dynRaw as any)?.tools;
-      const dynTools: Record<string, ToolDefinition> = {};
-      if (rawTools) {
-        if (Array.isArray(rawTools)) {
-          for (const t of rawTools) {
-            const tName = (t as any)?.name || `tool_${Object.keys(dynTools).length}`;
-            dynTools[tName] = { ...(t as any), name: tName };
-          }
-        } else {
-          for (const [key, def] of Object.entries(rawTools as Record<string, ToolDefinition>)) {
-            dynTools[key] = { ...(def as any), name: (def as any)?.name || key };
-          }
-        }
-      }
+      const dynTools = normalizeToolMap((dynRaw as { tools?: Record<string, ToolDefinition> | ToolDefinition[] }).tools);
       const rawMax = (dynRaw as any)?.maxSpawn;
       const maxSpawn = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax as number)) : 4;
       const rawTimeout = (dynRaw as any)?.timeout;
       const timeout = Number.isFinite(rawTimeout) ? Math.floor(rawTimeout as number) : 0;
       this.dynamicSubagents = {
         enabled: dynEnabled,
-        model: dynModel,
+        model: dynModel as string | any | undefined,
         maxSpawn,
         thinkingLevel: (dynRaw as any)?.thinkingLevel,
         tools: dynTools,
@@ -321,21 +300,9 @@ export class Agent {
     this.bypassInputFileModality = config.bypassInputFileModality ?? false;
     this.stateless = config.stateless ?? false;
 
-    // Tools registration
+    // Tools registration (unified normalization shared with dynamic pool).
     if (config.tools) {
-      if (Array.isArray(config.tools)) {
-        for (const t of config.tools) {
-          const tName = t.name || `tool_${Object.keys(this.tools).length}`;
-          this.tools[tName] = { ...t, name: tName };
-        }
-      } else {
-        for (const [key, def] of Object.entries(config.tools)) {
-          this.tools[key] = {
-            ...def,
-            name: def.name || key,
-          };
-        }
-      }
+      Object.assign(this.tools, normalizeToolMap(config.tools));
     }
 
 
@@ -1480,8 +1447,13 @@ export class Agent {
       // <think> open tag then needs its own leading newline, otherwise it
       // glues onto the streamed text mid-line. False at stream start and
       // after every tag (both end with newlines), preserving the exact
-      // "<think>\n...\n</think>\n\n" contract for thinking-first streams.
+      // "<think>\n...\n</think>\n" contract for thinking-first streams.
       let needThinkNewline = false;
+      // Set on every think close; consumed by the next text_delta(s) to strip
+      // model-leading blank lines display-only (cache-safe: outer events only).
+      // Stays set until non-empty text is emitted so split "\n" | "\nText"
+      // chunks cannot leak a blank line.
+      let justClosedThink = false;
       const collapseBlankLines = (s: string): string => s.replace(/\n{3,}/g, "\n\n");
       const userOnThinking = options.onThinkingDelta;
       const userOnDelta = options.onDelta;
@@ -1504,13 +1476,32 @@ export class Agent {
         if (isThinking) {
           isThinking = false;
           // Drop any withheld trailing newlines: the span ends cleanly and
-          // the tag supplies its own line breaks. Empty spans still close.
+          // the tag supplies its own single line break. Empty spans still close.
           pendingNewlines = "";
-          const close = emittedAny ? "\n</think>\n\n" : "</think>\n\n";
+          const close = emittedAny ? "\n</think>\n" : "</think>\n";
           emittedAny = false;
+          justClosedThink = true;
           if (userOnThinking) userOnThinking(close, e);
           else if (userOnDelta) userOnDelta(close, e as any);
         }
+      };
+
+      /**
+       * Strips model-leading blank lines after a think close, display-only.
+       * Mutates `e.delta` in place so `for-await` consumers see the same clean
+       * text; safe because loop context derives from the provider result, not
+       * these outer events. Returns the display string (`""` when nothing
+       * displayable yet — caller skips the callback but keeps the flag set so
+       * a split newline-only chunk cannot leak a blank line).
+       */
+      const stripLeadingAfterClose = (e: any): string => {
+        const raw: string = e.delta ?? "";
+        if (!justClosedThink) return raw;
+        const stripped = raw.replace(/^\n+/, "");
+        try { e.delta = stripped; } catch {}
+        if (!stripped) return "";
+        justClosedThink = false;
+        return stripped;
       };
 
       /** Buffers one raw thinking chunk, returning the display string to
@@ -1550,9 +1541,14 @@ export class Agent {
         });
         s.on("text_delta", (e: any) => {
           closeThink(e);
-          needThinkNewline = !((e.delta ?? "").endsWith("\n"));
-          if (userOnDelta) userOnDelta(e.delta!, e);
-          else if (userOnThinking) userOnThinking(e.delta!, e as any);
+          const display = stripLeadingAfterClose(e);
+          if (!display) {
+            needThinkNewline = false;
+            return;
+          }
+          needThinkNewline = !display.endsWith("\n");
+          if (userOnDelta) userOnDelta(display, e);
+          else if (userOnThinking) userOnThinking(display, e as any);
         });
         // Close thinking tag and reset turn state before tool/subagent execution or results
         s.on("tool_call_start" as any, (e: any) => closeThink(e));
@@ -1570,8 +1566,9 @@ export class Agent {
           if (isThinking) {
             isThinking = false;
             pendingNewlines = "";
-            const tag = emittedAny ? "\n</think>\n\n" : "</think>\n\n";
+            const tag = emittedAny ? "\n</think>\n" : "</think>\n";
             emittedAny = false;
+            justClosedThink = true;
             s.push({ type: "thinking_delta", thinkingDelta: tag, __synthetic: true } as any);
           }
         };
@@ -1596,6 +1593,12 @@ export class Agent {
         });
         s.on("text_delta", (e: any) => {
           closeSynthetic();
+          if (justClosedThink) {
+            const stripped: string = (e.delta ?? "").replace(/^\n+/, "");
+            try { e.delta = stripped; } catch {}
+            if (!stripped) return;
+            justClosedThink = false;
+          }
           needThinkNewline = !((e.delta ?? "").endsWith("\n"));
         });
         s.on("tool_call_start" as any, () => {
