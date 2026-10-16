@@ -16,7 +16,6 @@ import * as path from "node:path";
 import {
   Agent,
   resolveModel,
-  getModelThinkingInfo,
   validateModelThinking,
   loadSessionFile,
   saveSessionFile,
@@ -33,9 +32,6 @@ import {
 // ---------------------------------------------------------------------------
 // 1. Session storage: sessions/<sessionId>/{session.json, media/*}
 // ---------------------------------------------------------------------------
-// Explicit single file still works: SESSION_FILE=... or --session-file=...
-// (legacy `.session.jsonl` included). Otherwise the CLI stores each session
-// in its own folder under SESSION_DIR and resumes the most recent one.
 const EXPLICIT_FILE =
   process.env.SESSION_FILE ??
   process.argv.find((a) => a.startsWith("--session-file="))?.split("=")[1];
@@ -70,10 +66,10 @@ function loadPrompt(): string {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Agent setup (restores history + totals in 3 calls)
+// 2. Agent setup (strictly hardcoded to "high" thinking)
 // ---------------------------------------------------------------------------
+const THINKING_LEVEL = "high" as const;
 const initialModel = saved?.model ?? process.env.MODEL ?? "google/gemini-3.5-flash-lite";
-const initialThinking = (saved?.thinkingLevel as any) ?? (process.env.THINKING_LEVEL as any) ?? "medium";
 
 const agent = new Agent({
   name: "Chat Agent",
@@ -85,7 +81,7 @@ const agent = new Agent({
     maxSpawn: 4,
     workerTimeoutMs: 60000,
   },
-  thinking: initialThinking as any,
+  thinking: THINKING_LEVEL,
   cache: (saved?.cache as any) ?? { retention: "implicit" as const },
   sessionId: saved?.sessionId,
   maxTurns: 10,
@@ -93,18 +89,27 @@ const agent = new Agent({
   persist: undefined,
 });
 
-// Restores messages, system prompt, model/thinking/session when present.
-if (saved) agent.importSession(saved);
+if (saved) {
+  agent.importSession(saved);
+}
+
+// Force "high" across all internal properties after session import
+(agent as any).thinking = THINKING_LEVEL;
+(agent as any).thinkingLevel = THINKING_LEVEL;
+(agent as any).thinkingConfig = {
+  enabled: true,
+  level: THINKING_LEVEL,
+  budgetTokens: undefined,
+};
 
 // ---------------------------------------------------------------------------
 // 3. Interactive CLI loop
 // ---------------------------------------------------------------------------
-const activeThinking = (agent as any).thinkingConfig?.level ?? initialThinking;
 console.log(`\n\x1b[1;36mAgent Accelerator — Interactive CLI\x1b[0m`);
 console.log(formatSessionBanner(saved, telemetry, sessionLocation));
-console.log(`Model: \x1b[32m"${agent.modelStringOrSpec}"\x1b[0m • Thinking: \x1b[33m${activeThinking}\x1b[0m • Context: \x1b[34m${formatSessionTokens(getSessionContextWindow(agent.modelStringOrSpec as string))}\x1b[0m`);
+console.log(`Model: \x1b[32m"${agent.modelStringOrSpec}"\x1b[0m • Thinking: \x1b[33m${THINKING_LEVEL}\x1b[0m • Context: \x1b[34m${formatSessionTokens(getSessionContextWindow(agent.modelStringOrSpec as string))}\x1b[0m`);
 console.log(`Session: \x1b[90m${agent.sessionId.slice(0, 16)}… (${sessionLocation})\x1b[0m`);
-console.log(`Commands: \x1b[90m/model "provider/model-id"  /level <lvl>  /help  /exit\x1b[0m\n`);
+console.log(`Commands: \x1b[90m/model "provider/model-id"  /help  /exit\x1b[0m\n`);
 
 const rl = readline.createInterface({ input: stdin, output: stdout });
 
@@ -143,10 +148,7 @@ while (true) {
 
     try {
       const resolved = resolveModel(nextModel);
-      const currentLevel = (agent as any).thinkingConfig?.level;
-      if (currentLevel && currentLevel !== "none") {
-        validateModelThinking(resolved.provider.id, resolved.modelId, currentLevel);
-      }
+      validateModelThinking(resolved.provider.id, resolved.modelId, THINKING_LEVEL);
     } catch (e: any) {
       console.log(`\x1b[33m⚠ Thinking level notice:\x1b[0m \x1b[90m${e.message}\x1b[0m`);
     }
@@ -157,35 +159,10 @@ while (true) {
     continue;
   }
 
-  if (q.startsWith("/level") || q.startsWith("/thinking")) {
-    const nextLevel = q.split(" ")[1]?.trim() as any;
-    const resolvedCurrent = resolveModel(agent.modelStringOrSpec as string);
-    if (nextLevel) {
-      try {
-        validateModelThinking(resolvedCurrent.provider.id, resolvedCurrent.modelId, nextLevel);
-        (agent as any).thinkingConfig = {
-          enabled: nextLevel !== "none",
-          level: nextLevel,
-          budgetTokens: nextLevel === "dynamic" ? -1 : nextLevel === "none" ? 0 : undefined,
-        };
-        persistSession();
-        console.log(`\x1b[32m✔ Switched thinking level to: ${nextLevel}\x1b[0m`);
-      } catch (err: any) {
-        console.log(`\x1b[31m✖ ${err.message}\x1b[0m`);
-      }
-    } else {
-      const info = getModelThinkingInfo(resolvedCurrent.provider.id, resolvedCurrent.modelId);
-      console.log(`Current thinking level: ${(agent as any).thinkingConfig?.level ?? "none"}`);
-      console.log(`\x1b[90m${info.description}\x1b[0m`);
-    }
-    continue;
-  }
-
   if (q === "/help") {
     console.log(`\x1b[33mAvailable Commands:\x1b[0m`);
     console.log(`  /model "provider/model-id"  Switch active model in quotes (e.g. /model "google/gemini-3.5-flash-lite")`);
-    console.log(`  /level <lvl>               Set thinking level (none, minimal, low, medium, high, xhigh, max, dynamic)`);
-    console.log(`  /exit, /quit               Exit chat session\n`);
+    console.log(`  /exit, /quit                Exit chat session\n`);
     continue;
   }
 
@@ -193,6 +170,7 @@ while (true) {
     const res = await agent.run(q, {
       stream: true,
       wrapThinking: true,
+      thinking: THINKING_LEVEL,
       onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
       onDelta: (d) => process.stdout.write(d),
       onEvent: (e) => {
@@ -207,8 +185,7 @@ while (true) {
     telemetry.add(res.usage, agent.modelStringOrSpec as string);
     persistSession();
 
-    const level = (agent as any).thinkingConfig?.level ?? "none";
-    console.log(`\n${telemetry.formatBar(res, { model: agent.modelStringOrSpec as string, thinkingLevel: level })}`);
+    console.log(`\n${telemetry.formatBar(res, { model: agent.modelStringOrSpec as string, thinkingLevel: THINKING_LEVEL })}`);
     if (res.subagents?.length) {
       console.log(
         `\x1b[90m  ↳ subagents: ${res.subagents

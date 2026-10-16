@@ -210,6 +210,7 @@ export {
   mapToolChoiceToOpenAI,
   normalizeToolChoice,
   parseStreamedToolArguments,
+  selectRawArguments,
   normalizeStructuredOutput,
   extractOutputValidator,
   parseStructuredOutput,

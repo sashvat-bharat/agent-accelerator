@@ -80,6 +80,7 @@ import {
   emitProviderWarning,
   noteProviderTurn,
   parseStreamedToolArguments,
+  selectRawArguments,
   mapOutputToCompatChat,
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
@@ -1199,7 +1200,7 @@ export class OpenAICompatibleChatProvider implements Provider {
             id: c.id && !c.id.includes("|") && c.id.length <= 40 ? c.id : clampToolCallId(c.id || newToolCallId()),
             name: c.name,
             arguments: args,
-            rawArguments: c.startArgs + c.deltaArgs,
+            rawArguments: selectRawArguments(c.startArgs, c.deltaArgs),
             ...withCompatSignature(sig),
           } as ToolCallRecord;
           toolCalls.push(record);

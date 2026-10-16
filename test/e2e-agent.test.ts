@@ -193,4 +193,41 @@ describe("End-to-End Agent Execution", () => {
       googleProvider.generate = originalGenerate;
     }
   });
+
+  it("should emit full thinking traces with signatures on the telemetry bus", async () => {
+    const { telemetryBus } = await import("../src/session/store.ts");
+    const googleProvider = getProvider("google") as any;
+    const originalGenerate = googleProvider.generate.bind(googleProvider);
+    const thinkingText = "Considering the cluster telemetry carefully before summarizing. ".repeat(100);
+    googleProvider.generate = async (): Promise<ProviderGenerateResult> => ({
+      text: "All healthy.",
+      thinking: thinkingText,
+      thoughtSignature: "c2lnbmF0dXJlLWFiYw==",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      finishReason: "stop",
+      responseId: "mock_think_1",
+      model: "mock-gemini",
+      provider: "google" as any,
+      raw: { request: {} as any },
+      durationMs: 5,
+    });
+
+    const seen: any[] = [];
+    const off = telemetryBus.onEvent((e) => void seen.push(e));
+    try {
+      const agent = new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "mock-key" });
+      const result = await agent.run("Summarize cluster health");
+      expect(result.thinking).toBe(thinkingText);
+      const evt = seen.find((e) => e?.code === "turn.thinking");
+      expect(evt).toBeDefined();
+      expect(evt.data.thinking).toBe(thinkingText);
+      expect(evt.data.thoughtSignature).toBe("c2lnbmF0dXJlLWFiYw==");
+      expect(evt.data.turns).toBe(1);
+      expect(evt.data.provider).toBe("google");
+    } finally {
+      off();
+      telemetryBus.clear();
+      googleProvider.generate = originalGenerate;
+    }
+  });
 });

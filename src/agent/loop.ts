@@ -593,6 +593,15 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         (config as unknown as { googleStore?: unknown }).googleStore;
       if (gStore === false) (providerOptions as unknown as { store?: boolean }).store = false;
     } catch {}
+    // Google interaction storage tier for the chain-TTL gate
+    // (`free`: 23h local gate; `paid`: 54d). Defaults to `free` in adapter.
+    try {
+      const gTier =
+        (runOptions as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+        (options as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+        (config as unknown as { googleTier?: unknown }).googleTier;
+      if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
+    } catch {}
 
     const genResult = await generateWithTimeout(
       () => provider.generate(
@@ -641,6 +650,26 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       genResult.thinking,
       genResult.thoughtSignature
     );
+
+    // Thinking-trace telemetry (observability-only, full text, no limit):
+    // one bus event per thinking turn carrying the text + thought signature.
+    // Never touches provider payloads, history, or persistence formats.
+    if (genResult.thinking) {
+      try {
+        telemetryBus.emit({
+          code: "turn.thinking",
+          message: `[Agent Accelerator] turn ${turns} thinking (${provider.id}/${modelId})`,
+          data: {
+            turns,
+            model: modelId,
+            provider: provider.id,
+            sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+            thinking: genResult.thinking,
+            ...(genResult.thoughtSignature ? { thoughtSignature: genResult.thoughtSignature } : {}),
+          },
+        });
+      } catch {}
+    }
 
     // Mid-session steer: if new queries arrived during this provider turn,
     // inject them now. Tool turns still execute first (see below) so the
@@ -966,6 +995,13 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
             (config as unknown as { googleStore?: unknown }).googleStore;
           if (gStore === false) (providerOptions as unknown as { store?: boolean }).store = false;
         } catch {}
+        try {
+          const gTier =
+            (runOptions as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+            (options as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+            (config as unknown as { googleTier?: unknown }).googleTier;
+          if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
+        } catch {}
 
         const innerStream = provider.stream(
           modelId,
@@ -1057,6 +1093,25 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           turnResponse.thinking,
           turnResponse.thoughtSignature
         );
+
+        // Thinking-trace telemetry (observability-only, full text, no limit):
+        // mirrors the non-streaming loop above; bus-only, never wire/history.
+        if (turnResponse.thinking) {
+          try {
+            telemetryBus.emit({
+              code: "turn.thinking",
+              message: `[Agent Accelerator] turn ${turns} thinking (${provider.id}/${modelId})`,
+              data: {
+                turns,
+                model: modelId,
+                provider: provider.id,
+                sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+                thinking: turnResponse.thinking,
+                ...(turnResponse.thoughtSignature ? { thoughtSignature: turnResponse.thoughtSignature } : {}),
+              },
+            });
+          } catch {}
+        }
 
         const noToolSteered = (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0)
           ? drainSteerInbox(context, config.steerInbox)

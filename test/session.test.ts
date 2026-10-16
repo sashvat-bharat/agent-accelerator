@@ -113,6 +113,108 @@ describe("session serialize/deserialize", () => {
     expect(deserializeSession("")).toBeNull();
     expect(deserializeSession("not json")).toBeNull();
   });
+
+  it("writes one line per field with totals before messages and no duplicated instructions", () => {
+    const a = new Agent({ model: "google/gemini-3.5-flash-lite", instructions: "Be brief." });
+    a.context.messages = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "text", text: "hello" }] },
+    ] as any;
+    const t = new SessionTelemetry({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: 0 });
+    const text = serializeSession(buildSessionData(a as any, t));
+    // Still valid JSON with both turns intact.
+    expect(deserializeSession(text)?.messages).toHaveLength(2);
+    // No duplicated base instructions (systemPrompt already embeds them).
+    expect(text).not.toContain('"instructions"');
+    // Totals sit right before the messages block.
+    const totalsAt = text.indexOf('"totals"');
+    const messagesAt = text.indexOf('"messages"');
+    expect(totalsAt).toBeGreaterThan(-1);
+    expect(messagesAt).toBeGreaterThan(totalsAt);
+    // Each conversation turn gets exactly one line holding complete JSON.
+    const lines = text.split("\n");
+    const openIdx = lines.findIndex((l) => l.includes('"messages"'));
+    expect(lines[openIdx]).toContain("[");
+    const turnLines: string[] = [];
+    for (let i = openIdx + 1; i < lines.length; i++) {
+      const trimmed = lines[i]!.trim();
+      if (trimmed.startsWith("]")) break;
+      turnLines.push(trimmed.replace(/,$/, ""));
+    }
+    expect(turnLines).toHaveLength(2);
+    expect(turnLines.every((l) => {
+      const parsed = JSON.parse(l) as { role?: string };
+      return typeof parsed.role === "string";
+    })).toBe(true);
+  });
+
+  it("preserves full thinking text and thought signatures through snapshots", () => {
+    const a = new Agent({ model: "google/gemini-3.5-flash-lite", instructions: "Be brief." });
+    const thinkingText = "First I will check the metrics, then summarize in two sentences. ".repeat(200);
+    a.context.addAssistantMessage("Summary done.", undefined, thinkingText, "c2lnbmF0dXJlLWFiYw==");
+    const back = deserializeSession(serializeSession(buildSessionData(a as any, null)));
+    const parts = (back?.messages ?? []).flatMap((m: any) => (Array.isArray(m.content) ? m.content : []));
+    const thinkingPart = parts.find((p: any) => p?.type === "thinking");
+    const textPart = parts.find((p: any) => p?.type === "text");
+    // Full text, no truncation cap.
+    expect(thinkingPart?.thinking).toBe(thinkingText);
+    // Signature rides on the text part (and message) when text is present.
+    expect(textPart?.thoughtSignature).toBe("c2lnbmF0dXJlLWFiYw==");
+  });
+
+  it("keeps worker reasoning on deduped steps (drops only repeated text)", () => {    const fake = {
+      sessionId: "accel-test",
+      modelStringOrSpec: "google/gemini-3.5-flash-lite",
+      context: { messages: [] },
+      subagentTraces: {
+        abc123: {
+          trackingId: "abc123",
+          name: "W",
+          sessionId: "s",
+          parentSessionId: "p",
+          status: "done",
+          task: "t",
+          turns: 1,
+          steps: [
+            { turn: 1, type: "assistant", text: "FINAL", thinking: "why final", thoughtSignature: "c2ln", isError: false, timestamp: 1 },
+          ],
+          text: "FINAL",
+        },
+      },
+    };
+    const data = buildSessionData(fake as any, null);
+    const step = (data.subagents as any)["abc123"].steps[0];
+    expect(step.text).toBeUndefined();
+    expect(step.thinking).toBe("why final");
+    expect(step.thoughtSignature).toBe("c2ln");
+    expect(step.turn).toBe(1);
+  });
+
+  it("drops tool-call rawArguments that re-parse to the stored arguments", () => {
+    const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
+    a.context.messages = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "c1", name: "w", arguments: { a: 1 }, rawArguments: '{"a":1}' }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "c2", name: "w", arguments: { a: 1 }, rawArguments: "{}{\"a\":1}" }],
+      },
+    ] as any;
+    const data = buildSessionData(a as any, null);
+    const calls = (data.messages as any[]).flatMap((m: any) => (Array.isArray(m.content) ? m.content : []));
+    expect(calls[0].rawArguments).toBeUndefined();
+    // Unparseable wire strings are kept: they carry info parsing lost.
+    expect(calls[1].rawArguments).toBe('{}{"a":1}');
+  });
+
+  it("drops cache.sessionId echoing the top-level sessionId", () => {
+    const a = new Agent({ model: "google/gemini-3.5-flash-lite", cache: { retention: "implicit" } });
+    const data = buildSessionData(a as any, null);
+    expect(data.sessionId).toBe(a.sessionId);
+    expect(data.cache).toEqual({ retention: "implicit" });
+  });
 });
 
 describe("agent export/import + file round-trip", () => {

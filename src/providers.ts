@@ -493,6 +493,29 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
   return { raw: startText + deltaText };
 }
 
+/**
+ * Returns the wire string that actually parsed in
+ * {@link parseStreamedToolArguments} (identical candidate trial order), so
+ * `rawArguments` audit trails never store concatenation artifacts like
+ * `"{}{...}"` (empty start payload + complete delta). Falls back to the raw
+ * concatenation when nothing parses, preserving the truncated-call marker
+ * path (`{ raw }`, never executed).
+ *
+ * @example `selectRawArguments("{}", '{"location":"Paris"}') // '{"location":"Paris"}'`
+ */
+export function selectRawArguments(startText: string, deltaText: string): string {
+  const candidates = [startText + deltaText, deltaText, startText].filter((c) => c && c.trim());
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (isPlainObject(parsed)) return candidate;
+    } catch {
+      // try next candidate
+    }
+  }
+  return startText + deltaText;
+}
+
 // ---------------------------------------------------------------------------
 // Structured outputs (canonical, pure, no I/O)
 // ---------------------------------------------------------------------------

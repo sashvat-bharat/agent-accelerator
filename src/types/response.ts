@@ -9,6 +9,8 @@ export interface SubAgentStep {
   name?: string;
   text?: string;
   thinking?: string;
+  /** Opaque provider thought signature captured with this step's reasoning, when present. */
+  thoughtSignature?: string;
   isError?: boolean;
   timestamp: number;
   /** True while the worker is still streaming this step; finalized on turn end. */

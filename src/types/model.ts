@@ -177,6 +177,12 @@ export interface ProviderRequestOptions {
   maxRetryDelayMs?: number;
   /** Normalized structured-output spec (see `normalizeStructuredOutput`). */
   output?: StructuredOutputSpec;
+  /**
+   * Google Interactions storage tier for the proactive chain-TTL gate
+   * (free: 23h local gate; paid: 54d). Default `free` (safe). Display-only
+   * cache behavior is unaffected; unknown values fall back to `free`.
+   */
+  googleTier?: "free" | "paid";
 }
 
 /** Auditable request/response wire payload captured in AgentResponse. */

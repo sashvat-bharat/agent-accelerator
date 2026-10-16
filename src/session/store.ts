@@ -67,6 +67,8 @@ export interface PersistedAgentSession {
   subagentModel?: string;
   thinkingLevel?: string;
   cache?: CacheConfig;
+  /** Legacy read-only: pre-compact files duplicated base instructions here;
+  * no longer written (`systemPrompt` already embeds them). */
   instructions?: string;
   systemPrompt?: string;
   cachedContentId?: string;
@@ -307,11 +309,24 @@ function snapshotSubagents(traces: Record<string, PersistedSubAgentTrace> | unde
   for (const [id, t] of byId) {
     // Drop assistant step text that merely repeats the final answer: the
     // step marker (turn/type/timestamp) stays, the full text lives on trace.text.
-    const steps = (t.steps ?? []).map((s) =>
-      s.type === "assistant" && typeof s.text === "string" && typeof t.text === "string" && s.text === t.text
-        ? { turn: s.turn, type: s.type, timestamp: s.timestamp }
-        : { ...s }
-    );
+    // Reasoning is never dropped: `thinking`/`thoughtSignature` survive the
+    // dedup so persisted worker steps keep their reasoning traces.
+    const steps = (t.steps ?? []).map((s) => {
+      if (
+        s.type === "assistant" &&
+        typeof s.text === "string" &&
+        typeof t.text === "string" &&
+        s.text === t.text
+      ) {
+        const marker: SubAgentStep = { turn: s.turn, type: s.type, timestamp: s.timestamp };
+        if (typeof s.thinking === "string" && s.thinking) marker.thinking = s.thinking;
+        const sig = (s as { thoughtSignature?: unknown }).thoughtSignature;
+        if (typeof sig === "string" && sig) marker.thoughtSignature = sig;
+        if (typeof s.isError === "boolean") marker.isError = s.isError;
+        return marker;
+      }
+      return { ...s };
+    });
     lean[id] = { ...t, steps };
   }
   try {
@@ -373,26 +388,68 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
     typeof (agent as any)?.parentSessionId === "string" ? (agent as any).parentSessionId as string : undefined;
   const subagents = snapshotSubagents((agent as any)?.subagentTraces as Record<string, PersistedSubAgentTrace> | undefined);
   const messages = stripRedundantRawArguments(agent.context.messages);
+  // `cache.sessionId` echoes the top-level `sessionId` (affinity alias): drop
+  // it from the file when identical so it isn't stored twice. Readers still
+  // accept legacy files carrying it (`importSession`, loop fallbacks).
+  const cacheForFile = (() => {
+    if (!agent.cacheConfig) return undefined;
+    if (agent.cacheConfig.sessionId === agent.sessionId) {
+      const { sessionId: _dropped, ...rest } = agent.cacheConfig;
+      return Object.keys(rest).length > 0 ? rest : undefined;
+    }
+    return agent.cacheConfig;
+  })();
+  // Field order is the on-disk layout contract: identity → config →
+  // systemPrompt → totals → messages → lineage/traces. `instructions` is
+  // intentionally never written: `systemPrompt` already embeds it (plus the
+  // appended directives), so writing both duplicates the same data.
+  // Readers still accept legacy files carrying `instructions`.
   return {
     version: 1,
     sessionId: agent.sessionId,
     model,
     ...(subagentModel ? { subagentModel: String(subagentModel) } : {}),
     ...(agent.thinkingConfig?.level ? { thinkingLevel: agent.thinkingConfig.level as string } : {}),
-    ...(agent.cacheConfig ? { cache: agent.cacheConfig } : {}),
-    ...(agent.instructions ? { instructions: agent.instructions } : {}),
+    ...(cacheForFile ? { cache: cacheForFile } : {}),
     ...(agent.context.systemPrompt ? { systemPrompt: agent.context.systemPrompt } : {}),
     ...(agent.context.cachedContentId ? { cachedContentId: agent.context.cachedContentId } : {}),
-    messages,
     ...(totals ? { totals } : {}),
+    messages,
     ...(parentSessionId ? { parentSessionId } : {}),
     ...(subagents ? { subagents } : {}),
   };
 }
 
-/** Serializes a snapshot to a pretty-printed `.json` document (2-space indent). */
+/**
+ * Serializes a snapshot so every top-level field occupies exactly one line
+ * (`  "key": <compact-json>`), except `messages`: the conversation array
+ * expands with one line per turn (`    {…}`), so each turn stays readable
+ * without exploding nested values vertically. The file stays valid JSON and
+ * greppable. Field order follows `buildSessionData` (totals before messages).
+ */
 export function serializeSession(data: PersistedAgentSession): string {
-  return JSON.stringify({ ...data, version: 1 }, null, 2);
+  const full = { ...data, version: 1 } as Record<string, unknown>;
+  const keys = Object.keys(full).filter((k) => full[k] !== undefined);
+  const lines = ["{"];
+  keys.forEach((k, i) => {
+    const comma = i < keys.length - 1 ? "," : "";
+    if (k === "messages" && Array.isArray(full[k])) {
+      const turns = full[k] as unknown[];
+      if (turns.length === 0) {
+        lines.push(`  ${JSON.stringify(k)}: []${comma}`);
+      } else {
+        lines.push(`  ${JSON.stringify(k)}: [`);
+        turns.forEach((t, j) => {
+          lines.push(`    ${JSON.stringify(t)}${j < turns.length - 1 ? "," : ""}`);
+        });
+        lines.push(`  ]${comma}`);
+      }
+      return;
+    }
+    lines.push(`  ${JSON.stringify(k)}: ${JSON.stringify(full[k])}${comma}`);
+  });
+  lines.push("}");
+  return lines.join("\n");
 }
 
 /** Parses new pretty `.session.json` snapshots AND legacy `.session.jsonl` documents. */

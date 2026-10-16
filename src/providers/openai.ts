@@ -74,6 +74,7 @@ import {
   mapToolChoiceToOpenAI,
   noteProviderTurn,
   parseStreamedToolArguments,
+  selectRawArguments,
   mapOutputToOpenAI,
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
@@ -1070,7 +1071,7 @@ export class OpenAIResponsesProvider implements Provider {
             callId: c.callId || undefined,
             name: c.name,
             arguments: args,
-            rawArguments: c.startArgs + c.deltaArgs,
+            rawArguments: selectRawArguments(c.startArgs, c.deltaArgs),
           };
           toolCalls.push(record);
           eventStream.push({ type: "tool_call_complete", toolCall: record });

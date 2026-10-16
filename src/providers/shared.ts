@@ -92,6 +92,30 @@ export function incompleteStreamError(provider: string, modelId: string): Error 
   return err;
 }
 
+/**
+ * True when an error signals an evicted/invalid chained interaction
+ * (Google Interactions `404` / `{code: not_found}` on REST, `{event_type:
+ * error, error: {code: not_found}}` on SSE). Structured-data only: HTTP
+ * status, `code`, or `errorType` — never message text.
+ */
+export function isNotFoundChainError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const err = error as Record<string, unknown>;
+  const status = Number(
+    (err["status"] as number | undefined) ??
+      (err["statusCode"] as number | undefined) ??
+      ((err["response"] as Record<string, unknown> | undefined)?.["status"] as number | undefined) ??
+      NaN
+  );
+  if (status === 404) return true;
+  const code = String(
+    (err["code"] as string | undefined) ??
+      (err["errorType"] as string | undefined) ??
+      ""
+  ).toLowerCase();
+  return code === "not_found";
+}
+
 /** Per-request timeout ms from provider options (Q-22). */
 export function timeoutFor(options: { timeoutMs?: number } | undefined): number | undefined {
   const t = (options as { timeoutMs?: unknown } | undefined)?.timeoutMs;

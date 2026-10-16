@@ -479,6 +479,41 @@ describe("GoogleInteractionsProvider (REST, mocked)", () => {
     expect(final.toolCalls?.[0]?.arguments).toEqual({ location: "Paris" });
   });
 
+  it("stores canonical rawArguments for empty-start + full-delta streams (no {}{} artifact)", async () => {
+    const sse = [
+      "event: step.start",
+      'data: {"index":0,"step":{"id":"call_c","type":"function_call","name":"w","arguments":{}},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":0,"delta":{"arguments":"{\\"a\\":1}","type":"arguments_delta"},"event_type":"step.delta"}',
+      "",
+      "event: interaction.completed",
+      'data: {"interaction":{"id":"v1_c","status":"requires_action","usage":{"total_tokens":3,"total_input_tokens":2,"total_output_tokens":1}},"event_type":"interaction.completed"}',
+      "",
+      "event: done",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async () => {
+      return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const stream = provider.stream(
+      "m",
+      { messages: [{ role: "user", content: "Hi" }] },
+      { apiKey: "k", sessionId: "s-canon" }
+    );
+    const toolEvents: any[] = [];
+    for await (const e of stream) {
+      if (e.type === "tool_call_complete") toolEvents.push(e.toolCall);
+    }
+    await stream.result();
+    expect(toolEvents.length).toBe(1);
+    // The winning candidate, not the "{}{...}" concatenation.
+    expect(toolEvents[0].rawArguments).toBe('{"a":1}');
+    expect(JSON.parse(toolEvents[0].rawArguments)).toEqual(toolEvents[0].arguments);
+  });
+
   it("surfaces SSE error events instead of resolving empty success", async () => {
     const sse = [
       "event: interaction.created",
@@ -548,5 +583,316 @@ describe("GoogleInteractionsProvider (REST, mocked)", () => {
     expect(sentBody.previous_interaction_id).toBeUndefined();
     expect(Array.isArray(sentBody.input)).toBe(true);
     clearSessionRouting("s-mixed");
+  });
+});
+
+describe("GoogleInteractionsProvider chain expiry & self-heal (mocked)", () => {
+  beforeEach(() => {
+    clearInteractionChains();
+    clearSessionRouting();
+  });
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    clearInteractionChains();
+    clearSessionRouting();
+    try { delete (globalThis as any).__agentAccelAnomaly; } catch {}
+  });
+
+  const HISTORY = {
+    messages: [
+      { role: "user", content: "Hi" },
+      { role: "assistant", content: [{ type: "text", text: "Hello" }] },
+      { role: "user", content: "Again" },
+    ],
+  } as any;
+
+  it("gates expired chains locally instead of wasting an RTT (free tier defaults to 23h)", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-ttl" });
+    const realNow = Date.now;
+    (Date as any).now = () => realNow() + 24 * 3600 * 1000;
+    try {
+      await provider.generate("m", HISTORY, { apiKey: "k", sessionId: "s-ttl" });
+    } finally {
+      (Date as any).now = realNow;
+    }
+    // Expired pointer dropped locally: full-history reseed, no chained id.
+    expect(bodies[1].previous_interaction_id).toBeUndefined();
+    expect(Array.isArray(bodies[1].input)).toBe(true);
+    expect(bodies[1].store).toBeUndefined();
+  });
+
+  it("keeps chains inside the paid-tier window (googleTier: paid)", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-tier" });
+    const realNow = Date.now;
+    (Date as any).now = () => realNow() + 50 * 24 * 3600 * 1000;
+    try {
+      await provider.generate("m", HISTORY, { apiKey: "k", sessionId: "s-tier", googleTier: "paid" });
+    } finally {
+      (Date as any).now = realNow;
+    }
+    expect(bodies[1].previous_interaction_id).toBe("v1_test123");
+  });
+
+  it("self-heals a 404 chained pointer with one full-history retry and replaces the chain", async () => {
+    const bodies: any[] = [];
+    let calls = 0;
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      calls++;
+      bodies.push(JSON.parse(req.body));
+      if (calls === 2) {
+        return new Response(JSON.stringify({ error: { code: "not_found", message: "The requested resource was not found." } }), { status: 404 });
+      }
+      const id = calls === 1 ? "v1_seed" : calls === 3 ? "v1_healed" : "v1_next";
+      return new Response(JSON.stringify({ ...TEXT_INTERACTION, id }), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-heal" });
+    const res = await provider.generate("m", HISTORY, { apiKey: "k", sessionId: "s-heal" });
+    expect(res.text).toBe("Hello there");
+    // Call 2 used the dead pointer; call 3 reseeded without it.
+    expect(bodies[1].previous_interaction_id).toBe("v1_seed");
+    expect(bodies[2].previous_interaction_id).toBeUndefined();
+    expect(Array.isArray(bodies[2].input)).toBe(true);
+    // The healed chain is live: the next turn chains to the new id.
+    await provider.generate("m", HISTORY, { apiKey: "k", sessionId: "s-heal" });
+    expect(bodies[3].previous_interaction_id).toBe("v1_healed");
+  });
+
+  it("does not retry chain-less 404s", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = async () => {
+      calls++;
+      return new Response(JSON.stringify({ error: { code: "not_found", message: "The requested resource was not found." } }), { status: 404 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    await expect(
+      provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-nochain" })
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+
+  it("re-sends system_instruction and tools on chained turns (interaction-scoped params)", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const tools = [{ name: "w", description: "d", parameters: { type: "object", properties: {} } }];
+    await provider.generate("m", { systemPrompt: "Be concise.", messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-scoped", tools });
+    await provider.generate("m", { systemPrompt: "Be concise.", ...HISTORY }, { apiKey: "k", sessionId: "s-scoped", tools });
+    expect(bodies[1].previous_interaction_id).toBe("v1_test123");
+    expect(bodies[1].system_instruction).toBe("Be concise.");
+    expect(Array.isArray(bodies[1].tools)).toBe(true);
+  });
+
+  it("clears the dead chain and marks retryable on SSE not_found", async () => {
+    const okSse = [
+      "event: interaction.created",
+      'data: {"interaction":{"id":"v1_sse_chain","status":"in_progress","object":"interaction","model":"m"},"event_type":"interaction.created"}',
+      "",
+      "event: step.delta",
+      'data: {"index":0,"delta":{"text":"hi","type":"text"},"event_type":"step.delta"}',
+      "",
+      "event: interaction.completed",
+      'data: {"interaction":{"id":"v1_sse_chain","status":"completed","usage":{"total_tokens":3,"total_input_tokens":2,"total_output_tokens":1}},"event_type":"interaction.completed"}',
+      "",
+      "event: done",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const errSse = [
+      "event: error",
+      'data: {"error":{"code":"not_found","message":"Failed to get completed interaction: Result not found."},"event_type":"error"}',
+      "",
+      "event: done",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    let calls = 0;
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      calls++;
+      try { JSON.parse(req.body); } catch {}
+      const sse = calls === 1 ? okSse : errSse;
+      return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const seed = provider.stream("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-sse-evict" });
+    const seedRes = await seed.result();
+    expect(seedRes.responseId).toBe("v1_sse_chain");
+    const stream = provider.stream("m", HISTORY, { apiKey: "k", sessionId: "s-sse-evict" });
+    try { for await (const _e of stream) { /* drain */ } } catch {}
+    const err = await stream.result().then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(err).toBeTruthy();
+    expect((err as any)?.retryable).toBe(true);
+    // Dead pointer was cleared: the next turn reseeds without it.
+    let reseeded: any = null;
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      reseeded = JSON.parse(req.body);
+      return new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 });
+    };
+    await provider.generate("m", HISTORY, { apiKey: "k", sessionId: "s-sse-evict" });
+    expect(reseeded.previous_interaction_id).toBeUndefined();
+    expect(Array.isArray(reseeded.input)).toBe(true);
+  });
+
+  it("alerts when input tokens shrink turn-over-turn (dropped chain without rehydration)", async () => {
+    const seen: unknown[] = [];
+    (globalThis as any).__agentAccelAnomaly = (d: unknown) => void seen.push(d);
+    let calls = 0;
+    (globalThis as any).fetch = async () => {
+      calls++;
+      const usage =
+        calls === 1
+          ? { total_tokens: 150, total_input_tokens: 100, total_output_tokens: 50, total_cached_tokens: 0, total_thought_tokens: 0 }
+          : { total_tokens: 12, total_input_tokens: 10, total_output_tokens: 2, total_cached_tokens: 0, total_thought_tokens: 0 };
+      return new Response(JSON.stringify({ ...TEXT_INTERACTION, id: `v1_tok${calls}`, usage }), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-tok" });
+    await provider.generate("m", HISTORY, { apiKey: "k", sessionId: "s-tok" });
+    expect(seen.some((d: any) => d?.type === "interaction_history_shrink")).toBe(true);
+  });
+});
+
+describe("GoogleInteractionsProvider generation floor & failure handling (mocked)", () => {
+  beforeEach(() => {
+    clearInteractionChains();
+    clearSessionRouting();
+  });
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    clearInteractionChains();
+    clearSessionRouting();
+  });
+
+  it("rejects Gemini 1.x/2.x without any network call (minimum: Gemini 3)", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = async () => {
+      calls++;
+      return new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    for (const id of ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "google/gemini-2.5-flash-lite"]) {
+      await expect(
+        provider.generate(id, { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-floor" })
+      ).rejects.toThrow(/Gemini 3/);
+    }
+    expect(calls).toBe(0);
+  });
+
+  it("fails streams on legacy generation ids without any network call", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = async () => {
+      calls++;
+      return new Response("{}", { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const stream = provider.stream("gemini-2.0-flash", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-floor-sse" });
+    try { for await (const _e of stream) { /* drain */ } } catch {}
+    const err = await stream.result().then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(String((err as Error)?.message ?? err)).toMatch(/Gemini 3/);
+    expect(calls).toBe(0);
+  });
+
+  it("throws (never empty success) on failed interactions", async () => {
+    (globalThis as any).fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          ...TEXT_INTERACTION,
+          id: "v1_failed",
+          status: "failed",
+          error: { message: "Safety block triggered.", code: "safety" },
+        }),
+        { status: 200 }
+      );
+    };
+    const provider = new GoogleInteractionsProvider();
+    await expect(
+      provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-failed" })
+    ).rejects.toThrow(/Safety block triggered/);
+  });
+
+  it("fails streams on failed interaction.completed instead of empty stop", async () => {
+    const sse = [
+      "event: interaction.created",
+      'data: {"interaction":{"id":"v1_f","status":"in_progress","object":"interaction","model":"m"},"event_type":"interaction.created"}',
+      "",
+      "event: interaction.completed",
+      'data: {"interaction":{"id":"v1_f","status":"failed","error":{"message":"Safety block triggered.","code":"safety"}},"event_type":"interaction.completed"}',
+      "",
+      "event: done",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async () => {
+      return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const stream = provider.stream("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-failed-sse" });
+    try { for await (const _e of stream) { /* drain */ } } catch {}
+    const err = await stream.result().then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(String((err as Error)?.message ?? err)).toMatch(/Safety block triggered/);
+  });
+
+  it("maps incomplete to length (truncation, not stop)", async () => {
+    (globalThis as any).fetch = async () => {
+      return new Response(JSON.stringify({ ...TEXT_INTERACTION, id: "v1_inc", status: "incomplete" }), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const res = await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-inc" });
+    expect(res.finishReason).toBe("length");
+  });
+
+  it("omits empty thought signatures on foreign-provider replay, keeps google ones", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    await provider.generate(
+      "m",
+      {
+        messages: [
+          { role: "user", content: "Hi" },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "foreign reasoning", thoughtSignature: "sig-foreign", thoughtSignatureProvider: "openai" },
+              { type: "thinking", thinking: "own reasoning", thoughtSignature: "sig-own", thoughtSignatureProvider: "google" },
+            ],
+          },
+          { role: "user", content: "Again" },
+        ],
+      },
+      { apiKey: "k", sessionId: "s-sig" }
+    );
+    const thoughts = (bodies[0].input as any[]).filter((s) => s.type === "thought");
+    expect(thoughts.length).toBe(2);
+    expect(thoughts[0].signature).toBeUndefined();
+    expect(thoughts[0].summary).toBeDefined();
+    expect(thoughts[1].signature).toBe("sig-own");
   });
 });
