@@ -183,6 +183,20 @@ export interface ProviderRequestOptions {
    * cache behavior is unaffected; unknown values fall back to `free`.
    */
   googleTier?: "free" | "paid";
+  /** Sampling controls. Sent where the wire supports them; otherwise warn+drop. */
+  sampling?: { temperature?: number; topP?: number };
+  /** Upper bound on generated tokens for one model call. */
+  maxOutputTokens?: number;
+  /** Stop sequence(s). Chat Completions only; other wires warn+drop. */
+  stop?: string[];
+  /** Deterministic-sampling seed. Chat Completions only; other wires warn+drop. */
+  seed?: number;
+  /** `fetch` implementation used for the provider request (defaults to global `fetch`). */
+  fetch?: typeof fetch;
+  /** Base backoff delay in ms for provider retries (default 250). */
+  retryBaseDelayMs?: number;
+  /** Total time budget in ms for provider retries (default 30000). */
+  retryBudgetMs?: number;
 }
 
 /** Auditable request/response wire payload captured in AgentResponse. */

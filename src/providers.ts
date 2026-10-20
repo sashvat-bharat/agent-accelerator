@@ -13,6 +13,8 @@ import type { CacheConfig, ServiceTier, ThinkingLevel } from "./types/core.ts";
 import type { StructuredOutputSpec } from "./types/model.ts";
 import { zodToJsonSchema } from "./tools/schema.ts";
 import { ValidationError } from "./types/errors.ts";
+import { TRUNCATED_ARGS_KEY } from "./types/tool.ts";
+import { telemetryBus } from "./telemetry.ts";
 
 /** Classification of a canonical capability on a given provider. */
 export type ProviderCapabilityStatus =
@@ -50,11 +52,19 @@ export function emitProviderWarning(options: {
   if (emittedWarnings.has(key)) return;
   emittedWarnings.add(key);
   const requested = options.requested ? ` (requested: "${options.requested}")` : "";
-  // Leading newline: warnings fire at the start of a turn's request build,
-  // when the previous turn's streamed text may have left the terminal cursor
-  // mid-line. Without it the warning glues onto streamed output.
-  // Q-41 dual: telemetry bus (new) + console.warn (compat for existing captureWarnings tests; /cli logger replaces in 0.5).
-  { const msg = `[Agent Accelerator] WARNING [${options.provider}] ${options.capability}${requested}: ${options.reason} Using ${options.fallback} instead.`; try { (globalThis as any).__agentAccelTelemetry?.emitWarning?.({ code: "provider_warning", provider: options.provider, capability: options.capability, message: msg }); } catch {} try { (globalThis as any).__agentAccelWarnSink?.(msg, options); } catch {} try { console.warn(msg); } catch {} }
+  // Primary channel: the telemetry bus (code `provider_warning`). The legacy
+  // global sink and `console.warn` remain for existing capture-based tests and
+  // CLIs that predate the bus.
+  const msg = `[Agent Accelerator] WARNING [${options.provider}] ${options.capability}${requested}: ${options.reason} Using ${options.fallback} instead.`;
+  telemetryBus.emitWarning("provider_warning", msg, {
+    provider: options.provider,
+    capability: options.capability,
+    requested: options.requested,
+    reason: options.reason,
+    fallback: options.fallback,
+  });
+  try { (globalThis as any).__agentAccelWarnSink?.(msg, options); } catch {}
+  try { console.warn(msg); } catch {}
 }
 
 /** Clears deduped-warning state (mainly for tests). */
@@ -490,7 +500,7 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
       // try next candidate
     }
   }
-  return { raw: startText + deltaText };
+  return { [TRUNCATED_ARGS_KEY]: startText + deltaText };
 }
 
 /**
@@ -499,7 +509,7 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
  * `rawArguments` audit trails never store concatenation artifacts like
  * `"{}{...}"` (empty start payload + complete delta). Falls back to the raw
  * concatenation when nothing parses, preserving the truncated-call marker
- * path (`{ raw }`, never executed).
+ * path (`{ __truncated_raw }`, never executed).
  *
  * @example `selectRawArguments("{}", '{"location":"Paris"}') // '{"location":"Paris"}'`
  */
@@ -514,6 +524,101 @@ export function selectRawArguments(startText: string, deltaText: string): string
     }
   }
   return startText + deltaText;
+}
+
+// ---------------------------------------------------------------------------
+// Generation controls (sampling / maxOutputTokens / stop / seed)
+// ---------------------------------------------------------------------------
+
+/** Canonical generation controls as carried on `ProviderRequestOptions`. */
+export interface GenerationParams {
+  sampling?: { temperature?: number; topP?: number };
+  maxOutputTokens?: number;
+  stop?: string[];
+  seed?: number;
+}
+
+const finiteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** Normalizes the public `stop` option (`string | string[]`) to a clean array, or undefined. */
+export function normalizeStop(stop: string | string[] | undefined): string[] | undefined {
+  const list = (Array.isArray(stop) ? stop : stop === undefined ? [] : [stop]).filter(
+    (s): s is string => typeof s === "string" && s.length > 0
+  );
+  return list.length > 0 ? list : undefined;
+}
+
+/**
+ * Standard Chat Completions fields (OpenRouter + generic compat endpoints):
+ * `temperature`, `top_p`, `max_tokens`, `stop`, `seed`. Only set values are
+ * emitted, so strict endpoints never see anything the caller did not ask for.
+ */
+export function mapGenerationParamsToChat(params: GenerationParams | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!params) return out;
+  if (finiteNumber(params.sampling?.temperature)) out["temperature"] = params.sampling!.temperature;
+  if (finiteNumber(params.sampling?.topP)) out["top_p"] = params.sampling!.topP;
+  if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out["max_tokens"] = Math.floor(params.maxOutputTokens);
+  if (params.stop && params.stop.length > 0) out["stop"] = params.stop;
+  if (finiteNumber(params.seed)) out["seed"] = Math.floor(params.seed);
+  return out;
+}
+
+function warnUnsupportedStopSeed(provider: string, modelRef: string, params: GenerationParams, reasonSuffix: string): void {
+  if (params.stop && params.stop.length > 0) {
+    emitProviderWarning({
+      provider,
+      capability: "stop sequences",
+      requested: `${params.stop.join("|")} (${modelRef})`,
+      reason: `the ${reasonSuffix} defines no stop-sequence parameter.`,
+      fallback: "no stop sequences (the model decides when to stop)",
+    });
+  }
+  if (finiteNumber(params.seed)) {
+    emitProviderWarning({
+      provider,
+      capability: "seed",
+      requested: `${params.seed} (${modelRef})`,
+      reason: `the ${reasonSuffix} defines no seed parameter.`,
+      fallback: "non-deterministic sampling",
+    });
+  }
+}
+
+/**
+ * OpenAI Responses: `temperature`, `top_p`, `max_output_tokens` are native;
+ * `stop` and `seed` do not exist on this wire (warn + drop).
+ */
+export function mapGenerationParamsToOpenAI(
+  params: GenerationParams | undefined,
+  modelRef: string
+): { temperature?: number; top_p?: number; max_output_tokens?: number } {
+  if (!params) return {};
+  warnUnsupportedStopSeed("openai", modelRef, params, "OpenAI Responses API");
+  const out: { temperature?: number; top_p?: number; max_output_tokens?: number } = {};
+  if (finiteNumber(params.sampling?.temperature)) out.temperature = params.sampling!.temperature;
+  if (finiteNumber(params.sampling?.topP)) out.top_p = params.sampling!.topP;
+  if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out.max_output_tokens = Math.floor(params.maxOutputTokens);
+  return out;
+}
+
+/**
+ * Google Interactions `generation_config`: `max_output_tokens` is documented;
+ * `temperature`/`top_p` are accepted (newer Gemini models ignore them and
+ * return deprecation headers). `stop` and `seed` are not documented for this
+ * API (warn + drop).
+ */
+export function mapGenerationParamsToGoogle(
+  params: GenerationParams | undefined,
+  modelRef: string
+): { temperature?: number; top_p?: number; max_output_tokens?: number } {
+  if (!params) return {};
+  warnUnsupportedStopSeed("google", modelRef, params, "Gemini Interactions API");
+  const out: { temperature?: number; top_p?: number; max_output_tokens?: number } = {};
+  if (finiteNumber(params.sampling?.temperature)) out.temperature = params.sampling!.temperature;
+  if (finiteNumber(params.sampling?.topP)) out.top_p = params.sampling!.topP;
+  if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out.max_output_tokens = Math.floor(params.maxOutputTokens);
+  return out;
 }
 
 // ---------------------------------------------------------------------------

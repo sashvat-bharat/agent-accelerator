@@ -1,5 +1,12 @@
 import { describe, it, expect } from "bun:test";
-import { resolveModel, getProvider, ModelProvider } from "../src/index.ts";
+import {
+  resolveModel,
+  getProvider,
+  ModelProvider,
+  getModelFromCatalog,
+  getModelThinkingInfo,
+  computeSessionTurnCost,
+} from "../src/index.ts";
 
 describe("Model Resolution & Providers", () => {
   it("should resolve Google AI Studio models", () => {
@@ -66,5 +73,35 @@ describe("Model Resolution & Providers", () => {
       expect(e.message).toContain("requires thinking and does not support disabling it");
       expect(e.message).toContain("How to fix:");
     }
+  });
+});
+
+describe("catalog lookups do not bleed across providers", () => {
+  it("a custom prefix never inherits another provider's entry that shares its id", () => {
+    // gpt-4o is a hosted OpenAI model; a self-hosted endpoint serving a model of
+    // the same name must not pick up its price, modalities or reasoning flags.
+    expect(getModelFromCatalog("openai", "gpt-4o")).toBeDefined();
+    expect(getModelFromCatalog("ollama", "gpt-4o")).toBeUndefined();
+    expect(getModelFromCatalog("my-private-endpoint", "gpt-4o")).toBeUndefined();
+  });
+
+  it("first-class providers and explicit bare-id lookups still resolve globally", () => {
+    expect(getModelFromCatalog("gpt-4o", "gpt-4o")).toBeDefined();
+    expect(getModelFromCatalog("OpenAI", "gpt-4o")).toBeDefined();
+    expect(getModelFromCatalog("google", "gemini-3.5-flash-lite")).toBeDefined();
+  });
+
+  it("custom-prefix cost stays unknown (0) while the hosted model is priced", () => {
+    const usage = { inputTokens: 1_000_000, outputTokens: 1_000_000, totalTokens: 2_000_000 };
+    expect(computeSessionTurnCost(usage, "openai/gpt-4o")).toBeGreaterThan(0);
+    expect(computeSessionTurnCost(usage, "ollama/gpt-4o")).toBe(0);
+  });
+
+  it("thinking validation for a custom prefix is permissive (no borrowed reasoning flags)", () => {
+    const info = getModelThinkingInfo("ollama", "gpt-4o");
+    expect(info.supportsThinking).toBe(true);
+    expect(info.allowedLevels).toContain("high");
+    // The hosted non-reasoning model keeps its strict answer.
+    expect(getModelThinkingInfo("openai", "gpt-4o").supportsThinking).toBe(false);
   });
 });

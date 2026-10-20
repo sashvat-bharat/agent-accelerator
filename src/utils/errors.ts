@@ -92,6 +92,11 @@ export function toConciseProviderError(error: unknown, providerId: string, model
     ...((typeof err?.code === "string" || typeof err?.code === "number") && err.code !== ""
       ? { code: { value: err.code, enumerable: false } }
       : {}),
+    // Server rate-limit hint in ms (from Retry-After); survives re-wraps so
+    // `withRetries` can honor it instead of hammering a 429.
+    ...(typeof err?.retryAfterMs === "number" && Number.isFinite(err.retryAfterMs)
+      ? { retryAfterMs: { value: err.retryAfterMs, enumerable: false } }
+      : {}),
     ...(typeof (err as { raw?: unknown })?.raw === "string"
       ? { raw: { value: (err as { raw: string }).raw.slice(0, 500), enumerable: false } }
       : {}),

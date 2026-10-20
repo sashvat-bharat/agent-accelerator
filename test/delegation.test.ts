@@ -298,6 +298,100 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     }
   });
 
+  it("should scope worker traces to the owning agent's sessions (no cross-tenant reads)", async () => {
+    const { executeToolCalls } = require("../src/index.ts");
+    const worker = new SubAgent({
+      name: "tenant_worker",
+      description: "Does work",
+      model: "google/gemini-3.5-flash-lite",
+      apiKey: "TEST_KEY",
+    });
+    const tenantA = new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "TEST_KEY", sessionId: "tenant-a" });
+    const tenantB = new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "TEST_KEY", sessionId: "tenant-b" });
+
+    const originalFetch = globalThis.fetch;
+    (globalThis as any).fetch = async () =>
+      new Response(
+        JSON.stringify({
+          id: "v1_scope",
+          object: "interaction",
+          status: "completed",
+          steps: [{ type: "model_output", content: [{ type: "text", text: "secret result" }] }],
+          usage: { total_tokens: 4, total_input_tokens: 2, total_output_tokens: 2 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    try {
+      const results = await executeToolCalls({
+        tools: buildAgentTools([worker]),
+        toolCalls: [{ id: "c1", name: "tenant_worker", arguments: { task: "private task" } }],
+        sessionId: tenantA.sessionId,
+      });
+      const displayId: string = (results[0]!.result as any)._subagentMetadata[0].trackingId;
+      const rawId = displayId.split("-").pop()!;
+
+      expect(tenantA.track(displayId)?.task).toBe("private task");
+      expect(tenantA.listTrackedSubAgents()).toContain(rawId);
+
+      expect(tenantB.track(displayId)).toBeUndefined();
+      expect(tenantB.track(rawId)).toBeUndefined();
+      expect(tenantB.listTrackedSubAgents()).not.toContain(rawId);
+      let leaked = false;
+      const off = tenantB.subscribeToSubAgent(rawId, () => {
+        leaked = true;
+      });
+      off();
+      expect(leaked).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("runs parallel calls to the same fixed worker concurrently, each with its own answer", async () => {
+    const { executeToolCalls } = require("../src/index.ts");
+    const sse = (task: string) =>
+      [
+        { event_type: "step.delta", index: 0, delta: { type: "text", text: `answer:${task}` } },
+        { event_type: "interaction.completed", interaction: { id: `v1_${task}`, status: "completed", usage: { total_tokens: 3, total_input_tokens: 1, total_output_tokens: 2 } } },
+      ]
+        .map((e) => `data: ${JSON.stringify(e)}\n\n`)
+        .join("");
+    const originalFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (_url: any, opts: any) => {
+      const body = JSON.parse(opts.body);
+      await new Promise((r) => setTimeout(r, 120)); // each model call takes 120ms
+      return new Response(sse(String(body.input)), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    };
+    try {
+      for (const midSession of [undefined, { mode: "steer" as const }]) {
+        const researcher = new SubAgent({
+          name: "researcher",
+          description: "Researches",
+          model: "google/gemini-3.5-flash-lite",
+          apiKey: "TEST_KEY",
+          ...(midSession ? { midSession } : {}),
+        });
+        const t0 = Date.now();
+        const results = await executeToolCalls({
+          tools: buildAgentTools([researcher]),
+          toolCalls: [
+            { id: "a", name: "researcher", arguments: { task: "topic-A" } },
+            { id: "b", name: "researcher", arguments: { task: "topic-B" } },
+            { id: "c", name: "researcher", arguments: { task: "topic-C" } },
+          ],
+          sessionId: "accel-parallel-parent",
+        });
+        const elapsed = Date.now() - t0;
+        expect(results.map((r: any) => String(r.result))).toEqual(["answer:topic-A", "answer:topic-B", "answer:topic-C"]);
+        expect(results.every((r: any) => r.isError === false)).toBe(true);
+        expect(elapsed).toBeLessThan(300); // serialized would be >= 360ms
+        expect(researcher.isBusy).toBe(false); // the shared instance was never occupied
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("should keep fixed sub-agent child sessions within OpenAI 64-char prompt_cache_key", async () => {
     // Regression: `parent-sub-adversarial_critic` (65 chars) 400d on OpenAI
     // (`Invalid 'prompt_cache_key': string too long`), yielding 0-tok

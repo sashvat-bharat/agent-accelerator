@@ -27,9 +27,10 @@ import type { Message, ContentPart } from "../types/message.ts";
 import type { TokenUsage, CacheConfig, ServiceTier } from "../types/core.ts";
 import type { ModelSpec } from "../types/model.ts";
 import type { AgentResponse } from "../types/response.ts";
-import { base64ToBytes } from "../utils/base64.ts";
+import { base64ToBytes, bytesToBase64 } from "../utils/base64.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
 import type { SubAgentStep } from "../types/response.ts";
+import { SessionLoadError } from "../types/errors.ts";
 
 /** Cumulative per-session token + cost totals (JSON-safe). */
 export interface SessionTotals {
@@ -97,11 +98,13 @@ function specFor(modelStr: string): ReturnType<typeof getModelFromCatalog> {
     if (raw.includes("/")) {
       const [prefix, ...rest] = raw.split("/");
       const id = rest.join("/");
-      return (
-        getModelFromCatalog(prefix!, id) ||
-        getModelFromCatalog(prefix!.toLowerCase(), id) ||
-        getModelFromCatalog(id, id)
-      );
+      const known = getModelFromCatalog(prefix!, id) || getModelFromCatalog(prefix!.toLowerCase(), id);
+      if (known) return known;
+      // A bare-id global search is only meaningful for first-class prefixes: a
+      // custom endpoint's model must not borrow an unrelated model's price.
+      return ["google", "gemini", "openai", "openrouter"].includes(prefix!.toLowerCase())
+        ? getModelFromCatalog(id, id)
+        : undefined;
     }
     return (
       getModelFromCatalog("google", raw) ||
@@ -374,6 +377,30 @@ function stripRedundantRawArguments(messages: Message[]): Message[] {
   });
 }
 
+/**
+ * Rewrites binary media (`Uint8Array` / `ArrayBuffer`) as `data:` URLs so the
+ * snapshot survives JSON (a raw `Uint8Array` would serialize as
+ * `{"0":137,"1":80,…}` and corrupt every later turn). Dir mode already moved
+ * bytes to `media/` files, so this is a no-op there.
+ */
+function inlineBinaryMedia(messages: Message[]): Message[] {
+  return messages.map((m) => {
+    if (!Array.isArray(m.content)) return m;
+    let changed = false;
+    const content = (m.content as ContentPart[]).map((part) => {
+      const p = part as unknown as Record<string, unknown>;
+      if (!p || typeof p.type !== "string" || !(MEDIA_PART_KEYS as readonly string[]).includes(p.type)) return part;
+      const value = p[p.type];
+      if (!(value instanceof Uint8Array) && !(value instanceof ArrayBuffer)) return part;
+      changed = true;
+      const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+      const mime = typeof p.mimeType === "string" && p.mimeType ? p.mimeType : "application/octet-stream";
+      return { ...p, [p.type]: `data:${mime};base64,${bytesToBase64(bytes)}` } as unknown as ContentPart;
+    });
+    return changed ? { ...m, content } : m;
+  });
+}
+
 /** Builds a storable snapshot from a live agent + optional telemetry. */
 export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTelemetry | SessionTotals | null): PersistedAgentSession {
   const rawModel = agent.modelStringOrSpec as any;
@@ -387,7 +414,7 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
   const parentSessionId =
     typeof (agent as any)?.parentSessionId === "string" ? (agent as any).parentSessionId as string : undefined;
   const subagents = snapshotSubagents((agent as any)?.subagentTraces as Record<string, PersistedSubAgentTrace> | undefined);
-  const messages = stripRedundantRawArguments(agent.context.messages);
+  const messages = inlineBinaryMedia(stripRedundantRawArguments(agent.context.messages));
   // `cache.sessionId` echoes the top-level `sessionId` (affinity alias): drop
   // it from the file when identical so it isn't stored twice. Readers still
   // accept legacy files carrying it (`importSession`, loop fallbacks).
@@ -452,12 +479,44 @@ export function serializeSession(data: PersistedAgentSession): string {
   return lines.join("\n");
 }
 
-/** Parses new pretty `.session.json` snapshots AND legacy `.session.jsonl` documents. */
-export function deserializeSession(raw: string): PersistedAgentSession | null {
+const MESSAGE_ROLES = new Set(["system", "user", "assistant", "tool"]);
+
+/**
+ * Index of the first structurally invalid message, or -1. A loaded snapshot
+ * is untrusted input: provider history builders assume `role` + `content`
+ * shapes, so a hand-edited or tampered file must fail at load, not as a
+ * TypeError deep inside a request.
+ */
+export function findInvalidMessage(messages: unknown): number {
+  if (!Array.isArray(messages)) return 0;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i] as { role?: unknown; content?: unknown } | null;
+    if (!m || typeof m !== "object" || typeof m.role !== "string" || !MESSAGE_ROLES.has(m.role)) return i;
+    if (typeof m.content === "string") continue;
+    if (!Array.isArray(m.content)) return i;
+    for (const part of m.content) {
+      if (!part || typeof part !== "object" || typeof (part as { type?: unknown }).type !== "string") return i;
+    }
+  }
+  return -1;
+}
+
+/** Load limits for session snapshots (see {@link MAX_SESSION_MESSAGES} / {@link MAX_SESSION_JSON_BYTES}). */
+export interface SessionLimits {
+  maxMessages?: number;
+  maxBytes?: number;
+}
+
+/** Marker for a structurally valid payload that exceeds the configured limits. */
+const OVER_LIMIT = Symbol("session-over-limit");
+
+function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSession | null | typeof OVER_LIMIT {
+  const maxMessages = limits?.maxMessages ?? MAX_SESSION_MESSAGES;
+  const maxBytes = limits?.maxBytes ?? MAX_SESSION_JSON_BYTES;
   const text = (raw ?? "").trim();
   if (!text) return null;
-  // Q-10: reject oversized payloads (>10MB JSON) — return null, no console.
-  if (text.length > MAX_SESSION_JSON_BYTES) return null;
+  // Q-10: oversized payloads are rejected, but flagged as over-limit (NOT corrupt).
+  if (text.length > maxBytes) return OVER_LIMIT;
   try {
     // Legacy JSONL: lines shaped {type: session|mainModel|subagentModel|metrics|message|...}
     if (text.startsWith('{"type"')) {
@@ -510,8 +569,8 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
         }
       }
       if (!sessionId && messages.length === 0) return null;
-      // Q-10: oversize guard — return null, no console.
-      if (messages.length > MAX_SESSION_MESSAGES) return null;
+      // Q-10: oversize guard — flagged as over-limit, not corrupt.
+      if (messages.length > maxMessages) return OVER_LIMIT;
       return {
         version: 1,
         sessionId: sessionId || `accel-${Date.now()}`,
@@ -535,7 +594,7 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
     if ("version" in obj && (obj as { version?: unknown }).version !== 1) return null;
     // Very old single-JSON shape without version: {sessionId, model, context:{messages}}
     if (obj.context && Array.isArray(obj.context.messages) && !Array.isArray(obj.messages)) {
-      if ((obj.context.messages as unknown[]).length > MAX_SESSION_MESSAGES) return null;
+      if ((obj.context.messages as unknown[]).length > maxMessages) return OVER_LIMIT;
       return {
         version: 1,
         sessionId: obj.sessionId ?? obj.id ?? `accel-${Date.now()}`,
@@ -553,7 +612,7 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
       };
     }
     if (!obj.sessionId && !Array.isArray(obj.messages)) return null;
-    if (Array.isArray(obj.messages) && (obj.messages as unknown[]).length > MAX_SESSION_MESSAGES) return null;
+    if (Array.isArray(obj.messages) && (obj.messages as unknown[]).length > maxMessages) return OVER_LIMIT;
     if ("sessionId" in obj && obj.sessionId !== undefined && typeof obj.sessionId !== "string") return null;
     if ("messages" in obj && obj.messages !== undefined && !Array.isArray(obj.messages)) return null;
     return {
@@ -576,15 +635,59 @@ export function deserializeSession(raw: string): PersistedAgentSession | null {
   }
 }
 
+/** Parses new pretty `.session.json` snapshots AND legacy `.session.jsonl` documents. Returns null for empty, corrupt or over-limit input. */
+export function deserializeSession(raw: string, limits?: SessionLimits): PersistedAgentSession | null {
+  const parsed = parseSession(raw, limits);
+  if (parsed === OVER_LIMIT || parsed === null) return null;
+  return findInvalidMessage(parsed.messages) === -1 ? parsed : null;
+}
+
+/** Outcome of {@link inspectSessionPayload}. */
+export type SessionPayloadStatus = "ok" | "empty" | "corrupt" | "over_limit";
+
+/**
+ * Like {@link deserializeSession} but says WHY a payload did not load. A
+ * valid snapshot that merely exceeds the load limits is `over_limit`, never
+ * `corrupt`, so persistence never quarantines (or loops on) healthy data.
+ */
+export function inspectSessionPayload(
+  raw: string,
+  limits?: SessionLimits
+): { status: SessionPayloadStatus; session?: PersistedAgentSession } {
+  if (!(raw ?? "").trim()) return { status: "empty" };
+  const parsed = parseSession(raw, limits);
+  if (parsed === OVER_LIMIT) return { status: "over_limit" };
+  if (parsed === null || findInvalidMessage(parsed.messages) !== -1) return { status: "corrupt" };
+  return { status: "ok", session: parsed };
+}
+
 /** Loads a session file (pretty `.json` or legacy `.jsonl`). Returns null when missing/corrupt. */
-export function loadSessionFile(filePath: string): PersistedAgentSession | null {
+export function loadSessionFile(filePath: string, limits?: SessionLimits): PersistedAgentSession | null {
+  const resolved = path.resolve(filePath);
+  let raw: string;
   try {
-    const resolved = path.resolve(filePath);
     if (!fs.existsSync(resolved)) return null;
-    return deserializeSession(fs.readFileSync(resolved, "utf8"));
+    raw = fs.readFileSync(resolved, "utf8");
   } catch {
     return null;
   }
+  return sessionFromPayload(raw, resolved, limits);
+}
+
+/**
+ * Shared load tail: corrupt/empty -> null (callers start fresh), but a valid
+ * over-limit snapshot throws so the app cannot silently start blank and then
+ * overwrite a healthy long-running session.
+ */
+function sessionFromPayload(raw: string, file: string, limits?: SessionLimits): PersistedAgentSession | null {
+  const res = inspectSessionPayload(raw, limits);
+  if (res.status === "over_limit") {
+    throw new SessionLoadError(
+      `[Agent Accelerator] Session "${file}" exceeds the load limits (maxMessages ${limits?.maxMessages ?? MAX_SESSION_MESSAGES}, maxBytes ${limits?.maxBytes ?? MAX_SESSION_JSON_BYTES}). Raise them via the limits argument or archive the file; it was NOT modified.`,
+      { file }
+    );
+  }
+  return res.session ?? null;
 }
 
 /** Atomic file write (temp + rename) so a crash never leaves half-written JSON. */
@@ -627,7 +730,9 @@ export function saveSessionFile(
     if (fs.existsSync(resolved)) {
       try {
         const raw = fs.readFileSync(resolved, "utf8");
-        if (raw.trim().length > 0 && deserializeSession(raw) === null) {
+        // Only genuinely corrupt payloads are quarantined; a healthy snapshot
+        // over the load limits is simply rewritten (it is our own prior save).
+        if (inspectSessionPayload(raw).status === "corrupt") {
           try { fs.renameSync(resolved, `${resolved}.corrupt-${Date.now()}`); } catch {}
         }
       } catch {}
@@ -847,7 +952,7 @@ export function saveSessionDir(
       if (fs.existsSync(target)) {
         try {
           const raw = fs.readFileSync(target, "utf8");
-          if (raw.trim().length > 0 && deserializeSession(raw) === null) {
+          if (inspectSessionPayload(raw).status === "corrupt") {
             try { fs.renameSync(target, `${target}.corrupt-${Date.now()}`); } catch {}
           }
         } catch {}
@@ -871,14 +976,14 @@ export interface LoadedSessionDir {
  * single files). Relative `media/…` refs resolve against the folder.
  * Returns null when nothing loadable exists.
  */
-export function loadSessionDir(sessionPath: string): LoadedSessionDir | null {
+export function loadSessionDir(sessionPath: string, limits?: SessionLimits): LoadedSessionDir | null {
   try {
     const resolved = path.resolve(sessionPath);
     let dir = resolved;
     try {
       const st = fs.statSync(resolved);
       if (st.isFile()) {
-        const single = loadSessionFile(resolved);
+        const single = loadSessionFile(resolved, limits);
         if (!single) return null;
         dir = path.dirname(resolved);
         if (single.messages) {
@@ -891,11 +996,12 @@ export function loadSessionDir(sessionPath: string): LoadedSessionDir | null {
     }
     const file = path.join(dir, "session.json");
     if (!fs.existsSync(file)) return null;
-    const data = deserializeSession(fs.readFileSync(file, "utf8"));
+    const data = sessionFromPayload(fs.readFileSync(file, "utf8"), file, limits);
     if (!data) return null;
     data.messages = resolveMediaPaths(data.messages, dir);
     return { session: data, dir };
-  } catch {
+  } catch (err) {
+    if (err instanceof SessionLoadError) throw err;
     return null;
   }
 }
@@ -927,10 +1033,10 @@ export function findLatestSessionDir(rootDir: string): string | null {
 // size/version guards, no behavior change otherwise).
 // ---------------------------------------------------------------------------
 
-/** Max messages accepted in a session snapshot (Q-10). */
-export const MAX_SESSION_MESSAGES = 5000;
-/** Max raw JSON bytes accepted in deserializeSession (Q-10). */
-export const MAX_SESSION_JSON_BYTES = 10 * 1024 * 1024;
+/** Default max messages accepted when loading a session snapshot (override via `SessionLimits`). */
+export const MAX_SESSION_MESSAGES = 50_000;
+/** Default max raw JSON size accepted when loading a session snapshot (override via `SessionLimits`). */
+export const MAX_SESSION_JSON_BYTES = 100 * 1024 * 1024;
 
 function sessionLoadError(message: string): Error {
   const e = new Error(`[Agent Accelerator] Invalid session: ${message}`);
@@ -993,70 +1099,13 @@ export function getSessionContextWindowOrUndefined(modelStr: string): number | u
 }
 
 // ---------------------------------------------------------------------------
-// Q-41: telemetry bus (no console.* in library code).
+// Q-41: telemetry bus lives in `../telemetry.ts` (dependency-free, so low-level
+// modules such as the catalog cache and event stream can emit without import
+// cycles). Re-exported here for backward compatibility.
 // ---------------------------------------------------------------------------
-
-/** Telemetry event emitted via the in-process bus (Q-41). */
-export interface TelemetryEvent {
-  code: string;
-  message: string;
-  level?: "info" | "warn" | "error";
-  data?: unknown;
-  timestamp: number;
-}
-
-/** Listener subscribed via `telemetryBus.onEvent`. */
-export type TelemetryListener = (event: TelemetryEvent) => void;
-
-interface TelemetryBus {
-  /** Subscribes to telemetry events. Returns an unsubscribe function. Default: no-op delivery (no listeners, no console). */
-  onEvent(listener: TelemetryListener): () => void;
-  /** Emits a warning (level `warn`). Never throws, never logs to console. */
-  emitWarning(code: string, message: string, data?: unknown): void;
-  /** Emits a generic event. Never throws, never logs to console. */
-  emit(event: Omit<TelemetryEvent, "timestamp"> & { timestamp?: number }): void;
-  /** Removes all listeners (useful in tests). */
-  clear(): void;
-}
-
-/**
- * In-process telemetry bus (Q-41). Library code routes warnings/anomalies
- * here instead of `console.*`. Default has zero listeners so emission is a
- * no-op; CLIs/tests attach a pretty logger via `onEvent`.
- */
-export const telemetryBus: TelemetryBus = (() => {
-  const listeners = new Set<TelemetryListener>();
-  const deliver = (event: TelemetryEvent): void => {
-    for (const l of [...listeners]) {
-      try { l(event); } catch {
-        // why: a faulty telemetry listener must not break the emitting run.
-      }
-    }
-  };
-  return {
-    onEvent(listener: TelemetryListener): () => void {
-      listeners.add(listener);
-      return () => { listeners.delete(listener); };
-    },
-    emitWarning(code: string, message: string, data?: unknown): void {
-      try {
-        deliver({ code, message, level: "warn", data, timestamp: Date.now() });
-      } catch {
-        // why: telemetry emission is observability-only.
-      }
-    },
-    emit(event: Omit<TelemetryEvent, "timestamp"> & { timestamp?: number }): void {
-      try {
-        deliver({ level: "info", ...event, timestamp: event.timestamp ?? Date.now() });
-      } catch {
-        // why: telemetry emission is observability-only.
-      }
-    },
-    clear(): void {
-      listeners.clear();
-    },
-  };
-})();
+import { telemetryBus } from "../telemetry.ts";
+export { telemetryBus };
+export type { TelemetryEvent, TelemetryListener } from "../telemetry.ts";
 
 /** Reports a usage/cost anomaly via the global hook + telemetry bus (Q-35). Never logs. */
 export function reportUsageAnomaly(detail: { type: string; [k: string]: unknown }): void {

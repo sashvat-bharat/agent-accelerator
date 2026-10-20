@@ -143,8 +143,15 @@ export interface AgentConfig {
    */
   persist?: { dir?: string; file?: string };
   // Q-54 missing knobs (all optional, additive; loop reads via `(config as any).*`).
-  /** Canonical tool-selection control (`"auto"` default). */
+  /**
+   * Canonical tool-selection control (`"auto"` default). `"none"` applies to
+   * every turn of a run; `"required"` and a pinned tool (`{ tool: "name" }`)
+   * apply to the FIRST model turn only, since forcing a tool call on every
+   * turn would make a run unable to finish.
+   */
   toolChoice?: ToolChoiceOption;
+  /** Google Interactions storage tier for the chain-TTL gate: `"free"` (23h, default) or `"paid"` (54d). */
+  googleTier?: "free" | "paid";
   /** Maximum output tokens for one model call. */
   maxOutputTokens?: number;
   /** Sampling knobs. */
@@ -168,19 +175,43 @@ export interface AgentConfig {
   fetch?: typeof fetch;
   /** Provider/env overrides forwarded to key resolution. */
   env?: Record<string, string>;
-  /** Structured logger for loop telemetry (defaults to no-op). */
+  /** @deprecated Not implemented yet; subscribe with `telemetryBus.onEvent` instead. Passing it emits a `config.unsupported_option` warning. */
   logger?: AgentLogger;
-  /** Control hooks (Q-59). All optional, fail-open by default. */
+  /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   hooks?: unknown;
-  /** Threshold compaction policy (Q-60a). Fully configurable/replaceable. */
+  /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   contextManagement?: unknown;
-  /** Telemetry bus (Q-41). Default no-op; pretty logger lives in /cli. */
+  /** @deprecated Not implemented yet; subscribe with `telemetryBus.onEvent` instead. Passing it emits a `config.unsupported_option` warning. */
   telemetry?: { onEvent?: (e: any) => void } | unknown;
-  /** Local file access roots (Q-08). Default deny; `path` sources must resolve inside roots. */
+  /**
+   * Local file policy. With `roots` set, every local-path media part and the
+   * built-in `convert_document_to_markdown` tool must resolve inside them
+   * (`[]` denies all local paths). Without it, developer-supplied parts are
+   * unrestricted and the model-callable tool is limited to `process.cwd()`.
+   */
   fileAccess?: { roots?: string[] };
-  /** Raw capture policy (Q-11). Default "redacted": no bodies. */
+  /**
+   * Conversation handling when a run FAILS (aborts always keep partial
+   * history). `"auto"` (default) restores the pre-run state unless a tool
+   * already ran, since rolling back would erase the record of real side
+   * effects and a retry would repeat them. `"rollback"` always restores;
+   * `"keep"` never does.
+   */
+  onFailure?: "auto" | "rollback" | "keep";
+  /**
+   * What `AgentResponse.raw` keeps of the wire exchange. `"redacted"` (default):
+   * URL, method, redacted headers and HTTP status, with request/response BODIES
+   * replaced by a content-free summary so prompts, files and model output never
+   * leak into logs via `toJSON()`. `true`: full bodies (debugging). `false`:
+   * URL, method and status only.
+   */
   captureRaw?: false | "redacted" | true;
-  /** Opt-in run budgets (Q-39). All fields default unlimited. */
+  /**
+   * Opt-in budgets, enforced PER RUN (counters restart with every `run`/`stream`)
+   * and including sub-agent usage. Exceeding a cap throws `BudgetExceededError`
+   * with the partial usage attached. `maxCostUsd` counts only priced usage:
+   * models with unknown pricing contribute $0, never a guess.
+   */
   budget?: Budget;
   /** Run + network limits (Q-22). Turn/budget caps unlimited by default; network timeouts finite. */
   limits?: AgentRunLimits;

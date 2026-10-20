@@ -558,6 +558,13 @@ It also:
 
 `serviceTier` values other than `flex` / `priority` are omitted (standard routing).
 
+OpenRouter app attribution (`HTTP-Referer` / `X-Title`) is **opt-in**; nothing is sent by default:
+
+```ts
+import { setAttribution } from "agent-accelerator";
+setAttribution({ referer: "https://my.app", title: "My App" });
+```
+
 ### Custom
 
 `OpenAICompatibleProvider` is also exposed through the `CustomProvider`, `createCustomProvider`, and `createOpenAICompatibleProvider(prefix, opts?)` aliases.
@@ -578,7 +585,7 @@ It also:
 Provider wire types are exported for inspecting raw requests and responses through:
 
 ```ts
-res.raw.request.body
+res.raw.request.body   // full body only with `captureRaw: true`
 res.raw.response.body
 ```
 
@@ -920,7 +927,15 @@ ProviderRawData {
 }
 ```
 
-Sensitive keys are redacted.
+Credential headers are always redacted (`Authorization`, `x-goog-api-key`, anything named `*key*` / `*token*` / `*secret*` / `cookie`, and credential-looking values).
+
+**`captureRaw`** controls how much of the wire exchange `res.raw` keeps:
+
+| Value | `request.body` / `response.body` |
+| :-- | :-- |
+| `"redacted"` (default) | content-free summary (`{ redacted: true, bytes, model, items, tools }`): prompts, files and model output never reach your logs via `toJSON()` |
+| `true` | full bodies (for debugging; handle with care) |
+| `false` | `null`; only URL, method and HTTP status are kept |
 
 ---
 ## Errors

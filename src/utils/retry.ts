@@ -31,8 +31,10 @@ export function isTransientError(error: unknown): boolean {
 
 function readRetryAfterMs(error: unknown): number | undefined {
   const err = error as Record<string, unknown>;
+  // Preferred: milliseconds attached by the adapter from the Retry-After header.
+  const direct = err["retryAfterMs"];
+  if (typeof direct === "number" && Number.isFinite(direct) && direct >= 0) return Math.min(60_000, direct);
   const raw =
-    (err["retryAfterMs"] as unknown) ??
     ((err["response"] as Record<string, unknown> | undefined)?.["headers"] as Record<string, unknown> | undefined)?.["retry-after"] ??
     ((err["headers"] as Record<string, unknown> | undefined)?.["retry-after"]);
   if (raw === undefined) return undefined;
@@ -73,11 +75,13 @@ export async function withRetries<T>(
     signal?: AbortSignal;
     label?: { providerId?: string; modelId?: string };
     retryBudgetMs?: number;
+    baseDelayMs?: number;
   }
 ): Promise<T> {
   const maxRetries = options?.maxRetries ?? 2;
   const maxDelay = options?.maxRetryDelayMs ?? 5000;
   const budgetMs = options?.retryBudgetMs ?? 30_000;
+  const baseDelay = options?.baseDelayMs ?? 250;
   const started = Date.now();
   const fail = (error: unknown): never => {
     if (options?.label?.providerId && options?.label?.modelId) {
@@ -94,8 +98,12 @@ export async function withRetries<T>(
       if (attempt >= maxRetries || !isTransientError(error)) fail(error);
       if (Date.now() - started >= budgetMs) fail(error);
       const retryAfter = readRetryAfterMs(error);
-      const backoff = Math.min(maxDelay, 250 * 2 ** attempt + Math.random() * 100);
-      const delay = retryAfter !== undefined ? Math.min(maxDelay, Math.max(backoff, retryAfter)) : backoff;
+      const backoff = Math.min(maxDelay, baseDelay * 2 ** attempt + Math.random() * 100);
+      // A server-provided Retry-After is honored in full (it is the provider's
+      // own instruction), but never past the retry budget: waiting that long is
+      // pointless, so surface the 429 now instead of sleeping and failing anyway.
+      const delay = retryAfter !== undefined ? Math.max(backoff, retryAfter) : backoff;
+      if (retryAfter !== undefined && Date.now() - started + delay > budgetMs) fail(error);
       attempt += 1;
       await sleep(delay, options?.signal);
     }

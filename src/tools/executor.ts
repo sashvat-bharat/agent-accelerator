@@ -6,6 +6,8 @@ import type {
 } from "../types/tool.ts";
 import { toJsonSafe } from "../utils/serialization.ts";
 import { ConfigError } from "../types/errors.ts";
+import { isSubagentResult } from "./subagent-result.ts";
+import { isTruncatedArguments } from "../types/tool.ts";
 
 export interface ExecuteToolsOptions {
   tools: Record<string, ToolDefinition>;
@@ -56,22 +58,16 @@ export const DEFAULT_MAX_RESULT_CHARS = 20000;
 export const REPEAT_BLOCK_THRESHOLD = 3;
 
 /**
- * True when a tool call carries only `{ raw: string }` arguments — the marker
- * shape produced by `parseStreamedToolArguments` when streamed JSON chunks
- * never parsed to an object (truncated/incomplete arguments). Such calls must
- * NOT execute: the model must retry with complete JSON.
+ * True when a tool call carries only the `{ __truncated_raw: string }` marker
+ * produced by `parseStreamedToolArguments` when streamed JSON chunks never
+ * parsed to an object (truncated/incomplete arguments). Such calls must NOT
+ * execute: the model must retry with complete JSON. The marker key is not a
+ * plausible parameter name, so tools with a real `raw` parameter are unaffected.
  *
  * @example `if (isTruncatedToolCall(call)) return truncatedError(call);`
  */
 export function isTruncatedToolCall(call: ToolCallRecord): boolean {
-  const args = call?.arguments;
-  if (!args || typeof args !== "object" || Array.isArray(args)) return false;
-  const keys = Object.keys(args);
-  return (
-    keys.length === 1 &&
-    keys[0] === "raw" &&
-    typeof (args as Record<string, unknown>).raw === "string"
-  );
+  return isTruncatedArguments(call?.arguments);
 }
 
 /**
@@ -128,21 +124,26 @@ function truncateResultString(value: string, limit: number): string {
 }
 
 /**
- * Drops `stack` from an Error-shaped sanitized result for model context.
- * Keeps `{ name, message }` plus any custom keys; nested values untouched.
+ * Scrubs Error-shaped values ANYWHERE in a JSON-safe tool result before it
+ * reaches model context: `stack` is dropped (stack frames carry absolute
+ * server paths) and `message` is passed through {@link sanitizeErrorMessage}
+ * (credentials in URLs, absolute paths). Non-error data is untouched.
  */
-function stripTopLevelErrorStack(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+function scrubErrors(value: unknown, depth = 0): unknown {
+  if (!value || typeof value !== "object" || depth > 32) return value;
+  if (Array.isArray(value)) return value.map((v) => scrubErrors(v, depth + 1));
   const record = value as Record<string, unknown>;
-  if (
-    typeof record.name === "string" &&
-    typeof record.message === "string" &&
-    "stack" in record
-  ) {
-    const { stack: _dropped, ...rest } = record;
-    return rest;
+  const errorShaped = typeof record.name === "string" && typeof record.message === "string" && "stack" in record;
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(record)) {
+    if (errorShaped && key === "stack") continue;
+    if (errorShaped && key === "message" && typeof v === "string") {
+      out[key] = sanitizeErrorMessage(v);
+      continue;
+    }
+    out[key] = scrubErrors(v, depth + 1);
   }
-  return value;
+  return out;
 }
 
 /** Stable serialization for repeat-guard fingerprints (key order independent). */
@@ -269,6 +270,14 @@ function resolveTool(tools: Record<string, ToolDefinition>, requestedName: strin
     name: requestedName,
     suggestion: best && best.distance <= threshold ? best.name : undefined,
   };
+}
+
+/** Finds a tool definition by exact or case/format-insensitive name (no suggestion logic). */
+export function findToolDefinition(
+  tools: Record<string, ToolDefinition>,
+  name: string
+): ToolDefinition | undefined {
+  return resolveTool(tools, name).definition;
 }
 
 class Semaphore {
@@ -433,7 +442,7 @@ export async function executeToolCalls(
   const runSingle = async (call: ToolCallRecord): Promise<ToolResultRecord> => {
     const startTime = nowMs();
 
-    // Truncated streamed arguments (Q-12): the `{ raw }` marker means the
+    // Truncated streamed arguments (Q-12): the `__truncated_raw` marker means the
     // provider's partial JSON never parsed. Never execute or overwrite wire
     // finishReason here — return a synthetic error so the model retries with
     // complete JSON.
@@ -561,11 +570,28 @@ export async function executeToolCalls(
           durationMs: elapsedMs(executionStartTime),
         };
       }
-      // Stack traces stay in server logs, not model context: keep
-      // { name, message } plus custom keys, drop stack.
-      let safeResult = stripTopLevelErrorStack(toJsonSafe(rawResult));
+      // Branded delegation envelopes pass through untouched: JSON-safing would
+      // strip the (symbol) brand the loop needs to trust their metadata.
+      if (isSubagentResult(rawResult)) {
+        return {
+          id: call.id,
+          name: resolved.name,
+          result: rawResult,
+          isError: false,
+          durationMs: elapsedMs(executionStartTime),
+        };
+      }
+      // Nested error stacks / absolute paths never reach model context.
+      let safeResult = scrubErrors(toJsonSafe(rawResult));
+      const charLimit = resultCharLimit(toolDef);
       if (typeof safeResult === "string") {
-        safeResult = truncateResultString(safeResult, resultCharLimit(toolDef));
+        safeResult = truncateResultString(safeResult, charLimit);
+      } else {
+        // Structured results are capped by their serialized size too: a tool
+        // returning 50k rows must not blow the context window (or the bill).
+        // Oversized ones become a truncated JSON string with the usual marker.
+        const json = JSON.stringify(safeResult);
+        if (typeof json === "string" && json.length > charLimit) safeResult = truncateResultString(json, charLimit);
       }
       return {
         id: call.id,

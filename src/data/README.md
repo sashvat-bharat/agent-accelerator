@@ -19,6 +19,10 @@ To keep the repository and published npm/Bun package lightweight and blazing fas
    * **Cache Hit (< 12h)**: Instant memory/disk load with zero network overhead.
    * **Cache Miss / Expired (≥ 12h)**: Automatically downloads the latest catalog directly from `https://models.dev/api.json`, caches it to `src/data/models.dev.json`, and loads the catalog into memory.
    * **Resilience**: If an existing cache exists on disk, temporary upstream network issues will safely continue using the local cached copy.
+   * **Never blocks a run once a catalog is loaded**: an expired catalog is served immediately and refreshed in the background (8s timeout). Only a cold start (nothing loaded yet) waits for the download.
+   * **Failure backoff**: after a failed refresh, automatic refreshes pause for 10 minutes (offline laptops and firewalled hosts are not retried on every prompt).
+   * **Location**: the cache lives in this package's own `src/data/` (resolved from the module, not from the working directory). Set `AGENT_CACHE_DIR` for read-only or serverless filesystems.
+   * **Air-gapped / hermetic runs**: set `AGENT_CATALOG_REFRESH=off` to disable automatic refreshes entirely. `bun run update-models` and `refreshModelCatalog()` still work. The repo's tests set this via `test/setup.ts`.
 
 ---
 

@@ -223,3 +223,80 @@ describe("Tools & Parallel Execution", () => {
     expect(result.bytes.type).toBe("Uint8Array");
   });
 });
+
+describe("truncated-argument marker vs. a real `raw` parameter", () => {
+  it("executes a tool whose only parameter is named `raw`, and still refuses truncated streams", async () => {
+    const { executeToolCalls, tool, z, parseStreamedToolArguments } = await import("../src/index.ts");
+    const { isTruncatedToolCall } = await import("../src/tools/executor.ts");
+    let ran: unknown;
+    const run_shell = tool({
+      description: "Runs a command",
+      input: z.object({ raw: z.string() }),
+      execute: async ({ raw }) => {
+        ran = raw;
+        return "done";
+      },
+    });
+    const ok = await executeToolCalls({
+      tools: { run_shell },
+      toolCalls: [{ id: "c1", name: "run_shell", arguments: { raw: "ls -la" } }],
+    });
+    expect(ok[0]!.isError).toBe(false);
+    expect(ran).toBe("ls -la");
+
+    const truncatedArgs = parseStreamedToolArguments('{"raw": "ls -', "");
+    expect(isTruncatedToolCall({ id: "c2", name: "run_shell", arguments: truncatedArgs })).toBe(true);
+    const bad = await executeToolCalls({
+      tools: { run_shell },
+      toolCalls: [{ id: "c2", name: "run_shell", arguments: truncatedArgs }],
+    });
+    expect(bad[0]!.isError).toBe(true);
+    expect(String(bad[0]!.result)).toContain("truncated");
+    expect(ran).toBe("ls -la"); // not executed again
+  });
+});
+
+describe("tool result hygiene", () => {
+  const run = async (execute: () => unknown, extra: object = {}) => {
+    const t = tool({ description: "t", input: z.object({}), execute: execute as any, ...extra });
+    const [r] = await executeToolCalls({ tools: { t }, toolCalls: [{ id: "c", name: "t", arguments: {} }] });
+    return r!;
+  };
+
+  it("caps oversized STRUCTURED results (not just strings) with the usual marker", async () => {
+    const rows = Array.from({ length: 5000 }, (_, i) => ({ id: i, name: `row-${i}` }));
+    const r = await run(() => rows);
+    expect(r.isError).toBe(false);
+    expect(typeof r.result).toBe("string");
+    expect((r.result as string).length).toBeLessThan(20_100);
+    expect(r.result as string).toContain("[Truncated: showing 20000 of");
+  });
+
+  it("honors a per-tool maxResultChars for structured results, and leaves small objects as objects", async () => {
+    const small = await run(() => ({ ok: true, items: [1, 2, 3] }));
+    expect(small.result).toEqual({ ok: true, items: [1, 2, 3] });
+    const capped = await run(() => ({ blob: "x".repeat(500) }), { maxResultChars: 100 });
+    expect(typeof capped.result).toBe("string");
+    expect(capped.result as string).toContain("[Truncated: showing 100 of");
+  });
+
+  it("strips stacks and absolute paths from errors nested anywhere in a result", async () => {
+    const boom = new Error("failed reading /home/deploy/app/secrets.env");
+    const r = await run(() => ({ status: "partial", errors: [{ source: "db", error: boom }] }));
+    const text = JSON.stringify(r.result);
+    expect(text).not.toContain("/home/deploy");
+    expect(text).not.toContain("secrets.env");
+    expect(text).not.toContain('"stack"');
+    expect(text).toContain("[redacted-path]");
+    expect((r.result as any).errors[0].error.name).toBe("Error");
+  });
+});
+
+describe("tool-name collisions fail at construction", () => {
+  it("throws ConfigError from `new Agent` instead of failing mid-run", async () => {
+    const { Agent, ConfigError } = await import("../src/index.ts");
+    const mk = () => tool({ description: "d", input: z.object({}), execute: async () => "x" });
+    expect(() => new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", tools: { getUser: mk(), get_user: mk() } })).toThrow(ConfigError);
+    expect(() => new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", tools: { getUser: mk(), other: mk() } })).not.toThrow();
+  });
+});

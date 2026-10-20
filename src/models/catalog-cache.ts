@@ -1,7 +1,9 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { getEnv } from "../utils/env.ts";
+import { telemetryBus } from "../telemetry.ts";
 
 /** Default TTL: 12 Hours (in milliseconds). */
 export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
@@ -75,14 +77,16 @@ function notifyUpdateListeners(): void {
 }
 
 /**
- * Catalog cache directory. Defaults to `src/data` (repo convention); override
- * with `AGENT_CACHE_DIR` when embedding as a package or running on a
- * read-only filesystem (serverless/containers).
+ * Catalog cache directory. Defaults to the package's own `src/data` (resolved
+ * from this module, NOT the process working directory, so running a script
+ * from another folder never creates stray `src/data` dirs or trusts a
+ * look-alike file there). Override with `AGENT_CACHE_DIR` when embedding as a
+ * package or running on a read-only filesystem (serverless/containers).
  */
 export function getCacheDir(): string {
   const override = getEnv("AGENT_CACHE_DIR");
   if (override && override.trim()) return path.resolve(override.trim());
-  return path.resolve(process.cwd(), "src/data");
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../data");
 }
 
 /** Cache file path: `<cacheDir>/models.dev.json`, honoring AGENT_CACHE_DIR (Q-16a/Q-34). */
@@ -120,6 +124,15 @@ export function verifyCatalogSha256(text: string): boolean {
   const hex = createHash("sha256").update(text, "utf8").digest("hex").toLowerCase();
   return hex === pin;
 }
+
+/** Wall-clock of the last failed network refresh (0 = none); drives the retry backoff. */
+let lastRefreshFailureAt = 0;
+/** After a failed refresh, `ensureModelCatalogFresh` stays quiet this long (10 min). */
+export const REFRESH_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
+/** Network timeout for a background refresh when a usable catalog is already loaded. */
+const BACKGROUND_REFRESH_TIMEOUT_MS = 8_000;
+
+let inFlightRefresh: Promise<CatalogStatus> | null = null;
 
 // In-memory catalog state
 let activeCatalog: Record<string, any> = {};
@@ -247,6 +260,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
   let freshData: Record<string, any>;
 
   const fallbackToDiskCache = (): void => {
+    lastRefreshFailureAt = Date.now();
     const existing = readJsonFileSync(cachePath);
     if (existing && existing.data) {
       activeCatalog = existing.data;
@@ -309,6 +323,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
     clearTimeout(timer);
   }
 
+  lastRefreshFailureAt = 0;
   const fetchedAt = Date.now();
   const cachePayload: CatalogCacheFile = {
     fetchedAt,
@@ -331,37 +346,59 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
     writeJsonFileSync(cachePath, cachePayload);
   } catch (err) {
     activeFromCache = false;
-    try {
-      (globalThis as any).__agentAccelTelemetry?.emitWarning?.({
-        code: "catalog_cache_write_failed",
-        message: `[Agent Accelerator] Could not write model catalog cache (${err instanceof Error ? err.message : String(err)}). Continuing with the in-memory catalog.`,
-      });
-    } catch {}
+    telemetryBus.emitWarning(
+      "catalog_cache_write_failed",
+      `[Agent Accelerator] Could not write model catalog cache (${err instanceof Error ? err.message : String(err)}). Continuing with the in-memory catalog.`,
+      { path: cachePath }
+    );
   }
 
   notifyUpdateListeners();
   return getCatalogStatus();
 }
 
-let inFlightRefresh: Promise<CatalogStatus> | null = null;
+
+/** True when `AGENT_CATALOG_REFRESH` is `off`/`0`/`false`: never touch the network automatically. */
+function automaticRefreshDisabled(): boolean {
+  const v = getEnv("AGENT_CATALOG_REFRESH")?.trim().toLowerCase();
+  return v === "off" || v === "0" || v === "false";
+}
 
 /**
- * Ensures that the model catalog is loaded and fresh.
- * Called automatically before Agent runs. If the cache is expired, triggers a refresh.
+ * Ensures that the model catalog is loaded and fresh. Called automatically
+ * before Agent runs.
+ *
+ * - Fresh and loaded: returns immediately.
+ * - Expired but loaded (stale-while-revalidate): returns the stale catalog at
+ *   once and refreshes in the background with a short timeout, so a run is
+ *   never delayed by models.dev being slow or unreachable.
+ * - Nothing loaded yet (cold start): waits for the download.
+ * - A failed refresh is not retried automatically for 10 minutes.
+ * - `AGENT_CATALOG_REFRESH=off` disables automatic refreshes entirely
+ *   (air-gapped hosts, hermetic tests); `force` and `refreshModelCatalog`
+ *   still work.
  */
 export async function ensureModelCatalogFresh(options: RefreshCatalogOptions = {}): Promise<CatalogStatus> {
   const current = getCatalogStatus();
-  if (!current.isExpired && current.loaded && !options.force) {
+  if (!options.force) {
+    if (!current.isExpired && current.loaded) return current;
+    if (automaticRefreshDisabled()) return current;
+    if (Date.now() - lastRefreshFailureAt < REFRESH_FAILURE_BACKOFF_MS) return current;
+  }
+
+  const start = (): Promise<CatalogStatus> => {
+    if (!inFlightRefresh) {
+      const timeoutMs = options.timeoutMs ?? (current.loaded ? BACKGROUND_REFRESH_TIMEOUT_MS : undefined);
+      inFlightRefresh = refreshModelCatalog({ ...options, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }).finally(() => {
+        inFlightRefresh = null;
+      });
+    }
+    return inFlightRefresh;
+  };
+
+  if (current.loaded && !options.force) {
+    start().catch(() => {}); // background revalidation; failures are non-fatal
     return current;
   }
-
-  if (inFlightRefresh) {
-    return inFlightRefresh;
-  }
-
-  inFlightRefresh = refreshModelCatalog(options).finally(() => {
-    inFlightRefresh = null;
-  });
-
-  return inFlightRefresh;
+  return start();
 }

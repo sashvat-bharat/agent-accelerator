@@ -6,6 +6,7 @@ import type { SubAgentExecutionMetadata, SubAgentStep } from "../types/response.
 import type { Agent } from "./agent.ts";
 import type { Budget, BudgetState } from "../types/agent.ts";
 import { BudgetExceededError } from "../types/errors.ts";
+import { makeSubagentResult } from "../tools/subagent-result.ts";
 import { hashSessionPart } from "../utils/session.ts";
 import { createTrackingId } from "../utils/session.ts";
 import { nowMs } from "../utils/session.ts";
@@ -280,10 +281,52 @@ export function getSubAgentTraceScoped(id: string, parentSessionId: string): Sub
   return snapshotTrace(t);
 }
 
-/** Lists tracking ids of known worker traces (mainly for `track` misses). */
+/**
+ * Lists tracking ids of EVERY worker trace in the process (all agents, all
+ * sessions). Diagnostics only: `Agent` never uses it, because in a
+ * multi-tenant host it would expose other tenants' workers. Use
+ * {@link listSubAgentTraceIdsForSessions} for agent-bound callers.
+ */
 export function listSubAgentTraceIds(): string[] {
   pruneTraces();
   return [...subagentTraces.keys()];
+}
+
+/** Scoped lookup across a set of parent session ids (an agent's default + named sessions). */
+export function getSubAgentTraceForSessions(
+  id: string,
+  parentSessionIds: ReadonlySet<string>
+): SubAgentTrace | undefined {
+  if (!id || parentSessionIds.size === 0) return undefined;
+  const t = lookupTrace(id);
+  if (!t || !parentSessionIds.has(t.parentSessionId)) return undefined;
+  return snapshotTrace(t);
+}
+
+/** Raw tracking ids of traces spawned from any of `parentSessionIds` (deduped). */
+export function listSubAgentTraceIdsForSessions(parentSessionIds: ReadonlySet<string>): string[] {
+  pruneTraces();
+  const out = new Set<string>();
+  for (const t of subagentTraces.values()) {
+    if (parentSessionIds.has(t.parentSessionId)) out.add(t.trackingId);
+  }
+  return [...out];
+}
+
+/**
+ * Like {@link subscribeToSubAgent} but refuses (returns a no-op unsubscribe)
+ * when the trace exists and belongs to a different parent session. An id that
+ * does not exist yet is accepted: ids are 128-bit random, so subscribing early
+ * cannot reach another tenant's trace.
+ */
+export function subscribeToSubAgentForSessions(
+  id: string,
+  parentSessionIds: ReadonlySet<string>,
+  fn: (trace: SubAgentTrace) => void
+): () => void {
+  const t = lookupTrace(id);
+  if (t && !parentSessionIds.has(t.parentSessionId)) return () => {};
+  return subscribeToSubAgent(id, fn);
 }
 
 /**
@@ -701,6 +744,10 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               serviceTier: parentAgent.serviceTier,
               headers: parentAgent.customHeaders,
               maxTurns: parentAgent.maxTurns,
+              // Run limits, retry policy, credentials/env, fetch, Google tier and the
+              // file-access policy all carry over: a worker must never be less
+              // constrained than the agent that spawned it.
+              ...parentAgent.inheritableConfig(),
             });
             // Lineage binding: child records its parent session so persisted
             // snapshots and routing can tell siblings apart even when ids
@@ -756,6 +803,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             } finally {
               if (timeoutId) clearTimeout(timeoutId);
               try { workerStream.cancel(); } catch {}
+              try { subAgent.reset(); } catch {} // one-shot worker: free its chain/routing state
               try { detachWorkerListeners(); } catch {}
               if (abortListener && parentSignal) {
                 try { parentSignal.removeEventListener("abort", abortListener as any); } catch {}
@@ -788,21 +836,8 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               notifyTrace(trackingId);
             }
             try { (parentAgent as any).persistNow?.(); } catch {}
-            // Q-39: charge completed worker usage, then enforce token/cost/duration budgets.
-            try { chargeBudgetUsage(parentAgent, (res as any).usage); } catch {}
-            try {
-              checkBudget(readBudget(parentAgent), readBudgetState(parentAgent), { usage: undefined });
-            } catch (budgetErr) {
-              const be = budgetErr as { context?: { partial?: Record<string, unknown> } };
-              try {
-                if (be && typeof be === "object" && be.context?.partial) {
-                  (be.context.partial as Record<string, unknown>)["text"] = subagentText;
-                  (be.context.partial as Record<string, unknown>)["turns"] = (res as any).turns ?? 0;
-                  (be.context.partial as Record<string, unknown>)["usage"] = (res as any).usage;
-                }
-              } catch {}
-              throw budgetErr;
-            }
+            // Worker usage is charged against the parent's budget centrally by the
+            // loop (it sees every finished worker, fixed and dynamic, exactly once).
             const metadata: SubAgentExecutionMetadata = {
               name: subagentName,
               trackingId: displayId,
@@ -884,12 +919,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
         return r;
       }));
 
-      const resultPayload = {
-        xml: xmlOutput,
-        _subagentMetadata: subagentMetadataList,
-        toString() { return xmlOutput; },
-      };
-      return resultPayload;
+      return makeSubagentResult(xmlOutput, subagentMetadataList);
     },
   });
 }
@@ -956,13 +986,19 @@ export function agentToTool(
             try { ctx?.onSubagentEvent?.(ev); } catch {}
           },
         });
-        const workerStream = agentInstance.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: onWorkerTurn } as any);
+        // One isolated copy per call: the shared instance is single-flight, so
+        // calling it directly would serialize (or steer) parallel tool calls.
+        const worker: Agent =
+          typeof (agentInstance as Agent).fork === "function" ? agentInstance.fork(subSessionId, parentSessionId) : agentInstance;
+        const workerStream = worker.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: onWorkerTurn } as any);
         const detachWorkerListeners = attachToStream(workerStream as unknown as Parameters<typeof attachToStream>[0]);
         let response: any;
         try {
           response = await workerStream.result();
         } finally {
           try { detachWorkerListeners(); } catch {}
+          // The per-call session id is never reused: drop its provider chain/routing state.
+          if (worker !== agentInstance) { try { worker.reset(); } catch {} }
         }
         const durationMs = Math.max(0, nowMs() - startTime);
         const live = subagentTraces.get(trackingId);
@@ -1002,12 +1038,7 @@ export function agentToTool(
           m["turnId"] = callTurnId;
           if (response.meta !== undefined) m["meta"] = response.meta;
         } catch {}
-        const wrapper: any = {
-          xml: response.text,
-          _subagentMetadata: [metadata],
-          toString() { return response.text; },
-        };
-        return wrapper;
+        return makeSubagentResult(response.text, [metadata]);
       } catch (err: any) {
         const durationMs = Math.max(0, nowMs() - startTime);
         const msg = err?.message || String(err);
@@ -1038,12 +1069,7 @@ export function agentToTool(
           m["runId"] = callRunId;
           m["turnId"] = callTurnId;
         } catch {}
-        const wrapper: any = {
-          xml: `Error in ${name}: ${msg}`,
-          _subagentMetadata: [metadata],
-          toString() { return `Error in ${name}: ${msg}`; },
-        };
-        return wrapper;
+        return makeSubagentResult(`Error in ${name}: ${msg}`, [metadata]);
       }
     },
   });

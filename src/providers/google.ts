@@ -44,6 +44,7 @@ import { withRetries } from "../utils/retry.ts";
 import { setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import {
   newToolCallId,
+  parseArguments,
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
@@ -52,7 +53,12 @@ import {
   timeoutFor,
   hasAuthHeader,
   clampToolCallId,
+  openStreamResponse,
+  retryOptionsFrom,
+  headersToRecord,
+  parseRetryAfterMs,
 } from "./shared.ts";
+import { telemetryBus } from "../telemetry.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
@@ -65,6 +71,7 @@ import {
   parseStreamedToolArguments,
   selectRawArguments,
   mapOutputToGoogle,
+  mapGenerationParamsToGoogle,
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
   emitProviderWarning,
@@ -173,17 +180,11 @@ function chainTtlMs(options?: ProviderRequestOptions): number {
   return resolveInteractionTier(options) === "paid" ? PAID_CHAIN_TTL_MS : FREE_CHAIN_TTL_MS;
 }
 
-/** Emits a chain anomaly via the global hook + telemetry bus. Never throws. */
+/** Emits a chain anomaly on the telemetry bus (+ legacy global hook). Never throws. */
 function reportChainAnomaly(detail: { type: string; [k: string]: unknown }): void {
+  telemetryBus.emitWarning(detail.type, `[Agent Accelerator] [google] ${String(detail.type)}`, detail);
   try {
     (globalThis as unknown as { __agentAccelAnomaly?: (d: unknown) => void }).__agentAccelAnomaly?.(detail);
-  } catch {}
-  try {
-    (globalThis as unknown as { __agentAccelTelemetry?: { emitWarning?: (e: unknown) => void } }).__agentAccelTelemetry?.emitWarning?.({
-      code: detail.type,
-      message: `[Agent Accelerator] [google] ${String(detail.type)}`,
-      ...detail,
-    });
   } catch {}
 }
 
@@ -369,19 +370,40 @@ function resultToText(result: unknown): string {
   return safeStringify(result);
 }
 
-/** Latest-turn input for stateful chaining (server already holds history). */
+/**
+ * Latest-turn input for stateful chaining (the server already holds history):
+ * everything AFTER the last assistant message, in order. That is normally one
+ * user prompt (sent as plain text/blocks), but after tool execution it is the
+ * `function_result` steps, and a mid-run `steer()` can append user messages
+ * behind them. Sending only the last message would drop the tool results and
+ * leave the chained interaction waiting on its function calls.
+ */
 async function latestTurnInput(context: ProviderContext): Promise<string | InteractionContentBlock[] | InteractionInputStep[]> {
   const messages = context.messages;
-  // Trailing tool messages -> function_result steps.
-  const trailingTool: Message[] = [];
+  let lastAssistant = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.role === "tool") trailingTool.unshift(m);
-    else break;
+    if (messages[i]!.role === "assistant") {
+      lastAssistant = i;
+      break;
+    }
   }
-  if (trailingTool.length > 0) {
-    const steps: InteractionInputStep[] = [];
-    for (const m of trailingTool) {
+  const tail = messages.slice(lastAssistant + 1).filter((m) => m.role !== "system");
+  if (tail.length === 0) return "";
+
+  const hasToolResults = tail.some((m) => m.role === "tool");
+  if (!hasToolResults && tail.length === 1) {
+    const only = tail[0]!;
+    if (typeof only.content === "string") return only.content;
+    const blocks = await contentPartsToBlocks(only.content);
+    if (blocks.length === 1 && blocks[0]!.type === "text") {
+      return (blocks[0] as { type: "text"; text: string }).text;
+    }
+    return blocks;
+  }
+
+  const steps: InteractionInputStep[] = [];
+  for (const m of tail) {
+    if (m.role === "tool") {
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
@@ -393,17 +415,16 @@ async function latestTurnInput(context: ProviderContext): Promise<string | Inter
           });
         }
       }
+    } else if (m.role === "user") {
+      if (typeof m.content === "string") {
+        steps.push({ type: "user_input", content: [{ type: "text", text: m.content }] });
+      } else {
+        const blocks = await contentPartsToBlocks(m.content);
+        if (blocks.length > 0) steps.push({ type: "user_input", content: blocks });
+      }
     }
-    return steps;
   }
-  const last = messages[messages.length - 1];
-  if (!last) return "";
-  if (typeof last.content === "string") return last.content;
-  const blocks = await contentPartsToBlocks(last.content);
-  if (blocks.length === 1 && blocks[0]!.type === "text") {
-    return (blocks[0] as { type: "text"; text: string }).text;
-  }
-  return blocks;
+  return steps;
 }
 
 /** Full-history Steps for stateless (provider-switch) turns. */
@@ -549,8 +570,15 @@ function parseInteraction(
         if (block.type === "text" && block.text) text += block.text;
       }
     } else if (step.type === "function_call") {
+      // Object args as-is; a JSON string is parsed (unparseable text becomes the
+      // truncated marker); absent args mean a zero-argument call.
+      const rawArgs: unknown = step.arguments;
       const args =
-        step.arguments && typeof step.arguments === "object" ? step.arguments : { raw: step.arguments };
+        rawArgs && typeof rawArgs === "object"
+          ? rawArgs
+          : typeof rawArgs === "string"
+            ? parseArguments(rawArgs)
+            : {};
       toolCalls.push({
         id: step.id || newToolCallId(),
         name: step.name || "unknown",
@@ -635,6 +663,8 @@ export class GoogleInteractionsProvider implements Provider {
         options?.thinking?.enabled !== false && (options?.thinking?.level ?? "dynamic") !== "none";
       if (thinkingActive) generationConfig["thinking_summaries"] = "auto";
       if (toolChoice) generationConfig["tool_choice"] = toolChoice;
+      // max_output_tokens (+ temperature/top_p); stop and seed warn+drop: not documented for Interactions.
+      Object.assign(generationConfig, mapGenerationParamsToGoogle(options, `google/${modelId}`));
 
       const body: InteractionRequestBody = {
         model: modelId,
@@ -737,7 +767,7 @@ export class GoogleInteractionsProvider implements Provider {
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
     try {
-      const res = await fetch(url, this.requestInit(body, options, apiKey, effective));
+      const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, effective));
       const text = await res.text();
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => {
@@ -754,7 +784,8 @@ export class GoogleInteractionsProvider implements Provider {
     statusText: string,
     url: string,
     bodyText: string,
-    modelId: string
+    modelId: string,
+    headers?: Record<string, string>
   ): void {
     if (status >= 200 && status < 300) return;
     const { message, code, errorType, raw } = readErrorPayload(bodyText);
@@ -772,6 +803,8 @@ export class GoogleInteractionsProvider implements Provider {
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
     if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
     if (raw) (err as Record<string, unknown>)["raw"] = raw;
+    const retryAfterMs = parseRetryAfterMs(headers);
+    if (retryAfterMs !== undefined) (err as Record<string, unknown>)["retryAfterMs"] = retryAfterMs;
     throw toConciseProviderError(err, "google", modelId);
   }
 
@@ -816,7 +849,7 @@ export class GoogleInteractionsProvider implements Provider {
 
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, options?.signal);
-      this.throwIfError(res.status, res.statusText, url, res.text, clean);
+      this.throwIfError(res.status, res.statusText, url, res.text, clean, res.headers);
       let interaction: InteractionObject;
       try {
         interaction = JSON.parse(res.text) as InteractionObject;
@@ -849,8 +882,7 @@ export class GoogleInteractionsProvider implements Provider {
     };
 
     const retryOptions = {
-      maxRetries: options?.maxRetries,
-      maxRetryDelayMs: options?.maxRetryDelayMs,
+      ...retryOptionsFrom(options),
       signal: options?.signal,
       label: { providerId: "google", modelId: clean },
     };
@@ -939,25 +971,30 @@ export class GoogleInteractionsProvider implements Provider {
         };
 
         const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
-        const streamTimeoutTimer =
-          streamTimeoutMs && streamTimeoutMs > 0
-            ? setTimeout(() => {
-                try {
-                  linked.abort();
-                } catch {}
-              }, streamTimeoutMs)
-            : undefined;
-        let res: Response;
-        try {
-          res = await fetch(url, this.requestInit(body, options, apiKey, linked.signal));
-        } finally {
-          if (streamTimeoutTimer) clearTimeout(streamTimeoutTimer);
-        }
-        if (!res.ok || !res.body) {
-          const text = !res.ok ? await res.text().catch(() => "") : "";
-          if (!res.ok) this.throwIfError(res.status, res.statusText, url, text, clean);
-          throw toConciseProviderError(new Error("Google streaming response had no body"), "google", clean);
-        }
+        // Transient failures (429/5xx/network) are retried here, before the
+        // first byte; once the stream is live it is never retried.
+        const res = await openStreamResponse({
+          fetchOnce: async () => {
+            const timer =
+              streamTimeoutMs && streamTimeoutMs > 0
+                ? setTimeout(() => {
+                    try {
+                      linked.abort();
+                    } catch {}
+                  }, streamTimeoutMs)
+                : undefined;
+            try {
+              return await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, linked.signal));
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          },
+          onHttpError: (r, text) => this.throwIfError(r.status, r.statusText, url, text, clean, headersToRecord(r.headers)),
+          noBodyError: () => toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
+          retry: retryOptionsFrom(options),
+          signal: linked.signal,
+          label: { providerId: "google", modelId: clean },
+        });
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -966,7 +1003,7 @@ export class GoogleInteractionsProvider implements Provider {
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         const parser = new SSEParser();
-        const reader = res.body.getReader();
+        const reader = res.body!.getReader(); // openStreamResponse guarantees a body
         const decoder = new TextDecoder();
         let text = "";
         let thinking = "";
@@ -1164,8 +1201,7 @@ export class GoogleInteractionsProvider implements Provider {
         const isAbort =
           linked.signal.aborted ||
           eventStream.isCancelled() ||
-          (raw as { name?: string }).name === "AbortError" ||
-          /abort|cancell?ed/i.test(String((raw as { message?: string }).message ?? raw));
+          (raw as { name?: string }).name === "AbortError";
         if (isAbort) {
           eventStream.fail(
             Object.assign(new Error("Stream aborted"), { name: "AbortError" })

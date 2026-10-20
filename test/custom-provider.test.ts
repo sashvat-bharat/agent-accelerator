@@ -126,6 +126,28 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
     }
   });
 
+  test("custom prefix without a base URL fails fast and never sends its key to OpenAI", async () => {
+    delete process.env.GROQ_BASE_URL;
+    delete process.env.GROQ_BASEURL;
+    delete process.env.GROQ_API_BASE;
+    process.env.GROQ_API_KEY = "gsk_secret";
+    const provider = ensureCustomProvider("groq");
+    const originalFetch = globalThis.fetch;
+    let called = false;
+    (globalThis as any).fetch = async () => {
+      called = true;
+      return new Response("{}", { status: 200 });
+    };
+    try {
+      await expect(
+        provider.generate("groq/llama-3.3-70b-versatile", { messages: [{ role: "user", content: "hi" }] })
+      ).rejects.toThrow(/Missing base URL for "groq"/);
+      expect(called).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("thinking preflight: catalog-known non-reasoning throws, unknown is permissive", async () => {
     const { validateModelThinking } = await import("../src/index.ts");
     // groq/llama-3.3-70b-versatile exists in models.dev with reasoning:false → strict is correct.

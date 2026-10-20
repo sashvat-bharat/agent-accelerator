@@ -150,7 +150,7 @@ describe("Canonical provider contract", () => {
     // Start-only complete call (no deltas).
     expect(parseStreamedToolArguments('{"a":1}', "")).toEqual({ a: 1 });
     // Unparseable stream degrades to {raw} for the existing Zod retry hint.
-    expect(parseStreamedToolArguments("{bad", "!!!")).toEqual({ raw: "{bad!!!" });
+    expect(parseStreamedToolArguments("{bad", "!!!")).toEqual({ __truncated_raw: "{bad!!!" });
   });
 });
 
@@ -275,6 +275,41 @@ describe("GoogleInteractionsProvider (REST, mocked)", () => {
     expect(bodies[1].previous_interaction_id).toBe("v1_tool1");
     // function_result echoes the provider call id; no invented ids.
     expect(JSON.stringify(bodies[1].input)).toContain("call_1");
+  });
+
+  it("chained turn after tools + a mid-run steer still sends the function_result (then the steer)", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      const b = JSON.parse(req.body);
+      bodies.push(b);
+      const payload = b.previous_interaction_id ? TEXT_INTERACTION : TOOL_INTERACTION;
+      return new Response(JSON.stringify(payload), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const tools = [{ name: "get_weather", description: "d", parameters: { type: "object", properties: {} } }];
+    await provider.generate(
+      "gemini-3.5-flash-lite",
+      { messages: [{ role: "user", content: "Weather in Paris?" }] },
+      { apiKey: "k", sessionId: "s-steer", tools }
+    );
+    await provider.generate(
+      "gemini-3.5-flash-lite",
+      {
+        messages: [
+          { role: "user", content: "Weather in Paris?" },
+          { role: "assistant", content: [{ type: "tool_call", id: "call_1", name: "get_weather", arguments: {} }] },
+          { role: "tool", name: "get_weather", content: [{ type: "tool_result", id: "call_1", name: "get_weather", result: "21C" }] },
+          { role: "user", content: "also check Rome" }, // steer injected after the tool results
+        ],
+      },
+      { apiKey: "k", sessionId: "s-steer", tools }
+    );
+    expect(bodies[1].previous_interaction_id).toBe("v1_tool1");
+    const steps = bodies[1].input;
+    expect(Array.isArray(steps)).toBe(true);
+    expect(steps.map((s: any) => s.type)).toEqual(["function_result", "user_input"]);
+    expect(steps[0].call_id).toBe("call_1");
+    expect(steps[1].content[0].text).toBe("also check Rome");
   });
 
   it("falls back to stateless full history after a provider switch", async () => {

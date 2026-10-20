@@ -6,8 +6,11 @@
  * across the four REST transports, plus timeout/signal and id helpers.
  */
 import { toConciseProviderError } from "../utils/errors.ts";
+import { withRetries } from "../utils/retry.ts";
+import { redactHeadersCentral } from "../utils/cache.ts";
+import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
 
-/** Parses a JSON tool-argument string; non-objects degrade to `{ raw }`. */
+/** Parses a JSON tool-argument string; non-objects degrade to the truncated-arguments marker. */
 export function parseArguments(raw: string | undefined): Record<string, unknown> {
   if (!raw) return {};
   try {
@@ -15,9 +18,9 @@ export function parseArguments(raw: string | undefined): Record<string, unknown>
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
-    return { raw };
+    return { [TRUNCATED_ARGS_KEY]: raw };
   } catch {
-    return { raw };
+    return { [TRUNCATED_ARGS_KEY]: raw };
   }
 }
 
@@ -30,17 +33,13 @@ export function normalizeThinkingParts(parts: string[]): string | undefined {
 }
 
 /**
- * Redacts secret-bearing headers for the raw audit trail. Superset of the
- * four adapter versions: `authorization` (any case) and `x-goog-api-key` are
- * redacted; all other headers pass through untouched.
+ * Redacts secret-bearing headers for the raw audit trail via the central
+ * deny-list: any header whose NAME contains key / token / secret / cookie /
+ * authorization (so `x-api-key`, `api-key`, `cf-aig-authorization` …), plus any
+ * value that looks like a credential. Everything else passes through.
  */
 export function redactedHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    const lower = k.toLowerCase();
-    out[k] = lower === "authorization" || lower === "x-goog-api-key" ? "[REDACTED]" : v;
-  }
-  return out;
+  return redactHeadersCentral(headers) as Record<string, string>;
 }
 
 /**
@@ -176,11 +175,9 @@ export function hasAuthHeader(headers: Record<string, string> | undefined): bool
   return false;
 }
 
-/** True for truncated streamed tool args (`{ raw }` marker from `parseStreamedToolArguments`). */
+/** True for truncated streamed tool args (the `__truncated_raw` marker from `parseStreamedToolArguments`). */
 export function hasTruncatedToolArguments(args: unknown): boolean {
-  if (!args || typeof args !== "object" || Array.isArray(args)) return false;
-  const keys = Object.keys(args as Record<string, unknown>);
-  return keys.length === 1 && keys[0] === "raw" && typeof (args as Record<string, unknown>).raw === "string";
+  return isTruncatedArguments(args);
 }
 
 /** Short hash for tool-ID clamping (FNV-1a, 8 hex chars, no deps). */
@@ -211,4 +208,77 @@ export function clampToolCallId(id: string): string {
   const hash = shortHashId(id).slice(0, 8);
   const prefix = callId.slice(0, Math.max(1, 40 - hash.length - 1));
   return `${prefix}_${hash}`;
+}
+
+/** Plain lower-cased header record from a fetch `Headers` object. */
+export function headersToRecord(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((v, k) => {
+    out[k] = v;
+  });
+  return out;
+}
+
+/**
+ * Parses a rate-limit hint from response headers into milliseconds:
+ * `retry-after-ms`, then `retry-after` (delta-seconds or HTTP-date).
+ * Returns undefined when absent or unparseable.
+ */
+export function parseRetryAfterMs(headers: Record<string, string> | undefined, now = Date.now()): number | undefined {
+  if (!headers) return undefined;
+  const get = (name: string): string | undefined => {
+    for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() === name) return v;
+    return undefined;
+  };
+  const ms = get("retry-after-ms");
+  if (ms !== undefined && ms.trim() !== "" && Number.isFinite(Number(ms)) && Number(ms) >= 0) return Math.round(Number(ms));
+  const ra = get("retry-after");
+  if (ra === undefined || ra.trim() === "") return undefined;
+  const secs = Number(ra);
+  if (Number.isFinite(secs)) return secs >= 0 ? Math.round(secs * 1000) : undefined;
+  const at = Date.parse(ra);
+  return Number.isFinite(at) ? Math.max(0, at - now) : undefined;
+}
+
+/**
+ * Opens an SSE response, retrying transient failures (429/5xx/network) BEFORE
+ * any byte is consumed, so a streaming caller gets the same resilience as
+ * `generate()`. Once this resolves the stream is live and never retried.
+ * `onHttpError` must throw (usually the adapter's concise `throwIfError`).
+ */
+export function openStreamResponse(args: {
+  fetchOnce: () => Promise<Response>;
+  onHttpError: (res: Response, bodyText: string) => void;
+  noBodyError: () => Error;
+  retry: ReturnType<typeof retryOptionsFrom>;
+  signal: AbortSignal;
+  label: { providerId: string; modelId: string };
+}): Promise<Response> {
+  return withRetries(
+    async () => {
+      const res = await args.fetchOnce();
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        args.onHttpError(res, text);
+      }
+      if (!res.body) throw args.noBodyError();
+      return res;
+    },
+    { ...args.retry, signal: args.signal, label: args.label }
+  );
+}
+
+/** Retry knobs from provider request options, in the shape `withRetries` expects. */
+export function retryOptionsFrom(options: {
+  maxRetries?: number;
+  maxRetryDelayMs?: number;
+  retryBaseDelayMs?: number;
+  retryBudgetMs?: number;
+} | undefined): { maxRetries?: number; maxRetryDelayMs?: number; baseDelayMs?: number; retryBudgetMs?: number } {
+  return {
+    maxRetries: options?.maxRetries,
+    maxRetryDelayMs: options?.maxRetryDelayMs,
+    baseDelayMs: options?.retryBaseDelayMs,
+    retryBudgetMs: options?.retryBudgetMs,
+  };
 }

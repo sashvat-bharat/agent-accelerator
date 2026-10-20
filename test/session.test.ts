@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   SessionTelemetry,
@@ -10,6 +11,7 @@ import {
   saveSessionFile,
   saveSessionDir,
   loadSessionDir,
+  inspectSessionPayload,
   findLatestSessionDir,
   computeSessionTurnCost,
   getSessionContextWindow,
@@ -18,6 +20,7 @@ import {
   type PersistedAgentSession,
 } from "../src/session/store.ts";
 import { Agent } from "../src/agent/agent.ts";
+import { SessionLoadError } from "../src/types/errors.ts";
 
 describe("session telemetry", () => {
   it("accumulates totals and prefers provider cost", () => {
@@ -310,6 +313,141 @@ describe("session directories with media/", () => {
       expect(loadSessionDir(path.join(root, "empty"))).toBeNull();
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("session persistence: over-limit vs corrupt", () => {
+  const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "accel-sess-"));
+
+  it("classifies payloads: ok / empty / corrupt / over_limit", () => {
+    const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
+    const raw = serializeSession(buildSessionData(a as any, null));
+    expect(inspectSessionPayload(raw).status).toBe("ok");
+    expect(inspectSessionPayload("   ").status).toBe("empty");
+    expect(inspectSessionPayload("{not json").status).toBe("corrupt");
+    expect(inspectSessionPayload(raw, { maxBytes: 10 }).status).toBe("over_limit");
+    a.context.messages.push({ role: "user", content: "a" }, { role: "user", content: "b" });
+    const big = serializeSession(buildSessionData(a as any, null));
+    expect(inspectSessionPayload(big, { maxMessages: 1 }).status).toBe("over_limit");
+  });
+
+  it("never quarantines a healthy snapshot, however many times it is re-saved", () => {
+    const root = tmp();
+    try {
+      const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
+      for (let i = 0; i < 6; i++) a.context.messages.push({ role: "user", content: `m${i}` });
+      const file = path.join(root, "s.session.json");
+      // Simulates a session already beyond a (tiny) load limit: it must stay one file.
+      saveSessionFile(file, a, null);
+      const original = fs.readFileSync(file, "utf8");
+      expect(inspectSessionPayload(original, { maxMessages: 2 }).status).toBe("over_limit");
+      for (let i = 0; i < 5; i++) saveSessionFile(file, a, null);
+      const leftovers = fs.readdirSync(root).filter((f) => f.includes(".corrupt-"));
+      expect(leftovers).toEqual([]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still quarantines genuinely corrupt files", () => {
+    const root = tmp();
+    try {
+      const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
+      const file = path.join(root, "s.session.json");
+      fs.writeFileSync(file, "{truncated");
+      saveSessionFile(file, a, null);
+      expect(fs.readdirSync(root).some((f) => f.includes(".corrupt-"))).toBe(true);
+      expect(loadSessionFile(file)?.sessionId).toBe(a.sessionId);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("loading a valid over-limit file throws SessionLoadError and leaves it untouched", () => {
+    const root = tmp();
+    try {
+      const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
+      for (let i = 0; i < 4; i++) a.context.messages.push({ role: "user", content: `m${i}` });
+      const dir = saveSessionDir(root, a, null);
+      const file = path.join(dir, "session.json");
+      const before = fs.readFileSync(file, "utf8");
+      expect(() => loadSessionDir(dir, { maxMessages: 2 })).toThrow(SessionLoadError);
+      expect(() => loadSessionFile(file, { maxMessages: 2 })).toThrow(SessionLoadError);
+      expect(fs.readFileSync(file, "utf8")).toBe(before);
+      expect(loadSessionDir(dir)?.session.messages).toHaveLength(4);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("binary media survives rollback and file persistence", () => {
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+  it("checkpoint/rollback keeps Uint8Array media intact", async () => {
+    const { AgentContext } = await import("../src/agent/context.ts");
+    const ctx = new AgentContext("sys");
+    ctx.addUserMessage([{ type: "text", text: "see" }, { type: "image", image: png, mimeType: "image/png" }]);
+    const cp = ctx.checkpoint();
+    ctx.addAssistantMessage("partial work");
+    ctx.rollback(cp);
+    expect(ctx.messages).toHaveLength(1);
+    const part: any = (ctx.messages[0]!.content as any[])[1];
+    expect(part.image).toBeInstanceOf(Uint8Array);
+    expect([...part.image]).toEqual([...png]);
+    // The snapshot is detached: mutating live bytes later cannot corrupt it.
+    png[0] = 137;
+  });
+
+  it("persist:{file} snapshots inline bytes as data URLs that reload and normalize", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "accel-bin-"));
+    try {
+      const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
+      a.context.addUserMessage([{ type: "image", image: png, mimeType: "image/png" }]);
+      const file = path.join(root, "s.session.json");
+      saveSessionFile(file, a, null);
+      const back = loadSessionFile(file)!;
+      const stored: any = (back.messages[0]!.content as any[])[0];
+      expect(typeof stored.image).toBe("string");
+      expect(stored.image.startsWith("data:image/png;base64,")).toBe(true);
+      const { normalizeMediaInput } = await import("../src/utils/media.ts");
+      const norm = await normalizeMediaInput(stored.image);
+      expect(norm.mimeType).toBe("image/png");
+      expect(norm.base64Data).toBe(Buffer.from(png).toString("base64"));
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("untrusted session files", () => {
+  it("rejects structurally invalid messages at load and at import", async () => {
+    const bad = JSON.stringify({ version: 1, sessionId: "s1", model: "m", messages: [{ role: "user", content: "ok" }, { role: "hacker", content: 5 }] });
+    expect(deserializeSession(bad)).toBeNull();
+    expect(inspectSessionPayload(bad).status).toBe("corrupt");
+    const agent = new Agent({ model: "google/gemini-3.5-flash-lite" });
+    expect(() =>
+      agent.importSession({ version: 1, sessionId: "s1", model: "m", messages: [{ role: "user" } as any] })
+    ).toThrow(SessionLoadError);
+    expect(agent.context.messages).toHaveLength(0);
+  });
+
+  it("warns on the telemetry bus when an import references local files without a roots policy", async () => {
+    const { telemetryBus } = await import("../src/session/store.ts");
+    const seen: string[] = [];
+    const off = telemetryBus.onEvent((e) => seen.push(e.code));
+    try {
+      const msgs = [{ role: "user", content: [{ type: "image", image: "/home/me/.aws/credentials" }] }] as any;
+      new Agent({ model: "google/gemini-3.5-flash-lite" }).importSession({ version: 1, sessionId: "s2", model: "m", messages: msgs });
+      expect(seen).toContain("session.local_media_paths");
+      seen.length = 0;
+      new Agent({ model: "google/gemini-3.5-flash-lite", fileAccess: { roots: [os.tmpdir()] } }).importSession({
+        version: 1, sessionId: "s3", model: "m", messages: msgs,
+      });
+      expect(seen).not.toContain("session.local_media_paths");
+    } finally {
+      off();
     }
   });
 });

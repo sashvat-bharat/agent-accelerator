@@ -12,7 +12,8 @@
  *
  * Strictness contract (differs from the old lenient passthrough on purpose):
  * - Requests carry ONLY standard Chat Completions fields (`model`, `messages`,
- *   `tools`, `tool_choice`, `stream`). No `reasoning`, `service_tier`,
+ *   `tools`, `tool_choice`, `stream`, plus `temperature`/`top_p`/`max_tokens`/
+ *   `stop`/`seed` when explicitly set). No `reasoning`, `service_tier`,
  *   `session_id`, `prompt_cache_key`, or other extras: strict endpoints
  *   (groq, ollama, …) fail unknown body properties, so anything unsupported
  *   is warn+drop, never sent.
@@ -60,6 +61,7 @@ import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
+import { ConfigError } from "../types/errors.ts";
 import {
   parseArguments,
   normalizeThinkingParts,
@@ -72,6 +74,10 @@ import {
   timeoutFor,
   hasAuthHeader,
   clampToolCallId,
+  openStreamResponse,
+  retryOptionsFrom,
+  headersToRecord,
+  parseRetryAfterMs,
 } from "./shared.ts";
 import { getModelFromCatalog, createGenericModelSpec, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
@@ -82,6 +88,7 @@ import {
   parseStreamedToolArguments,
   selectRawArguments,
   mapOutputToCompatChat,
+  mapGenerationParamsToChat,
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
 } from "../providers.ts";
@@ -175,8 +182,6 @@ interface ChatResponse {
   [k: string]: unknown;
 }
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
-
 /** Headers that must never leak onto native REST requests. */
 const INTERNAL_HEADERS = new Set([
   "x-thought-signature-map",
@@ -198,7 +203,7 @@ function resolveBaseUrl(
   options?: ProviderRequestOptions
 ): string {
   const envPrefix = envPrefixOf(prefix);
-  return (
+  const resolved =
     options?.baseUrl ||
     configuredBaseUrl ||
     options?.env?.[`${envPrefix}_BASE_URL`] ||
@@ -206,9 +211,15 @@ function resolveBaseUrl(
     options?.env?.[`${envPrefix}_API_BASE`] ||
     getEnv(`${envPrefix}_BASE_URL`) ||
     getEnv(`${envPrefix}_BASEURL`) ||
-    getEnv(`${envPrefix}_API_BASE`) ||
-    DEFAULT_BASE_URL
-  ).replace(/\/+$/, "");
+    getEnv(`${envPrefix}_API_BASE`);
+  // Never fall back to another vendor's cloud: a custom prefix's API key
+  // must only ever travel to the endpoint the developer named.
+  if (!resolved) {
+    throw new ConfigError(
+      `[Agent Accelerator] Missing base URL for "${prefix}". Set ${envPrefix}_BASE_URL (or pass baseUrl); custom endpoints never default to api.openai.com.`
+    );
+  }
+  return resolved.replace(/\/+$/, "");
 }
 
 function resolveApiKey(
@@ -613,7 +624,7 @@ export interface CustomProviderOptions {
   baseUrl?: string;
   /** Static apiKey — overrides env. Explicit per-call `apiKey` still wins. */
   apiKey?: string;
-  /** Default baseUrl when no env is set. Defaults to OpenAI cloud. */
+  /** Default baseUrl when no env is set. There is no implicit default: without one the request fails fast. */
   defaultBaseUrl?: string;
 }
 
@@ -734,6 +745,8 @@ export class OpenAICompatibleChatProvider implements Provider {
     };
     const compatTools = toCompatTools(tools);
     if (compatTools) body.tools = compatTools;
+    // Standard Chat Completions generation fields, only when the caller set them.
+    Object.assign(body, mapGenerationParamsToChat(options));
     const toolChoice = mapToolChoiceToOpenAI(
       options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
     );
@@ -823,7 +836,7 @@ export class OpenAICompatibleChatProvider implements Provider {
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
     try {
-      const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, effective));
+      const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
       const text = await res.text();
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => {
@@ -839,7 +852,8 @@ export class OpenAICompatibleChatProvider implements Provider {
     status: number,
     url: string,
     bodyText: string,
-    modelId: string
+    modelId: string,
+    headers?: Record<string, string>
   ): void {
     if (status >= 200 && status < 300) return;
     const { message, code, errorType, raw } = readErrorPayload(bodyText);
@@ -857,6 +871,8 @@ export class OpenAICompatibleChatProvider implements Provider {
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
     if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
     if (raw) (err as Record<string, unknown>)["raw"] = raw;
+    const retryAfterMs = parseRetryAfterMs(headers);
+    if (retryAfterMs !== undefined) (err as Record<string, unknown>)["retryAfterMs"] = retryAfterMs;
     throw toConciseProviderError(err, this.prefix, modelId);
   }
 
@@ -867,13 +883,13 @@ export class OpenAICompatibleChatProvider implements Provider {
   ): Promise<ProviderGenerateResult> {
     const startTime = Date.now();
     const clean = cleanModelId(this.prefix, model);
-    const baseUrl = this.baseUrl(options);
-    const apiKey = this.requireApiKey(baseUrl, options);
     // Fail fast before any network call when the catalog knows the model
     // lacks the requested modality. Unknown models skip the guard; the
-    // endpoint verdict surfaces concisely.
+    // endpoint verdict surfaces concisely. Cheap local checks run first.
     assertModalitiesSupported(context, this.prefix, clean);
     assertNoVideoOrFileParts(context, this.prefix, clean);
+    const baseUrl = this.baseUrl(options);
+    const apiKey = this.requireApiKey(baseUrl, options);
     const url = `${baseUrl}/chat/completions`;
     const sessionId = options?.sessionId || options?.cache?.sessionId;
     const tools = options?.tools as StandardToolDeclaration[] | undefined;
@@ -896,7 +912,7 @@ export class OpenAICompatibleChatProvider implements Provider {
 
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, sessionId, options?.signal);
-      this.throwIfError(res.status, url, res.text, clean);
+      this.throwIfError(res.status, url, res.text, clean, res.headers);
       let response: ChatResponse;
       try {
         response = JSON.parse(res.text) as ChatResponse;
@@ -925,8 +941,7 @@ export class OpenAICompatibleChatProvider implements Provider {
 
     try {
       return await withRetries(doCall, {
-        maxRetries: options?.maxRetries,
-        maxRetryDelayMs: options?.maxRetryDelayMs,
+        ...retryOptionsFrom(options),
         signal: options?.signal,
         label: { providerId: this.prefix, modelId: clean },
       });
@@ -966,10 +981,10 @@ export class OpenAICompatibleChatProvider implements Provider {
 
     (async () => {
       try {
-        const baseUrl = this.baseUrl(options);
-        const apiKey = this.requireApiKey(baseUrl, options);
         assertModalitiesSupported(context, prefix, clean);
         assertNoVideoOrFileParts(context, prefix, clean);
+        const baseUrl = this.baseUrl(options);
+        const apiKey = this.requireApiKey(baseUrl, options);
         const url = `${baseUrl}/chat/completions`;
         const sessionId = options?.sessionId || options?.cache?.sessionId;
         const tools = options?.tools as StandardToolDeclaration[] | undefined;
@@ -991,25 +1006,30 @@ export class OpenAICompatibleChatProvider implements Provider {
         };
 
         const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
-        const streamTimeoutTimer =
-          streamTimeoutMs && streamTimeoutMs > 0
-            ? setTimeout(() => {
-                try {
-                  linked.abort();
-                } catch {}
-              }, streamTimeoutMs)
-            : undefined;
-        let res: Response;
-        try {
-          res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
-        } finally {
-          if (streamTimeoutTimer) clearTimeout(streamTimeoutTimer);
-        }
-        if (!res.ok || !res.body) {
-          const text = !res.ok ? await res.text().catch(() => "") : "";
-          if (!res.ok) this.throwIfError(res.status, url, text, clean);
-          throw toConciseProviderError(new Error("OpenAI-compatible streaming response had no body"), prefix, clean);
-        }
+        // Transient failures (429/5xx/network) are retried here, before the
+        // first byte; once the stream is live it is never retried.
+        const res = await openStreamResponse({
+          fetchOnce: async () => {
+            const timer =
+              streamTimeoutMs && streamTimeoutMs > 0
+                ? setTimeout(() => {
+                    try {
+                      linked.abort();
+                    } catch {}
+                  }, streamTimeoutMs)
+                : undefined;
+            try {
+              return await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          },
+          onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
+          noBodyError: () => toConciseProviderError(new Error("OpenAI-compatible streaming response had no body"), prefix, clean),
+          retry: retryOptionsFrom(options),
+          signal: linked.signal,
+          label: { providerId: prefix, modelId: clean },
+        });
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -1018,7 +1038,7 @@ export class OpenAICompatibleChatProvider implements Provider {
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         const parser = new SSEParser();
-        const reader = res.body.getReader();
+        const reader = res.body!.getReader(); // openStreamResponse guarantees a body
         const decoder = new TextDecoder();
         let text = "";
         let thinking = "";
@@ -1263,8 +1283,7 @@ export class OpenAICompatibleChatProvider implements Provider {
         const isAbort =
           linked.signal.aborted ||
           eventStream.isCancelled() ||
-          (raw as { name?: string }).name === "AbortError" ||
-          /abort|cancell?ed/i.test(String((raw as { message?: string }).message ?? raw));
+          (raw as { name?: string }).name === "AbortError";
         eventStream.fail(
           isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw
         );

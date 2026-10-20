@@ -47,7 +47,7 @@ describe("native chat wire mapping (text, image, audio)", () => {
       sentBody = JSON.parse(req.body);
       return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
     };
-    const provider = new OpenAICompatibleChatProvider("groq");
+    const provider = new OpenAICompatibleChatProvider("groq", { baseUrl: "https://compat.example/v1" });
     // Unlisted model id: the catalog gate skips unknown models so the wire
     // mapping itself is what's under test here.
     await provider.generate("unlisted-model-xyz", context, { apiKey: "k" });
@@ -138,5 +138,38 @@ describe("native chat wire mapping (text, image, audio)", () => {
       .then(() => null)
       .catch((e) => e);
     expect(String(err?.message ?? err)).toMatch(/unsupported file input.*convert_document_to_markdown/);
+  });
+});
+
+describe("media MIME detection when no type is supplied", () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+  const pdf = new TextEncoder().encode("%PDF-1.7\n....");
+
+  it("sniffs magic bytes for raw bytes (instead of application/octet-stream)", async () => {
+    const { normalizeMediaInput, sniffMimeType } = await import("../src/index.ts");
+    expect(sniffMimeType(png)).toBe("image/png");
+    expect(sniffMimeType(pdf)).toBe("application/pdf");
+    expect(sniffMimeType(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe("image/jpeg");
+    expect(sniffMimeType(new Uint8Array([1, 2, 3, 4, 5]))).toBeUndefined();
+    expect((await normalizeMediaInput(png)).mimeType).toBe("image/png");
+    expect((await normalizeMediaInput(pdf)).mimeType).toBe("application/pdf");
+    // An explicit hint always wins; unknown bytes stay generic.
+    expect((await normalizeMediaInput(png, "image/x-custom")).mimeType).toBe("image/x-custom");
+    expect((await normalizeMediaInput(new Uint8Array([1, 2, 3, 4, 5]))).mimeType).toBe("application/octet-stream");
+  });
+
+  it("sniffs base64 payloads and generic download types (default jpeg only as a last resort)", async () => {
+    const { normalizeMediaInput } = await import("../src/index.ts");
+    const longPng = new Uint8Array(200);
+    longPng.set(png);
+    const b64 = Buffer.from(longPng).toString("base64");
+    expect((await normalizeMediaInput(b64)).mimeType).toBe("image/png");
+    const prev = globalThis.fetch;
+    (globalThis as any).fetch = async () => new Response(png, { status: 200, headers: { "content-type": "application/octet-stream" } });
+    try {
+      expect((await normalizeMediaInput("https://8.8.8.8/download")).mimeType).toBe("image/png");
+    } finally {
+      globalThis.fetch = prev;
+    }
   });
 });

@@ -52,6 +52,19 @@ function applyModalityOverrides(provider: string, modelId: string, base: ModelMo
   };
 }
 
+/**
+ * Whether a lookup may fall back to the GLOBAL model index (any provider's
+ * entry with that id). Allowed for first-class providers and for explicit
+ * bare-id searches (`getModelFromCatalog(id, id)`). Denied for custom
+ * prefixes (`ollama/gpt-oss-20b`): a self-hosted model must not inherit the
+ * price, modalities or reasoning flags of an unrelated hosted model that
+ * happens to share its id: unknown stays unknown.
+ */
+function allowsGlobalFallback(providerInput: string, modelIdInput: string): boolean {
+  const p = providerInput.toLowerCase();
+  return p in PROVIDER_ALIASES || p === "gemini" || p === modelIdInput.trim().toLowerCase();
+}
+
 function normalizeModelIdForLookup(modelId: string): string {
   if (modelId.includes("/")) {
     const parts = modelId.split("/");
@@ -280,7 +293,11 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
     }
   }
 
-  // Global O(1) fallback via indexed catalog
+  // Global O(1) fallback via indexed catalog (first-class providers / bare ids only)
+  if (!allowsGlobalFallback(providerInput, modelId)) {
+    setLookupCache(cacheKey, undefined);
+    return undefined;
+  }
   const index = getGlobalIndex();
   const lowerModelId = modelId.toLowerCase();
   const strippedLower = normalizeModelIdForLookup(modelId).toLowerCase();
@@ -310,7 +327,9 @@ export interface ModelThinkingInfo {
  * @example `const info = getModelThinkingInfo("google", "gemini-3.5-flash-lite");`
  */
 export function getModelThinkingInfo(provider: string, modelId: string): ModelThinkingInfo {
-  const spec = getModelFromCatalog(provider, modelId) || getModelFromCatalog(modelId, modelId);
+  const spec =
+    getModelFromCatalog(provider, modelId) ||
+    (allowsGlobalFallback(provider, modelId) ? getModelFromCatalog(modelId, modelId) : undefined);
   if (!spec) {
     return {
       supportsThinking: true,

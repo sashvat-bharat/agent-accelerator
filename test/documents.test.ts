@@ -8,6 +8,7 @@ import {
   buildDocumentXml,
   DocumentConversionError,
   convert_document_to_markdown,
+  createConvertDocumentTool,
   modelSupportsFileInput,
   isAnydocAvailable,
   DEFAULT_DOCUMENT_MAX_CHARS,
@@ -105,10 +106,8 @@ describe.skipIf(!ANYDOC)("document conversion integration (anydoc installed)", (
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-doc-"));
     const csv = path.join(dir, "data.csv");
     fs.writeFileSync(csv, "name,price\napples,1.2\n");
-    const out = (await convert_document_to_markdown.execute(
-      { destination: csv },
-      { toolCallId: "t1" }
-    )) as string;
+    const docTool = createConvertDocumentTool({ roots: [dir] });
+    const out = (await docTool.execute({ destination: csv }, { toolCallId: "t1" })) as string;
     expect(out.startsWith('<Document name="data.csv"')).toBe(true);
     expect(out).toContain("apples");
     expect(out.endsWith("</Document>")).toBe(true);
@@ -121,5 +120,25 @@ describe.skipIf(!ANYDOC)("document conversion integration (anydoc installed)", (
       { toolCallId: "t2" }
     )) as string;
     expect(out.startsWith("Error:")).toBe(true);
+  });
+
+  it("refuses local paths outside the tool's roots and private-network URLs", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-doc-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "accel-out-"));
+    const secret = path.join(outside, "secret.csv");
+    fs.writeFileSync(secret, "k,v\nsecret,1\n");
+    const docTool = createConvertDocumentTool({ roots: [dir] });
+    const blockedPath = (await docTool.execute({ destination: secret }, { toolCallId: "t3" })) as string;
+    expect(blockedPath.startsWith("Error:")).toBe(true);
+    expect(blockedPath).toContain("outside the allowed fileAccess roots");
+    expect(blockedPath).not.toContain("secret,1");
+    const blockedUrl = (await docTool.execute(
+      { destination: "http://169.254.169.254/latest/meta-data/x.csv" },
+      { toolCallId: "t4" }
+    )) as string;
+    expect(blockedUrl.startsWith("Error:")).toBe(true);
+    expect(blockedUrl).toMatch(/private\/internal host/);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   });
 });
