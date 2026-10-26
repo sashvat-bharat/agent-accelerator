@@ -15,7 +15,11 @@ import {
   resolveDynamicModelInput,
   resolveMainModel,
 } from "./worker.ts";
+import * as path from "node:path";
 import { createConvertDocumentTool } from "../utils/documents.ts";
+import { registerAgent } from "../scheduler/scheduler.ts";
+import { resolveHome } from "../scheduler/store.ts";
+import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
 import { createSessionId, nowMs } from "../utils/session.ts";
@@ -153,7 +157,11 @@ export class Agent {
     thinkingLevel?: ThinkingLevel;
     tools: Record<string, ToolDefinition>;
     timeout: number;
+    /** Scheduled actions (`scheduled_actions` + `get_datetime` tools) are on. */
+    allowScheduledActions: boolean;
   };
+  /** Home folder for everything written to disk (`sessions/`, `scheduled_tasks/`). */
+  readonly home: string;
   /** Registered model-callable tools. */
   readonly tools: Record<string, ToolDefinition> = {};
   /** Normalized reasoning configuration. */
@@ -290,6 +298,7 @@ export class Agent {
         thinkingLevel: (dynRaw as any)?.thinkingLevel,
         tools: dynTools,
         timeout,
+        allowScheduledActions: dynRaw.allowScheduledActions === true,
       };
     }
     this.apiKey = (rawModel as any)?.apiKey || config.apiKey;
@@ -303,7 +312,12 @@ export class Agent {
           : Infinity;
     this.sessionId = config.sessionId || config.cache?.sessionId || createSessionId();
     (this as any).subagentTraces = {};
-    this.persistConfig = config.persist;
+    this.home = resolveHome(config.home);
+    // `persist: {}` (neither dir nor file) means the default sessions folder under home.
+    this.persistConfig =
+      config.persist && !config.persist.dir && !config.persist.file
+        ? { ...config.persist, dir: path.join(this.home, "sessions") }
+        : config.persist;
     // `whenBusy` (canonical) wins over legacy `mode`; anything else is "auto".
     const normalizedMode = resolveWhenBusy(config.midSession);
     const rawMaxQueued = (config.midSession as any)?.maxQueued;
@@ -390,14 +404,21 @@ export class Agent {
       this.tools["convert_document_to_markdown"] = createConvertDocumentTool({ roots: this.fileAccess?.roots });
     }
 
-    if (this.dynamicSubagents?.enabled === true) {
-      if (!this.subagentModel) {
-        throw new SubAgentModelError(
-          typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : (this.modelStringOrSpec as any)?.id
-        );
-      }
+    const dyn = this.dynamicSubagents;
+    if ((dyn?.enabled === true || dyn?.allowScheduledActions) && !this.subagentModel) {
+      throw new SubAgentModelError(
+        typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : (this.modelStringOrSpec as any)?.id
+      );
+    }
+    if (dyn?.enabled === true) {
       const spawnTool = createSubagentSpawnTool(this);
       this.tools[spawnTool.name || "spawn_subagents"] = spawnTool;
+    }
+    if (dyn?.allowScheduledActions) {
+      // Fixed by config, so the tool set (and the prompt cache) stays stable.
+      const scheduleTool = createScheduledActionsTool(this);
+      this.tools[scheduleTool.name || "scheduled_actions"] = scheduleTool;
+      if (!this.tools["get_datetime"]) this.tools["get_datetime"] = getDatetimeTool;
     }
 
     // Ambiguous tool names would only blow up mid-run, after a paid model turn: fail at construction.
@@ -407,6 +428,7 @@ export class Agent {
     if (initialCachedId) {
       this.context.cachedContentId = initialCachedId;
     }
+    if (dyn?.allowScheduledActions) registerAgent(this);
   }
 
   private getFullInstructions(): string | undefined {
@@ -887,7 +909,16 @@ export class Agent {
    * @internal
    */
   fork(sessionId: string, parentSessionId?: string): Agent {
-    const copy = new Agent({ ...this.forkConfig, sessionId, stateless: true, persist: undefined });
+    // A fork is a short-lived worker copy: it must not schedule, nor replace the
+    // real agent in the scheduler's registry.
+    const dyn = this.forkConfig.dynamicSubagents;
+    const copy = new Agent({
+      ...this.forkConfig,
+      sessionId,
+      stateless: true,
+      persist: undefined,
+      ...(dyn?.allowScheduledActions ? { dynamicSubagents: { ...dyn, allowScheduledActions: false } } : {}),
+    });
     if (parentSessionId) (copy as unknown as { parentSessionId?: string }).parentSessionId = parentSessionId;
     return copy;
   }

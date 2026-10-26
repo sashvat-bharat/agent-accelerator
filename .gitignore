@@ -46,3 +46,6 @@ models.dev.json
 # chat session runtime artifacts (examples/05-chat.ts)
 .session.json
 sessions/
+
+# default Agent Accelerator home (sessions, scheduled actions)
+.agent-accel/

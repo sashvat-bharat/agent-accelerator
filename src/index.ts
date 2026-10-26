@@ -105,6 +105,27 @@ export {
 } from "./agent/delegation.ts";
 export type { DynamicSubagentTask, AgentAsToolTarget, SubAgentTrace, StreamingLoopHandle } from "./agent/delegation.ts";
 
+// Scheduled actions: dynamic sub-agents that run later and save their answer to a file
+export {
+  createScheduledAction,
+  listScheduledActions,
+  updateScheduledAction,
+  runScheduledAction,
+  skipScheduledAction,
+  killScheduledAction,
+} from "./scheduler/scheduler.ts";
+export { getDatetimeTool } from "./scheduler/tool.ts";
+export type {
+  ScheduledActionInput,
+  ScheduledActionPatch,
+  ScheduledActionRecord,
+  ScheduledDelivery,
+  ScheduledState,
+  ScheduledRunStatus,
+  ScheduleSpec,
+  KillResult,
+} from "./types/scheduler.ts";
+
 // Providers & Registry — unified multi-provider layer, all native REST
 export {
   getProvider,

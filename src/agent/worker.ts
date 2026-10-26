@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "../types/tool.ts";
 import type { SubAgentStep } from "../types/response.ts";
 import type { AgentConfig } from "../types/agent.ts";
+import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
 import { escapeXml } from "../utils/serialization.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
@@ -245,6 +246,37 @@ export function resolveWorkerCredentials(
     return { apiKeyToUse: parentAgent.apiKey, baseUrlToUse: parentAgent.baseUrl, attemptedProvider };
   }
   return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
+}
+
+/**
+ * Config of a stateless dynamic worker (`spawn_subagents` and scheduled
+ * actions): the developer's fixed worker model, level and limits, never the
+ * LLM's choice. Credentials carry over only when the providers match, and
+ * `inheritableConfig()` keeps the worker no less constrained than its parent.
+ */
+export function buildDynamicWorkerConfig(
+  parent: Agent,
+  worker: { name: string; role?: string; instructions: string; sessionId: string; tools: Record<string, ToolDefinition> }
+): AgentConfig {
+  const model = parent.subagentModel;
+  const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
+  return {
+    name: worker.name,
+    description: worker.role || `Sub-agent ${worker.name}`,
+    instructions: worker.instructions,
+    model,
+    apiKey: apiKeyToUse,
+    baseUrl: baseUrlToUse,
+    thinkingLevel: parent.dynamicSubagents?.thinkingLevel ?? parent.thinkingConfig?.level,
+    sessionId: worker.sessionId,
+    tools: worker.tools,
+    // Stateless by design: one task in, one result out, then shut down. No history, no recursion.
+    stateless: true,
+    serviceTier: parent.serviceTier,
+    headers: parent.customHeaders,
+    maxTurns: parent.maxTurns,
+    ...parent.inheritableConfig(),
+  };
 }
 
 /** Builds one `<NAME>...text...</NAME>` block inside `<SUB-AGENTS-RESPONSE>`. */

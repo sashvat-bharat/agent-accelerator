@@ -139,9 +139,16 @@ export interface AgentConfig {
    * after every step (user turn, assistant turn, tool batch, sub-agent
    * step) so a crash loses at most the in-flight step. Pass `{ dir }` for
    * `sessions/<sessionId>/session.json` layout or `{ file }` for a single
-   * pretty `.session.json` file. Writes are atomic and never fail a turn.
+   * pretty `.session.json` file. `persist: {}` (neither) uses `<home>/sessions`.
+   * Writes are atomic and never fail a turn.
    */
   persist?: { dir?: string; file?: string };
+  /**
+   * Folder for everything Agent Accelerator writes to disk (`sessions/`,
+   * `scheduled_tasks/`). Defaults to `.agent-accel/` in the working directory.
+   * An explicit `persist.dir` / `persist.file` still wins for sessions.
+   */
+  home?: string;
   // Q-54 missing knobs (all optional, additive; loop reads via `(config as any).*`).
   /**
    * Canonical tool-selection control (`"auto"` default). `"none"` applies to
@@ -257,6 +264,12 @@ export interface MidSessionConfig {
 export interface DynamicSubagentsConfig {
   /** Enables the automatic `spawn_subagents` tool. Defaults to true when the object is present. */
   enabled?: boolean;
+  /**
+   * Lets the Main Agent schedule dynamic sub-agents to run later (once or on
+   * repeat) via the `scheduled_actions` and `get_datetime` tools. Off by
+   * default: without it no tool, clock or timer exists. Needs a worker model.
+   */
+  allowScheduledActions?: boolean;
   /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then `SUB_AGENT_MODEL` env, then the parent model. */
   model?: string | ModelSpec | ModelProviderInstance;
   /** Max workers the Main Agent may spawn in a single `spawn_subagents` call. Extras are trimmed safely. Defaults to 4. */

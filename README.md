@@ -125,7 +125,7 @@ An `Agent` holds :
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Overridden by `dynamicSubagents.model`. Falls back to `SUB_AGENT_MODEL`. |
-| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout? }`. See [Dynamic delegation](#dynamic-delegation). |
+| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }`. See [Dynamic delegation](#dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`. Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
@@ -136,7 +136,8 @@ An `Agent` holds :
 | `apiKey`          | `string`                                             | Overrides environment-based API-key lookup for this agent.                                                                                                 |
 | `baseUrl`         | `string`                                             | Overrides the default endpoint for this agent.                                                                                                             |
 | `stateless`       | `boolean`                                            | When `true`, history is cleared before and after each `run`. Useful for one-shot evaluators. Defaults to `false`.                                          |
-| `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions: rewrites the session file after every step (user/assistant/tool/sub-agent). `{ dir }` uses `sessions/<sessionId>/session.json`, `{ file }` a single `.session.json`. Writes are atomic and never fail a turn. |
+| `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions: rewrites the session file after every step (user/assistant/tool/sub-agent). `{ dir }` uses `sessions/<sessionId>/session.json`, `{ file }` a single `.session.json`, `{}` uses `<home>/sessions`. Writes are atomic and never fail a turn. |
+| `home`            | `string`                                             | Folder for everything the SDK writes to disk (`sessions/`, `scheduled_tasks/`). Defaults to `.agent-accel/` in the working directory. An explicit `persist.dir` / `persist.file` still wins.        |
 
 When `dynamicSubagents.enabled` is set without a resolvable worker model, construction throws `SubAgentModelError`.
 
@@ -312,6 +313,69 @@ console.log(res.subagents.map((s) => s.name));
 * `buildAgentTools(list)` — wraps multiple agents and deduplicates names. Used internally by `subagents`.
 * `createSubagentSpawnTool(parentAgent)` — builds the dynamic subagent spawner. Rarely needed directly.
 * `DynamicSubagentTask` — `{ name, role?, instructions, task, tools?, timeoutMs? }`, the shape produced for dynamic delegation. No `model` — workers run on the developer-configured model.
+
+---
+## Scheduled actions
+
+A scheduled action is a dynamic sub-agent that runs **later** (once or on repeat), on its own, and writes its answer to a file instead of replying in the chat: a research brief every day at 7:00 AM, a health report every Monday. It is off by default: without the flag no tool, clock or timer exists.
+
+```ts
+const agent = new Agent({
+  name: "Main Agent",
+  model: "google/gemini-3.8-flash",
+  dynamicSubagents: {
+    model: "google/gemini-3.5-flash-lite", // worker model (required)
+    tools: { get_weather, recent_news }, // worker tool pool
+    allowScheduledActions: true, // default false
+  },
+});
+```
+
+The Main Agent then gets two tools, fixed by config so the prompt cache stays stable: `scheduled_actions` (one tool, `command` = `create | list | get | update | kill | run_now | skip`) and `get_datetime` (the machine's local date and time, also exported as `getDatetimeTool`). The tool description is exactly [`src/scheduler/scheduled-actions.md`](src/scheduler/scheduled-actions.md) (the worker pool names are filled in), so you can read what the model is told.
+
+The same code is available to your program:
+
+```ts
+import { createScheduledAction, telemetryBus } from "agent-accelerator";
+
+createScheduledAction(agent, {
+  instructions: "You write a short, sourced AI research brief.",
+  task: "Summarize the most important AI news of the last day in 5 bullets.",
+  tools: ["recent_news"], // names from the worker pool
+  scheduled_action: {
+    name: "Daily AI Research Brief",
+    id: "daily-ai-brief", // lowercase kebab-case; the SDK appends 6 chars: daily-ai-brief-d64aj2
+    timeToDeliver: "01:07:00", // "DD:HH:MM" - DD days from today (01 = tomorrow), 12-hour clock
+    meridiem: "AM",
+    startCookingInAdvance: "00:00:30", // optional, a "DD:HH:MM" duration (default 10 minutes)
+    repeatEvery: "01:00:00", // optional; omit to run once
+    retries: 1, // optional; used only while time remains before delivery
+  },
+});
+
+telemetryBus.onEvent((e) => {
+  if (e.code === "scheduled_action.delivered") console.log(`${e.data.name} is ready: ${e.data.file}`);
+});
+```
+
+| Function | What it does |
+| --- | --- |
+| `createScheduledAction(agent, input)` | Schedule a new action. Throws one `ValidationError` listing every problem. |
+| `listScheduledActions({ home? })` | Every action with its metadata, state (`waiting`, `cooking`, `missed`, `done`), `lastRun` and a `running` flag. |
+| `updateScheduledAction(id, patch, { home? })` | Change instructions, task, tools, timeout, role or any schedule field. Schedule changes are refused while it is cooking. |
+| `runScheduledAction(id, { home? })` | Run now, outside the schedule (also resolves a missed run). Needs the creating `Agent` alive. |
+| `skipScheduledAction(id, { home? })` | Ignore a missed run and wait for the next scheduled time. |
+| `killScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
+
+**How it behaves**
+
+* **One local clock.** A single timer per home folder ticks once a second against the machine's own time and only asks what is overdue, so drift or sleep cannot skip a run. There is no timezone or daylight-saving logic. The timer is `unref`'d and runs only while something is pending, so actions run only while your process is alive.
+* **The creating `Agent` runs it.** The task stores the Agent's `name`; the clock hands each run to the live Agent with that name (latest wins) and uses its worker model and tool pool. The scheduler holds only a weak reference, so keep your `Agent` referenced for as long as it should run; if none is alive the run counts as missed.
+* **Each run is fresh.** A new stateless dynamic sub-agent built from the saved fields, on your fixed worker model and tool pool, never touching the Main Agent's session. It inherits the parent's limits, retry policy, `fileAccess` and `captureRaw`.
+* **Files are the truth.** Everything lives in `<home>/scheduled_tasks/`: `tasks.json` (every action), `deliveries.json` (saved results waiting for their delivery time) and one folder per action with one `.md` file per run (a small header, then the result). The file is re-read and validated before each run, so editing `instructions` or `task` there takes effect on the next run. API keys, the model and tool code are never stored. Don't put secrets in `instructions`.
+* **Ready, then delivered.** A finished run is saved immediately (`scheduled_action.ready`); at `timeToDeliver` the SDK emits `scheduled_action.delivered` on `telemetryBus` with `{ id, name, status, file, readyAt, deliverAt, late }`. There is no notification system: what happens next is your code. Other events: `.created`, `.updated`, `.started`, `.failed`, `.missed`, `.skipped`, `.killed`, plus the warnings `.invalid` and `.store_corrupt`.
+* **Overlap and failure.** A run still cooking when the next one is due is skipped, never stacked. A failed run still writes a file saying why and is delivered like any result (`status: "failed"`).
+* **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once and runs nothing by itself: pick `run_now` or `skip`. A result saved before the process exited is simply delivered (marked `late`) on the first tick after start.
 
 ---
 ## Tools
@@ -1187,6 +1251,10 @@ bun run examples/10-document_markdown.ts
 
 bun run examples/11-session-identity.ts
 # sub-agent TrackingIDs, live worker boxes, lineage, track(), durable sessions
+
+bun run examples/14-scheduled-actions.ts [--quick]
+# scheduled actions walkthrough on your computer's clock: starts working ~1 minute from now,
+# delivers ~2 minutes from now (code-scheduled and model-scheduled); --quick skips the waiting
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
@@ -1258,6 +1326,7 @@ bun run update-models # refresh model catalog cache (supports --force, --ttl=24h
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
+├── scheduler/  # Scheduled actions: clock, store, tool + its manual (scheduled-actions.md)
 ├── session/    # Session persistence + telemetry (snapshots, hit rates, .session.json store)
 ├── providers/  # native REST adapters (google/openai/openrouter/openai-compat) + registry + canonical contract
 ├── models/     # Dynamic catalog cache, parser, verified overrides

@@ -15,12 +15,12 @@ import { newTurnId } from "../utils/session.ts";
 import {
   sanitizeToolName,
   sanitizeXmlTag,
+  buildDynamicWorkerConfig,
   buildSubagentsXml,
   createLiveWorker,
   grantWorkerTools,
   normalizeWorkerTimeoutValue,
   providerOfWorkerModel,
-  resolveWorkerCredentials,
 } from "./worker.ts";
 
 export { escapeXml };
@@ -683,14 +683,9 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
 
           // Fixed developer-configured worker model — never LLM-choosable.
           const chosenModel: any = parentAgent.subagentModel;
-          // Shared credential resolution: reuse parent creds only on same provider.
-          const { apiKeyToUse, baseUrlToUse, attemptedProvider } = resolveWorkerCredentials(
-            parentAgent as { modelStringOrSpec?: unknown; apiKey?: string; baseUrl?: string },
-            chosenModel
-          );
           const chosenModelStrForProvider = typeof chosenModel === "string" ? chosenModel : (chosenModel as any)?.model ?? (chosenModel as any)?.id ?? String(chosenModel);
 
-          const runWithModel = async (modelToUse: any, apiKey: string | undefined, baseUrl: string | undefined) => {
+          const runWithModel = async () => {
             if (context?.signal?.aborted) throw new Error("Aborted before spawn");
             const childSessionId = createChildSessionId(parentAgent.sessionId, subagentName);
             workerSessionId = childSessionId;
@@ -729,26 +724,15 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             const grantedTools = grantWorkerTools(toolPool, (t as { tools?: unknown }).tools);
             // Timeout: >0 fixed for every worker; 0 = no limit; -1 = per-task timeoutMs.
             const workerTimeout = normalizeWorkerTimeoutValue(cfgTimeout, (t as { timeoutMs?: unknown }).timeoutMs);
-            const subAgent = new AgentClass({
-              name: t.name,
-              description: t.role || `Sub-agent ${t.name}`,
-              instructions: t.instructions,
-              model: modelToUse,
-              apiKey,
-              baseUrl,
-              thinkingLevel: (dynCfg?.thinkingLevel as any) ?? parentAgent.thinkingConfig?.level,
-              sessionId: childSessionId,
-              tools: grantedTools,
-              // Stateless by design: one task in, one result out, then shut down. No history, no recursion.
-              stateless: true,
-              serviceTier: parentAgent.serviceTier,
-              headers: parentAgent.customHeaders,
-              maxTurns: parentAgent.maxTurns,
-              // Run limits, retry policy, credentials/env, fetch, Google tier and the
-              // file-access policy all carry over: a worker must never be less
-              // constrained than the agent that spawned it.
-              ...parentAgent.inheritableConfig(),
-            });
+            const subAgent = new AgentClass(
+              buildDynamicWorkerConfig(parentAgent, {
+                name: t.name,
+                role: t.role,
+                instructions: t.instructions,
+                sessionId: childSessionId,
+                tools: grantedTools,
+              })
+            );
             // Lineage binding: child records its parent session so persisted
             // snapshots and routing can tell siblings apart even when ids
             // are truncated to 64 chars.
@@ -813,7 +797,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           };
 
           try {
-            const res: any = await runWithModel(chosenModel, apiKeyToUse, baseUrlToUse);
+            const res: any = await runWithModel();
 
             const durationMs = Math.max(0, nowMs() - startTime);
             const rawText = (res as any).text;
@@ -875,7 +859,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             if (err && (err as { code?: unknown }).code === "budget_exceeded") throw err;
             const durationMs = Math.max(0, nowMs() - startTime);
             const errorMessage = err?.message || String(err);
-            const prov = attemptedProvider || providerOfWorkerModel(chosenModelStrForProvider) || providerOfWorkerModel(chosenModel as unknown) || "unknown";
+            const prov = providerOfWorkerModel(chosenModelStrForProvider) || providerOfWorkerModel(chosenModel as unknown) || "unknown";
             const live = subagentTraces.get(trackingId);
             if (live) {
               live.status = "error";
