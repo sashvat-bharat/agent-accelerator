@@ -191,7 +191,7 @@ describe("GoogleInteractionsProvider (REST, mocked)", () => {
     expect(res.responseId).toBe("v1_test123");
     expect(res.thoughtSignature).toBe("sig_abc");
     expect(res.usage.inputTokens).toBe(7);
-    expect(res.usage.outputTokens).toBe(3);
+    expect(res.usage.outputTokens).toBe(4); // 3 output + 1 thought: Google bills thoughts as output
     expect(res.usage.cachedTokens).toBe(2);
     expect(res.usage.thinkingTokens).toBe(1);
     expect(res.finishReason).toBe("stop");
@@ -929,5 +929,57 @@ describe("GoogleInteractionsProvider generation floor & failure handling (mocked
     expect(thoughts[0].signature).toBeUndefined();
     expect(thoughts[0].summary).toBeDefined();
     expect(thoughts[1].signature).toBe("sig-own");
+  });
+});
+
+describe("model switch mid-session", () => {
+  it("reseeds from full history, chains again afterwards, and raises no false history-shrink anomaly", async () => {
+    const { Agent, telemetryBus, clearInteractionChains } = await import("../src/index.ts");
+    clearInteractionChains();
+    const bodies: any[] = [];
+    const usages = [
+      { total_tokens: 1050, total_input_tokens: 1000, total_output_tokens: 50 },
+      { total_tokens: 1100, total_input_tokens: 1050, total_output_tokens: 50, total_cached_tokens: 950 },
+      { total_tokens: 700, total_input_tokens: 650, total_output_tokens: 50 }, // new model, smaller tokenizer count, cache gone
+      { total_tokens: 760, total_input_tokens: 700, total_output_tokens: 60, total_cached_tokens: 600 },
+    ];
+    let n = 0;
+    const fn = (async (_u: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ id: `v1_${n + 1}`, status: "completed", steps: [{ type: "model_output", content: [{ type: "text", text: "ok" }] }], usage: usages[n++] }), { status: 200 });
+    }) as any;
+    const anomalies: string[] = [];
+    const off = telemetryBus.onEvent((e) => { if (e.code === "interaction_history_shrink") anomalies.push(e.code); });
+    try {
+      const agent = new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", fetch: fn });
+      await agent.run("hello");
+      await agent.run("again");
+      (agent as any).modelStringOrSpec = "google/gemini-3.5-flash";
+      const first = await agent.run("after switch");
+      await agent.run("more");
+      expect(bodies.map((b) => b.previous_interaction_id ?? null)).toEqual([null, "v1_1", null, "v1_3"]);
+      expect(Array.isArray(bodies[2].input)).toBe(true); // full history on the switch turn
+      expect(first.usage.cachedTokens).toBe(0);
+      // priced with the NEW model's rates: 650 in @ $1.50/M + 50 out @ $9/M
+      expect(first.usage.cost?.totalCost).toBeCloseTo((650 * 1.5 + 50 * 9) / 1e6, 9);
+      expect(anomalies).toEqual([]);
+    } finally {
+      off();
+      clearInteractionChains();
+    }
+  });
+});
+
+describe("Google thought tokens are billed as output", () => {
+  it("prices output + thought tokens (usage from a real thinking session)", async () => {
+    const { Agent } = await import("../src/index.ts");
+    const fn = (async () =>
+      new Response(JSON.stringify({ id: "v1_t", status: "completed", steps: [{ type: "model_output", content: [{ type: "text", text: "ok" }] }], usage: { total_tokens: 1593, total_input_tokens: 1240, total_output_tokens: 85, total_thought_tokens: 268 } }), { status: 200 })) as any;
+    const res = await new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", fetch: fn }).run("hi");
+    expect(res.usage.outputTokens).toBe(353);
+    expect(res.usage.thinkingTokens).toBe(268);
+    expect(res.usage.totalTokens).toBe(1593);
+    // 1240 in @ $0.30/M + (85 + 268) out @ $2.50/M
+    expect(res.usage.cost?.totalCost).toBeCloseTo(0.001255, 6); // 1254.5 micro-USD, rounded to whole micro-USD
   });
 });

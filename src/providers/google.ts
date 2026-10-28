@@ -514,7 +514,11 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
 
 function mapUsage(raw?: InteractionObject["usage"]): TokenUsage {
   const input = raw?.total_input_tokens ?? 0;
-  const output = raw?.total_output_tokens ?? 0;
+  // Google reports thought tokens separately from `total_output_tokens`, but bills them as output
+  // ("response pricing is the sum of output tokens and thinking tokens"). Fold them into output so
+  // pricing is right and `thinkingTokens` stays a subset of `outputTokens`.
+  const thought = raw?.total_thought_tokens ?? 0;
+  const output = (raw?.total_output_tokens ?? 0) + thought;
   // Canonical invariant: cached hits are a SUBSET of input. Google usually
   // honors this, but long chained runs have been observed reporting
   // total_cached_tokens > total_input_tokens (which yields >100% hit rates
@@ -527,7 +531,7 @@ function mapUsage(raw?: InteractionObject["usage"]): TokenUsage {
     cachedTokens: cached,
     cacheReadTokens: cached,
     cacheWriteTokens: 0,
-    thinkingTokens: raw?.total_thought_tokens ?? 0,
+    thinkingTokens: thought,
   };
 }
 
@@ -663,7 +667,7 @@ export class GoogleInteractionsProvider implements Provider {
         options?.thinking?.enabled !== false && (options?.thinking?.level ?? "dynamic") !== "none";
       if (thinkingActive) generationConfig["thinking_summaries"] = "auto";
       if (toolChoice) generationConfig["tool_choice"] = toolChoice;
-      // max_output_tokens (+ temperature/top_p); stop and seed warn+drop: not documented for Interactions.
+      // max_output_tokens only; stop and seed warn+drop.
       Object.assign(generationConfig, mapGenerationParamsToGoogle(options, `google/${modelId}`));
 
       const body: InteractionRequestBody = {
@@ -717,6 +721,9 @@ export class GoogleInteractionsProvider implements Provider {
       // Interaction ids are model-scoped server-side: chaining a 2.5 id into
       // a 3.5 request 400s, so a same-provider model switch resumes stateless.
       const continuing = !!chain && !switched && chain.model === modelId && context.messages.length > 1;
+      // A model switch reseeds from full history and tokenizes differently: drop the token
+      // baseline so the new model's first turn is not mistaken for a shrunken history.
+      if (chain && sessionId && chain.model !== modelId) lastTurnTotals.delete(sessionId);
 
       if (switched) {
         // Cross-provider turn: the Google server never saw the other

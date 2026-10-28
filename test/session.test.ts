@@ -236,7 +236,7 @@ describe("agent export/import + file round-trip", () => {
   });
 
   it("saves and loads a file", () => {
-    const dir = fs.mkdtempSync(path.join(process.cwd(), "src/data/.sess-test-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-sess-test-"));
     const file = path.join(dir, "chat.json");
     try {
       const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
@@ -257,13 +257,13 @@ describe("agent export/import + file round-trip", () => {
   });
 
   it("loadSessionFile returns null when missing", () => {
-    expect(loadSessionFile(path.join(process.cwd(), "src/data/.does-not-exist-12345.json"))).toBeNull();
+    expect(loadSessionFile(path.join(os.tmpdir(), "accel-does-not-exist-12345.json"))).toBeNull();
   });
 });
 
 describe("session directories with media/", () => {
   it("extracts binary + data-URL media to files and reloads as paths", () => {
-    const root = fs.mkdtempSync(path.join(process.cwd(), "src/data/.sessdir-test-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "accel-sessdir-test-"));
     try {
       const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3]);
       const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
@@ -300,7 +300,7 @@ describe("session directories with media/", () => {
   });
 
   it("finds the latest session and loads legacy single files", () => {
-    const root = fs.mkdtempSync(path.join(process.cwd(), "src/data/.sessdir-latest-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "accel-sessdir-latest-"));
     try {
       const a = new Agent({ model: "google/gemini-3.5-flash-lite" });
       const dir = saveSessionDir(root, a, null);

@@ -527,12 +527,11 @@ export function selectRawArguments(startText: string, deltaText: string): string
 }
 
 // ---------------------------------------------------------------------------
-// Generation controls (sampling / maxOutputTokens / stop / seed)
+// Generation controls (maxOutputTokens / stop / seed)
 // ---------------------------------------------------------------------------
 
 /** Canonical generation controls as carried on `ProviderRequestOptions`. */
 export interface GenerationParams {
-  sampling?: { temperature?: number; topP?: number };
   maxOutputTokens?: number;
   stop?: string[];
   seed?: number;
@@ -550,14 +549,12 @@ export function normalizeStop(stop: string | string[] | undefined): string[] | u
 
 /**
  * Standard Chat Completions fields (OpenRouter + generic compat endpoints):
- * `temperature`, `top_p`, `max_tokens`, `stop`, `seed`. Only set values are
+ * `max_tokens`, `stop`, `seed`. Only set values are
  * emitted, so strict endpoints never see anything the caller did not ask for.
  */
 export function mapGenerationParamsToChat(params: GenerationParams | undefined): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (!params) return out;
-  if (finiteNumber(params.sampling?.temperature)) out["temperature"] = params.sampling!.temperature;
-  if (finiteNumber(params.sampling?.topP)) out["top_p"] = params.sampling!.topP;
   if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out["max_tokens"] = Math.floor(params.maxOutputTokens);
   if (params.stop && params.stop.length > 0) out["stop"] = params.stop;
   if (finiteNumber(params.seed)) out["seed"] = Math.floor(params.seed);
@@ -585,40 +582,28 @@ function warnUnsupportedStopSeed(provider: string, modelRef: string, params: Gen
   }
 }
 
-/**
- * OpenAI Responses: `temperature`, `top_p`, `max_output_tokens` are native;
- * `stop` and `seed` do not exist on this wire (warn + drop).
- */
+/** OpenAI Responses: `max_output_tokens` is native; `stop` and `seed` do not exist on this wire (warn + drop). */
 export function mapGenerationParamsToOpenAI(
   params: GenerationParams | undefined,
   modelRef: string
-): { temperature?: number; top_p?: number; max_output_tokens?: number } {
+): { max_output_tokens?: number } {
   if (!params) return {};
   warnUnsupportedStopSeed("openai", modelRef, params, "OpenAI Responses API");
-  const out: { temperature?: number; top_p?: number; max_output_tokens?: number } = {};
-  if (finiteNumber(params.sampling?.temperature)) out.temperature = params.sampling!.temperature;
-  if (finiteNumber(params.sampling?.topP)) out.top_p = params.sampling!.topP;
-  if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out.max_output_tokens = Math.floor(params.maxOutputTokens);
-  return out;
+  return finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0
+    ? { max_output_tokens: Math.floor(params.maxOutputTokens) }
+    : {};
 }
 
-/**
- * Google Interactions `generation_config`: `max_output_tokens` is documented;
- * `temperature`/`top_p` are accepted (newer Gemini models ignore them and
- * return deprecation headers). `stop` and `seed` are not documented for this
- * API (warn + drop).
- */
+/** Google Interactions `generation_config`: `max_output_tokens` is documented; `stop` and `seed` are not (warn + drop). */
 export function mapGenerationParamsToGoogle(
   params: GenerationParams | undefined,
   modelRef: string
-): { temperature?: number; top_p?: number; max_output_tokens?: number } {
+): { max_output_tokens?: number } {
   if (!params) return {};
   warnUnsupportedStopSeed("google", modelRef, params, "Gemini Interactions API");
-  const out: { temperature?: number; top_p?: number; max_output_tokens?: number } = {};
-  if (finiteNumber(params.sampling?.temperature)) out.temperature = params.sampling!.temperature;
-  if (finiteNumber(params.sampling?.topP)) out.top_p = params.sampling!.topP;
-  if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out.max_output_tokens = Math.floor(params.maxOutputTokens);
-  return out;
+  return finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0
+    ? { max_output_tokens: Math.floor(params.maxOutputTokens) }
+    : {};
 }
 
 // ---------------------------------------------------------------------------

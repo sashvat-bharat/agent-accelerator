@@ -115,3 +115,27 @@ console.log(JSON.stringify({ loaded: st.loaded, seen }));`
     }
   });
 });
+
+describe("telemetry.persist", () => {
+  it("appends bus events as NDJSON under <home>/telemetry and never writes thinking text", async () => {
+    const { Agent, telemetryBus } = await import("../src/index.ts");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "accel-tel-home-"));
+    const agent = new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", home, telemetry: { persist: true } });
+    telemetryBus.emit({ code: "tool.call_started", message: "m", data: { toolCallId: "c1" } });
+    telemetryBus.emit({ code: "turn.thinking", message: "secret reasoning", data: { thinking: "x" } });
+    const dir = path.join(home, "telemetry");
+    const lines = fs.readdirSync(dir).flatMap((f) => fs.readFileSync(path.join(dir, f), "utf8").trim().split("\n"));
+    const codes = lines.map((l) => JSON.parse(l).code);
+    expect(codes).toContain("tool.call_started");
+    expect(codes).not.toContain("turn.thinking");
+    expect(agent.home).toBe(path.resolve(home));
+  });
+
+  it("writes nothing unless asked", async () => {
+    const { Agent, telemetryBus } = await import("../src/index.ts");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "accel-tel-off-"));
+    new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", home });
+    telemetryBus.emit({ code: "tool.call_started", message: "m" });
+    expect(fs.existsSync(path.join(home, "telemetry"))).toBe(false);
+  });
+});

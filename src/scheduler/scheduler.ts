@@ -4,7 +4,7 @@
  *
  * One clock per home folder, ticking once a second against the machine's own
  * time. Each tick only asks "what is overdue?", so drift, sleep or a clock
- * change cannot skip a run. The files under `<home>/scheduled_tasks/` are the
+ * change cannot skip a run. The files under `<home>/scheduled_actions/` are the
  * source of truth (see `store.ts`); nothing waits in memory, and the timer is
  * unref'd and runs only while something is pending.
  *
@@ -30,6 +30,7 @@ import type {
 import {
   TASK_ID_PATTERN,
   findRunFile,
+  migrateLegacyFolder,
   readDeliveries,
   readRun,
   readTasks,
@@ -647,7 +648,10 @@ const schedulers = new Map<string, Scheduler>();
 /** The scheduler of a RESOLVED home folder (created on first use; nothing runs until something is pending). */
 export function getScheduler(home: string): Scheduler {
   let s = schedulers.get(home);
-  if (!s) schedulers.set(home, (s = new Scheduler(home)));
+  if (!s) {
+    migrateLegacyFolder(home);
+    schedulers.set(home, (s = new Scheduler(home)));
+  }
   return s;
 }
 

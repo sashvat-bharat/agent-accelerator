@@ -4,7 +4,9 @@
  * Persistent multi-turn chat using SDK session helpers:
  * `loadSessionDir` / `saveSessionDir` / `SessionTelemetry` +
  * `agent.importSession` / `agent.exportSession`.
- * Sessions live in `sessions/<sessionId>/{session.json, media/*}`.
+ * Everything lives under the Agent Accelerator home (`.agent-accel/`):
+ * `sessions/<sessionId>/{session.json, media/*}` and, with `telemetry.persist`,
+ * `telemetry/<date>.ndjson` (tool calls, warnings). Move it with `setHome(dir)` or AGENT_ACCEL_HOME.
  *
  * Run: bun run examples/05-chat.ts
  */
@@ -15,6 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import {
   Agent,
+  resolveHome,
   resolveModel,
   validateModelThinking,
   loadSessionFile,
@@ -30,7 +33,7 @@ import {
 } from "agent-accelerator";
 
 // ---------------------------------------------------------------------------
-// 1. Session storage: sessions/<sessionId>/{session.json, media/*}
+// 1. Storage: <home>/sessions/<sessionId>/{session.json, media/*}
 // ---------------------------------------------------------------------------
 const EXPLICIT_FILE =
   process.env.SESSION_FILE ??
@@ -38,7 +41,7 @@ const EXPLICIT_FILE =
 const SESSION_ROOT =
   process.env.SESSION_DIR ??
   process.argv.find((a) => a.startsWith("--session-dir="))?.split("=")[1] ??
-  path.join(process.cwd(), "sessions");
+  path.join(resolveHome(), "sessions");
 const RESUMED_DIR = !EXPLICIT_FILE ? findLatestSessionDir(SESSION_ROOT) : null;
 const RESUMED = RESUMED_DIR ? loadSessionDir(RESUMED_DIR) : null;
 const saved = EXPLICIT_FILE ? loadSessionFile(EXPLICIT_FILE) : (RESUMED?.session ?? null);
@@ -73,6 +76,7 @@ const initialModel = saved?.model ?? process.env.MODEL ?? "google/gemini-3.5-fla
 
 const agent = new Agent({
   name: "Chat Agent",
+  telemetry: { persist: true }, // opt in: tool calls and warnings go to <home>/telemetry/<date>.ndjson
   instructions: loadPrompt(),
   model: initialModel,
   dynamicSubagents: {

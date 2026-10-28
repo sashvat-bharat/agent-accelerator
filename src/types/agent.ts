@@ -30,12 +30,6 @@ export type ModelRef = string | ModelSpec | ModelProviderInstance;
 /** Canonical reasoning option (Q-52): bare level, or level + explicit token budget. */
 export type ThinkingOption = ThinkingLevel | { level?: ThinkingLevel; budgetTokens?: number };
 
-/** Canonical sampling knobs (Q-54). Read by the loop via `(config as any).sampling`. */
-export interface SamplingConfig {
-  temperature?: number;
-  topP?: number;
-}
-
 /** Canonical retry policy (Q-54). Read by the loop via `(config as any).retry`. */
 export interface RetryPolicyConfig {
   maxRetries?: number;
@@ -145,7 +139,7 @@ export interface AgentConfig {
   persist?: { dir?: string; file?: string };
   /**
    * Folder for everything Agent Accelerator writes to disk (`sessions/`,
-   * `scheduled_tasks/`). Defaults to `.agent-accel/` in the working directory.
+   * `scheduled_actions/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
    * An explicit `persist.dir` / `persist.file` still wins for sessions.
    */
   home?: string;
@@ -161,8 +155,6 @@ export interface AgentConfig {
   googleTier?: "free" | "paid";
   /** Maximum output tokens for one model call. */
   maxOutputTokens?: number;
-  /** Sampling knobs. */
-  sampling?: SamplingConfig;
   /** Stop sequence(s). */
   stop?: StopOption;
   /** Deterministic seed, when the provider supports it. */
@@ -188,8 +180,11 @@ export interface AgentConfig {
   hooks?: unknown;
   /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   contextManagement?: unknown;
-  /** @deprecated Not implemented yet; subscribe with `telemetryBus.onEvent` instead. Passing it emits a `config.unsupported_option` warning. */
-  telemetry?: { onEvent?: (e: any) => void } | unknown;
+  /**
+   * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning
+   * text) to `<home>/telemetry/<date>.ndjson`. Off by default: the SDK writes nothing unless asked.
+   */
+  telemetry?: { persist?: boolean };
   /**
    * Local file policy. With `roots` set, every local-path media part and the
    * built-in `convert_document_to_markdown` tool must resolve inside them
@@ -337,8 +332,6 @@ export interface AgentRunOptions {
   toolChoice?: ToolChoiceOption;
   /** Per-run output-token cap. */
   maxOutputTokens?: number;
-  /** Per-run sampling override. */
-  sampling?: SamplingConfig;
   /** Per-run stop sequence(s). */
   stop?: StopOption;
   /** Per-run seed. */

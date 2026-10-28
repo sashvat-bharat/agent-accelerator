@@ -12,7 +12,7 @@
  *
  * Strictness contract (differs from the old lenient passthrough on purpose):
  * - Requests carry ONLY standard Chat Completions fields (`model`, `messages`,
- *   `tools`, `tool_choice`, `stream`, plus `temperature`/`top_p`/`max_tokens`/
+ *   `tools`, `tool_choice`, `stream`, plus `max_tokens`/
  *   `stop`/`seed` when explicitly set). No `reasoning`, `service_tier`,
  *   `session_id`, `prompt_cache_key`, or other extras: strict endpoints
  *   (groq, ollama, …) fail unknown body properties, so anything unsupported

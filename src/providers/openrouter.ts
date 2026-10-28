@@ -643,9 +643,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     // PDF ingestion is a documented plugin, not a message shape: enable it
     // only when file parts are present (never by default).
     if (hasFiles) body.plugins = [{ id: "file-parser" }];
-    // No temperature/top_p/max_tokens/stop/user/seed knobs
-    // (no canonical options exist; omitting also keeps provider cache keys
-    // stable). `response_format` above is the sole structured-output exception.
     // No store/previous_response_id/conversation: they do not exist
     // on this endpoint.
     // Session affinity: top-level `session_id` is the documented sticky-routing

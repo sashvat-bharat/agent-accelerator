@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, SamplingConfig, RetryPolicyConfig, Budget, BudgetState } from "../types/agent.ts";
+import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState } from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
 import { normalizeThinkingV2, resolveWhenBusy, normalizeWorkerTimeout } from "../tools/tool.ts";
@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { createConvertDocumentTool } from "../utils/documents.ts";
 import { registerAgent } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../scheduler/store.ts";
+import { persistTelemetry } from "../telemetry-file.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
@@ -160,7 +161,7 @@ export class Agent {
     /** Scheduled actions (`scheduled_actions` + `get_datetime` tools) are on. */
     allowScheduledActions: boolean;
   };
-  /** Home folder for everything written to disk (`sessions/`, `scheduled_tasks/`). */
+  /** Home folder for everything written to disk (`sessions/`, `scheduled_actions/`, `telemetry/`). */
   readonly home: string;
   /** Registered model-callable tools. */
   readonly tools: Record<string, ToolDefinition> = {};
@@ -199,7 +200,6 @@ export class Agent {
   private readonly callDefaults: {
     toolChoice?: ToolChoiceOption;
     maxOutputTokens?: number;
-    sampling?: SamplingConfig;
     stop?: string | string[];
     seed?: number;
     retry?: RetryPolicyConfig;
@@ -361,7 +361,7 @@ export class Agent {
     this.forkConfig = { ...config };
     this.captureRaw = config.captureRaw;
     this.budget = config.budget ? { ...config.budget } : undefined;
-    for (const key of ["hooks", "contextManagement", "logger", "telemetry"] as const) {
+    for (const key of ["hooks", "contextManagement", "logger"] as const) {
       if (config[key] !== undefined) {
         // Declared for forward compatibility only: say so instead of silently ignoring.
         telemetryBus.emitWarning(
@@ -371,11 +371,11 @@ export class Agent {
         );
       }
     }
+    if (config.telemetry?.persist) persistTelemetry(this.home);
     this.googleTier = config.googleTier === "paid" || config.googleTier === "free" ? config.googleTier : undefined;
     this.callDefaults = {
       toolChoice: config.toolChoice,
       maxOutputTokens: config.maxOutputTokens,
-      sampling: config.sampling,
       stop: config.stop,
       seed: config.seed,
       retry: config.retry,
@@ -944,13 +944,12 @@ export class Agent {
   /**
    * Single place that turns agent config + per-run options into the options
    * every provider call receives. Per-run values override agent defaults
-   * (objects such as `sampling`, `retry` and `env` merge key by key).
+   * (objects such as `retry` and `env` merge key by key).
    */
   private buildProviderOptions(runOptions: AgentRunOptions | undefined): ProviderRequestOptions {
     const d = this.callDefaults;
     const sessionId = runOptions?.sessionId || this.sessionId;
     const toolChoice = normalizeToolChoiceOption(runOptions?.toolChoice ?? d.toolChoice);
-    const sampling = { ...d.sampling, ...runOptions?.sampling };
     const retry = { ...d.retry, ...runOptions?.retry };
     const env = { ...d.env, ...runOptions?.env };
     const stop = normalizeStop(runOptions?.stop ?? d.stop);
@@ -970,7 +969,6 @@ export class Agent {
       ...(this.outputSpec ? { output: this.outputSpec } : {}),
       ...(this.googleTier ? { googleTier: this.googleTier } : {}),
       ...(toolChoice !== undefined ? { toolChoice } : {}),
-      ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       ...(stop ? { stop } : {}),
       ...(seed !== undefined ? { seed } : {}),

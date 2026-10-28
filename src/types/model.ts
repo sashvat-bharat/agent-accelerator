@@ -183,8 +183,6 @@ export interface ProviderRequestOptions {
    * cache behavior is unaffected; unknown values fall back to `free`.
    */
   googleTier?: "free" | "paid";
-  /** Sampling controls. Sent where the wire supports them; otherwise warn+drop. */
-  sampling?: { temperature?: number; topP?: number };
   /** Upper bound on generated tokens for one model call. */
   maxOutputTokens?: number;
   /** Stop sequence(s). Chat Completions only; other wires warn+drop. */

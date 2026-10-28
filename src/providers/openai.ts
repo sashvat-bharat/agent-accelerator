@@ -12,8 +12,7 @@
  * effort, service_tier flex/priority, prompt_cache_key affinity, usage,
  * finish reasons, switching, abort, errors.
  *
- * Also implemented: `text.format` structured output, `temperature`/`top_p`/
- * `max_output_tokens` (stop + seed have no Responses equivalent: warn+drop).
+ * Also implemented: `text.format` structured output, `max_output_tokens` (stop + seed have no Responses equivalent: warn+drop).
  *
  * Out of scope (never sent): background, conversation, previous_response_id
  * chaining, include, metadata, truncation, safety_identifier,
@@ -578,7 +577,7 @@ export class OpenAIResponsesProvider implements Provider {
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;
-    // temperature / top_p / max_output_tokens (stop + seed warn+drop: not on this wire).
+    // max_output_tokens (stop + seed warn+drop: not on this wire).
     Object.assign(body, mapGenerationParamsToOpenAI(options, `openai/${modelId}`));
     // Structured outputs: Responses `text.format{type:json_schema,name,schema,strict}`.
     // Skipped when emulated (instruction already in `instructions`).

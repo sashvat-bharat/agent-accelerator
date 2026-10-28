@@ -26,8 +26,9 @@
  * now and delivers at least 2 minutes from now.
  *
  * Needs: MODEL + SUB_AGENT_MODEL + provider key (see .env.example). Costs live
- * tokens. Files go to ./.agent-accel/demo/scheduled_tasks/ (gitignored) and
- * the demo removes what it creates.
+ * tokens. Files go to ./.agent-accel/demo/ (gitignored): `scheduled_actions/` holds
+ * the actions and their results (the demo removes what it creates) and `telemetry/`
+ * keeps the event log (`tool.*`, `scheduled_action.*`) for you to inspect.
  *
  * Note: actions run only while this process is alive, and the Agent must stay
  * referenced (the scheduler holds it weakly).
@@ -143,6 +144,7 @@ async function main(): Promise<void> {
     model: MODEL,
     instructions: "You are a planning assistant. When the user wants something done later or on a schedule, use the scheduling tools.",
     home: HOME,
+    telemetry: { persist: true }, // opt in: every event is also appended to <home>/telemetry/<date>.ndjson
     dynamicSubagents: {
       enabled: false, // we only want scheduling, not on-the-spot spawn_subagents
       model: WORKER_MODEL, // the fixed worker model: the Main Agent can never choose it

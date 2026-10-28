@@ -11,11 +11,11 @@ import {
 } from "../src/index.ts";
 
 describe("Model Catalog Dynamic Cache & 12h TTL", () => {
-  it("should resolve cache directory and path to src/data by default", () => {
+  it("should resolve cache directory and path to <home>/catalog by default", () => {
     const dir = getCacheDir();
     const filePath = getCacheFilePath();
-    expect(dir).toContain("src/data");
-    expect(filePath).toContain("src/data/models.dev.json");
+    expect(dir).toContain(".agent-accel/catalog");
+    expect(filePath).toContain(".agent-accel/catalog/models.dev.json");
   });
 
   it("should have a default TTL of 12 hours", () => {

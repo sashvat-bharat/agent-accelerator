@@ -17,6 +17,7 @@ import {
   makeRepeatBlockedResult,
   shouldBlockRepeat,
   toolCallFingerprint,
+  traceToolEvent,
 } from "../tools/executor.ts";
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
 import { preprocessFilePartsForBypass } from "../utils/documents.ts";
@@ -282,6 +283,7 @@ export function ensureToolPairing(context: AgentContext): void {
           rebuilt.push(hit.message.content.length === 1 ? hit.message : { role: "tool", name: hit.part.name, content: [hit.part] });
         } else {
           const name = typeof p.name === "string" ? p.name : "tool";
+          traceToolEvent("call_interrupted", "warn", { id: p.id, name }, {});
           rebuilt.push({
             role: "tool",
             name,
@@ -290,7 +292,7 @@ export function ensureToolPairing(context: AgentContext): void {
                 type: "tool_result",
                 id: p.id,
                 name,
-                result: `Error: tool_call '${name}' (${p.id}) has no result because the run was interrupted before it completed (recovered by ensureToolPairing).`,
+                result: `Error: tool_call '${name}' (${p.id}) has no result because the run was interrupted before it completed (recovered by ensureToolPairing). It may have partially executed: check the tool trace before repeating side-effecting work.`,
                 isError: true,
               },
             ],
@@ -530,6 +532,7 @@ async function executeToolCallsWithRepeatGuard(options: {
     }
     if (!previousFingerprints.has(fingerprint)) repeatCounts.delete(fingerprint); // streak broken
     if (shouldBlockRepeat(previousFingerprints, call, repeatCounts)) {
+      traceToolEvent("call_blocked", "warn", call, { agentName: options.agentName, sessionId: options.sessionId }, { reason: "repeat_blocked" });
       blocked.set(call.id, makeRepeatBlockedResult(call));
     } else {
       executable.push(call);

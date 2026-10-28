@@ -59,7 +59,7 @@ export function createChildSessionId(parentId: string, tag: string): string {
     rand = Math.random().toString(36).slice(2, 10);
   }
   // Provider-safe: OpenAI `prompt_cache_key` enforces max 64 chars (400
-  // otherwise). Parent ids are already ~42 chars (`accel-<uuid>`), so naive
+  // otherwise). Parent ids are already ~36+ chars (a UUID), so naive
   // `${parent}-sub-${tag}-${rand}` overflows (observed 65-72 chars → every
   // sub-agent 400s with 0 usage). Truncate the parent portion to fit, keeping
   // the tag + rand suffix intact for uniqueness/debuggability.

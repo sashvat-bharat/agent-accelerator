@@ -29,17 +29,16 @@ async function inSubprocess(cacheDir: string, body: string): Promise<any> {
 }
 
 describe("catalog cache location", () => {
-  it("defaults to the package's src/data regardless of the working directory", () => {
-    const original = process.cwd();
-    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "accel-cwd-"));
+  it("lives in <home>/catalog and follows setHome", async () => {
+    const { setHome } = await import("../src/index.ts");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "accel-home-"));
     try {
-      process.chdir(elsewhere);
-      const dir = getCacheDir();
-      expect(dir.endsWith(path.join("src", "data"))).toBe(true);
-      expect(dir.startsWith(fs.realpathSync(elsewhere))).toBe(false);
+      expect(getCacheDir()).toBe(path.resolve(".agent-accel", "catalog"));
+      setHome(home);
+      expect(getCacheDir()).toBe(path.join(path.resolve(home), "catalog"));
     } finally {
-      process.chdir(original);
-      fs.rmSync(elsewhere, { recursive: true, force: true });
+      setHome();
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 });

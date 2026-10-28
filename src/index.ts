@@ -115,6 +115,7 @@ export {
   killScheduledAction,
 } from "./scheduler/scheduler.ts";
 export { getDatetimeTool } from "./scheduler/tool.ts";
+export { setHome, resolveHome } from "./utils/home.ts";
 export type {
   ScheduledActionInput,
   ScheduledActionPatch,
@@ -441,7 +442,6 @@ export type {
   ModelRef,
   ThinkingOption,
   StructuredOutputOption,
-  SamplingConfig,
   RetryPolicyConfig,
   AgentLogger,
   ToolChoiceOption,

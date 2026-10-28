@@ -8,6 +8,7 @@ import { toJsonSafe } from "../utils/serialization.ts";
 import { ConfigError } from "../types/errors.ts";
 import { isSubagentResult } from "./subagent-result.ts";
 import { isTruncatedArguments } from "../types/tool.ts";
+import { telemetryBus } from "../telemetry.ts";
 
 export interface ExecuteToolsOptions {
   tools: Record<string, ToolDefinition>;
@@ -95,6 +96,11 @@ export function assertNoToolCollisions(
   }
 }
 
+/** Redacts `scheme://user:pass@` credentials. The only scrub applied to telemetry-bus error detail. */
+function redactUrlCredentials(message: string): string {
+  return message.replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s"'`@]+@/g, "$1[redacted]@");
+}
+
 /**
  * Redacts secrets and machine-local details from an error message before it
  * is sent back to the model: credentials in URLs/connection strings
@@ -102,11 +108,7 @@ export function assertNoToolCollisions(
  * (`/home/...`, `/Users/...`, `C:\...` → `[redacted-path]`).
  */
 export function sanitizeErrorMessage(message: string): string {
-  let out = message;
-  out = out.replace(
-    /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s"'`@]+@/g,
-    "$1[redacted]@"
-  );
+  let out = redactUrlCredentials(message);
   out = out.replace(/\/home\/[^\s"'`:;,)]*/g, "[redacted-path]");
   out = out.replace(/\/Users\/[^\s"'`:;,)]*/g, "[redacted-path]");
   out = out.replace(/[A-Za-z]:\\[^\s"'`:;,)]*/g, "[redacted-path]");
@@ -222,6 +224,48 @@ export function makeRepeatBlockedResult(call: ToolCallRecord): ToolResultRecord 
     isError: true,
     durationMs: 1,
   };
+}
+
+/** Error detail for the telemetry bus (developer channel): full message, code, status, stack and cause chain; only URL credentials are redacted. */
+function describeError(err: unknown, depth = 0): Record<string, unknown> {
+  const e = (err ?? {}) as Record<string, unknown>;
+  const text = (v: unknown): string | undefined => (typeof v === "string" ? redactUrlCredentials(v) : undefined);
+  return {
+    name: typeof e.name === "string" ? e.name : typeof err,
+    message: text(e.message) ?? text(String(err)),
+    ...(e.code !== undefined ? { code: e.code } : {}),
+    ...(e.status !== undefined || e.statusCode !== undefined ? { status: e.status ?? e.statusCode } : {}),
+    ...(e.retryable === true || e.transient === true ? { retryable: true } : {}),
+    ...(text(e.stack) ? { stack: text(e.stack) } : {}),
+    ...(e.cause !== undefined && depth < 4 ? { cause: describeError(e.cause, depth + 1) } : {}),
+  };
+}
+
+/**
+ * Emits one tool lifecycle event on the telemetry bus (`tool.<phase>`). The bus
+ * delivers synchronously, so a developer sink that appends to disk leaves a
+ * crash-proof trace: a `call_started` with no ending event means "in flight at
+ * the crash", and the last `progress` shows how far it got.
+ */
+export function traceToolEvent(
+  phase: string,
+  level: "info" | "warn" | "error",
+  call: { id: string; name: string },
+  scope: { agentName?: string; sessionId?: string },
+  data: Record<string, unknown> = {}
+): void {
+  telemetryBus.emit({
+    code: `tool.${phase}`,
+    message: `[Agent Accelerator] tool ${call.name} (${call.id}): ${phase}`,
+    level,
+    data: { toolCallId: call.id, toolName: call.name, agentName: scope.agentName, sessionId: scope.sessionId, ...data },
+  });
+}
+
+function capJson(value: unknown, max = 2000): unknown {
+  const safe = scrubErrors(toJsonSafe(value));
+  const json = JSON.stringify(safe);
+  return typeof json === "string" && json.length > max ? `${json.slice(0, max)}…[truncated]` : safe;
 }
 
 function levenshtein(a: string, b: string): number {
@@ -385,6 +429,7 @@ async function executeAttempt(
     const error: any = new Error(`Tool execution timed out after ${timeoutMs}ms`);
     error.code = "ETIMEDOUT";
     error.transient = true;
+    error.toolTimeout = true;
     return error;
   };
   try {
@@ -439,14 +484,20 @@ export async function executeToolCalls(
     return semaphore;
   };
 
+  const scope = { agentName, sessionId };
   const runSingle = async (call: ToolCallRecord): Promise<ToolResultRecord> => {
     const startTime = nowMs();
+    // Latest `ctx.emit({ type: "progress", ... })` snapshot: what the tool had finished before any failure.
+    let progress: unknown;
+    let attempts = 0;
+    let timedOut = false;
 
     // Truncated streamed arguments (Q-12): the `__truncated_raw` marker means the
     // provider's partial JSON never parsed. Never execute or overwrite wire
     // finishReason here — return a synthetic error so the model retries with
     // complete JSON.
     if (isTruncatedToolCall(call)) {
+      traceToolEvent("call_blocked", "warn", call, scope, { reason: "truncated_arguments" });
       return {
         id: call.id,
         name: call.name,
@@ -462,6 +513,7 @@ export async function executeToolCalls(
     const toolDef = resolved.definition;
 
     if (!toolDef) {
+      traceToolEvent("call_blocked", "warn", call, scope, { reason: "tool_not_found", suggestion: resolved.suggestion });
       const suffix = resolved.suggestion ? ` Did you mean '${resolved.suggestion}'?` : "";
       return {
         id: call.id,
@@ -490,6 +542,10 @@ export async function executeToolCalls(
         signal,
         sessionId,
         onSubagentEvent,
+        emit: (event) => {
+          if (event?.type === "progress") progress = event;
+          traceToolEvent(event?.type === "progress" ? "progress" : "event", "info", call, scope, { event: capJson(event) });
+        },
       };
 
       // Validate input if Zod schema is provided
@@ -509,6 +565,7 @@ export async function executeToolCalls(
           const hint = expectedParams
             ? ` Expected parameters: ${expectedParams}.`
             : "";
+          traceToolEvent("call_blocked", "warn", call, scope, { reason: "schema_validation", detail: parseRes.error.message });
           return {
             id: call.id,
             name: call.name,
@@ -540,13 +597,20 @@ export async function executeToolCalls(
       executionStartTime = nowMs();
       let rawResult: unknown;
       let attempt = 0;
+      traceToolEvent("call_started", "info", call, scope, { maxAttempts, timeoutMs });
       while (true) {
         attempt++;
+        attempts = attempt;
+        traceToolEvent("attempt_started", "info", call, scope, { attempt, maxAttempts });
         try {
           rawResult = await executeAttempt(toolDef, parsedInput, context, timeoutMs);
           break;
         } catch (err: any) {
           if (signal?.aborted) throw new Error("Tool execution aborted");
+          timedOut = err?.toolTimeout === true;
+          const willRetry =
+            isTransientError(err) && attempt < maxAttempts && !(err?.code === "ETIMEDOUT" && (!configuredTries || configuredTries <= 0));
+          traceToolEvent("attempt_failed", "warn", call, scope, { attempt, maxAttempts, willRetry, error: describeError(err), progress: capJson(progress) });
           if (!isTransientError(err) || attempt >= maxAttempts) throw err;
           // A timeout is a deliberate per-attempt deadline, not a parent
           // cancellation (which rejects via the abort signal instead and is
@@ -555,13 +619,18 @@ export async function executeToolCalls(
           // maxTries. Note ctx.signal is cooperative: the timeout races the
           // tool body, but a tool that ignores the signal still resolves.
           if (err?.code === "ETIMEDOUT" && (!configuredTries || configuredTries <= 0)) throw err;
-          await waitForRetry(Math.min(30_000, 250 * 2 ** Math.min(attempt - 1, 7)), signal);
+          const delayMs = Math.min(30_000, 250 * 2 ** Math.min(attempt - 1, 7));
+          traceToolEvent("retry_scheduled", "info", call, scope, { attempt, nextAttempt: attempt + 1, delayMs });
+          await waitForRetry(delayMs, signal);
         }
       }
 
       // Undefined means "no value", serialized null-safe as "null" (changed
       // from the legacy "Success" marker so model context stays valid JSON).
+      const finishOk = (resultChars: number): void =>
+        traceToolEvent("call_succeeded", "info", call, scope, { attempts: attempt, durationMs: elapsedMs(executionStartTime), resultChars });
       if (rawResult === undefined) {
+        finishOk(4);
         return {
           id: call.id,
           name: resolved.name,
@@ -573,6 +642,7 @@ export async function executeToolCalls(
       // Branded delegation envelopes pass through untouched: JSON-safing would
       // strip the (symbol) brand the loop needs to trust their metadata.
       if (isSubagentResult(rawResult)) {
+        finishOk(rawResult.xml.length);
         return {
           id: call.id,
           name: resolved.name,
@@ -593,6 +663,7 @@ export async function executeToolCalls(
         const json = JSON.stringify(safeResult);
         if (typeof json === "string" && json.length > charLimit) safeResult = truncateResultString(json, charLimit);
       }
+      finishOk(typeof safeResult === "string" ? safeResult.length : (JSON.stringify(safeResult)?.length ?? 0));
       return {
         id: call.id,
         name: resolved.name,
@@ -601,8 +672,17 @@ export async function executeToolCalls(
         durationMs: elapsedMs(executionStartTime),
       };
     } catch (err: any) {
-      // Never leak secrets/paths to the model. A per-tool redactError hook
-      // wins; otherwise sanitize the message (credentials, file paths).
+      // The developer channel (telemetry bus) gets the full error; the model gets a
+      // scrubbed message plus what the tool finished before failing, so it repairs
+      // only the remainder instead of repeating completed side effects.
+      const aborted = signal?.aborted === true;
+      const done = err?.context?.progress ?? progress;
+      traceToolEvent(aborted ? "call_aborted" : timedOut ? "call_timed_out" : "call_failed", "error", call, scope, {
+        attempts,
+        durationMs: elapsedMs(executionStartTime),
+        error: describeError(err),
+        progress: capJson(done),
+      });
       let message: string;
       const redactError = (toolDef as any)?.redactError;
       if (typeof redactError === "function") {
@@ -614,10 +694,29 @@ export async function executeToolCalls(
       } else {
         message = sanitizeErrorMessage(err?.message || String(err));
       }
+      const details = {
+        ...(typeof redactError === "function"
+          ? {}
+          : {
+              error: {
+                name: err?.name,
+                ...(err?.code !== undefined ? { code: err.code } : {}),
+                ...(err?.status !== undefined || err?.statusCode !== undefined ? { status: err.status ?? err.statusCode } : {}),
+              },
+            }),
+        attempts,
+        ...(timedOut ? { timedOut: true } : {}),
+        ...(aborted ? { aborted: true } : {}),
+        ...(done !== undefined ? { progress: capJson(done) } : {}),
+        hint:
+          done !== undefined
+            ? "The tool failed part-way. Work reported in progress was NOT undone: do not repeat it, retry or fix only what remains."
+            : "The tool failed and may have partially executed. Check before retrying side-effecting work.",
+      };
       return {
         id: call.id,
         name: call.name,
-        result: `Error executing ${call.name}: ${message}`,
+        result: `Error executing ${call.name}: ${message}\n${JSON.stringify(details)}`,
         isError: true,
         durationMs: elapsedMs(executionStartTime),
       };

@@ -31,6 +31,7 @@ import { base64ToBytes, bytesToBase64 } from "../utils/base64.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
 import type { SubAgentStep } from "../types/response.ts";
 import { SessionLoadError } from "../types/errors.ts";
+import { createSessionId } from "../utils/session.ts";
 
 /** Cumulative per-session token + cost totals (JSON-safe). */
 export interface SessionTotals {
@@ -573,7 +574,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       if (messages.length > maxMessages) return OVER_LIMIT;
       return {
         version: 1,
-        sessionId: sessionId || `accel-${Date.now()}`,
+        sessionId: sessionId || createSessionId(),
         model,
         ...(subagentModel ? { subagentModel } : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
@@ -597,7 +598,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       if ((obj.context.messages as unknown[]).length > maxMessages) return OVER_LIMIT;
       return {
         version: 1,
-        sessionId: obj.sessionId ?? obj.id ?? `accel-${Date.now()}`,
+        sessionId: obj.sessionId ?? obj.id ?? createSessionId(),
         model: obj.model ?? "",
         subagentModel: obj.subagentModel,
         thinkingLevel: obj.thinkingLevel ?? obj.thinkingLevelChange,
@@ -617,7 +618,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
     if ("messages" in obj && obj.messages !== undefined && !Array.isArray(obj.messages)) return null;
     return {
       version: 1,
-      sessionId: obj.sessionId ?? `accel-${Date.now()}`,
+      sessionId: obj.sessionId ?? createSessionId(),
       model: obj.model ?? "",
       subagentModel: obj.subagentModel,
       thinkingLevel: obj.thinkingLevel,

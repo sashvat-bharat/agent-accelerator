@@ -1,9 +1,9 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { getEnv } from "../utils/env.ts";
 import { telemetryBus } from "../telemetry.ts";
+import { onHomeChange, resolveHome } from "../utils/home.ts";
 
 /** Default TTL: 12 Hours (in milliseconds). */
 export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
@@ -77,16 +77,14 @@ function notifyUpdateListeners(): void {
 }
 
 /**
- * Catalog cache directory. Defaults to the package's own `src/data` (resolved
- * from this module, NOT the process working directory, so running a script
- * from another folder never creates stray `src/data` dirs or trusts a
- * look-alike file there). Override with `AGENT_CACHE_DIR` when embedding as a
- * package or running on a read-only filesystem (serverless/containers).
+ * Catalog cache directory: `<home>/catalog` (the single Agent Accelerator home,
+ * see `resolveHome`), or `AGENT_CACHE_DIR` when set (read-only or serverless
+ * filesystems).
  */
 export function getCacheDir(): string {
   const override = getEnv("AGENT_CACHE_DIR");
   if (override && override.trim()) return path.resolve(override.trim());
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../data");
+  return path.join(resolveHome(), "catalog");
 }
 
 /** Cache file path: `<cacheDir>/models.dev.json`, honoring AGENT_CACHE_DIR (Q-16a/Q-34). */
@@ -140,7 +138,7 @@ let activeFetchedAt: number | undefined = undefined;
 let activeTtlMs: number = globalCatalogTtlMs;
 let activeFromCache = false;
 
-// Synchronous bootstrap: load from src/data/models.dev.json if present
+// Synchronous bootstrap: load <home>/catalog/models.dev.json if present
 function initializeCatalogSync(): void {
   const cachePath = getCacheFilePath();
   const cached = readJsonFileSync(cachePath);
@@ -168,6 +166,11 @@ function initializeCatalogSync(): void {
 }
 
 initializeCatalogSync();
+// `setHome()` moves the cache folder: reload from the new place.
+onHomeChange(() => {
+  initializeCatalogSync();
+  notifyUpdateListeners();
+});
 
 /** Returns the active in-memory catalog data. */
 export function getActiveCatalog(): Record<string, any> {
@@ -229,7 +232,7 @@ export function isValidCatalogPayload(data: unknown): data is Record<string, any
 
 /**
  * Refreshes the model catalog by downloading from models.dev
- * directly into src/data/models.dev.json with a 12-hour TTL.
+ * into `<home>/catalog/models.dev.json` with a 12-hour TTL.
  */
 export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): Promise<CatalogStatus> {
   const effectiveTtl = options.ttlMs ?? globalCatalogTtlMs;
@@ -341,7 +344,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
   activeTtlMs = effectiveTtl;
   activeFromCache = false;
 
-  // Save to src/data/models.dev.json (or the AGENT_CACHE_DIR override)
+  // Save to <home>/catalog/models.dev.json (or the AGENT_CACHE_DIR override)
   try {
     writeJsonFileSync(cachePath, cachePayload);
   } catch (err) {

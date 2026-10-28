@@ -1,9 +1,9 @@
 /**
  * Disk layer for scheduled actions. Everything lives under one home folder:
  *
- *   <home>/scheduled_tasks/tasks.json         every action, one file
- *   <home>/scheduled_tasks/deliveries.json    saved results waiting for their delivery time
- *   <home>/scheduled_tasks/<id>/<date>.md     one file per run
+ *   <home>/scheduled_actions/tasks.json         every action, one file
+ *   <home>/scheduled_actions/deliveries.json    saved results waiting for their delivery time
+ *   <home>/scheduled_actions/<id>/<date>.md     one file per run
  *
  * The files are the source of truth: every write re-reads first (never writes
  * from a stale copy) and goes through `writeFileAtomic` (temp file + rename).
@@ -14,6 +14,8 @@ import * as path from "node:path";
 import { z } from "zod";
 import { writeFileAtomic } from "../session/store.ts";
 import { telemetryBus } from "../telemetry.ts";
+import { resolveHome } from "../utils/home.ts";
+export { resolveHome };
 import { ValidationError } from "../types/errors.ts";
 import type { ScheduledActionRecord, ScheduledRunStatus } from "../types/scheduler.ts";
 import { durationMs, runFileName } from "./time.ts";
@@ -26,7 +28,7 @@ export const MAX_TASK_ID_LENGTH = 55;
 /** A saved run waiting for its delivery time (one entry of `deliveries.json`). */
 export interface PendingDelivery {
   id: string;
-  /** Run file path, relative to `scheduled_tasks/`. */
+  /** Run file path, relative to `scheduled_actions/`. */
   file: string;
   status: ScheduledRunStatus;
   readyAt: string;
@@ -50,18 +52,23 @@ export interface RunHeader {
   error?: string;
 }
 
-/** The home folder: explicit, else `.agent-accel/` in the working directory (resolved now). */
-export function resolveHome(home?: string): string {
-  return path.resolve(home || ".agent-accel");
-}
-
-const baseDir = (home: string): string => path.join(home, "scheduled_tasks");
+const baseDir = (home: string): string => path.join(home, "scheduled_actions");
 const tasksFile = (home: string): string => path.join(baseDir(home), "tasks.json");
 const deliveriesFile = (home: string): string => path.join(baseDir(home), "deliveries.json");
 
-/** Absolute path of a run file given its `scheduled_tasks/`-relative path. */
+/** Absolute path of a run file given its `scheduled_actions/`-relative path. */
 export function runPath(home: string, relativeFile: string): string {
   return path.resolve(baseDir(home), relativeFile);
+}
+
+/** Renames the pre-0.5.0 `scheduled_tasks/` folder to `scheduled_actions/` (once, only when the new one does not exist). */
+export function migrateLegacyFolder(home: string): void {
+  const legacy = path.join(home, "scheduled_tasks");
+  try {
+    if (fs.existsSync(legacy) && !fs.existsSync(baseDir(home))) fs.renameSync(legacy, baseDir(home));
+  } catch {
+    // why: best effort; the old folder simply stays where it is.
+  }
 }
 
 type Raw = Record<string, unknown>;
@@ -198,7 +205,7 @@ function renderRun(header: RunHeader, body: string): string {
 
 /**
  * Writes one run under its final name (`27-october-2026.md`, `-2`, `-3` on a
- * same-day clash) and returns its path relative to `scheduled_tasks/`.
+ * same-day clash) and returns its path relative to `scheduled_actions/`.
  */
 export function writeRunFile(home: string, id: string, deliverAt: Date, header: RunHeader, body: string): string {
   const dir = path.join(baseDir(home), id);
@@ -245,7 +252,7 @@ export function findRunFile(home: string, id: string, deliverAt: Date, startedAt
   return undefined;
 }
 
-/** Deletes an action's folder (`purge`). Only ever inside `scheduled_tasks/`. */
+/** Deletes an action's folder (`purge`). Only ever inside `scheduled_actions/`. */
 export function removeTaskFolder(home: string, id: string): void {
   const root = baseDir(home);
   const dir = path.resolve(root, id);
