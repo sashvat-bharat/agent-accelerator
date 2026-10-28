@@ -185,8 +185,9 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
     expect(sentBody.prompt_cache_key).toBeUndefined();
     expect(sentBody.session_id).toBe("s-or");
     expect(sentHeaders["Authorization"]).toBe("Bearer k");
-    expect(sentHeaders["HTTP-Referer"]).toBe("https://sashvat.com");
-    expect(sentHeaders["X-Title"]).toBe("Agent Accelerator");
+    // Attribution is opt-in: nothing is credited to a third-party app by default.
+    expect(sentHeaders["HTTP-Referer"]).toBeUndefined();
+    expect(sentHeaders["X-Title"]).toBeUndefined();
   });
 
   it("sends messages-array history with assistant tool calls + tool results", async () => {

@@ -136,3 +136,18 @@ export interface ToolResultRecord {
   isError?: boolean;
   durationMs?: number;
 }
+
+/**
+ * Key of the marker object that replaces tool arguments whose streamed JSON
+ * never parsed (`{ __truncated_raw: "<partial text>" }`). It is deliberately
+ * not a plausible parameter name, so a real tool with a `raw` parameter is
+ * never mistaken for a truncated call. Such calls are never executed.
+ */
+export const TRUNCATED_ARGS_KEY = "__truncated_raw";
+
+/** True when `args` is exactly the truncated-arguments marker. */
+export function isTruncatedArguments(args: unknown): boolean {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+  const keys = Object.keys(args as Record<string, unknown>);
+  return keys.length === 1 && keys[0] === TRUNCATED_ARGS_KEY && typeof (args as Record<string, unknown>)[TRUNCATED_ARGS_KEY] === "string";
+}

@@ -71,7 +71,7 @@ export interface CreateExplicitCacheOptions {
 
 /**
  * Creates an explicit cached content object using Google Gemini's cachedContents API.
- * REST: POST https://generativelanguage.googleapis.com/v1beta/cachedContents?key=...
+ * REST: POST https://generativelanguage.googleapis.com/v1beta/cachedContents (key in the `x-goog-api-key` header)
  */
 /**
  * Creates a Google Gemini cachedContents resource through the REST API.
@@ -125,11 +125,13 @@ export async function createExplicitCache(
     (payload as any).tool_config = options.toolConfig;
   }
 
-  const url = `${baseUrl}/cachedContents?key=${apiKey}`;
+  // The key travels in a header, never in the URL (URLs end up in proxy and access logs).
+  const url = `${baseUrl}/cachedContents`;
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
     },
     body: JSON.stringify(payload),
   });
@@ -152,8 +154,15 @@ export async function createExplicitCache(
 /** Header-name deny-list (case-insensitive substring match). */
 const REDACT_HEADER_SUBSTRINGS = ["key", "token", "secret", "cookie", "authorization"];
 
-/** Secret-looking value prefixes. */
-const REDACT_VALUE_PREFIXES = ["sk-", "AIza", "gsk-", "xox-"];
+/**
+ * Credential-looking values. Anchored on a non-alphanumeric boundary so plain
+ * words that merely contain "sk-" (e.g. `Task-Manager`, `Disk-Cache`) are NOT
+ * redacted, while `sk-…`, `gsk_…`, `xoxb-…` and `AIza…` tokens are.
+ */
+const SENSITIVE_VALUE_PATTERNS: RegExp[] = [
+  /(^|[^A-Za-z0-9])(sk|gsk|xox[a-z]?)[-_][A-Za-z0-9_-]{8,}/,
+  /(^|[^A-Za-z0-9])AIza[A-Za-z0-9_-]{10,}/,
+];
 
 function headerNameIsSensitive(name: string): boolean {
   const lower = String(name ?? "").toLowerCase();
@@ -163,7 +172,7 @@ function headerNameIsSensitive(name: string): boolean {
 function valueLooksSensitive(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const v = value.trim();
-  if (REDACT_VALUE_PREFIXES.some((p) => v.includes(p))) return true;
+  if (SENSITIVE_VALUE_PATTERNS.some((re) => re.test(v))) return true;
   // Bearer-style long tokens: "Bearer <20+ chars>"
   if (/^bearer\s+\S{20,}/i.test(v)) return true;
   return false;

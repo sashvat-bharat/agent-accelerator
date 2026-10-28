@@ -11,7 +11,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   });
 
   test("generate() captures extra_content.google.thought_signature", async () => {
-    const provider = new OpenAICompatibleChatProvider("compat");
+    const provider = new OpenAICompatibleChatProvider("compat", { baseUrl: "https://compat.example/v1" });
     (globalThis as any).fetch = async () => {
       return new Response(
         JSON.stringify({
@@ -49,7 +49,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   });
 
   test("buildPayload replays signature on Turn 2 (prevents 400)", async () => {
-    const provider = new OpenAICompatibleChatProvider("compat");
+    const provider = new OpenAICompatibleChatProvider("compat", { baseUrl: "https://compat.example/v1" });
     let replayedBody: any = null;
     (globalThis as any).fetch = async (_url: string, init: any) => {
       replayedBody = JSON.parse(init.body as string);
@@ -97,7 +97,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   });
 
   test("stream() captures signature from delta.tool_calls", async () => {
-    const provider = new OpenAICompatibleChatProvider("compat");
+    const provider = new OpenAICompatibleChatProvider("compat", { baseUrl: "https://compat.example/v1" });
     const chunks = [
       `data: {"id":"c1","choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"spawn_subagents","arguments":"{\\"tasks\\":[]}"},"extra_content":{"google":{"thought_signature":"${SIG}"}}}]}}]}\n\n`,
       `data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n`,
@@ -126,7 +126,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   });
 
   test("no signature → no extra_content (plain OpenAI unaffected)", async () => {
-    const provider = new OpenAICompatibleChatProvider("compat");
+    const provider = new OpenAICompatibleChatProvider("compat", { baseUrl: "https://compat.example/v1" });
     let body: any = null;
     (globalThis as any).fetch = async (_u: string, init: any) => {
       body = JSON.parse(init.body as string);

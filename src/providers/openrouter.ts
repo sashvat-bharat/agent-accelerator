@@ -57,6 +57,10 @@ import {
   timeoutFor,
   hasAuthHeader,
   clampToolCallId,
+  openStreamResponse,
+  retryOptionsFrom,
+  headersToRecord,
+  parseRetryAfterMs,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -67,7 +71,9 @@ import {
   mapToolChoiceToOpenRouterChat,
   noteProviderTurn,
   parseStreamedToolArguments,
+  selectRawArguments,
   mapOutputToOpenRouterChat,
+  mapGenerationParamsToChat,
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
   emitProviderWarning,
@@ -622,6 +628,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;
+    // Documented Chat Completions generation controls (only those the caller set).
+    Object.assign(body, mapGenerationParamsToChat(options));
     // Structured outputs: Chat Completions `response_format{type:json_schema,json_schema}`.
     // Skipped when emulated (unsupported model): instruction already in messages.
     if (outputSpec && !outputEmulated) {
@@ -635,9 +643,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     // PDF ingestion is a documented plugin, not a message shape: enable it
     // only when file parts are present (never by default).
     if (hasFiles) body.plugins = [{ id: "file-parser" }];
-    // No temperature/top_p/max_tokens/stop/user/seed knobs
-    // (no canonical options exist; omitting also keeps provider cache keys
-    // stable). `response_format` above is the sole structured-output exception.
     // No store/previous_response_id/conversation: they do not exist
     // on this endpoint.
     // Session affinity: top-level `session_id` is the documented sticky-routing
@@ -682,7 +687,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
     try {
-      const res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, effective));
+      const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
       const text = await res.text();
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => {
@@ -698,7 +703,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     status: number,
     url: string,
     bodyText: string,
-    modelId: string
+    modelId: string,
+    headers?: Record<string, string>
   ): void {
     if (status >= 200 && status < 300) return;
     const { message, code, errorType, raw } = readErrorPayload(bodyText);
@@ -716,6 +722,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
     if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
     if (raw) (err as Record<string, unknown>)["raw"] = raw;
+    const retryAfterMs = parseRetryAfterMs(headers);
+    if (retryAfterMs !== undefined) (err as Record<string, unknown>)["retryAfterMs"] = retryAfterMs;
     throw toConciseProviderError(err, "openrouter", modelId);
   }
 
@@ -762,7 +770,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
 
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, sessionId, options?.signal);
-      this.throwIfError(res.status, url, res.text, clean);
+      this.throwIfError(res.status, url, res.text, clean, res.headers);
       let response: ChatResponse;
       try {
         response = JSON.parse(res.text) as ChatResponse;
@@ -790,8 +798,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
 
     try {
       return await withRetries(doCall, {
-        maxRetries: options?.maxRetries,
-        maxRetryDelayMs: options?.maxRetryDelayMs,
+        ...retryOptionsFrom(options),
         signal: options?.signal,
         label: { providerId: "openrouter", modelId: clean },
       });
@@ -859,25 +866,30 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         };
 
         const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
-        const streamTimeoutTimer =
-          streamTimeoutMs && streamTimeoutMs > 0
-            ? setTimeout(() => {
-                try {
-                  linked.abort();
-                } catch {}
-              }, streamTimeoutMs)
-            : undefined;
-        let res: Response;
-        try {
-          res = await fetch(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
-        } finally {
-          if (streamTimeoutTimer) clearTimeout(streamTimeoutTimer);
-        }
-        if (!res.ok || !res.body) {
-          const text = !res.ok ? await res.text().catch(() => "") : "";
-          if (!res.ok) this.throwIfError(res.status, url, text, clean);
-          throw toConciseProviderError(new Error("OpenRouter streaming response had no body"), "openrouter", clean);
-        }
+        // Transient failures (429/5xx/network) are retried here, before the
+        // first byte; once the stream is live it is never retried.
+        const res = await openStreamResponse({
+          fetchOnce: async () => {
+            const timer =
+              streamTimeoutMs && streamTimeoutMs > 0
+                ? setTimeout(() => {
+                    try {
+                      linked.abort();
+                    } catch {}
+                  }, streamTimeoutMs)
+                : undefined;
+            try {
+              return await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          },
+          onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
+          noBodyError: () => toConciseProviderError(new Error("OpenRouter streaming response had no body"), "openrouter", clean),
+          retry: retryOptionsFrom(options),
+          signal: linked.signal,
+          label: { providerId: "openrouter", modelId: clean },
+        });
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -886,7 +898,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         const parser = new SSEParser();
-        const reader = res.body.getReader();
+        const reader = res.body!.getReader(); // openStreamResponse guarantees a body
         const decoder = new TextDecoder();
         let text = "";
         let thinking = "";
@@ -1065,7 +1077,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             id: c.id && !c.id.includes("|") && c.id.length <= 40 ? c.id : clampToolCallId(c.id || newToolCallId()),
             name: c.name,
             arguments: args,
-            rawArguments: c.startArgs + c.deltaArgs,
+            rawArguments: selectRawArguments(c.startArgs, c.deltaArgs),
           };
           toolCalls.push(record);
           eventStream.push({ type: "tool_call_complete", toolCall: record });
@@ -1126,8 +1138,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         const isAbort =
           linked.signal.aborted ||
           eventStream.isCancelled() ||
-          (raw as { name?: string }).name === "AbortError" ||
-          /abort|cancell?ed/i.test(String((raw as { message?: string }).message ?? raw));
+          (raw as { name?: string }).name === "AbortError";
         eventStream.fail(
           isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw
         );

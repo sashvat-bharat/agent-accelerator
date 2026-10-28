@@ -8,26 +8,25 @@ import type { ContentPart } from "../types/message.ts";
 import { ConfigError } from "../types/errors.ts";
 
 /**
- * Creates or formats a unique session ID for prompt caching affinity (clamped to 64 chars like agent-accel)
- */
-/**
- * Creates a unique, provider-safe session ID for cache affinity.
+ * Creates a unique, provider-safe session ID for cache affinity: a bare random
+ * UUID by default, or `${prefix}-<uuid>` when a prefix is given (clamped to 64 chars).
  *
- * @example `const sessionId = createSessionId("checkout");`
+ * @example `const sessionId = createSessionId();`
  */
-export function createSessionId(prefix = "accel"): string {
+export function createSessionId(prefix?: string): string {
+  const head = prefix ? `${prefix}-` : "";
   let id: string;
   try {
     const webCrypto =
       (globalThis as any)?.crypto ?? (typeof crypto !== "undefined" ? crypto : undefined);
     if (webCrypto && typeof webCrypto.randomUUID === "function") {
-      id = `${prefix}-${webCrypto.randomUUID()}`;
+      id = `${head}${webCrypto.randomUUID()}`;
     } else {
       throw new Error("no randomUUID");
     }
   } catch {
     // Fallback — still clamp
-    id = `${prefix}-${Math.random().toString(36).slice(2, 11)}-${Date.now().toString(36)}`;
+    id = `${head}${Math.random().toString(36).slice(2, 11)}-${Date.now().toString(36)}`;
   }
   return clampCacheKey(id) || id;
 }

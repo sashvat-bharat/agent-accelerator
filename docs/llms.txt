@@ -1,0 +1,12 @@
+# Agent Accelerator
+
+> Thin, typed TypeScript SDK (Bun, ships TypeScript source): one `Agent` class over Google Gemini, OpenAI, OpenRouter and any OpenAI-compatible endpoint. Tools, streaming, sub-agents, scheduled actions, mid-session steer/queue/interrupt, durable sessions, structured output, multimodal input, prompt caching, budgets/retries, telemetry bus, safe file/URL handling. Pre-1.0: pin a version. Import everything from "agent-accelerator". Paths are relative to docs/.
+
+- [For AI agents](for-ai-agents.md): decision table, templates, hard rules, what does NOT exist, error-to-fix lookup
+- [Getting started](getting-started.md): install, keys, first agent, concepts
+- [Agents and models](guides/agents-and-models.md): Agent, run/ask/stream, sessions in memory, model routing, providers, thinking, caching, structured output
+- [Tools and streaming](guides/tools-and-streaming.md): tool(), execution rules, toolChoice, streaming, events, steer/queue/interrupt
+- [Multi-agent and scheduling](guides/multi-agent.md): fixed and dynamic sub-agents, tracking, scheduled actions (DD:HH:MM)
+- [Data and media](guides/data-and-media.md): persistence/resume, images/audio/video/files, documents, usage and cost, model catalog
+- [Safety and operations](guides/safety-and-ops.md): limits, budget, retry, onFailure, errors, telemetry, security, known limitations
+- [Reference](reference.md): all AgentConfig keys, run options, response fields, stream events, telemetry codes, errors, env vars

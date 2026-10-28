@@ -4,7 +4,7 @@
 [![GitHub](https://img.shields.io/badge/GitHub-sashvat--bharat%2Fagent--accelerator-blue?logo=github)](https://github.com/sashvat-bharat/agent-accelerator)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Stability notice:** Agent Accelerator is pre-1.0 and under active development. Public APIs, provider transports, and configuration options may still change in breaking ways between releases. For production use, please pin your dependency to an exact version.
+> **Stability notice:** Pre-1.0 and under active development. Public APIs, provider transports and configuration options may change in breaking ways between releases. Pin an exact version for production.
 
 A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
 
@@ -71,9 +71,7 @@ SUB_AGENT_MODEL="google/gemini-3.5-flash-lite"
 # OLLAMA_BASE_URL="http://localhost:11434/v1"
 ```
 
-`MODEL` and `SUB_AGENT_MODEL` are used when `model` or the dynamic worker model are omitted.
-
-Explicit configuration always takes precedence over environment variables.
+`MODEL` and `SUB_AGENT_MODEL` are fallbacks, used only when `model` or the dynamic worker model are omitted. Explicit configuration always takes precedence over environment variables.
 
 ---
 
@@ -95,9 +93,7 @@ console.log(res.usage); // input / output / cached / thinking / cost
 console.log(res.raw.request.headers); // wire audit
 ```
 
-Use `instructions` for the system prompt.
-
-Keep `instructions` stable across turns to improve prefix-cache reuse.
+`instructions` is the system prompt. Keep it stable across turns to improve prefix-cache reuse.
 
 ---
 
@@ -105,7 +101,7 @@ Keep `instructions` stable across turns to improve prefix-cache reuse.
 
 `new Agent(config: AgentConfig)` is the main entry point.
 
-An `Agent` holds :
+An `Agent` holds:
 
 * `instructions`
 * `tools`
@@ -124,9 +120,9 @@ An `Agent` holds :
 | `instructions`    | `string`                                             | System prompt. Keep it stable; place per-turn additions in `additionalContext`.                                                                            |
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
-| `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Overridden by `dynamicSubagents.model`. Falls back to `SUB_AGENT_MODEL`. |
-| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout? }`. See [Dynamic delegation](#dynamic-delegation). |
-| `thinkingLevel`   | `ThinkingLevel`                                      | `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`. Validated against the model catalog before a request.                                      |
+| `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Falls back to `SUB_AGENT_MODEL`. |
+| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }`. See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
+| `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
 | `bypassInputFileModality` | `boolean`                                      | When `true`, `file` parts are converted client-side to Markdown for models lacking native support. Capable models still receive files natively. Defaults to `false`. |
@@ -136,7 +132,8 @@ An `Agent` holds :
 | `apiKey`          | `string`                                             | Overrides environment-based API-key lookup for this agent.                                                                                                 |
 | `baseUrl`         | `string`                                             | Overrides the default endpoint for this agent.                                                                                                             |
 | `stateless`       | `boolean`                                            | When `true`, history is cleared before and after each `run`. Useful for one-shot evaluators. Defaults to `false`.                                          |
-| `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions: rewrites the session file after every step (user/assistant/tool/sub-agent). `{ dir }` uses `sessions/<sessionId>/session.json`, `{ file }` a single `.session.json`. Writes are atomic and never fail a turn. |
+| `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions: rewrites the session file after every step (user/assistant/tool/sub-agent). `{ dir }` uses `sessions/<sessionId>/session.json`, `{ file }` a single `.session.json`, `{}` uses `<home>/sessions`. Writes are atomic and never fail a turn. |
+| `home`            | `string`                                             | Folder for everything the SDK writes to disk (`sessions/`, `scheduled_actions/`, `telemetry/`). Defaults to `setHome(dir)`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory. An explicit `persist.dir` / `persist.file` still wins.        |
 
 When `dynamicSubagents.enabled` is set without a resolvable worker model, construction throws `SubAgentModelError`.
 
@@ -144,7 +141,7 @@ When `dynamicSubagents.enabled` is set without a resolvable worker model, constr
 
 ```ts
 await agent.run(prompt, opts?) // non-streaming, or streaming when opts.stream is true
-agent.ask(prompt, optsOrBool?) // string deltas when streaming, otherwise same as run
+agent.ask(prompt, optsOrBool?) // deprecated (use run): string deltas when streaming, otherwise same as run
 agent.stream(prompt, opts?) // AssistantMessageEventStream
 agent.reset() // clears messages + signatures, keeps config
 agent.exportSession(telemetry?) // storable snapshot for saveSessionFile
@@ -167,7 +164,7 @@ Use `ContentPart[]` when sending images, audio, or video alongside text.
 | `onDelta(delta, event)`         | Called for each text chunk. Use to render answers live.                                                                                         |
 | `onThinkingDelta(delta, event)` | Called for each reasoning chunk. Use to render reasoning separately.                                                                            |
 | `onEvent(event)`                | Called for every event: `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `subagent_delta`, `usage`, `done`, and `error`. |
-| `wrapThinking`                  | Wraps reasoning as `<think>\n...\n</think>\n\n`, allowing UIs to render it without maintaining separate state.                                  |
+| `wrapThinking`                  | Wraps reasoning as `<think>\n...\n</think>\n`, allowing UIs to render it without maintaining separate state.                                  |
 | `onTurn(turn)`                  | Called after every model/tool turn with `{ turns, text?, thinking?, toolCalls?, toolResults? }`. Drives sub-agent step logs and persistence.   |
 | `additionalContext`             | Added only to the current user turn. Keeps the system prompt stable for better caching.                                                         |
 | `sessionId`                     | Per-run session override.                                                                                                                       |
@@ -175,6 +172,8 @@ Use `ContentPart[]` when sending images, audio, or video alongside text.
 | `signal`                        | `AbortSignal` used to cancel generation, tools, and subagents.                                                                                  |
 
 ### Streaming
+
+`run(prompt, { stream: true })` is the compat form; `agent.stream()` (below) is canonical.
 
 ```ts
 const res = await agent.run("Design an append-only log", {
@@ -219,7 +218,7 @@ stream.off("text_delta", handler);
 
 ## SubAgent
 
-`SubAgent extends Agent` and is designed for fixed worker roles.
+`SubAgent extends Agent` for fixed worker roles. It is a deprecated compat alias: prefer a plain `Agent` exposed via `subagents: [...]`, `agentToTool()` or `buildAgentTools()`.
 
 ```ts
 import { Agent, SubAgent } from "agent-accelerator";
@@ -260,8 +259,7 @@ Each subagent is automatically registered as an internal tool on the parent that
 
 **Dynamic delegation**
 
-`subagents` lists pre-defined workers (each becomes a callable tool). For
-LLM-spawned workers, configure `dynamicSubagents`:
+For LLM-spawned workers, configure `dynamicSubagents`:
 
 ```ts
 const agent = new Agent({
@@ -314,6 +312,69 @@ console.log(res.subagents.map((s) => s.name));
 * `DynamicSubagentTask` — `{ name, role?, instructions, task, tools?, timeoutMs? }`, the shape produced for dynamic delegation. No `model` — workers run on the developer-configured model.
 
 ---
+## Scheduled actions
+
+A scheduled action is a dynamic sub-agent that runs **later** (once or on repeat), on its own, and writes its answer to a file instead of replying in the chat: a research brief every day at 7:00 AM, a health report every Monday. It is off by default: without the flag no tool, clock or timer exists.
+
+```ts
+const agent = new Agent({
+  name: "Main Agent",
+  model: "google/gemini-3.8-flash",
+  dynamicSubagents: {
+    model: "google/gemini-3.5-flash-lite", // worker model (required)
+    tools: { get_weather, recent_news }, // worker tool pool
+    allowScheduledActions: true, // default false
+  },
+});
+```
+
+The Main Agent then gets two tools, fixed by config so the prompt cache stays stable: `scheduled_actions` (one tool, `command` = `create | list | get | update | kill | run_now | skip`) and `get_datetime` (the machine's local date and time, also exported as `getDatetimeTool`). The tool description is exactly [`src/scheduler/scheduled-actions.md`](src/scheduler/scheduled-actions.md) (the worker pool names are filled in), so you can read what the model is told.
+
+The same code is available to your program:
+
+```ts
+import { createScheduledAction, telemetryBus } from "agent-accelerator";
+
+createScheduledAction(agent, {
+  instructions: "You write a short, sourced AI research brief.",
+  task: "Summarize the most important AI news of the last day in 5 bullets.",
+  tools: ["recent_news"], // names from the worker pool
+  scheduled_action: {
+    name: "Daily AI Research Brief",
+    id: "daily-ai-brief", // lowercase kebab-case; the SDK appends 6 chars: daily-ai-brief-d64aj2
+    timeToDeliver: "01:07:00", // "DD:HH:MM" - DD days from today (01 = tomorrow), 12-hour clock
+    meridiem: "AM",
+    startCookingInAdvance: "00:00:30", // optional, a "DD:HH:MM" duration (default 10 minutes)
+    repeatEvery: "01:00:00", // optional; omit to run once
+    retries: 1, // optional; used only while time remains before delivery
+  },
+});
+
+telemetryBus.onEvent((e) => {
+  if (e.code === "scheduled_action.delivered") console.log(`${e.data.name} is ready: ${e.data.file}`);
+});
+```
+
+| Function | What it does |
+| --- | --- |
+| `createScheduledAction(agent, input)` | Schedule a new action. Throws one `ValidationError` listing every problem. |
+| `listScheduledActions({ home? })` | Every action with its metadata, state (`waiting`, `cooking`, `missed`, `done`), `lastRun` and a `running` flag. |
+| `updateScheduledAction(id, patch, { home? })` | Change instructions, task, tools, timeout, role or any schedule field. Schedule changes are refused while it is cooking. |
+| `runScheduledAction(id, { home? })` | Run now, outside the schedule (also resolves a missed run). Needs the creating `Agent` alive. |
+| `skipScheduledAction(id, { home? })` | Ignore a missed run and wait for the next scheduled time. |
+| `killScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
+
+**How it behaves**
+
+* **One local clock.** A single timer per home folder ticks once a second against the machine's own time and only asks what is overdue, so drift or sleep cannot skip a run. There is no timezone or daylight-saving logic. The timer is `unref`'d and runs only while something is pending, so actions run only while your process is alive.
+* **The creating `Agent` runs it.** The task stores the Agent's `name`; each run goes to the live Agent with that name (latest wins), using its worker model and tool pool. The scheduler holds only a weak reference, so keep your `Agent` referenced; if none is alive, the run counts as missed.
+* **Each run is fresh.** A new stateless dynamic sub-agent built from the saved fields, on your fixed worker model and tool pool, never touching the Main Agent's session. It inherits the parent's limits, retry policy, `fileAccess` and `captureRaw`.
+* **Files are the truth.** Everything lives in `<home>/scheduled_actions/`: `tasks.json` (every action), `deliveries.json` (saved results waiting for their delivery time) and one folder per action with one `.md` file per run (a small header, then the result). The file is re-read and validated before each run, so editing `instructions` or `task` there takes effect on the next run. API keys, the model and tool code are never stored. Don't put secrets in `instructions`.
+* **Ready, then delivered.** A finished run is saved immediately (`scheduled_action.ready`); at `timeToDeliver` the SDK emits `scheduled_action.delivered` on `telemetryBus` with `{ id, name, status, file, readyAt, deliverAt, late }`. There is no notification system: what happens next is your code. Other events: `.created`, `.updated`, `.started`, `.failed`, `.missed`, `.skipped`, `.killed`, plus the warnings `.invalid` and `.store_corrupt`.
+* **Overlap and failure.** A run still cooking when the next one is due is skipped, never stacked. A failed run still writes a file saying why and is delivered like any result (`status: "failed"`).
+* **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once and runs nothing by itself: pick `run_now` or `skip`. A result saved before the process exited is simply delivered (marked `late`) on the first tick after start.
+
+---
 ## Tools
 
 ```ts
@@ -338,14 +399,37 @@ const agent = new Agent({
 
 ### Tool Helpers
 
-* `tool({ name?, description, input?, parameters?, strict?, timeoutMs?, maxTries?, maxConcurrency?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return arbitrary values; results are converted safely for model context. `timeoutMs` defaults to `0` (no time limit) and is a best-effort event-loop deadline; `ctx.signal` enables cooperative cancellation. `maxTries` accepts a number or numeric string; a positive value is the total attempt limit, while `0`/omitted falls back to 3 attempts. `maxConcurrency` limits simultaneous calls for that tool (default pool: 8).
+* `tool({ name?, description, input?, parameters?, strict?, timeoutMs?, maxTries?, maxConcurrency?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return arbitrary values; results are converted safely for model context. `timeoutMs` defaults to `0` (no time limit) and is a best-effort event-loop deadline; `ctx.signal` enables cooperative cancellation. `maxAttempts` is the canonical name for `maxTries` (number or numeric string). A positive value is the total attempt limit; `0`/omitted means 3 attempts for `idempotent` tools and 1 for all others. `maxConcurrency` limits simultaneous calls for that tool (default pool: 8).
 * `toStandardToolDeclarations(record | array)` — converts tools to `{ name, description, parameters }` for providers.
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
 * `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls validate Zod input, use bounded parallelism, enforce per-tool timeouts, retry transient failures, recover namespace/camel-case tool-name aliases, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
-* `convert_document_to_markdown` — built-in tool that converts document files (PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV, local path or URL) to Markdown for models without native document parsing. Requires the optional `@firecrawl/anydoc` peer.
+* `convert_document_to_markdown` — built-in, model-callable version of `convertDocumentToMarkdown` (PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV, local path or URL) for models without native document parsing. Returns a `<Document>` envelope, is auto-registered with `bypassInputFileModality: true`, and requires the optional `@firecrawl/anydoc` peer.
 
-The agent loop also blocks an identical tool name and argument set when the model requests it in the immediately following turn. The synthetic error is returned to the model so it can reuse the prior result or change its arguments.
+The agent loop answers the 3rd consecutive identical call (same name and arguments) with a `repeat_blocked` error, so the model can reuse the prior result or change its arguments. Tools marked `repeatable: true`, or `idempotent: true` unless `repeatable` is set, are exempt.
+
+### Tool Failures and Tracing
+
+When a tool throws, the model gets the error line plus a JSON block: error `name`/`code`/`status`, `attempts`, `timedOut`, the last progress the tool reported, and a hint not to repeat finished work. Report progress from inside a tool with `ctx.emit({ type: "progress", ... })`, or throw `new ToolError(msg, { context: { progress } })`.
+
+```ts
+execute: async ({ recipients }, ctx) => {
+  const sent: string[] = [];
+  for (const to of recipients) {
+    await sendMail(to);                       // throws on the 5th
+    sent.push(to);
+    ctx.emit?.({ type: "progress", sent: [...sent] });
+  }
+}
+// model sees: Error executing send_mails: SMTP 550 ...
+//             {"error":{...},"attempts":1,"progress":{"sent":["a","b","c","d"]},"hint":"..."}
+```
+
+Every call also emits `tool.*` events on `telemetryBus` (nothing is written unless you attach a sink): `call_started`, `attempt_started`, `progress`, `attempt_failed`, `retry_scheduled`, `call_succeeded`, `call_failed`, `call_timed_out`, `call_aborted`, `call_blocked` (schema, truncated args, unknown tool, repeat guard) and `call_interrupted` (repaired after a crash). Each carries `toolCallId`, `toolName`, `agentName`, `sessionId`; failures add the full error (stack, cause chain; only URL credentials redacted). Delivery is synchronous, so a sink that appends to disk survives a crash: a `call_started` with no ending event was in flight, and the last `progress` shows how far it got.
+
+```ts
+telemetryBus.onEvent((e) => e.code.startsWith("tool.") && appendFileSync("tools.ndjson", JSON.stringify(e) + "\n"));
+```
 
 ### Tool Timing and Deadlines
 
@@ -434,9 +518,7 @@ Any other provider prefix is treated as an OpenAI-compatible custom provider.
 * `"groq/<id>"`, `"ollama/<id>"`, etc. → custom providers using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`. The API key is optional for local endpoints.
 * A bare `"some-model"` uses `OPENAI_BASE_URL` when configured. Otherwise, catalog lookup is attempted, followed by an `openrouter` fallback.
 
-Model resolution never silently selects a default model.
-
-An empty model throws.
+Model resolution never silently selects a default model: an empty model throws.
 
 An unknown prefix with no catalog match still routes to a custom provider, allowing private model IDs and endpoints.
 
@@ -505,7 +587,7 @@ Google-specific handling includes:
 
 * Isolating `thoughtSignature` per part for prefix stability.
 * Converting JSON Schema to OpenAPI 3.0 through `stripSchemaForGoogle`.
-* Implicit/automatic caching only — explicit retention and `cachedContentId` are warned about and dropped (the Interactions API defines no explicit cache primitives).
+* Implicit/automatic caching only; explicit retention and `cachedContentId` are dropped (see [Cache](#cache)).
 
 Helpers:
 
@@ -533,7 +615,7 @@ It also:
 * passes `service_tier` (`flex` | `priority`);
 * pins cache affinity with `prompt_cache_key` (clamped to 64 chars);
 * rejects `video` parts up front with a one-line error (the Responses wire carries text/image/file only);
-* never sends `temperature`, token caps, or background/conversation fields.
+* sends `max_output_tokens` when set; never sends `temperature`, `top_p`, or background/conversation fields.
 
 ### OpenRouter
 
@@ -543,11 +625,7 @@ Every turn is stateless: the full `messages[]` array is sent explicitly — no c
 
 Session affinity is a top-level body `session_id` plus the `x-session-id` header fallback (body takes precedence per OpenRouter docs).
 
-Thinking levels map to `reasoning.effort` verbatim:
-
-```text
-none | minimal | low | medium | high | xhigh | max   (dynamic omits — server default)
-```
+Thinking levels map to `reasoning.effort` verbatim, the same as OpenAI (`dynamic` omits, server default).
 
 It also:
 
@@ -557,6 +635,13 @@ It also:
 * reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present.
 
 `serviceTier` values other than `flex` / `priority` are omitted (standard routing).
+
+OpenRouter app attribution (`HTTP-Referer` / `X-Title`) is **opt-in**; nothing is sent by default:
+
+```ts
+import { setAttribution } from "agent-accelerator";
+setAttribution({ referer: "https://my.app", title: "My App" });
+```
 
 ### Custom
 
@@ -578,7 +663,7 @@ It also:
 Provider wire types are exported for inspecting raw requests and responses through:
 
 ```ts
-res.raw.request.body
+res.raw.request.body   // full body only with `captureRaw: true`
 res.raw.response.body
 ```
 
@@ -591,7 +676,7 @@ Examples include:
 ---
 ## Thinking
 
-Thinking uses a single `thinkingLevel` flag:
+Thinking is set with the canonical `thinking` option (`thinkingLevel` is a legacy alias that still works). The level type is:
 
 ```ts
 ThinkingLevel =
@@ -611,9 +696,7 @@ ThinkingLevel =
 * `dynamic` — allows the model to decide.
 * `minimal`, `low`, `medium`, `high`, `xhigh`, `max` — request increasing levels of reasoning where supported.
 
-Thinking can be configured on the `Agent` or through `ModelProvider.*(..., { thinkingLevel })`.
-
-The per-run `thinkingLevel` option can override the agent default for one request.
+Set it on the `Agent`, through `ModelProvider.*(..., { thinkingLevel })`, or per run: the per-run `thinking` option overrides the agent default for one request.
 
 Internally, thinking is normalized to:
 
@@ -784,11 +867,7 @@ Use:
 * `usage` for interim usage counts.
 * `done` for final usage and completion information.
 
-Breaking out of `for await` auto-cancels. Cancellation joins your
-`AbortSignal` and stream cancellation into one linked controller, so
-`controller.abort()` and `stream.cancel()` both stop the HTTP request.
-Abort rejects with `AbortError` (never retried) and never resolves partial
-results. `agent.run(prompt, { stream: true, signal })` exposes the same
+Breaking out of `for await` cancels the stream. Your `AbortSignal` and stream cancellation share one linked controller, so `controller.abort()` and `stream.cancel()` both stop the HTTP request. Abort rejects with `AbortError` (never retried) and never resolves partial results. `agent.run(prompt, { stream: true, signal })` exposes the same
 `cancel` handle.
 
 `SSEParser` provides:
@@ -858,7 +937,7 @@ SubAgentExecutionMetadata {
 }
 ```
 
-`finishReason` is `"max_turns"` when a finite `maxTurns` limit stopped the run with tool calls still pending (plus a console warning naming the dropped tools).
+`finishReason` is `"max_turns"` when a finite `maxTurns` limit stopped the run with tool calls still pending (with an `agent.max_turns_truncated` warning on `telemetryBus` naming the dropped tools).
 
 ### SubAgentStep
 
@@ -920,7 +999,15 @@ ProviderRawData {
 }
 ```
 
-Sensitive keys are redacted.
+Credential headers are always redacted (`Authorization`, `x-goog-api-key`, anything named `*key*` / `*token*` / `*secret*` / `cookie`, and credential-looking values).
+
+**`captureRaw`** controls how much of the wire exchange `res.raw` keeps:
+
+| Value | `request.body` / `response.body` |
+| :-- | :-- |
+| `"redacted"` (default) | content-free summary (`{ redacted: true, bytes, model, items, tools }`): prompts, files and model output never reach your logs via `toJSON()` |
+| `true` | full bodies (for debugging; handle with care) |
+| `false` | `null`; only URL, method and HTTP status are kept |
 
 ---
 ## Errors
@@ -951,10 +1038,11 @@ const res = await agent.run([...]).catch(fail);
 ---
 ## Model Catalog & Dynamic 12-Hour TTL Sync
 
-Agent Accelerator features an adaptive, dynamically synchronized model catalog powered by [models.dev](https://models.dev). To avoid shipping a bloated 4.4 MB static JSON file with production builds, the SDK employs a high-performance **12-hour TTL local caching architecture**:
+The model catalog is synced from [models.dev](https://models.dev) into a local cache, so the multi-megabyte snapshot never ships in the package. The cache has a **12-hour TTL**:
 
-- **Automated 12-Hour Cache Validation**: When `.run()`, `.ask()`, or `.stream()` executes, the runtime checks `src/data/models.dev.json`. If the cache timestamp is within 12 hours, it reads from disk with zero network delay. When the TTL expires, it transparently synchronizes with `https://models.dev/api.json`.
-- **Git & Package Safety**: The dynamic cache file (`src/data/models.dev.json`) is gitignored and excluded from production packages.
+- **Automated 12-hour validation**: `.run()`, `.ask()` and `.stream()` check `<home>/catalog/models.dev.json`. Within 12 hours it reads from disk with no network delay. After that the expired catalog is served immediately and refreshed from `https://models.dev/api.json` in the background (8 s timeout). Only a cold start, with nothing loaded yet, waits for the download. A failed refresh pauses automatic refreshes for 10 minutes.
+- **Git & Package Safety**: The cache lives in the single Agent Accelerator home (`<home>/catalog/models.dev.json`, `.agent-accel/` by default and gitignored), never inside the package or scattered in the project.
+- **Environment**: `setHome(dir)` / `AGENT_ACCEL_HOME` move the whole home; `AGENT_CACHE_DIR` moves only the cache (for read-only or serverless filesystems). `AGENT_CATALOG_REFRESH=off` disables automatic refreshes; `bun run update-models` and `refreshModelCatalog()` still work.
 
 ### Developer Catalog Controls
 
@@ -995,7 +1083,6 @@ directly, a refresh would wipe it.
 
 * `getModelFromCatalog(provider, modelId)` → `ModelSpec | undefined`, including alias and global fallback handling. Use it for context-window, pricing, and modality checks.
 * `getModelsForProvider(provider)` → returns `ModelSpec[]`.
-* `getModelThinkingInfo(provider, modelId)` → inspect permitted thinking levels.
 * `refreshModelCatalog(options?)` → programmatically sync with upstream models.dev.
 * `getCatalogStatus()` → diagnostic info on active catalog, provider count, and TTL expiry.
 
@@ -1125,7 +1212,7 @@ never in the gitignored snapshot.
 ---
 ## Utils
 
-* `createSessionId(prefix="accel")` — creates a UUID-based session ID clamped to 64 characters for affinity.
+* `createSessionId(prefix?)` — creates a random UUID session ID (`${prefix}-<uuid>` when a prefix is given), clamped to 64 characters for affinity.
 * `createTrackingId()` — system-generated 32-char TrackingID for one sub-agent worker (`NAME-{TrackingID}`).
 * `createChildSessionId(parentId, tag)` / `createFixedChildSessionId(parentId, name)` / `isSessionDescendant(child, parent)` — provider-safe (≤64 chars) child session IDs with parent-hash lineage.
 * `getEnv(key, fallback?)` — resolves an environment variable.
@@ -1133,7 +1220,6 @@ never in the gitignored snapshot.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
 * `withRetries(fn, { maxRetries?, maxRetryDelayMs?, signal?, label? })` / `isTransientError(err)` — bounded retries for transient provider failures (defaults: 2 retries, 5s cap, aborts never retried).
 * `convertDocumentToMarkdown(input, { filename?, format?, mimeType?, maxChars? })` — converts PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV to Markdown via the optional `@firecrawl/anydoc` peer. Throws `DocumentConversionError` on failure.
-* `convert_document_to_markdown` — built-in model-callable version of the above (returns a `<Document>` envelope); auto-registered with `bypassInputFileModality: true`.
 * `z` — re-exported from Zod so tools do not require a separate Zod import.
 
 ---
@@ -1172,6 +1258,16 @@ bun run examples/10-document_markdown.ts
 
 bun run examples/11-session-identity.ts
 # sub-agent TrackingIDs, live worker boxes, lineage, track(), durable sessions
+
+bun run examples/12-mid-session.ts
+# steer, queue and stream while a turn is running
+
+bun run examples/13-structured-output.ts
+# JSON Schema structured outputs on every provider
+
+bun run examples/14-scheduled-actions.ts [--quick]
+# scheduled actions walkthrough on your computer's clock: starts working ~1 minute from now,
+# delivers ~2 minutes from now (code-scheduled and model-scheduled); --quick skips the waiting
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
@@ -1186,7 +1282,7 @@ sessions/<sessionId>/session.json  (+ media/ for images, audio, video, files)
 It resumes the most recent session on next launch (legacy `.session.json`/`.session.jsonl` files still load) and prints a resume banner:
 
 ```text
-↺ Previous session loaded • accel-1a2b… (.session.json) • 12 messages • google/gemini-3.5-flash-lite • total-CH82.4% • $0.013 total
+↺ Previous session loaded • 1a2b3c4d… (.session.json) • 12 messages • google/gemini-3.5-flash-lite • total-CH82.4% • $0.013 total
 ```
 
 It also displays per-turn and session totals on one line:
@@ -1222,8 +1318,8 @@ saveSessionFile(".session.json", agent, telemetry);
 ```
 
 * `agent.exportSession(telemetry)` / `agent.importSession(saved)` round-trip messages, system prompt, model, thinking level, instructions, cache, worker model, and sub-agent traces without touching `AgentContext` internals.
-* `SessionTelemetry` accumulates `input / output / cacheRead / cacheWrite / reasoning / cost`, with clamped `turnHitRate()` / `totalHitRate()`, a dual `formatBar(res)`, and `formatSessionBanner(saved, telemetry, path)` for startup.
-* Files are pretty-printed JSON (2-space indent), written atomically (temp + rename). Cost prefers provider-reported totals and falls back to catalog pricing.
+* `SessionTelemetry` accumulates `input / output / cacheRead / cacheWrite / reasoning / cost`, with clamped `turnHitRate()` / `totalHitRate()`, a dual `formatBar(res)`, and `formatSessionBanner(saved, telemetry, path)` for startup. Cost follows the [TokenUsage](#response-usage-and-raw-data) rules.
+* Files are JSON with one line per top-level field and one line per turn (2-space indent), written atomically (temp + rename).
 * Binary media (bytes, data URLs, base64) is extracted to `media/` on save via `saveSessionDir("sessions", agent, telemetry)` → `sessions/<sessionId>/{session.json, media/*}`; remote URLs and local paths stay references. `loadSessionDir(dir)` resolves `media/…` refs back to absolute paths, and `findLatestSessionDir("sessions")` resumes the most recent session.
 * Sub-agent traces persist in a dedicated `subagents` section keyed by TrackingID (`{ trackingId, name, sessionId, parentSessionId, status, task, turns, usage, steps, text }`). Files stay lean: redundant `rawArguments` and repeated step text are dropped on save (rebuilt/kept live in memory).
 * With `persist: { dir }` or `{ file }`, the session file is rewritten after every step, so a crash loses at most the in-flight step.
@@ -1243,6 +1339,7 @@ bun run update-models # refresh model catalog cache (supports --force, --ttl=24h
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
+├── scheduler/  # Scheduled actions: clock, store, tool + its manual (scheduled-actions.md)
 ├── session/    # Session persistence + telemetry (snapshots, hit rates, .session.json store)
 ├── providers/  # native REST adapters (google/openai/openrouter/openai-compat) + registry + canonical contract
 ├── models/     # Dynamic catalog cache, parser, verified overrides
@@ -1251,12 +1348,7 @@ src/
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
 └── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, documents, retry, errors
-examples/
-├── 01-metadata.ts  02-function_calling.ts  03-multi_agent.ts
-├── 04-sub-agents.ts  05-chat.ts  06-multimodal_image.ts
-├── 07-multimodal_audio.ts  08-multimodal_video.ts
-├── 09-multimodal_document.ts  10-document_markdown.ts
-├── files/  prompts/  research-agent.ts  _shared.ts
+examples/        # live demos 01-14 (see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
 test/            # unit + mocked-provider tests mirroring src/
 ```
 

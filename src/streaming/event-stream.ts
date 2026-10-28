@@ -1,4 +1,5 @@
 import type { StreamEvent, AgentResponse } from "../types/response.ts";
+import { telemetryBus } from "../telemetry.ts";
 
 /** Listener invoked for a matching stream event type or `*`. */
 export type StreamEventListener = (event: StreamEvent) => void;
@@ -36,9 +37,10 @@ function approxEventBytes(event: StreamEvent): number {
   return n;
 }
 
-function reportStreamAnomaly(detail: unknown): void {
-  // why: telemetry hook only, never console — streams are hot paths and
-  // logging per-drop would spam and break no-console policy (Q-29/Q-41).
+function reportStreamAnomaly(detail: { type: string; [k: string]: unknown }): void {
+  // why: bus + hook only, never console — streams are hot paths and logging
+  // per-drop would spam and break no-console policy (Q-29/Q-41).
+  telemetryBus.emitWarning(detail.type, `[Agent Accelerator] stream anomaly: ${detail.type}`, detail);
   try {
     (globalThis as unknown as { __agentAccelAnomaly?: (d: unknown) => void }).__agentAccelAnomaly?.(detail);
   } catch {
@@ -256,7 +258,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     this.cancelHandlers.clear();
     const err = reason instanceof Error ? reason : null;
     const abortErr: Error =
-      err && (err.name === "AbortError" || /abort|cancel/i.test(err.message))
+      err && err.name === "AbortError"
         ? err
         : Object.assign(new Error("Stream aborted"), { name: "AbortError" });
     this.fail(abortErr);

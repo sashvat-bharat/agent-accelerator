@@ -6,6 +6,7 @@ import { normalizeMediaInput } from "./media.ts";
 import { base64ToBytes } from "./base64.ts";
 import { escapeXml } from "./serialization.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
+import { assertPathAllowed, fetchRemoteBytes, RemoteFetchError } from "./safe-io.ts";
 
 /**
  * Client-side document conversion (anydoc engine).
@@ -104,6 +105,16 @@ export interface ConvertDocumentOptions {
   maxChars?: number;
   /** Abort signal honored by the remote-fetch leg. */
   signal?: AbortSignal;
+  /**
+   * Allowed local roots for path inputs (see `AgentConfig.fileAccess`).
+   * Omitted = unrestricted (developer-supplied inputs); `[]` denies every path.
+   */
+  roots?: readonly string[];
+  /**
+   * Input is model/user-controlled: private/internal hosts are refused for
+   * remote URLs. The built-in tool always sets this.
+   */
+  untrusted?: boolean;
 }
 
 /** Normalized conversion result (pre-XML-envelope). */
@@ -296,7 +307,23 @@ export async function convertDocumentInput(
   try {
     // Remote URL leg: fetch bytes first (anydoc reads files, not URLs).
     if (typeof input === "string" && isHttpUrl(input)) {
-      const res = await fetch(input, { signal: opts.signal });
+      let res;
+      try {
+        res = await fetchRemoteBytes(input, {
+          signal: opts.signal,
+          maxBytes: MAX_DOCUMENT_FETCH_BYTES,
+          allowPrivateNetwork: !opts.untrusted,
+        });
+      } catch (err) {
+        if (err instanceof RemoteFetchError) {
+          throw new DocumentConversionError(
+            err.reason === "too_large" ? "resourceLimit" : "blocked",
+            `[Agent Accelerator] Could not download document "${input}": ${err.message}`,
+            input
+          );
+        }
+        throw err;
+      }
       if (!res.ok) {
         throw new DocumentConversionError(
           "io",
@@ -304,19 +331,12 @@ export async function convertDocumentInput(
           input
         );
       }
-      const buf = new Uint8Array(await res.arrayBuffer());
-      if (buf.byteLength > MAX_DOCUMENT_FETCH_BYTES) {
-        throw new DocumentConversionError(
-          "resourceLimit",
-          `[Agent Accelerator] Remote document "${input}" is ${(buf.byteLength / 1_000_000).toFixed(1)} MB, over the ${MAX_DOCUMENT_FETCH_BYTES / 1_000_000} MB fetch cap.`,
-          input
-        );
-      }
+      const buf = res.bytes;
       const name = filenameOpt || basenameOf(input);
       const inferred = resolveDocumentFormat({
         filename: name,
         format: opts.format,
-        mimeType: res.headers.get("content-type") || opts.mimeType,
+        mimeType: res.contentType || opts.mimeType,
       });
       let wire = canonicalizeFormat(anydoc, inferred);
       if (!wire) {
@@ -340,6 +360,17 @@ export async function convertDocumentInput(
 
     // Local path leg: the engine reads + detects from the path itself.
     if (typeof input === "string" && looksLikePath(input)) {
+      if (opts.roots) {
+        try {
+          await assertPathAllowed(input, opts.roots);
+        } catch (err) {
+          throw new DocumentConversionError(
+            "blocked",
+            `[Agent Accelerator] Could not read document "${input.slice(0, 120)}": ${err instanceof Error ? err.message : String(err)}`,
+            input
+          );
+        }
+      }
       const name = filenameOpt || basenameOf(input);
       const markdown = await anydoc.toMarkdown(input);
       const inferred = resolveDocumentFormat({ filename: name, format: opts.format });
@@ -424,7 +455,7 @@ export function modelSupportsFileInput(providerId: string, modelId: string): boo
  */
 export async function preprocessFilePartsForBypass(
   messages: Message[],
-  opts: { providerId: string; modelId: string; signal?: AbortSignal; maxChars?: number }
+  opts: { providerId: string; modelId: string; signal?: AbortSignal; maxChars?: number; roots?: readonly string[] }
 ): Promise<void> {
   if (modelSupportsFileInput(opts.providerId, opts.modelId)) return;
   for (const m of messages) {
@@ -451,6 +482,7 @@ export async function preprocessFilePartsForBypass(
           mimeType,
           maxChars: opts.maxChars,
           signal: opts.signal,
+          roots: opts.roots,
         });
         const destination =
           filename ||
@@ -466,8 +498,75 @@ export async function preprocessFilePartsForBypass(
   }
 }
 
+/** Options for {@link createConvertDocumentTool}. */
+export interface ConvertDocumentToolOptions {
+  /**
+   * Local roots the model may read from. Defaults to `[process.cwd()]`; pass
+   * `[]` to deny every local path (URLs only).
+   */
+  roots?: readonly string[];
+}
+
 /**
- * Built-in model-callable document converter. Register it and move on:
+ * Builds the model-callable document converter. The `destination` is chosen
+ * by the model, so it is always treated as untrusted: local paths must sit
+ * inside `roots`, and remote URLs may not target private/internal hosts.
+ *
+ * @example `const tool = createConvertDocumentTool({ roots: ["./docs"] });`
+ */
+export function createConvertDocumentTool(options: ConvertDocumentToolOptions = {}): ToolDefinition {
+  return tool({
+    name: "convert_document_to_markdown",
+    description:
+      "Convert a document file to Markdown text. Call this when the user provides a document file path or URL, or asks about the contents of a document. " +
+      "Supported formats: PDF (.pdf), Word (.doc, .docx, .docm), PowerPoint (.ppt, .pps, .pot, .pptx, .pptm, .ppsx, .ppsm), " +
+      "Excel (.xls, .xlsx, .xlsm, .xlsb), OpenDocument (.odt, .ods, .odp), RTF (.rtf), EPUB (.epub), CSV (.csv). " +
+      "Returns the content wrapped in <Document name destination> tags. Do not use for images, audio, or video.",
+    input: z.object({
+      destination: z
+        .string()
+        .min(1)
+        .describe("Local file path or http(s) URL of the document to convert."),
+      format: z
+        .string()
+        .optional()
+        .describe(
+          "Explicit format override, e.g. 'pdf', 'docx', 'xlsx', 'csv'. Inferred from the destination when omitted."
+        ),
+      maxChars: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum Markdown characters to return (default 100000). Excess is truncated with a marker."),
+    }),
+    timeoutMs: 60_000,
+    execute: async ({ destination, format, maxChars }, ctx) => {
+      const dest = String(destination ?? "").trim();
+      if (!dest) {
+        return "Error: convert_document_to_markdown needs a non-empty destination (local file path or http(s) URL).";
+      }
+      try {
+        const doc = await convertDocumentInput(dest, {
+          format,
+          maxChars,
+          signal: ctx?.signal,
+          untrusted: true,
+          roots: options.roots ?? [process.cwd()],
+        });
+        return buildDocumentXml(doc.name, dest, doc.markdown);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        return `Error: ${detail}`;
+      }
+    },
+  });
+}
+
+/**
+ * Built-in model-callable document converter with the default policy (local
+ * paths limited to the working directory, no private-network URLs). Use
+ * {@link createConvertDocumentTool} to choose other roots.
  *
  * @example
  * ```ts
@@ -475,43 +574,4 @@ export async function preprocessFilePartsForBypass(
  * const agent = new Agent({ model, tools: { convert_document_to_markdown } });
  * ```
  */
-export const convert_document_to_markdown: ToolDefinition = tool({
-  name: "convert_document_to_markdown",
-  description:
-    "Convert a document file to Markdown text. Call this when the user provides a document file path or URL, or asks about the contents of a document. " +
-    "Supported formats: PDF (.pdf), Word (.doc, .docx, .docm), PowerPoint (.ppt, .pps, .pot, .pptx, .pptm, .ppsx, .ppsm), " +
-    "Excel (.xls, .xlsx, .xlsm, .xlsb), OpenDocument (.odt, .ods, .odp), RTF (.rtf), EPUB (.epub), CSV (.csv). " +
-    "Returns the content wrapped in <Document name destination> tags. Do not use for images, audio, or video.",
-  input: z.object({
-    destination: z
-      .string()
-      .min(1)
-      .describe("Local file path or http(s) URL of the document to convert."),
-    format: z
-      .string()
-      .optional()
-      .describe(
-        "Explicit format override, e.g. 'pdf', 'docx', 'xlsx', 'csv'. Inferred from the destination when omitted."
-      ),
-    maxChars: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe("Maximum Markdown characters to return (default 100000). Excess is truncated with a marker."),
-  }),
-  timeoutMs: 60_000,
-  execute: async ({ destination, format, maxChars }, ctx) => {
-    const dest = String(destination ?? "").trim();
-    if (!dest) {
-      return "Error: convert_document_to_markdown needs a non-empty destination (local file path or http(s) URL).";
-    }
-    try {
-      const doc = await convertDocumentInput(dest, { format, maxChars, signal: ctx?.signal });
-      return buildDocumentXml(doc.name, dest, doc.markdown);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      return `Error: ${detail}`;
-    }
-  },
-});
+export const convert_document_to_markdown: ToolDefinition = createConvertDocumentTool();

@@ -223,3 +223,171 @@ describe("Tools & Parallel Execution", () => {
     expect(result.bytes.type).toBe("Uint8Array");
   });
 });
+
+describe("truncated-argument marker vs. a real `raw` parameter", () => {
+  it("executes a tool whose only parameter is named `raw`, and still refuses truncated streams", async () => {
+    const { executeToolCalls, tool, z, parseStreamedToolArguments } = await import("../src/index.ts");
+    const { isTruncatedToolCall } = await import("../src/tools/executor.ts");
+    let ran: unknown;
+    const run_shell = tool({
+      description: "Runs a command",
+      input: z.object({ raw: z.string() }),
+      execute: async ({ raw }) => {
+        ran = raw;
+        return "done";
+      },
+    });
+    const ok = await executeToolCalls({
+      tools: { run_shell },
+      toolCalls: [{ id: "c1", name: "run_shell", arguments: { raw: "ls -la" } }],
+    });
+    expect(ok[0]!.isError).toBe(false);
+    expect(ran).toBe("ls -la");
+
+    const truncatedArgs = parseStreamedToolArguments('{"raw": "ls -', "");
+    expect(isTruncatedToolCall({ id: "c2", name: "run_shell", arguments: truncatedArgs })).toBe(true);
+    const bad = await executeToolCalls({
+      tools: { run_shell },
+      toolCalls: [{ id: "c2", name: "run_shell", arguments: truncatedArgs }],
+    });
+    expect(bad[0]!.isError).toBe(true);
+    expect(String(bad[0]!.result)).toContain("truncated");
+    expect(ran).toBe("ls -la"); // not executed again
+  });
+});
+
+describe("tool result hygiene", () => {
+  const run = async (execute: () => unknown, extra: object = {}) => {
+    const t = tool({ description: "t", input: z.object({}), execute: execute as any, ...extra });
+    const [r] = await executeToolCalls({ tools: { t }, toolCalls: [{ id: "c", name: "t", arguments: {} }] });
+    return r!;
+  };
+
+  it("caps oversized STRUCTURED results (not just strings) with the usual marker", async () => {
+    const rows = Array.from({ length: 5000 }, (_, i) => ({ id: i, name: `row-${i}` }));
+    const r = await run(() => rows);
+    expect(r.isError).toBe(false);
+    expect(typeof r.result).toBe("string");
+    expect((r.result as string).length).toBeLessThan(20_100);
+    expect(r.result as string).toContain("[Truncated: showing 20000 of");
+  });
+
+  it("honors a per-tool maxResultChars for structured results, and leaves small objects as objects", async () => {
+    const small = await run(() => ({ ok: true, items: [1, 2, 3] }));
+    expect(small.result).toEqual({ ok: true, items: [1, 2, 3] });
+    const capped = await run(() => ({ blob: "x".repeat(500) }), { maxResultChars: 100 });
+    expect(typeof capped.result).toBe("string");
+    expect(capped.result as string).toContain("[Truncated: showing 100 of");
+  });
+
+  it("strips stacks and absolute paths from errors nested anywhere in a result", async () => {
+    const boom = new Error("failed reading /home/deploy/app/secrets.env");
+    const r = await run(() => ({ status: "partial", errors: [{ source: "db", error: boom }] }));
+    const text = JSON.stringify(r.result);
+    expect(text).not.toContain("/home/deploy");
+    expect(text).not.toContain("secrets.env");
+    expect(text).not.toContain('"stack"');
+    expect(text).toContain("[redacted-path]");
+    expect((r.result as any).errors[0].error.name).toBe("Error");
+  });
+});
+
+describe("tool-name collisions fail at construction", () => {
+  it("throws ConfigError from `new Agent` instead of failing mid-run", async () => {
+    const { Agent, ConfigError } = await import("../src/index.ts");
+    const mk = () => tool({ description: "d", input: z.object({}), execute: async () => "x" });
+    expect(() => new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", tools: { getUser: mk(), get_user: mk() } })).toThrow(ConfigError);
+    expect(() => new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", tools: { getUser: mk(), other: mk() } })).not.toThrow();
+  });
+});
+
+describe("tool failure trace and partial progress", () => {
+  const collect = async (defn: ReturnType<typeof tool>, args: Record<string, unknown> = {}) => {
+    const { telemetryBus } = await import("../src/index.ts");
+    const events: Array<{ code: string; data: any }> = [];
+    const off = telemetryBus.onEvent((e) => { if (e.code.startsWith("tool.")) events.push({ code: e.code, data: e.data }); });
+    try {
+      const [r] = await executeToolCalls({
+        tools: { t: defn },
+        toolCalls: [{ id: "c1", name: "t", arguments: args }],
+        agentName: "mailer",
+        sessionId: "s1",
+      });
+      return { r: r!, events };
+    } finally {
+      off();
+    }
+  };
+
+  it("reports what finished before the failure (4 of 5 mails) and traces every phase", async () => {
+    const sendMails = tool({
+      name: "t",
+      description: "send mails",
+      input: z.object({}),
+      execute: async (_a, ctx) => {
+        const sent: string[] = [];
+        for (const to of ["a", "b", "c", "d", "e"]) {
+          if (to === "e") throw Object.assign(new Error("SMTP 550 mailbox unavailable"), { code: "EMAIL_REJECTED", status: 550 });
+          sent.push(to);
+          ctx.emit?.({ type: "progress", sent: [...sent], remaining: ["e"] });
+        }
+      },
+    });
+    const { r, events } = await collect(sendMails);
+    expect(r.isError).toBe(true);
+    const text = String(r.result);
+    expect(text.startsWith("Error executing t: SMTP 550 mailbox unavailable\n")).toBe(true);
+    const details = JSON.parse(text.split("\n")[1]!);
+    expect(details.error).toEqual({ name: "Error", code: "EMAIL_REJECTED", status: 550 });
+    expect(details.attempts).toBe(1);
+    expect(details.progress.sent).toEqual(["a", "b", "c", "d"]);
+    expect(details.hint).toContain("do not repeat");
+    expect(events.map((e) => e.code)).toEqual([
+      "tool.call_started", "tool.attempt_started",
+      "tool.progress", "tool.progress", "tool.progress", "tool.progress",
+      "tool.attempt_failed", "tool.call_failed",
+    ]);
+    const failed = events.at(-1)!.data;
+    expect(failed.error.code).toBe("EMAIL_REJECTED");
+    expect(failed.error.stack).toContain("SMTP 550");
+    expect(failed.progress.sent).toHaveLength(4);
+    expect(failed.sessionId).toBe("s1");
+    expect(failed.agentName).toBe("mailer");
+  });
+
+  it("prefers progress carried on the thrown ToolError", async () => {
+    const { ToolError } = await import("../src/index.ts");
+    const { r } = await collect(tool({
+      name: "t", description: "d", input: z.object({}),
+      execute: () => { throw new ToolError("halfway", { context: { progress: { done: 2 } } }); },
+    }));
+    expect(JSON.parse(String(r.result).split("\n")[1]!).progress).toEqual({ done: 2 });
+  });
+
+  it("marks timeouts, keeps the call_started trace, and redacts only credentials on the bus", async () => {
+    const { r, events } = await collect(tool({
+      name: "t", description: "d", input: z.object({}), timeoutMs: 10,
+      execute: async () => { await new Promise((res) => setTimeout(res, 100)); },
+    }));
+    expect(JSON.parse(String(r.result).split("\n")[1]!).timedOut).toBe(true);
+    expect(events.some((e) => e.code === "tool.call_timed_out")).toBe(true);
+
+    const leak = await collect(tool({
+      name: "t", description: "d", input: z.object({}),
+      execute: () => { throw new Error("connect postgres://admin:hunter2@db/x failed reading /home/deploy/a.env"); },
+    }));
+    expect(String(leak.r.result)).not.toContain("hunter2");
+    expect(String(leak.r.result)).toContain("[redacted-path]");
+    const busMsg = leak.events.at(-1)!.data.error.message as string;
+    expect(busMsg).not.toContain("hunter2");
+    expect(busMsg).toContain("/home/deploy/a.env");
+  });
+
+  it("emits call_succeeded and call_blocked for the other outcomes", async () => {
+    const ok = await collect(tool({ name: "t", description: "d", input: z.object({}), execute: () => "fine" }));
+    expect(ok.events.map((e) => e.code)).toEqual(["tool.call_started", "tool.attempt_started", "tool.call_succeeded"]);
+    const bad = await collect(tool({ name: "t", description: "d", input: z.object({ n: z.number() }), execute: () => 1 }), { n: "x" });
+    expect(bad.events.map((e) => e.code)).toEqual(["tool.call_blocked"]);
+    expect(bad.events[0]!.data.reason).toBe("schema_validation");
+  });
+});

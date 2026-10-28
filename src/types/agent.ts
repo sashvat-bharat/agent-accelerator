@@ -30,12 +30,6 @@ export type ModelRef = string | ModelSpec | ModelProviderInstance;
 /** Canonical reasoning option (Q-52): bare level, or level + explicit token budget. */
 export type ThinkingOption = ThinkingLevel | { level?: ThinkingLevel; budgetTokens?: number };
 
-/** Canonical sampling knobs (Q-54). Read by the loop via `(config as any).sampling`. */
-export interface SamplingConfig {
-  temperature?: number;
-  topP?: number;
-}
-
 /** Canonical retry policy (Q-54). Read by the loop via `(config as any).retry`. */
 export interface RetryPolicyConfig {
   maxRetries?: number;
@@ -139,16 +133,28 @@ export interface AgentConfig {
    * after every step (user turn, assistant turn, tool batch, sub-agent
    * step) so a crash loses at most the in-flight step. Pass `{ dir }` for
    * `sessions/<sessionId>/session.json` layout or `{ file }` for a single
-   * pretty `.session.json` file. Writes are atomic and never fail a turn.
+   * pretty `.session.json` file. `persist: {}` (neither) uses `<home>/sessions`.
+   * Writes are atomic and never fail a turn.
    */
   persist?: { dir?: string; file?: string };
+  /**
+   * Folder for everything Agent Accelerator writes to disk (`sessions/`,
+   * `scheduled_actions/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
+   * An explicit `persist.dir` / `persist.file` still wins for sessions.
+   */
+  home?: string;
   // Q-54 missing knobs (all optional, additive; loop reads via `(config as any).*`).
-  /** Canonical tool-selection control (`"auto"` default). */
+  /**
+   * Canonical tool-selection control (`"auto"` default). `"none"` applies to
+   * every turn of a run; `"required"` and a pinned tool (`{ tool: "name" }`)
+   * apply to the FIRST model turn only, since forcing a tool call on every
+   * turn would make a run unable to finish.
+   */
   toolChoice?: ToolChoiceOption;
+  /** Google Interactions storage tier for the chain-TTL gate: `"free"` (23h, default) or `"paid"` (54d). */
+  googleTier?: "free" | "paid";
   /** Maximum output tokens for one model call. */
   maxOutputTokens?: number;
-  /** Sampling knobs. */
-  sampling?: SamplingConfig;
   /** Stop sequence(s). */
   stop?: StopOption;
   /** Deterministic seed, when the provider supports it. */
@@ -168,19 +174,46 @@ export interface AgentConfig {
   fetch?: typeof fetch;
   /** Provider/env overrides forwarded to key resolution. */
   env?: Record<string, string>;
-  /** Structured logger for loop telemetry (defaults to no-op). */
+  /** @deprecated Not implemented yet; subscribe with `telemetryBus.onEvent` instead. Passing it emits a `config.unsupported_option` warning. */
   logger?: AgentLogger;
-  /** Control hooks (Q-59). All optional, fail-open by default. */
+  /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   hooks?: unknown;
-  /** Threshold compaction policy (Q-60a). Fully configurable/replaceable. */
+  /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   contextManagement?: unknown;
-  /** Telemetry bus (Q-41). Default no-op; pretty logger lives in /cli. */
-  telemetry?: { onEvent?: (e: any) => void } | unknown;
-  /** Local file access roots (Q-08). Default deny; `path` sources must resolve inside roots. */
+  /**
+   * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning
+   * text) to `<home>/telemetry/<date>.ndjson`. Off by default: the SDK writes nothing unless asked.
+   */
+  telemetry?: { persist?: boolean };
+  /**
+   * Local file policy. With `roots` set, every local-path media part and the
+   * built-in `convert_document_to_markdown` tool must resolve inside them
+   * (`[]` denies all local paths). Without it, developer-supplied parts are
+   * unrestricted and the model-callable tool is limited to `process.cwd()`.
+   */
   fileAccess?: { roots?: string[] };
-  /** Raw capture policy (Q-11). Default "redacted": no bodies. */
+  /**
+   * Conversation handling when a run FAILS (aborts always keep partial
+   * history). `"auto"` (default) restores the pre-run state unless a tool
+   * already ran, since rolling back would erase the record of real side
+   * effects and a retry would repeat them. `"rollback"` always restores;
+   * `"keep"` never does.
+   */
+  onFailure?: "auto" | "rollback" | "keep";
+  /**
+   * What `AgentResponse.raw` keeps of the wire exchange. `"redacted"` (default):
+   * URL, method, redacted headers and HTTP status, with request/response BODIES
+   * replaced by a content-free summary so prompts, files and model output never
+   * leak into logs via `toJSON()`. `true`: full bodies (debugging). `false`:
+   * URL, method and status only.
+   */
   captureRaw?: false | "redacted" | true;
-  /** Opt-in run budgets (Q-39). All fields default unlimited. */
+  /**
+   * Opt-in budgets, enforced PER RUN (counters restart with every `run`/`stream`)
+   * and including sub-agent usage. Exceeding a cap throws `BudgetExceededError`
+   * with the partial usage attached. `maxCostUsd` counts only priced usage:
+   * models with unknown pricing contribute $0, never a guess.
+   */
   budget?: Budget;
   /** Run + network limits (Q-22). Turn/budget caps unlimited by default; network timeouts finite. */
   limits?: AgentRunLimits;
@@ -226,6 +259,12 @@ export interface MidSessionConfig {
 export interface DynamicSubagentsConfig {
   /** Enables the automatic `spawn_subagents` tool. Defaults to true when the object is present. */
   enabled?: boolean;
+  /**
+   * Lets the Main Agent schedule dynamic sub-agents to run later (once or on
+   * repeat) via the `scheduled_actions` and `get_datetime` tools. Off by
+   * default: without it no tool, clock or timer exists. Needs a worker model.
+   */
+  allowScheduledActions?: boolean;
   /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then `SUB_AGENT_MODEL` env, then the parent model. */
   model?: string | ModelSpec | ModelProviderInstance;
   /** Max workers the Main Agent may spawn in a single `spawn_subagents` call. Extras are trimmed safely. Defaults to 4. */
@@ -293,8 +332,6 @@ export interface AgentRunOptions {
   toolChoice?: ToolChoiceOption;
   /** Per-run output-token cap. */
   maxOutputTokens?: number;
-  /** Per-run sampling override. */
-  sampling?: SamplingConfig;
   /** Per-run stop sequence(s). */
   stop?: StopOption;
   /** Per-run seed. */

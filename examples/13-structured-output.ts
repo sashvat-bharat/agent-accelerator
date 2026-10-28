@@ -41,6 +41,7 @@ const zodStrict = new Agent({
   instructions: "Extract the weather as JSON. Return ONLY the object.",
   model: MODEL,
   output: Weather,
+  captureRaw: true, // keep the full request body so the wire keys below are visible
 });
 
 const zodRes = await zodStrict

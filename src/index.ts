@@ -61,6 +61,7 @@ export {
   convertDocumentToMarkdown,
   convertDocumentInput,
   convert_document_to_markdown,
+  createConvertDocumentTool,
   isAnydocAvailable,
   resolveDocumentFormat,
   truncateMarkdown,
@@ -71,7 +72,8 @@ export {
   DEFAULT_DOCUMENT_MAX_CHARS,
   MAX_DOCUMENT_FETCH_BYTES,
 } from "./utils/documents.ts";
-export type { ConvertDocumentOptions, ConvertedDocument } from "./utils/documents.ts";
+export type { ConvertDocumentOptions, ConvertedDocument, ConvertDocumentToolOptions } from "./utils/documents.ts";
+export { assertPathAllowed, enforceFileAccess, fetchRemoteBytes, isPrivateAddress, RemoteFetchError, MAX_REMOTE_FETCH_BYTES } from "./utils/safe-io.ts";
 
 // Multi-Agent Delegation & Tools
 export {
@@ -83,8 +85,11 @@ export {
   isSessionDescendant,
   getSubAgentTrace,
   getSubAgentTraceScoped,
+  getSubAgentTraceForSessions,
   listSubAgentTraceIds,
+  listSubAgentTraceIdsForSessions,
   subscribeToSubAgent,
+  subscribeToSubAgentForSessions,
   appendSubAgentStep,
   pruneTraces,
   trimTraceSteps,
@@ -99,6 +104,28 @@ export {
   SUBAGENT_SUBSCRIBE_TTL_MS,
 } from "./agent/delegation.ts";
 export type { DynamicSubagentTask, AgentAsToolTarget, SubAgentTrace, StreamingLoopHandle } from "./agent/delegation.ts";
+
+// Scheduled actions: dynamic sub-agents that run later and save their answer to a file
+export {
+  createScheduledAction,
+  listScheduledActions,
+  updateScheduledAction,
+  runScheduledAction,
+  skipScheduledAction,
+  killScheduledAction,
+} from "./scheduler/scheduler.ts";
+export { getDatetimeTool } from "./scheduler/tool.ts";
+export { setHome, resolveHome } from "./utils/home.ts";
+export type {
+  ScheduledActionInput,
+  ScheduledActionPatch,
+  ScheduledActionRecord,
+  ScheduledDelivery,
+  ScheduledState,
+  ScheduledRunStatus,
+  ScheduleSpec,
+  KillResult,
+} from "./types/scheduler.ts";
 
 // Providers & Registry — unified multi-provider layer, all native REST
 export {
@@ -210,6 +237,7 @@ export {
   mapToolChoiceToOpenAI,
   normalizeToolChoice,
   parseStreamedToolArguments,
+  selectRawArguments,
   normalizeStructuredOutput,
   extractOutputValidator,
   parseStructuredOutput,
@@ -291,6 +319,10 @@ export type { AgentAccelErrorCode, AgentAccelErrorContext } from "./types/errors
 // Normalized run limits (Q-22; sub-agents inherit unless overridden)
 export type { AgentRunLimits } from "./agent/agent.ts";
 
+// Telemetry bus: warnings, anomalies and per-turn thinking traces (attach with `telemetryBus.onEvent`)
+export { telemetryBus } from "./telemetry.ts";
+export type { TelemetryEvent, TelemetryListener } from "./telemetry.ts";
+
 // Session persistence & telemetry (conversation history + cost rollup)
 export {
   SessionTelemetry,
@@ -306,6 +338,8 @@ export {
   buildSessionData,
   serializeSession,
   deserializeSession,
+  inspectSessionPayload,
+  findInvalidMessage,
   getSessionContextWindow,
   computeSessionTurnCost,
   formatSessionTokens,
@@ -313,7 +347,7 @@ export {
   formatSessionBanner,
   emptyTotals,
 } from "./session/store.ts";
-export type { PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir, PersistedSubAgentTrace } from "./session/store.ts";
+export type { SessionLimits, SessionPayloadStatus, PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir, PersistedSubAgentTrace } from "./session/store.ts";
 
 // Utilities
 /**
@@ -328,8 +362,9 @@ export type { ParsedModelRef, ResolvedAgentConfig } from "./utils/session.ts";
  * `/internal` entry (Q-50).
  */
 export { getApiKey, getEnv } from "./utils/env.ts";
-export { buildSessionHeaders } from "./utils/headers.ts";
-export { normalizeMediaInput, inferMimeType } from "./utils/media.ts";
+export { buildSessionHeaders, setAttribution, getAttribution } from "./utils/headers.ts";
+export type { AttributionConfig } from "./utils/headers.ts";
+export { normalizeMediaInput, inferMimeType, sniffMimeType } from "./utils/media.ts";
 export { base64ToBytes, bytesToBase64 } from "./utils/base64.ts";
 export { toJsonSafe, safeStringify, escapeXml } from "./utils/serialization.ts";
 
@@ -407,7 +442,6 @@ export type {
   ModelRef,
   ThinkingOption,
   StructuredOutputOption,
-  SamplingConfig,
   RetryPolicyConfig,
   AgentLogger,
   ToolChoiceOption,

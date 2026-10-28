@@ -1,19 +1,27 @@
 import { z } from "zod";
 import { tool } from "../tools/tool.ts";
-import { normalizeToolName } from "../tools/executor.ts";
 import { escapeXml } from "../utils/serialization.ts";
 import type { ToolDefinition } from "../types/tool.ts";
-import type { SubAgentExecutionMetadata } from "../types/response.ts";
+import type { SubAgentExecutionMetadata, SubAgentStep } from "../types/response.ts";
 import type { Agent } from "./agent.ts";
 import type { Budget, BudgetState } from "../types/agent.ts";
 import { BudgetExceededError } from "../types/errors.ts";
-import { resolveModel } from "../providers/registry.ts";
+import { makeSubagentResult } from "../tools/subagent-result.ts";
 import { hashSessionPart } from "../utils/session.ts";
 import { createTrackingId } from "../utils/session.ts";
 import { nowMs } from "../utils/session.ts";
 import { newRunId } from "../utils/session.ts";
 import { newTurnId } from "../utils/session.ts";
-import type { SubAgentStep } from "../types/response.ts";
+import {
+  sanitizeToolName,
+  sanitizeXmlTag,
+  buildDynamicWorkerConfig,
+  buildSubagentsXml,
+  createLiveWorker,
+  grantWorkerTools,
+  normalizeWorkerTimeoutValue,
+  providerOfWorkerModel,
+} from "./worker.ts";
 
 export { escapeXml };
 
@@ -36,17 +44,6 @@ export interface DynamicSubagentTask {
   timeoutMs?: number;
 }
 
-function sanitizeXmlTag(raw: string): string {
-  let s = raw.toUpperCase().replace(/[^A-Z0-9.-]/g, "-");
-  if (!/^[A-Z]/.test(s)) s = `AGENT-${s}`;
-  s = s.replace(/[.]/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
-  return s.slice(0, 64) || "SUBAGENT";
-}
-function sanitizeToolName(raw: string): string {
-  const tag = sanitizeXmlTag(raw);
-  return tag.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-{2,}/g, "-").slice(0, 64) || "sub-agent";
-}
-
 export function createChildSessionId(parentId: string, tag: string): string {
   let rand: string;
   try {
@@ -62,7 +59,7 @@ export function createChildSessionId(parentId: string, tag: string): string {
     rand = Math.random().toString(36).slice(2, 10);
   }
   // Provider-safe: OpenAI `prompt_cache_key` enforces max 64 chars (400
-  // otherwise). Parent ids are already ~42 chars (`accel-<uuid>`), so naive
+  // otherwise). Parent ids are already ~36+ chars (a UUID), so naive
   // `${parent}-sub-${tag}-${rand}` overflows (observed 65-72 chars → every
   // sub-agent 400s with 0 usage). Truncate the parent portion to fit, keeping
   // the tag + rand suffix intact for uniqueness/debuggability.
@@ -284,10 +281,52 @@ export function getSubAgentTraceScoped(id: string, parentSessionId: string): Sub
   return snapshotTrace(t);
 }
 
-/** Lists tracking ids of known worker traces (mainly for `track` misses). */
+/**
+ * Lists tracking ids of EVERY worker trace in the process (all agents, all
+ * sessions). Diagnostics only: `Agent` never uses it, because in a
+ * multi-tenant host it would expose other tenants' workers. Use
+ * {@link listSubAgentTraceIdsForSessions} for agent-bound callers.
+ */
 export function listSubAgentTraceIds(): string[] {
   pruneTraces();
   return [...subagentTraces.keys()];
+}
+
+/** Scoped lookup across a set of parent session ids (an agent's default + named sessions). */
+export function getSubAgentTraceForSessions(
+  id: string,
+  parentSessionIds: ReadonlySet<string>
+): SubAgentTrace | undefined {
+  if (!id || parentSessionIds.size === 0) return undefined;
+  const t = lookupTrace(id);
+  if (!t || !parentSessionIds.has(t.parentSessionId)) return undefined;
+  return snapshotTrace(t);
+}
+
+/** Raw tracking ids of traces spawned from any of `parentSessionIds` (deduped). */
+export function listSubAgentTraceIdsForSessions(parentSessionIds: ReadonlySet<string>): string[] {
+  pruneTraces();
+  const out = new Set<string>();
+  for (const t of subagentTraces.values()) {
+    if (parentSessionIds.has(t.parentSessionId)) out.add(t.trackingId);
+  }
+  return [...out];
+}
+
+/**
+ * Like {@link subscribeToSubAgent} but refuses (returns a no-op unsubscribe)
+ * when the trace exists and belongs to a different parent session. An id that
+ * does not exist yet is accepted: ids are 128-bit random, so subscribing early
+ * cannot reach another tenant's trace.
+ */
+export function subscribeToSubAgentForSessions(
+  id: string,
+  parentSessionIds: ReadonlySet<string>,
+  fn: (trace: SubAgentTrace) => void
+): () => void {
+  const t = lookupTrace(id);
+  if (t && !parentSessionIds.has(t.parentSessionId)) return () => {};
+  return subscribeToSubAgent(id, fn);
 }
 
 /**
@@ -474,16 +513,6 @@ export function isStreamingLoop(value: unknown): value is StreamingLoopHandle {
   return typeof r["on"] === "function" && typeof r["result"] === "function";
 }
 
-function providerOf(modelStr: string | any | undefined): string | undefined {
-  if (!modelStr) return undefined;
-  try {
-    const m = typeof modelStr === "string" ? modelStr : (modelStr as any)?.model ?? (modelStr as any)?.id ?? String(modelStr);
-    return resolveModel(m as any).provider.id;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * Creates the built-in tool that spawns stateless dynamic sub-agents concurrently.
  *
@@ -654,23 +683,9 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
 
           // Fixed developer-configured worker model — never LLM-choosable.
           const chosenModel: any = parentAgent.subagentModel;
-          // Normalize chosenModel to string|ModelSpec handling
-          let chosenModelStrForProvider = typeof chosenModel === "string" ? chosenModel : (chosenModel as any)?.model ?? (chosenModel as any)?.id ?? String(chosenModel);
-          let attemptedProvider = providerOf(chosenModelStrForProvider);
-          // Determine creds: only reuse parent creds if provider matches parent provider, else let env resolve for cross-provider
-          const parentProvider = providerOf(parentAgent.modelStringOrSpec as any);
-          const targetProviderFinal = providerOf(chosenModelStrForProvider);
-          let apiKeyToUse: string | undefined;
-          let baseUrlToUse: string | undefined;
-          if (targetProviderFinal === parentProvider) {
-            apiKeyToUse = parentAgent.apiKey;
-            baseUrlToUse = parentAgent.baseUrl;
-          } else {
-            apiKeyToUse = undefined;
-            baseUrlToUse = undefined;
-          }
+          const chosenModelStrForProvider = typeof chosenModel === "string" ? chosenModel : (chosenModel as any)?.model ?? (chosenModel as any)?.id ?? String(chosenModel);
 
-          const runWithModel = async (modelToUse: any, apiKey: string | undefined, baseUrl: string | undefined) => {
+          const runWithModel = async () => {
             if (context?.signal?.aborted) throw new Error("Aborted before spawn");
             const childSessionId = createChildSessionId(parentAgent.sessionId, subagentName);
             workerSessionId = childSessionId;
@@ -695,118 +710,29 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             const persistParent = () => {
               try { (parentAgent as any).persistNow?.(); } catch {}
             };
-            const onWorkerTurn = (turn: { turns: number; text?: string; thinking?: string; toolCalls?: Array<{ name: string }>; toolResults?: Array<{ name: string; isError?: boolean }> }) => {
-              try {
-                liveTurn = turn.turns;
-                // Finalize any partial streaming entry for this turn, then
-                // log structural steps (tool calls/results) as before.
-                const timestamp = Date.now();
-                const partialEntry = findPartial(liveTurn);
-                if (partialEntry) {
-                  if (turn.text) partialEntry.text = turn.text;
-                  if (turn.thinking) partialEntry.thinking = turn.thinking;
-                  delete (partialEntry as any).partial;
-                } else if (turn.text) {
-                  trace.steps.push({ turn: turn.turns, type: "assistant", text: turn.text.slice(0, 2000), timestamp });
-                }
-                for (const tc of turn.toolCalls ?? []) {
-                  trace.steps.push({ turn: turn.turns, type: "tool_call", name: tc.name, timestamp });
-                }
-                for (const tr of turn.toolResults ?? []) {
-                  trace.steps.push({ turn: turn.turns, type: "tool_result", name: tr.name, isError: tr.isError, timestamp });
-                }
-                trace.turns = Math.max(trace.turns, turn.turns);
-                trimTraceSteps(trace);
-                touchTrace(trace.trackingId);
-                notifyTrace(trackingId);
-                persistParent();
-              } catch {}
-            };
-            // Realtime thinking/text: the worker is streamed internally and
-            // every delta lands in the trace (partial entry, updated in
-            // place) so `agent.track(id)` shows generation as it happens —
-            // not just at turn end. Deltas also ride to the parent stream via
-            // `context.onSubagentEvent` (streaming parent runs only).
-            let liveTurn = 1;
-            let partialText = "";
-            let partialThinking = "";
-            const findPartial = (turn: number): SubAgentStep | undefined => {
-              for (let i = trace.steps.length - 1; i >= 0; i--) {
-                const s = trace.steps[i]!;
-                if (s.turn === turn && s.partial) return s;
-              }
-              return undefined;
-            };
-            const forwardDelta = (delta?: string, thinkingDelta?: string) => {
-              try {
-                context?.onSubagentEvent?.({
-                  trackingId: displayId,
-                  delta,
-                  thinkingDelta,
-                  partialText: partialText || undefined,
-                  partialThinking: partialThinking || undefined,
-                });
-              } catch {}
-            };
-            const onWorkerDelta = (delta?: string, thinkingDelta?: string) => {
-              try {
-                if (delta) {
-                  partialText = (partialText + delta).slice(-10000);
-                  let entry = findPartial(liveTurn);
-                  if (!entry) {
-                    entry = { turn: liveTurn, type: "assistant", text: "", partial: true, timestamp: Date.now() };
-                    trace.steps.push(entry);
-                  }
-                  entry.text = partialText;
-                  entry.timestamp = Date.now();
-                }
-                if (thinkingDelta) {
-                  partialThinking = (partialThinking + thinkingDelta).slice(-10000);
-                  let entry = findPartial(liveTurn);
-                  if (!entry) {
-                    entry = { turn: liveTurn, type: "assistant", text: "", partial: true, timestamp: Date.now() };
-                    trace.steps.push(entry);
-                  }
-                  entry.thinking = partialThinking;
-                  entry.timestamp = Date.now();
-                }
-                trimTraceSteps(trace);
-                notifyTrace(trackingId);
-                forwardDelta(delta, thinkingDelta);
-              } catch {}
-            };
-            // Grant ONLY the Main Agent-selected subset from the developer pool. Unknown names are dropped.
-            // Matching is case/format-insensitive (same rules as tool execution): the model may emit
-            // "RECENT_NEWS" or "recent news" for a registered "recent_news" tool.
-            const poolByNormalized = new Map<string, ToolDefinition>();
-            for (const [key, def] of Object.entries(toolPool)) {
-              poolByNormalized.set(normalizeToolName(key), def);
-              const declared = (def as ToolDefinition)?.name;
-              if (declared) poolByNormalized.set(normalizeToolName(declared), def);
-            }
-            const grantedTools: Record<string, ToolDefinition> = {};
-            for (const toolName of (t as any).tools ?? []) {
-              const pooled = toolPool[toolName] ?? poolByNormalized.get(normalizeToolName(String(toolName)));
-              if (pooled) grantedTools[(pooled as ToolDefinition).name || toolName] = pooled;
-            }
-            // Timeout: >0 fixed for every worker; 0 = no limit; -1 = per-task timeoutMs from the Main Agent.
-            const workerTimeout = cfgTimeout > 0 ? cfgTimeout : cfgTimeout === -1 && (t as any).timeoutMs > 0 ? (t as any).timeoutMs : 0;
-            const subAgent = new AgentClass({
-              name: t.name,
-              description: t.role || `Sub-agent ${t.name}`,
-              instructions: t.instructions,
-              model: modelToUse,
-              apiKey,
-              baseUrl,
-              thinkingLevel: (dynCfg?.thinkingLevel as any) ?? parentAgent.thinkingConfig?.level,
-              sessionId: childSessionId,
-              tools: grantedTools,
-              // Stateless by design: one task in, one result out, then shut down. No history, no recursion.
-              stateless: true,
-              serviceTier: parentAgent.serviceTier,
-              headers: parentAgent.customHeaders,
-              maxTurns: parentAgent.maxTurns,
+            // Unified live worker state machine (shared with fixed workers).
+            const { onWorkerTurn, onWorkerDelta, attachToStream } = createLiveWorker(trace, trackingId, displayId, {
+              trim: (t) => trimTraceSteps(t),
+              touch: (id) => touchTrace(id),
+              notify: (id) => notifyTrace(id),
+              persist: persistParent,
+              emit: (ev) => {
+                try { context?.onSubagentEvent?.(ev); } catch {}
+              },
             });
+            // Grant ONLY the Main Agent-selected subset from the developer pool.
+            const grantedTools = grantWorkerTools(toolPool, (t as { tools?: unknown }).tools);
+            // Timeout: >0 fixed for every worker; 0 = no limit; -1 = per-task timeoutMs.
+            const workerTimeout = normalizeWorkerTimeoutValue(cfgTimeout, (t as { timeoutMs?: unknown }).timeoutMs);
+            const subAgent = new AgentClass(
+              buildDynamicWorkerConfig(parentAgent, {
+                name: t.name,
+                role: t.role,
+                instructions: t.instructions,
+                sessionId: childSessionId,
+                tools: grantedTools,
+              })
+            );
             // Lineage binding: child records its parent session so persisted
             // snapshots and routing can tell siblings apart even when ids
             // are truncated to 64 chars.
@@ -850,10 +776,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             // Streamed internally (consumed to completion): same final result
             // as run(), but text/thinking deltas flow into the trace live.
             const workerStream = subAgent.stream(t.task, { signal: workerController.signal, onTurn: onWorkerTurn } as any);
-            const textListener = (e: any) => onWorkerDelta(e.delta, undefined);
-            const thinkingListener = (e: any) => onWorkerDelta(undefined, e.thinkingDelta);
-            workerStream.on("text_delta", textListener);
-            workerStream.on("thinking_delta", thinkingListener);
+            const detachWorkerListeners = attachToStream(workerStream as unknown as Parameters<typeof attachToStream>[0]);
             const taskPromise = workerStream.result();
             try {
               const racers: Promise<unknown>[] = [taskPromise as unknown as Promise<unknown>];
@@ -864,8 +787,8 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             } finally {
               if (timeoutId) clearTimeout(timeoutId);
               try { workerStream.cancel(); } catch {}
-              try { workerStream.off("text_delta", textListener); } catch {}
-              try { workerStream.off("thinking_delta", thinkingListener); } catch {}
+              try { subAgent.reset(); } catch {} // one-shot worker: free its chain/routing state
+              try { detachWorkerListeners(); } catch {}
               if (abortListener && parentSignal) {
                 try { parentSignal.removeEventListener("abort", abortListener as any); } catch {}
               }
@@ -874,7 +797,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
           };
 
           try {
-            const res: any = await runWithModel(chosenModel, apiKeyToUse, baseUrlToUse);
+            const res: any = await runWithModel();
 
             const durationMs = Math.max(0, nowMs() - startTime);
             const rawText = (res as any).text;
@@ -897,21 +820,8 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               notifyTrace(trackingId);
             }
             try { (parentAgent as any).persistNow?.(); } catch {}
-            // Q-39: charge completed worker usage, then enforce token/cost/duration budgets.
-            try { chargeBudgetUsage(parentAgent, (res as any).usage); } catch {}
-            try {
-              checkBudget(readBudget(parentAgent), readBudgetState(parentAgent), { usage: undefined });
-            } catch (budgetErr) {
-              const be = budgetErr as { context?: { partial?: Record<string, unknown> } };
-              try {
-                if (be && typeof be === "object" && be.context?.partial) {
-                  (be.context.partial as Record<string, unknown>)["text"] = subagentText;
-                  (be.context.partial as Record<string, unknown>)["turns"] = (res as any).turns ?? 0;
-                  (be.context.partial as Record<string, unknown>)["usage"] = (res as any).usage;
-                }
-              } catch {}
-              throw budgetErr;
-            }
+            // Worker usage is charged against the parent's budget centrally by the
+            // loop (it sees every finished worker, fixed and dynamic, exactly once).
             const metadata: SubAgentExecutionMetadata = {
               name: subagentName,
               trackingId: displayId,
@@ -949,7 +859,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
             if (err && (err as { code?: unknown }).code === "budget_exceeded") throw err;
             const durationMs = Math.max(0, nowMs() - startTime);
             const errorMessage = err?.message || String(err);
-            const prov = attemptedProvider || providerOf(chosenModelStrForProvider) || providerOf(chosenModel as any) || "unknown";
+            const prov = providerOfWorkerModel(chosenModelStrForProvider) || providerOfWorkerModel(chosenModel as unknown) || "unknown";
             const live = subagentTraces.get(trackingId);
             if (live) {
               live.status = "error";
@@ -988,21 +898,12 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
         })
       );
 
-      const xmlBlocks = executedResults.map((r) => {
+      const xmlOutput = buildSubagentsXml(executedResults.map((r) => {
         subagentMetadataList.push(r.metadata);
-        const escaped = escapeXml(r.text);
-        const indentedText = escaped.split("\n").map((line) => `        ${line}`).join("\n");
-        return `    <${r.name}>\n${indentedText}\n    </${r.name}>`;
-      });
+        return r;
+      }));
 
-      const xmlOutput = `<SUB-AGENTS-RESPONSE>\n${xmlBlocks.join("\n")}\n</SUB-AGENTS-RESPONSE>`;
-
-      const resultPayload = {
-        xml: xmlOutput,
-        _subagentMetadata: subagentMetadataList,
-        toString() { return xmlOutput; },
-      };
-      return resultPayload;
+      return makeSubagentResult(xmlOutput, subagentMetadataList);
     },
   });
 }
@@ -1060,82 +961,28 @@ export function agentToTool(
           steps: [],
         };
         insertTrace(trace, displayId);
-        const onWorkerTurn = (turn: { turns: number; text?: string; thinking?: string; toolCalls?: Array<{ name: string }>; toolResults?: Array<{ name: string; isError?: boolean }> }) => {
-          try {
-            liveTurn = turn.turns;
-            const timestamp = Date.now();
-            const partialEntry = findPartial(liveTurn);
-            if (partialEntry) {
-              if (turn.text) partialEntry.text = turn.text;
-              if (turn.thinking) partialEntry.thinking = turn.thinking;
-              delete (partialEntry as any).partial;
-            } else if (turn.text) {
-              trace.steps.push({ turn: turn.turns, type: "assistant", text: turn.text.slice(0, 2000), timestamp });
-            }
-            for (const tc of turn.toolCalls ?? []) trace.steps.push({ turn: turn.turns, type: "tool_call", name: tc.name, timestamp });
-            for (const tr of turn.toolResults ?? []) trace.steps.push({ turn: turn.turns, type: "tool_result", name: tr.name, isError: tr.isError, timestamp });
-            trace.turns = Math.max(trace.turns, turn.turns);
-            trimTraceSteps(trace);
-            touchTrace(trace.trackingId);
-            notifyTrace(trackingId);
-          } catch {}
-        };
-        let liveTurn = 1;
-        let partialText = "";
-        let partialThinking = "";
-        const findPartial = (turn: number): SubAgentStep | undefined => {
-          for (let i = trace.steps.length - 1; i >= 0; i--) {
-            const s = trace.steps[i]!;
-            if (s.turn === turn && s.partial) return s;
-          }
-          return undefined;
-        };
-        const onWorkerDelta = (delta?: string, thinkingDelta?: string) => {
-          try {
-            if (delta) {
-              partialText = (partialText + delta).slice(-10000);
-              let entry = findPartial(liveTurn);
-              if (!entry) {
-                entry = { turn: liveTurn, type: "assistant", text: "", partial: true, timestamp: Date.now() };
-                trace.steps.push(entry);
-              }
-              entry.text = partialText;
-              entry.timestamp = Date.now();
-            }
-            if (thinkingDelta) {
-              partialThinking = (partialThinking + thinkingDelta).slice(-10000);
-              let entry = findPartial(liveTurn);
-              if (!entry) {
-                entry = { turn: liveTurn, type: "assistant", text: "", partial: true, timestamp: Date.now() };
-                trace.steps.push(entry);
-              }
-              entry.thinking = partialThinking;
-              entry.timestamp = Date.now();
-            }
-            trimTraceSteps(trace);
-            notifyTrace(trackingId);
-            try {
-              ctx?.onSubagentEvent?.({
-                trackingId: displayId,
-                delta,
-                thinkingDelta,
-                partialText: partialText || undefined,
-                partialThinking: partialThinking || undefined,
-              });
-            } catch {}
-          } catch {}
-        };
-        const workerStream = agentInstance.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: onWorkerTurn } as any);
-        const textListener = (e: any) => onWorkerDelta(e.delta, undefined);
-        const thinkingListener = (e: any) => onWorkerDelta(undefined, e.thinkingDelta);
-        workerStream.on("text_delta", textListener);
-        workerStream.on("thinking_delta", thinkingListener);
+        // Unified live worker state machine (shared with dynamic workers).
+        const { onWorkerTurn, attachToStream } = createLiveWorker(trace, trackingId, displayId, {
+          trim: (t) => trimTraceSteps(t),
+          touch: (id) => touchTrace(id),
+          notify: (id) => notifyTrace(id),
+          emit: (ev) => {
+            try { ctx?.onSubagentEvent?.(ev); } catch {}
+          },
+        });
+        // One isolated copy per call: the shared instance is single-flight, so
+        // calling it directly would serialize (or steer) parallel tool calls.
+        const worker: Agent =
+          typeof (agentInstance as Agent).fork === "function" ? agentInstance.fork(subSessionId, parentSessionId) : agentInstance;
+        const workerStream = worker.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: onWorkerTurn } as any);
+        const detachWorkerListeners = attachToStream(workerStream as unknown as Parameters<typeof attachToStream>[0]);
         let response: any;
         try {
           response = await workerStream.result();
         } finally {
-          try { workerStream.off("text_delta", textListener); } catch {}
-          try { workerStream.off("thinking_delta", thinkingListener); } catch {}
+          try { detachWorkerListeners(); } catch {}
+          // The per-call session id is never reused: drop its provider chain/routing state.
+          if (worker !== agentInstance) { try { worker.reset(); } catch {} }
         }
         const durationMs = Math.max(0, nowMs() - startTime);
         const live = subagentTraces.get(trackingId);
@@ -1175,12 +1022,7 @@ export function agentToTool(
           m["turnId"] = callTurnId;
           if (response.meta !== undefined) m["meta"] = response.meta;
         } catch {}
-        const wrapper: any = {
-          xml: response.text,
-          _subagentMetadata: [metadata],
-          toString() { return response.text; },
-        };
-        return wrapper;
+        return makeSubagentResult(response.text, [metadata]);
       } catch (err: any) {
         const durationMs = Math.max(0, nowMs() - startTime);
         const msg = err?.message || String(err);
@@ -1211,12 +1053,7 @@ export function agentToTool(
           m["runId"] = callRunId;
           m["turnId"] = callTurnId;
         } catch {}
-        const wrapper: any = {
-          xml: `Error in ${name}: ${msg}`,
-          _subagentMetadata: [metadata],
-          toString() { return `Error in ${name}: ${msg}`; },
-        };
-        return wrapper;
+        return makeSubagentResult(`Error in ${name}: ${msg}`, [metadata]);
       }
     },
   });

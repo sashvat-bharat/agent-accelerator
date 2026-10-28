@@ -1,23 +1,43 @@
-import type { Provider, ProviderRequestOptions, ModelSpec } from "../types/model.ts";
+import type { Provider, ProviderRequestOptions, ModelSpec, ProviderRawData } from "../types/model.ts";
 import type { ToolDefinition, ToolCallRecord, ToolResultRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { AgentRunOptions } from "../types/agent.ts";
 import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, normalizeFinishReason, type FinishReason, type SubAgentExecutionMetadata, type StreamEvent } from "../types/response.ts";
-import { priceUsage, reportUsageAnomaly, telemetryBus } from "../session/store.ts";
+import { priceUsage, reportUsageAnomaly } from "../session/store.ts";
+import { telemetryBus } from "../telemetry.ts";
 export { telemetryBus };
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { toStandardToolDeclarations } from "../tools/tool.ts";
-import { executeToolCalls } from "../tools/executor.ts";
+import {
+  executeToolCalls,
+  findToolDefinition,
+  isRepeatableTool,
+  makeRepeatBlockedResult,
+  shouldBlockRepeat,
+  toolCallFingerprint,
+  traceToolEvent,
+} from "../tools/executor.ts";
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
 import { preprocessFilePartsForBypass } from "../utils/documents.ts";
+import { enforceFileAccess } from "../utils/safe-io.ts";
+import { isSubagentResult, normalizeSubagentMetadata } from "../tools/subagent-result.ts";
+import { BudgetExceededError } from "../types/errors.ts";
+import { applyCaptureRaw, type CaptureRawMode } from "../utils/raw-capture.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
 
 /** One mid-session steer request buffered while a run is active. */
 export interface SteerEntry {
   prompt: string | ContentPart[];
   options?: AgentRunOptions;
+  /**
+   * @internal Settles the promise handed to the `steer()` caller. If the run
+   * ends before the prompt is injected, the entry becomes a queued follow-up
+   * (`deferredToQueue`) and the caller's promise resolves with THAT run's
+   * response instead of the finished one.
+   */
+  settle?: { resolve: (res: AgentResponse) => void; reject: (err: unknown) => void; deferredToQueue?: boolean };
 }
 
 export interface AgentLoopConfig {
@@ -31,6 +51,26 @@ export interface AgentLoopConfig {
   maxTurns?: number;
   /** Convert `file` parts client-side for pdf-incapable models (see Agent flag). */
   bypassInputFileModality?: boolean;
+  /** Local-file policy: media paths must resolve inside `roots` (see `AgentConfig.fileAccess`). */
+  fileAccess?: { roots?: string[] };
+  /**
+   * What to do with the conversation when a run fails (not aborts):
+   * - `"auto"` (default): roll back to the pre-run checkpoint, UNLESS a tool
+   *   already executed. Rolling back then would erase the only record of real
+   *   side effects (emails sent, rows written) and a retry would repeat them.
+   * - `"rollback"`: always restore the checkpoint.
+   * - `"keep"`: never restore it.
+   */
+  onFailure?: "auto" | "rollback" | "keep";
+  /** Wire-exchange capture policy for `AgentResponse.raw` (default `"redacted"`: no bodies). */
+  captureRaw?: CaptureRawMode;
+  /**
+   * Budget hook. Called with no argument at the start of every turn (time /
+   * count checks) and with a priced usage snapshot after each model turn and
+   * each finished sub-agent (charge + check). Throws `BudgetExceededError`
+   * to stop the run.
+   */
+  enforceBudget?: (usage?: TokenUsage) => void;
   /** Called after every turn for durable persistence checkpoints (never fails a turn). */
   onProgress?: () => void;
   /**
@@ -107,6 +147,33 @@ function emitTurn(
   } catch {}
 }
 
+/**
+ * Per-turn `toolChoice`. `"none"` holds for the whole run; a forced choice
+ * (`"required"` or a pinned function) applies to the FIRST model turn only:
+ * forcing a tool call on every turn would keep the model calling tools until
+ * `maxTurns`, so the run could never produce a final answer.
+ */
+function toolChoiceForTurn(
+  choice: ProviderRequestOptions["toolChoice"],
+  turn: number
+): ProviderRequestOptions["toolChoice"] {
+  if (choice === undefined || choice === "auto") return undefined;
+  if (choice === "none") return "none";
+  return turn === 1 ? choice : undefined;
+}
+
+/** Whether a failed run should restore its pre-run checkpoint (see `AgentLoopConfig.onFailure`). */
+function shouldRollbackOnFailure(
+  policy: "auto" | "rollback" | "keep" | undefined,
+  isAbort: boolean,
+  toolsExecuted: boolean
+): boolean {
+  if (isAbort) return false;
+  if (policy === "keep") return false;
+  if (policy === "rollback") return true;
+  return !toolsExecuted;
+}
+
 function emitProgress(config: { onProgress?: () => void }): void {
   try { config.onProgress?.(); } catch {}
 }
@@ -174,67 +241,67 @@ function warnMaxTurnsHit(agentName: string | undefined, maxTurns: number, pendin
 // ---------------------------------------------------------------------------
 
 /**
- * Repairs orphaned tool call/result pairs before each provider request
- * (Q-19). Providers reject a `tool_result` without its `tool_call` and
- * vice versa; a prior abort or crash can leave such orphans in history.
- * Synthesizes error results for orphan calls and drops orphan results.
+ * Repairs tool call/result pairing before each provider request (Q-19).
+ *
+ * Providers reject a `tool_result` without its `tool_call`, a `tool_call`
+ * without its result, AND (Chat-Completions style APIs) results that are not
+ * directly after the assistant message that issued the calls. A prior abort or
+ * crash can leave any of these in history, so the repair:
+ * - re-emits every result immediately after its assistant message, in call order;
+ * - synthesizes an error result for calls that never got one (e.g. `interrupt()`
+ *   fired before the tools ran), at that same position;
+ * - drops results whose id the model never issued.
+ * Open-weight models that reuse one id for several calls keep one result per call.
  */
 export function ensureToolPairing(context: AgentContext): void {
   try {
-    const callIds = new Map<string, string>();
-    for (const m of context.messages) {
-      if ((m as any)?.role !== "assistant" || !Array.isArray((m as any).content)) continue;
-      for (const p of (m as any).content as Array<any>) {
-        if (p && p.type === "tool_call" && typeof p.id === "string" && p.id) {
-          if (!callIds.has(p.id)) callIds.set(p.id, typeof p.name === "string" ? p.name : "tool");
-        }
-      }
-    }
-    if (callIds.size === 0) {
-      // No calls: drop any stray tool results.
-      const hasOrphan = context.messages.some(
-        (m: any) => m?.role === "tool" && Array.isArray(m.content)
-      );
-      if (!hasOrphan) return;
-      context.messages = context.messages.filter((m: any) => m?.role !== "tool");
-      return;
-    }
-    const resultIds = new Set<string>();
-    for (const m of context.messages) {
-      if ((m as any)?.role !== "tool" || !Array.isArray((m as any).content)) continue;
-      for (const p of (m as any).content as Array<any>) {
+    type ToolResultPart = Extract<ContentPart, { type: "tool_result" }>;
+    const messages = context.messages;
+    // Pass 1: queue every existing result part by id (document order).
+    const results = new Map<string, Array<{ part: ToolResultPart; message: (typeof messages)[number] }>>();
+    for (const m of messages) {
+      if (m?.role !== "tool" || !Array.isArray(m.content)) continue;
+      for (const p of m.content) {
         if (p && p.type === "tool_result" && typeof p.id === "string" && p.id) {
-          resultIds.add(p.id);
+          const q = results.get(p.id) ?? [];
+          q.push({ part: p, message: m });
+          results.set(p.id, q);
         }
       }
     }
-    const missing: ToolResultRecord[] = [];
-    for (const [id, name] of callIds) {
-      if (!resultIds.has(id)) {
-        missing.push({
-          id,
-          name,
-          result: `Error: orphan tool_call '${name}' (${id}) without a matching tool result (recovered by ensureToolPairing).`,
-          isError: true,
-          durationMs: 0,
-        });
+    // Pass 2: rebuild, placing each assistant's results right behind it.
+    const rebuilt: typeof messages = [];
+    for (const m of messages) {
+      if (m?.role === "tool") continue; // re-emitted next to their calls (orphans dropped)
+      rebuilt.push(m);
+      if (m?.role !== "assistant" || !Array.isArray(m.content)) continue;
+      for (const p of m.content) {
+        if (!p || p.type !== "tool_call" || typeof p.id !== "string" || !p.id) continue;
+        const hit = results.get(p.id)?.shift();
+        if (hit) {
+          // Reuse the original message object when it carried exactly this result.
+          rebuilt.push(hit.message.content.length === 1 ? hit.message : { role: "tool", name: hit.part.name, content: [hit.part] });
+        } else {
+          const name = typeof p.name === "string" ? p.name : "tool";
+          traceToolEvent("call_interrupted", "warn", { id: p.id, name }, {});
+          rebuilt.push({
+            role: "tool",
+            name,
+            content: [
+              {
+                type: "tool_result",
+                id: p.id,
+                name,
+                result: `Error: tool_call '${name}' (${p.id}) has no result because the run was interrupted before it completed (recovered by ensureToolPairing). It may have partially executed: check the tool trace before repeating side-effecting work.`,
+                isError: true,
+              },
+            ],
+          });
+        }
       }
     }
-    if (missing.length > 0) {
-      try { context.addToolResults(missing); } catch {}
-      for (const r of missing) resultIds.add(r.id);
-    }
-    // Drop orphan results (result id never issued by the model).
-    const filtered = context.messages.filter((m: any) => {
-      if (m?.role !== "tool" || !Array.isArray(m.content)) return true;
-      const parts = m.content as Array<any>;
-      const keep = parts.filter((p) => p?.type !== "tool_result" || callIds.has(p.id));
-      if (keep.length === parts.length) return true;
-      if (keep.length === 0) return false;
-      try { (m as any).content = keep; } catch {}
-      return true;
-    });
-    context.messages = filtered as typeof context.messages;
+    const unchanged = rebuilt.length === messages.length && rebuilt.every((m, i) => m === messages[i]);
+    if (!unchanged) context.messages = rebuilt;
   } catch {}
 }
 
@@ -246,13 +313,14 @@ export interface LoopLimits {
   maxTurns?: number;
   deadlineMs?: number;
   maxToolCallsPerRun?: number;
+  maxTotalTokens?: number;
   requestTimeoutMs: number;
   firstByteTimeoutMs: number;
   streamIdleTimeoutMs: number;
 }
 
 /** Resolves `(config as any).limits` with Q-22 defaults (timeouts tolerate reasoning). */
-function resolveLoopLimits(config: AgentLoopConfig, fallbackMaxTurns: number): LoopLimits & { maxTurns: number; deadlineMs: number; maxToolCallsPerRun: number } {
+function resolveLoopLimits(config: AgentLoopConfig, fallbackMaxTurns: number): LoopLimits & { maxTurns: number; deadlineMs: number; maxToolCallsPerRun: number; maxTotalTokens: number } {
   const raw = ((config as unknown as { limits?: Record<string, unknown> }).limits ?? {}) as Record<string, unknown>;
   const num = (v: unknown): number | undefined =>
     typeof v === "number" && Number.isFinite(v) ? v : undefined;
@@ -264,10 +332,11 @@ function resolveLoopLimits(config: AgentLoopConfig, fallbackMaxTurns: number): L
   }
   const deadlineMs = num(raw.deadlineMs) ?? Infinity;
   const maxToolCallsPerRun = num(raw.maxToolCallsPerRun) ?? Infinity;
+  const maxTotalTokens = num(raw.maxTotalTokens) ?? Infinity;
   const requestTimeoutMs = num(raw.requestTimeoutMs) ?? 300_000;
   const firstByteTimeoutMs = num(raw.firstByteTimeoutMs) ?? 120_000;
   const streamIdleTimeoutMs = num(raw.streamIdleTimeoutMs) ?? 300_000;
-  return { maxTurns, deadlineMs, maxToolCallsPerRun, requestTimeoutMs, firstByteTimeoutMs, streamIdleTimeoutMs };
+  return { maxTurns, deadlineMs, maxToolCallsPerRun, maxTotalTokens, requestTimeoutMs, firstByteTimeoutMs, streamIdleTimeoutMs };
 }
 
 function loopSessionId(config: AgentLoopConfig): string | undefined {
@@ -300,6 +369,15 @@ function throwIfAborted(
 ): void {
   if (signal?.aborted) {
     throw makeAbortError(partial, (signal as unknown as { reason?: unknown })?.reason ?? new Error("Aborted"));
+  }
+}
+
+function checkTokenLimit(usage: TokenUsage, maxTotalTokens: number): void {
+  if (Number.isFinite(maxTotalTokens) && usage.totalTokens > maxTotalTokens) {
+    throw new BudgetExceededError(
+      `Token limit exceeded: ${usage.totalTokens} > limits.maxTotalTokens ${maxTotalTokens}.`,
+      { context: { partial: { usage, turns: 0 } } }
+    );
   }
 }
 
@@ -408,46 +486,38 @@ function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpe
 }
 
 function sanitizeToolResult(r: ToolResultRecord): { sanitized: ToolResultRecord; metas: SubAgentExecutionMetadata[] } {
-  if (r.result && typeof r.result === "object" && "_subagentMetadata" in (r.result as any)) {
-    const metaList = (r.result as any)._subagentMetadata as SubAgentExecutionMetadata[];
-    const xml = (r.result as any).xml || (r.result as any).toString?.() || String(r.result);
+  // Only SDK-branded delegation envelopes are trusted. A plain object that
+  // merely carries a `_subagentMetadata` key (e.g. scraped JSON) is ordinary
+  // tool output: it must not replace what the model sees or touch billing.
+  if (isSubagentResult(r.result)) {
+    const xml = r.result.xml || r.result.toString?.() || String(r.result);
     return {
       sanitized: { ...r, result: xml },
-      metas: Array.isArray(metaList) ? metaList : [],
+      metas: normalizeSubagentMetadata(r.result._subagentMetadata),
     };
   }
   return { sanitized: r, metas: [] };
 }
 
-function toolCallFingerprint(call: ToolCallRecord): string {
-  const stableSerialize = (value: any, seen = new Set<any>()): string => {
-    if (value === null || typeof value !== "object") return JSON.stringify(value);
-    if (seen.has(value)) return "[Circular]";
-    seen.add(value);
-    if (Array.isArray(value)) return `[${value.map((item) => stableSerialize(item, seen)).join(",")}]`;
-    const output = `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key], seen)}`).join(",")}}`;
-    seen.delete(value);
-    return output;
-  };
-  const args = stableSerialize(call.arguments ?? {});
-  return `${call.name}\u0000${args}`;
-}
-
 /**
- * Prevents an identical tool call from being executed in consecutive model
- * turns. The synthetic error is sent back to the model so it can reuse the
- * previous result or choose a different action.
+ * Stops a model from hammering the same call. Per fingerprint (name + stable
+ * args) the guard counts CONSECUTIVE turns: the first two identical calls run,
+ * the third in a row is answered with a synthetic `repeat_blocked` error so
+ * the model reuses the earlier result or changes approach. Tools declared
+ * `repeatable` (or `idempotent`, e.g. status polling) are never blocked.
+ * A fingerprint that skips a turn starts over.
  */
 async function executeToolCallsWithRepeatGuard(options: {
   tools: Record<string, ToolDefinition>;
   toolCalls: ToolCallRecord[];
   previousFingerprints: Set<string>;
+  repeatCounts: Map<string, number>;
   agentName?: string;
   signal?: AbortSignal;
   sessionId?: string;
   onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
 }): Promise<{ results: ToolResultRecord[]; fingerprints: Set<string> }> {
-  const { toolCalls, previousFingerprints } = options;
+  const { toolCalls, previousFingerprints, repeatCounts } = options;
   const currentFingerprints = new Set<string>();
   const blocked = new Map<string, ToolResultRecord>();
   const executable: ToolCallRecord[] = [];
@@ -455,20 +525,21 @@ async function executeToolCallsWithRepeatGuard(options: {
   for (const call of toolCalls) {
     const fingerprint = toolCallFingerprint(call);
     currentFingerprints.add(fingerprint);
-    if (previousFingerprints.has(fingerprint)) {
-      blocked.set(call.id, {
-        id: call.id,
-        name: call.name,
-        result:
-          `Error: Tool '${call.name}' was called again immediately with identical arguments. ` +
-          "The previous result is already available; reuse it or call the tool with different arguments.",
-        isError: true,
-        durationMs: 0,
-      });
+    const def = findToolDefinition(options.tools, call.name);
+    if (def && isRepeatableTool(def)) {
+      executable.push(call);
+      continue;
+    }
+    if (!previousFingerprints.has(fingerprint)) repeatCounts.delete(fingerprint); // streak broken
+    if (shouldBlockRepeat(previousFingerprints, call, repeatCounts)) {
+      traceToolEvent("call_blocked", "warn", call, { agentName: options.agentName, sessionId: options.sessionId }, { reason: "repeat_blocked" });
+      blocked.set(call.id, makeRepeatBlockedResult(call));
     } else {
       executable.push(call);
     }
   }
+  // Streaks only survive while the fingerprint keeps appearing every turn.
+  for (const fp of [...repeatCounts.keys()]) if (!currentFingerprints.has(fp)) repeatCounts.delete(fp);
 
   const executed = executable.length > 0
     ? await executeToolCalls({
@@ -546,7 +617,9 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   const allSubagents: SubAgentExecutionMetadata[] = [];
   let finalResult: any = null;
   let turns = 0;
+  let toolsExecuted = false;
   let previousToolCallFingerprints = new Set<string>();
+  const repeatCounts = new Map<string, number>();
 
   try {
   if (config.bypassInputFileModality) {
@@ -554,6 +627,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       providerId: provider.id,
       modelId,
       signal: runOptions?.signal,
+      roots: config.fileAccess?.roots,
     });
   }
 
@@ -563,8 +637,10 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     // Q-21: fail fast on abort (throws AbortError with partial).
     throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: finalResult?.text });
     checkDeadline(startTime, limits.deadlineMs);
+    config.enforceBudget?.();
     // Q-19: repair orphan tool pairs before every request.
     ensureToolPairing(context);
+    if (config.fileAccess?.roots) await enforceFileAccess(context.messages, config.fileAccess.roots);
     turns++;
 
     const spec = getModelFromCatalog(provider.id, modelId);
@@ -576,6 +652,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       cache: options?.cache,
       tools: standardTools.length > 0 ? standardTools : undefined,
       signal: runOptions?.signal,
+      toolChoice: toolChoiceForTurn(options?.toolChoice, turns),
       ...(loopOutput.spec ? { output: loopOutput.spec } : {}),
     };
     // Q-22: per-request timeout pass-through (providers honor timeoutMs).
@@ -592,6 +669,15 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         (options as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
         (config as unknown as { googleStore?: unknown }).googleStore;
       if (gStore === false) (providerOptions as unknown as { store?: boolean }).store = false;
+    } catch {}
+    // Google interaction storage tier for the chain-TTL gate
+    // (`free`: 23h local gate; `paid`: 54d). Defaults to `free` in adapter.
+    try {
+      const gTier =
+        (runOptions as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+        (options as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+        (config as unknown as { googleTier?: unknown }).googleTier;
+      if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
     } catch {}
 
     const genResult = await generateWithTimeout(
@@ -633,6 +719,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     }
 
     accumulateUsage(accumulatedUsage, genResult.usage, spec);
+    config.enforceBudget?.({ ...genResult.usage, cost: computeCostFromPricing(genResult.usage, spec) });
+    checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
 
     // Record assistant turn in context
     context.addAssistantMessage(
@@ -641,6 +729,26 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       genResult.thinking,
       genResult.thoughtSignature
     );
+
+    // Thinking-trace telemetry (observability-only, full text, no limit):
+    // one bus event per thinking turn carrying the text + thought signature.
+    // Never touches provider payloads, history, or persistence formats.
+    if (genResult.thinking) {
+      try {
+        telemetryBus.emit({
+          code: "turn.thinking",
+          message: `[Agent Accelerator] turn ${turns} thinking (${provider.id}/${modelId})`,
+          data: {
+            turns,
+            model: modelId,
+            provider: provider.id,
+            sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+            thinking: genResult.thinking,
+            ...(genResult.thoughtSignature ? { thoughtSignature: genResult.thoughtSignature } : {}),
+          },
+        });
+      } catch {}
+    }
 
     // Mid-session steer: if new queries arrived during this provider turn,
     // inject them now. Tool turns still execute first (see below) so the
@@ -660,6 +768,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
             providerId: provider.id,
             modelId,
             signal: runOptions?.signal,
+            roots: config.fileAccess?.roots,
           });
         }
       }
@@ -678,10 +787,12 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${limits.maxToolCallsPerRun}).`
       );
     }
+    toolsExecuted = true;
     const guarded = await executeToolCallsWithRepeatGuard({
       tools,
       toolCalls: genResult.toolCalls,
       previousFingerprints: previousToolCallFingerprints,
+      repeatCounts,
       agentName,
       signal: runOptions?.signal,
       sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
@@ -697,11 +808,13 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       if (metas.length > 0) {
         allSubagents.push(...metas);
         for (const s of metas) {
+          if (s.raw) s.raw = applyCaptureRaw(s.raw, config.captureRaw);
           const subagentSpec = getModelFromCatalog(s.provider, s.model);
           if (subagentSpec && (!s.usage?.cost || !s.usage.cost.totalCost)) {
             s.usage.cost = computeCostFromPricing(s.usage, subagentSpec);
           }
           accumulateUsage(accumulatedUsage, s.usage, subagentSpec);
+          config.enforceBudget?.(s.usage);
         }
       }
       sanitizedResults.push(sanitized);
@@ -709,6 +822,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     allToolResults.push(...sanitizedResults);
     context.addToolResults(sanitizedResults);
+    checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
     // Q-19: results are stored BEFORE the cancellation check so an abort
     // never drops executed tool work from history.
     throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: genResult.text });
@@ -730,6 +844,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
           providerId: provider.id,
           modelId,
           signal: runOptions?.signal,
+          roots: config.fileAccess?.roots,
         });
       }
     }
@@ -775,18 +890,17 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     // Q-04: canonical finish reason + raw vendor passthrough.
     ...canonicalFinishReason(finalResult?.finishReason, truncatedByMaxTurns),
     durationMs: Date.now() - startTime,
-    raw: finalResult?.raw,
+    raw: applyCaptureRaw(finalResult?.raw, config.captureRaw) as ProviderRawData,
     turns,
   });
   } catch (err) {
     // Q-19: run-level onFailure rollback (default restores pre-run
     // checkpoint; opt out with (config as any).onFailure === "keep").
     // Aborts are excluded so partial history survives interruption.
-    const onFailure = (config as unknown as { onFailure?: unknown }).onFailure;
     const isAbort =
       (err as { name?: string } | null)?.name === "AbortError" ||
       !!runOptions?.signal?.aborted;
-    if (onFailure !== "keep" && !isAbort) {
+    if (shouldRollbackOnFailure(config.onFailure, isAbort, toolsExecuted)) {
       try { context.rollback(preRunCp, sessionIdForRollback); } catch {
         // why: rollback is best-effort — the original error takes precedence.
       }
@@ -874,6 +988,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
     const allToolCalls: ToolCallRecord[] = [];
     const allToolResults: ToolResultRecord[] = [];
     const allSubagents: SubAgentExecutionMetadata[] = [];
+    let toolsExecuted = false;
     try {
       await ensureModelCatalogFresh();
       // Re-validate after refresh: Agent.stream() validates before the catalog
@@ -895,6 +1010,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           providerId: config.provider.id,
           modelId: config.modelId,
           signal: config.runOptions?.signal,
+          roots: config.fileAccess?.roots,
         });
       }
       const {
@@ -937,11 +1053,14 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       lastResponse = null;
       turns = 0;
       let previousToolCallFingerprints = new Set<string>();
+      const repeatCounts = new Map<string, number>();
 
       while (turns < maxTurns) {
         throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
         checkDeadline(streamStartTime, streamLimits.deadlineMs);
+        config.enforceBudget?.();
         ensureToolPairing(context);
+        if (config.fileAccess?.roots) await enforceFileAccess(context.messages, config.fileAccess.roots);
         turns++;
 
         const spec2 = getModelFromCatalog(provider.id, modelId);
@@ -952,6 +1071,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           cache: options?.cache,
           tools: standardTools.length > 0 ? standardTools : undefined,
           signal: linked.signal,
+          toolChoice: toolChoiceForTurn(options?.toolChoice, turns),
           ...(streamOutputSpec ? { output: streamOutputSpec } : {}),
         };
         try {
@@ -965,6 +1085,13 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
             (options as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
             (config as unknown as { googleStore?: unknown }).googleStore;
           if (gStore === false) (providerOptions as unknown as { store?: boolean }).store = false;
+        } catch {}
+        try {
+          const gTier =
+            (runOptions as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+            (options as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+            (config as unknown as { googleTier?: unknown }).googleTier;
+          if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
         } catch {}
 
         const innerStream = provider.stream(
@@ -1010,7 +1137,12 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
               throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
               const event = res.value as StreamEvent;
               if ((event as StreamEvent)?.type !== "done") {
-                outerStream.push(event);
+                // The provider's `start` event carries the request audit record: apply the capture policy.
+                outerStream.push(
+                  event.type === "start" && event.raw
+                    ? { ...event, raw: applyCaptureRaw(event.raw, config.captureRaw) }
+                    : event
+                );
               }
             } catch (e) {
               if (timer) clearTimeout(timer);
@@ -1050,6 +1182,8 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         }
 
         accumulateUsage(accumulatedUsage, turnResponse.usage, spec2);
+        config.enforceBudget?.({ ...turnResponse.usage, cost: computeCostFromPricing(turnResponse.usage, spec2) });
+        checkTokenLimit(accumulatedUsage, streamLimits.maxTotalTokens);
 
         context.addAssistantMessage(
           turnResponse.text,
@@ -1057,6 +1191,25 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           turnResponse.thinking,
           turnResponse.thoughtSignature
         );
+
+        // Thinking-trace telemetry (observability-only, full text, no limit):
+        // mirrors the non-streaming loop above; bus-only, never wire/history.
+        if (turnResponse.thinking) {
+          try {
+            telemetryBus.emit({
+              code: "turn.thinking",
+              message: `[Agent Accelerator] turn ${turns} thinking (${provider.id}/${modelId})`,
+              data: {
+                turns,
+                model: modelId,
+                provider: provider.id,
+                sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+                thinking: turnResponse.thinking,
+                ...(turnResponse.thoughtSignature ? { thoughtSignature: turnResponse.thoughtSignature } : {}),
+              },
+            });
+          } catch {}
+        }
 
         const noToolSteered = (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0)
           ? drainSteerInbox(context, config.steerInbox)
@@ -1093,10 +1246,12 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         } catch {
           // why: stream push never throws, but guard anyway to protect the loop.
         }
+        toolsExecuted = true;
         const guarded = await executeToolCallsWithRepeatGuard({
           tools,
           toolCalls: turnResponse.toolCalls,
           previousFingerprints: previousToolCallFingerprints,
+      repeatCounts,
           agentName,
           signal: linked.signal,
           sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
@@ -1125,11 +1280,13 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           if (metas.length > 0) {
             allSubagents.push(...metas);
             for (const s of metas) {
+              if (s.raw) s.raw = applyCaptureRaw(s.raw, config.captureRaw);
               const subagentSpec = getModelFromCatalog(s.provider, s.model);
               if (subagentSpec && (!s.usage?.cost || !s.usage.cost.totalCost)) {
                 s.usage.cost = computeCostFromPricing(s.usage, subagentSpec);
               }
               accumulateUsage(accumulatedUsage, s.usage, subagentSpec);
+              config.enforceBudget?.(s.usage);
               outerStream.push({
                 type: "subagent_complete",
                 subagent: s,
@@ -1224,7 +1381,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         // Q-04: canonical finish reason + raw vendor passthrough.
         ...truncatedFinish,
         durationMs: Date.now() - startTime,
-        raw: lastResponse?.raw as any,
+        raw: applyCaptureRaw(lastResponse?.raw, config.captureRaw) as ProviderRawData,
         turns,
       });
 
@@ -1243,13 +1400,11 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       const isAbort =
         linked.signal.aborted ||
         outerStream.isCancelled() ||
-        (raw as any)?.name === "AbortError" ||
-        /abort|cancell?ed/i.test(String((raw as any)?.message ?? raw));
+        (raw as any)?.name === "AbortError";
       // Q-19: streaming onFailure rollback (same policy as runAgentLoop;
       // aborts excluded so partial history survives).
       try {
-        const onFailure = (config as unknown as { onFailure?: unknown }).onFailure;
-        if (onFailure !== "keep" && !isAbort) {
+        if (shouldRollbackOnFailure(config.onFailure, isAbort, toolsExecuted)) {
           try { config.context.rollback(streamPreCp, streamSessionId); } catch {
             // why: rollback is best-effort — the original error takes precedence.
           }

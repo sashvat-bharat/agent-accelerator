@@ -162,3 +162,13 @@ describe("modality guard (catalog-driven)", () => {
     ).not.toThrow();
   });
 });
+
+describe("createSessionId", () => {
+  it("is a bare random UUID with no prefix by default", async () => {
+    const { createSessionId } = await import("../src/index.ts");
+    const a = createSessionId();
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(a).not.toBe(createSessionId());
+    expect(createSessionId("checkout")).toMatch(/^checkout-[0-9a-f-]{36}$/);
+  });
+});

@@ -3,13 +3,32 @@ import {
   buildSessionHeaders,
   createSessionId,
 } from "../src/index.ts";
+import { setAttribution, getAttribution } from "../src/utils/headers.ts";
 
 describe("Caching & Session Affinity", () => {
   it("should generate proper session headers for OpenRouter (x-session-id)", () => {
     const sessionId = "session_or_999";
     const headers = buildSessionHeaders("openrouter", { sessionId });
     expect(headers["x-session-id"]).toBe(sessionId);
-    expect(headers["X-Title"]).toBe("Agent Accelerator");
+  });
+
+  it("sends NO OpenRouter attribution by default, only what setAttribution() configured", () => {
+    const before = getAttribution();
+    try {
+      setAttribution({});
+      const none = buildSessionHeaders("openrouter", { sessionId: "s1" });
+      expect(none["HTTP-Referer"]).toBeUndefined();
+      expect(none["X-Title"]).toBeUndefined();
+      const noSession = buildSessionHeaders("openrouter");
+      expect(noSession["HTTP-Referer"]).toBeUndefined();
+      setAttribution({ referer: "https://my.app", title: "My App" });
+      const opted = buildSessionHeaders("openrouter", { sessionId: "s1" });
+      expect(opted["HTTP-Referer"]).toBe("https://my.app");
+      expect(opted["X-Title"]).toBe("My App");
+    } finally {
+      setAttribution({});
+      setAttribution(before);
+    }
   });
 
   it("should generate proper headers for Google (x-goog-api-client & session headers)", () => {

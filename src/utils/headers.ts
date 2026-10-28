@@ -24,7 +24,7 @@ export function getPackageVersion(): string {
     const v = (globalThis as any).process?.env?.npm_package_version;
     if (typeof v === "string" && v) return v;
   } catch {}
-  return "0.4.5";
+  return "0.5.0";
 }
 
 function getAgentAccelUserAgent(): string {
@@ -55,9 +55,9 @@ export interface AttributionConfig {
 let attribution: AttributionConfig = {};
 
 /**
- * Configures global attribution headers. Defaults to none (no hardcoded
- * site); OpenRouter keeps its legacy `sashvat.com` / `Agent Accelerator`
- * fallback when no custom attribution is set (backward compat).
+ * Configures global attribution headers (OpenRouter `HTTP-Referer` / `X-Title`).
+ * Defaults to none: nothing is sent unless you call this, so your traffic is
+ * never credited to a site or app you did not choose.
  * @example `setAttribution({ referer: "https://example.com", title: "My App" });`
  */
 export function setAttribution(cfg: AttributionConfig): void {
@@ -151,9 +151,8 @@ function stripForBrowser(headers: Record<string, string>): Record<string, string
 /**
  * Builds provider-specific session, cache-affinity, and attribution headers.
  *
- * Q-17: attribution is configurable via `setAttribution()` (default none).
- * OpenRouter keeps its legacy `https://sashvat.com` / `Agent Accelerator`
- * fallback when no custom attribution is set. Custom (non-first-class)
+ * Q-17: attribution is configurable via `setAttribution()` (default none; no
+ * referer/title is ever sent unless you set one). Custom (non-first-class)
  * prefixes receive minimal `x-session-id`/`x-client-request-id` affinity only
  * (no `session_id` alias, no attribution) when a session id is present.
  * `customHeaders` merge case-insensitively against canonical names.
@@ -193,14 +192,18 @@ export function buildSessionHeaders(
     return key !== undefined ? headers[key] : undefined;
   };
 
+  // OpenRouter app attribution is strictly opt-in (`setAttribution`): by default
+  // a user's traffic is not credited to any third-party app or site.
+  const applyOpenRouterAttribution = (): void => {
+    if (attr.referer !== undefined && getHeader("HTTP-Referer") === undefined) headers["HTTP-Referer"] = attr.referer;
+    if (attr.title !== undefined && getHeader("X-Title") === undefined) headers["X-Title"] = attr.title;
+  };
+
   if (sessionId && !browser) {
     if (provider === "openrouter") {
       setHeaderCaseInsensitive(headers, "x-session-id", sessionId);
       setHeaderCaseInsensitive(headers, "x-client-request-id", sessionId);
-      const referer = attr.referer ?? "https://sashvat.com";
-      const title = attr.title ?? "Agent Accelerator";
-      if (getHeader("HTTP-Referer") === undefined) headers["HTTP-Referer"] = referer;
-      if (getHeader("X-Title") === undefined) headers["X-Title"] = title;
+      applyOpenRouterAttribution();
     } else if (provider === "google") {
       if (getHeader("x-goog-api-client") === undefined) {
         headers["x-goog-api-client"] = "agent-accel/1.0";
@@ -219,10 +222,7 @@ export function buildSessionHeaders(
       setHeaderCaseInsensitive(headers, "x-client-request-id", sessionId);
     }
   } else if (provider === "openrouter") {
-    const referer = attr.referer ?? "https://sashvat.com";
-    const title = attr.title ?? "Agent Accelerator";
-    if (getHeader("HTTP-Referer") === undefined) headers["HTTP-Referer"] = referer;
-    if (getHeader("X-Title") === undefined) headers["X-Title"] = title;
+    applyOpenRouterAttribution();
   }
 
   if (provider === "google" && !browser && getHeader("x-goog-api-client") === undefined) {

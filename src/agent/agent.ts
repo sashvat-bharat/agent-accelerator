@@ -1,4 +1,7 @@
-import type { AgentConfig, AgentRunOptions, MidSessionConfig } from "../types/agent.ts";
+import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState } from "../types/agent.ts";
+import type { TokenUsage } from "../types/core.ts";
+import type { ProviderRequestOptions } from "../types/model.ts";
+import { normalizeThinkingV2, resolveWhenBusy, normalizeWorkerTimeout } from "../tools/tool.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { ThinkingLevel, ThinkingConfig, CacheConfig, ServiceTier } from "../types/core.ts";
 import type { ContentPart } from "../types/message.ts";
@@ -7,15 +10,33 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
-import { convert_document_to_markdown } from "../utils/documents.ts";
+import {
+  normalizeToolMap,
+  resolveDynamicModelInput,
+  resolveMainModel,
+} from "./worker.ts";
+import * as path from "node:path";
+import { createConvertDocumentTool } from "../utils/documents.ts";
+import { registerAgent } from "../scheduler/scheduler.ts";
+import { resolveHome } from "../scheduler/store.ts";
+import { persistTelemetry } from "../telemetry-file.ts";
+import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
+import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
-import { createSessionId } from "../utils/session.ts";
-import { getSubAgentTrace, subscribeToSubAgent, listSubAgentTraceIds, type SubAgentTrace } from "./delegation.ts";
-import { saveSessionDir, saveSessionFile } from "../session/store.ts";
-import { clearSessionRouting, normalizeStructuredOutput } from "../providers.ts";
+import { createSessionId, nowMs } from "../utils/session.ts";
+import {
+  chargeBudgetUsage,
+  checkBudget,
+  getSubAgentTraceForSessions,
+  subscribeToSubAgentForSessions,
+  listSubAgentTraceIdsForSessions,
+  type SubAgentTrace,
+} from "./delegation.ts";
+import { saveSessionDir, saveSessionFile, findInvalidMessage, telemetryBus } from "../session/store.ts";
+import { isLocalPathInput } from "../utils/safe-io.ts";
+import { clearSessionRouting, normalizeStructuredOutput, normalizeStop } from "../providers.ts";
 import type { StructuredOutputSpec } from "../types/model.ts";
 import { clearInteractionChains } from "../providers/google.ts";
-import { getModel, getSubModel } from "../utils/env.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
 import { buildSessionData, type PersistedAgentSession, type SessionTotals,} from "../session/store.ts";
 import { SessionTelemetry } from "../session/store.ts";
@@ -33,7 +54,7 @@ export function resolveEffectiveThinking(
   return { enabled: true, level: overrideLevel as ThinkingConfig["level"] };
 }
 
-import { ConfigError } from "../types/errors.ts";
+import { ConfigError, SessionLoadError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (Q-21 fallback when
@@ -52,6 +73,7 @@ export interface AgentRunLimits {
   maxTurns?: number;
   deadlineMs?: number;
   maxToolCallsPerRun?: number;
+  maxTotalTokens?: number;
   requestTimeoutMs: number;
   firstByteTimeoutMs: number;
   streamIdleTimeoutMs: number;
@@ -68,6 +90,7 @@ function resolveAgentLimits(config: { limits?: Record<string, unknown> }): Agent
     ...(num(raw.maxToolCallsPerRun) !== undefined
       ? { maxToolCallsPerRun: Math.max(1, Math.floor(num(raw.maxToolCallsPerRun)!)) }
       : {}),
+    ...(num(raw.maxTotalTokens) !== undefined ? { maxTotalTokens: Math.max(1, Math.floor(num(raw.maxTotalTokens)!)) } : {}),
     requestTimeoutMs: num(raw.requestTimeoutMs) ?? 300_000,
     firstByteTimeoutMs: num(raw.firstByteTimeoutMs) ?? 120_000,
     streamIdleTimeoutMs: num(raw.streamIdleTimeoutMs) ?? 300_000,
@@ -135,7 +158,11 @@ export class Agent {
     thinkingLevel?: ThinkingLevel;
     tools: Record<string, ToolDefinition>;
     timeout: number;
+    /** Scheduled actions (`scheduled_actions` + `get_datetime` tools) are on. */
+    allowScheduledActions: boolean;
   };
+  /** Home folder for everything written to disk (`sessions/`, `scheduled_actions/`, `telemetry/`). */
+  readonly home: string;
   /** Registered model-callable tools. */
   readonly tools: Record<string, ToolDefinition> = {};
   /** Normalized reasoning configuration. */
@@ -150,6 +177,35 @@ export class Agent {
   readonly serviceTier?: ServiceTier;
   /** Convert `file` parts client-side for pdf-incapable models. */
   readonly bypassInputFileModality: boolean;
+  /**
+   * Local-file policy. `roots` set: every local-path media part and the
+   * built-in document tool must resolve inside them (`[]` denies all paths).
+   * Unset: developer-supplied parts are unrestricted and the model-callable
+   * tool is limited to the working directory.
+   */
+  readonly fileAccess?: { roots?: string[] };
+  /** Failure policy for the conversation (see `AgentConfig.onFailure`). */
+  readonly onFailure: "auto" | "rollback" | "keep";
+  /** Wire-capture policy for `AgentResponse.raw` (default `"redacted"`: bodies replaced by a content-free summary). */
+  readonly captureRaw?: false | "redacted" | true;
+  /** Constructor config, kept so {@link Agent.fork} can build isolated copies. */
+  private readonly forkConfig: AgentConfig;
+  /** Opt-in per-run budget (tokens / cost / duration / sub-agent count), enforced by the loop. */
+  readonly budget?: Budget;
+  /** Live counters behind {@link Agent.budget}; reset at the start of every run. */
+  budgetState?: BudgetState;
+  /** Google chain-TTL tier (`free` 23h default / `paid` 54d). */
+  readonly googleTier?: "free" | "paid";
+  /** Per-call defaults forwarded to providers; per-run options override them. */
+  private readonly callDefaults: {
+    toolChoice?: ToolChoiceOption;
+    maxOutputTokens?: number;
+    stop?: string | string[];
+    seed?: number;
+    retry?: RetryPolicyConfig;
+    env?: Record<string, string>;
+    fetch?: typeof fetch;
+  };
   /** Maximum model/tool turns per run. */
   readonly maxTurns: number;
   /** Session ID used for history and cache affinity. */
@@ -220,53 +276,29 @@ export class Agent {
     this.description = config.description || "AI Agent powered by Agent Accelerator";
     // DX1: only instructions (no systemPrompt alias)
     this.instructions = config.instructions || "";
-    const rawModel: any = (config.model as any)?.model ? (config.model as any) : config.model;
-    // Support ModelProviderInstance {model, apiKey, baseUrl, thinkingLevel} and ModelSpec {id, provider}
-    if (rawModel && typeof rawModel === "object" && "model" in rawModel) {
-      this.modelStringOrSpec = rawModel.model;
-    } else if (rawModel && typeof rawModel === "object" && "id" in rawModel && "provider" in rawModel) {
-      this.modelStringOrSpec = rawModel;
-    } else {
-      this.modelStringOrSpec = rawModel || getModel();
-    }
+    // Unified model resolution (shared with SubAgent/workers): supports
+    // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
+    const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
+    this.modelStringOrSpec = modelStringOrSpec as string | any;
     const dynRaw = config.dynamicSubagents;
-    const dynModelRaw = (dynRaw as any)?.model ?? config.subagentModel;
-    let dynModel: string | any | undefined;
-    if (dynModelRaw && typeof dynModelRaw === "object" && "model" in dynModelRaw) {
-      dynModel = (dynModelRaw as any).model;
-    } else if (dynModelRaw && typeof dynModelRaw === "object" && "id" in dynModelRaw && "provider" in dynModelRaw) {
-      dynModel = dynModelRaw;
-    } else {
-      dynModel = (dynModelRaw as any) || getSubModel();
-    }
-    this.subagentModel = dynModel;
+    // Unified worker-model chain: dynamicSubagents.model > subagentModel > SUB_AGENT_MODEL.
+    const dynModel = resolveDynamicModelInput(dynRaw, config.subagentModel);
+    this.subagentModel = dynModel as string | any | undefined;
     const dynEnabled = dynRaw ? (dynRaw.enabled ?? true) : false;
     if (dynRaw) {
-      const rawTools = (dynRaw as any)?.tools;
-      const dynTools: Record<string, ToolDefinition> = {};
-      if (rawTools) {
-        if (Array.isArray(rawTools)) {
-          for (const t of rawTools) {
-            const tName = (t as any)?.name || `tool_${Object.keys(dynTools).length}`;
-            dynTools[tName] = { ...(t as any), name: tName };
-          }
-        } else {
-          for (const [key, def] of Object.entries(rawTools as Record<string, ToolDefinition>)) {
-            dynTools[key] = { ...(def as any), name: (def as any)?.name || key };
-          }
-        }
-      }
+      const dynTools = normalizeToolMap((dynRaw as { tools?: Record<string, ToolDefinition> | ToolDefinition[] }).tools);
       const rawMax = (dynRaw as any)?.maxSpawn;
       const maxSpawn = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax as number)) : 4;
-      const rawTimeout = (dynRaw as any)?.timeout;
-      const timeout = Number.isFinite(rawTimeout) ? Math.floor(rawTimeout as number) : 0;
+      // `workerTimeoutMs ?? timeout`, or -1 when `modelMaySetTimeout` (see normalizeWorkerTimeout).
+      const timeout = normalizeWorkerTimeout(dynRaw as { timeout?: number; workerTimeoutMs?: number; modelMaySetTimeout?: boolean });
       this.dynamicSubagents = {
         enabled: dynEnabled,
-        model: dynModel,
+        model: dynModel as string | any | undefined,
         maxSpawn,
         thinkingLevel: (dynRaw as any)?.thinkingLevel,
         tools: dynTools,
         timeout,
+        allowScheduledActions: dynRaw.allowScheduledActions === true,
       };
     }
     this.apiKey = (rawModel as any)?.apiKey || config.apiKey;
@@ -280,9 +312,14 @@ export class Agent {
           : Infinity;
     this.sessionId = config.sessionId || config.cache?.sessionId || createSessionId();
     (this as any).subagentTraces = {};
-    this.persistConfig = config.persist;
-    const rawMode = config.midSession?.mode ?? "auto";
-    const normalizedMode = rawMode === "steer" || rawMode === "queue" ? rawMode : "auto";
+    this.home = resolveHome(config.home);
+    // `persist: {}` (neither dir nor file) means the default sessions folder under home.
+    this.persistConfig =
+      config.persist && !config.persist.dir && !config.persist.file
+        ? { ...config.persist, dir: path.join(this.home, "sessions") }
+        : config.persist;
+    // `whenBusy` (canonical) wins over legacy `mode`; anything else is "auto".
+    const normalizedMode = resolveWhenBusy(config.midSession);
     const rawMaxQueued = (config.midSession as any)?.maxQueued;
     const rawMaxSteers = (config.midSession as any)?.maxSteers;
     this.midSessionConfig = {
@@ -319,23 +356,40 @@ export class Agent {
 
     this.serviceTier = config.serviceTier;
     this.bypassInputFileModality = config.bypassInputFileModality ?? false;
+    this.onFailure =
+      config.onFailure === "rollback" || config.onFailure === "keep" ? config.onFailure : "auto";
+    this.forkConfig = { ...config };
+    this.captureRaw = config.captureRaw;
+    this.budget = config.budget ? { ...config.budget } : undefined;
+    for (const key of ["hooks", "contextManagement", "logger"] as const) {
+      if (config[key] !== undefined) {
+        // Declared for forward compatibility only: say so instead of silently ignoring.
+        telemetryBus.emitWarning(
+          "config.unsupported_option",
+          `[Agent Accelerator] AgentConfig.${key} is accepted for forward compatibility but is not implemented yet; it has no effect. Attach to telemetryBus.onEvent for observability.`,
+          { option: key }
+        );
+      }
+    }
+    if (config.telemetry?.persist) persistTelemetry(this.home);
+    this.googleTier = config.googleTier === "paid" || config.googleTier === "free" ? config.googleTier : undefined;
+    this.callDefaults = {
+      toolChoice: config.toolChoice,
+      maxOutputTokens: config.maxOutputTokens,
+      stop: config.stop,
+      seed: config.seed,
+      retry: config.retry,
+      env: config.env,
+      fetch: config.fetch,
+    };
+    this.fileAccess = config.fileAccess
+      ? { ...(config.fileAccess.roots ? { roots: [...config.fileAccess.roots] } : {}) }
+      : undefined;
     this.stateless = config.stateless ?? false;
 
-    // Tools registration
+    // Tools registration (unified normalization shared with dynamic pool).
     if (config.tools) {
-      if (Array.isArray(config.tools)) {
-        for (const t of config.tools) {
-          const tName = t.name || `tool_${Object.keys(this.tools).length}`;
-          this.tools[tName] = { ...t, name: tName };
-        }
-      } else {
-        for (const [key, def] of Object.entries(config.tools)) {
-          this.tools[key] = {
-            ...def,
-            name: def.name || key,
-          };
-        }
-      }
+      Object.assign(this.tools, normalizeToolMap(config.tools));
     }
 
 
@@ -347,23 +401,34 @@ export class Agent {
     }
 
     if (this.bypassInputFileModality && !this.tools["convert_document_to_markdown"]) {
-      this.tools["convert_document_to_markdown"] = convert_document_to_markdown;
+      this.tools["convert_document_to_markdown"] = createConvertDocumentTool({ roots: this.fileAccess?.roots });
     }
 
-    if (this.dynamicSubagents?.enabled === true) {
-      if (!this.subagentModel) {
-        throw new SubAgentModelError(
-          typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : (this.modelStringOrSpec as any)?.id
-        );
-      }
+    const dyn = this.dynamicSubagents;
+    if ((dyn?.enabled === true || dyn?.allowScheduledActions) && !this.subagentModel) {
+      throw new SubAgentModelError(
+        typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : (this.modelStringOrSpec as any)?.id
+      );
+    }
+    if (dyn?.enabled === true) {
       const spawnTool = createSubagentSpawnTool(this);
       this.tools[spawnTool.name || "spawn_subagents"] = spawnTool;
     }
+    if (dyn?.allowScheduledActions) {
+      // Fixed by config, so the tool set (and the prompt cache) stays stable.
+      const scheduleTool = createScheduledActionsTool(this);
+      this.tools[scheduleTool.name || "scheduled_actions"] = scheduleTool;
+      if (!this.tools["get_datetime"]) this.tools["get_datetime"] = getDatetimeTool;
+    }
+
+    // Ambiguous tool names would only blow up mid-run, after a paid model turn: fail at construction.
+    assertNoToolCollisions(this.tools);
 
     this.context = new AgentContext(this.getFullInstructions());
     if (initialCachedId) {
       this.context.cachedContentId = initialCachedId;
     }
+    if (dyn?.allowScheduledActions) registerAgent(this);
   }
 
   private getFullInstructions(): string | undefined {
@@ -605,12 +670,39 @@ export class Agent {
     }
     const active = this.currentRun;
     if (!active) return this.run(prompt, options) as Promise<AgentResponse>;
+    return this.steerInto(active, prompt, options);
+  }
+
+  /**
+   * Buffers a steer prompt into the active run and returns a promise for ITS
+   * reply: the active run's response when the prompt is injected, or (if the
+   * run ends first and the prompt becomes a queued follow-up) the follow-up
+   * run's response, so a late steer's answer is never lost.
+   */
+  private steerInto(
+    active: NonNullable<Agent["currentRun"]>,
+    prompt: string | ContentPart[],
+    options?: AgentRunOptions
+  ): Promise<AgentResponse> {
     this.assertSteerRoom(active.steerInbox);
-    active.steerInbox.push({ prompt, options });
+    const runDone = active.runPromise ?? active.outerStream?.result();
+    if (!runDone) return this.run(prompt, options) as Promise<AgentResponse>;
+    const entry: SteerEntry = { prompt, options };
+    const reply = new Promise<AgentResponse>((resolve, reject) => {
+      entry.settle = { resolve, reject };
+    });
+    reply.catch(() => {}); // a fire-and-forget caller must not trigger an unhandled rejection
+    active.steerInbox.push(entry);
     this.persistNow();
-    if (active.runPromise) return active.runPromise;
-    if (active.outerStream) return active.outerStream.result();
-    return this.run(prompt, options) as Promise<AgentResponse>;
+    runDone.then(
+      (res) => {
+        if (!entry.settle?.deferredToQueue) entry.settle?.resolve(res);
+      },
+      (err) => {
+        if (!entry.settle?.deferredToQueue) entry.settle?.reject(err);
+      }
+    );
+    return reply;
   }
 
   /**
@@ -717,15 +809,24 @@ export class Agent {
         const max = this.midSessionConfig.maxQueued ?? 20;
         for (const entry of leftover) {
           try {
-            if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) continue;
+            if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+              entry.settle?.reject(Object.assign(new Error("Steer aborted before it could run"), { name: "AbortError" }));
+              continue;
+            }
           } catch { continue; }
-          if (this.pendingQueue.length >= max) break;
+          if (this.pendingQueue.length >= max) {
+            entry.settle?.reject(new Error("[Agent Accelerator] Steer dropped: the follow-up queue is full."));
+            continue;
+          }
+          // The steer was never injected: it now runs as a follow-up, and the
+          // caller's promise resolves with that run's response.
+          if (entry.settle) entry.settle.deferredToQueue = true;
           this.pendingQueue.push({
             prompt: entry.prompt,
             options: entry.options,
             isStream: false,
-            resolve: () => {},
-            reject: () => {},
+            resolve: entry.settle?.resolve ?? (() => {}),
+            reject: entry.settle?.reject ?? (() => {}),
           });
         }
       } catch {}
@@ -779,14 +880,116 @@ export class Agent {
     return runController.signal;
   }
 
+  /**
+   * Config a spawned dynamic worker must inherit so it is never less
+   * constrained than its parent (run limits, retry policy, credentials/env,
+   * fetch, Google tier, file-access policy).
+   * @internal
+   */
+  inheritableConfig(): Partial<AgentConfig> {
+    const d = this.callDefaults;
+    return {
+      limits: { ...this.runLimits },
+      ...(d.retry ? { retry: d.retry } : {}),
+      ...(d.env ? { env: d.env } : {}),
+      ...(d.fetch ? { fetch: d.fetch } : {}),
+      ...(this.googleTier ? { googleTier: this.googleTier } : {}),
+      ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
+      ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
+    };
+  }
+
+  /**
+   * Isolated, stateless copy of this agent for ONE delegated call. An `Agent`
+   * runs one thing at a time (a second `stream()` while busy queues or steers
+   * into the first), so delegation tools fork per call: parallel calls to the
+   * same worker then truly run in parallel, each with its own context and
+   * session id, and never see each other's answers. The copy keeps this
+   * agent's model, instructions, tools and policies but not its persistence.
+   * @internal
+   */
+  fork(sessionId: string, parentSessionId?: string): Agent {
+    // A fork is a short-lived worker copy: it must not schedule, nor replace the
+    // real agent in the scheduler's registry.
+    const dyn = this.forkConfig.dynamicSubagents;
+    const copy = new Agent({
+      ...this.forkConfig,
+      sessionId,
+      stateless: true,
+      persist: undefined,
+      ...(dyn?.allowScheduledActions ? { dynamicSubagents: { ...dyn, allowScheduledActions: false } } : {}),
+    });
+    if (parentSessionId) (copy as unknown as { parentSessionId?: string }).parentSessionId = parentSessionId;
+    return copy;
+  }
+
+  /** Budgets are per run: counters restart whenever a new run begins. */
+  private resetBudgetState(): void {
+    if (this.budget) this.budgetState = { spawned: 0, totalTokens: 0, totalCostUsd: 0, startedAtMs: nowMs() };
+  }
+
+  /** Loop hook: charge `usage` (when given) and throw `BudgetExceededError` once any cap is passed. */
+  private enforceBudget(usage?: TokenUsage): void {
+    if (!this.budget) return;
+    if (usage) chargeBudgetUsage(this as unknown as Parameters<typeof chargeBudgetUsage>[0], usage);
+    checkBudget(this.budget, this.budgetState);
+  }
+
+  /** Folds the canonical per-run `thinking` option into `thinkingLevel` so every downstream reader agrees. */
+  private withResolvedThinking<T extends AgentRunOptions>(runOptions: T): T {
+    const level = normalizeThinkingV2(runOptions.thinking, runOptions.thinkingLevel);
+    return level ? { ...runOptions, thinkingLevel: level } : runOptions;
+  }
+
+  /**
+   * Single place that turns agent config + per-run options into the options
+   * every provider call receives. Per-run values override agent defaults
+   * (objects such as `retry` and `env` merge key by key).
+   */
+  private buildProviderOptions(runOptions: AgentRunOptions | undefined): ProviderRequestOptions {
+    const d = this.callDefaults;
+    const sessionId = runOptions?.sessionId || this.sessionId;
+    const toolChoice = normalizeToolChoiceOption(runOptions?.toolChoice ?? d.toolChoice);
+    const retry = { ...d.retry, ...runOptions?.retry };
+    const env = { ...d.env, ...runOptions?.env };
+    const stop = normalizeStop(runOptions?.stop ?? d.stop);
+    const maxOutputTokens = runOptions?.maxOutputTokens ?? d.maxOutputTokens;
+    const seed = runOptions?.seed ?? d.seed;
+    const fetchImpl = runOptions?.fetch ?? d.fetch;
+    return {
+      apiKey: this.apiKey,
+      baseUrl: this.baseUrl,
+      headers: { ...(this.customHeaders ?? {}), ...(runOptions?.headers ?? {}) },
+      thinking: resolveEffectiveThinking(this.thinkingConfig, runOptions?.thinkingLevel),
+      cache: this.stateless
+        ? { sessionId }
+        : { ...this.cacheConfig, sessionId },
+      serviceTier: this.serviceTier,
+      sessionId,
+      ...(this.outputSpec ? { output: this.outputSpec } : {}),
+      ...(this.googleTier ? { googleTier: this.googleTier } : {}),
+      ...(toolChoice !== undefined ? { toolChoice } : {}),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      ...(stop ? { stop } : {}),
+      ...(seed !== undefined ? { seed } : {}),
+      ...(Object.keys(env).length > 0 ? { env } : {}),
+      ...(fetchImpl ? { fetch: fetchImpl } : {}),
+      ...(retry.maxRetries !== undefined ? { maxRetries: retry.maxRetries } : {}),
+      ...(retry.maxDelayMs !== undefined ? { maxRetryDelayMs: retry.maxDelayMs } : {}),
+      ...(retry.baseDelayMs !== undefined ? { retryBaseDelayMs: retry.baseDelayMs } : {}),
+      ...(retry.budgetMs !== undefined ? { retryBudgetMs: retry.budgetMs } : {}),
+    };
+  }
+
   private startNonStreamingRun(
     prompt: string | ContentPart[],
     options?: AgentRunOptions
   ): Promise<AgentResponse> {
+    this.resetBudgetState();
     const runController = new AbortController();
     const steerInbox: SteerEntry[] = [];
     const mergedSignal = this.mergeUserSignal(options?.signal, runController);
-    const runOptions = { ...options, signal: mergedSignal };
+    const runOptions = this.withResolvedThinking({ ...options, signal: mergedSignal });
     // Q-19a: route to the named session context (default = this.context).
     const targetContext = this.getSessionContext(runOptions?.sessionId || this.sessionId);
     const task = (async (): Promise<AgentResponse> => {
@@ -799,18 +1002,7 @@ export class Agent {
       this.prepareTurn(prompt, runOptions, targetContext);
       this.persistNow();
 
-      const providerOptions = {
-        apiKey: this.apiKey,
-        baseUrl: this.baseUrl,
-        headers: { ...(this.customHeaders ?? {}), ...(runOptions?.headers ?? {}) },
-        thinking: resolveEffectiveThinking(this.thinkingConfig, runOptions?.thinkingLevel),
-        cache: this.stateless
-          ? { sessionId: runOptions?.sessionId || this.sessionId }
-          : { ...this.cacheConfig, sessionId: runOptions?.sessionId || this.sessionId },
-        serviceTier: this.serviceTier,
-        sessionId: runOptions?.sessionId || this.sessionId,
-        ...(this.outputSpec ? { output: this.outputSpec } : {}),
-      };
+      const providerOptions = this.buildProviderOptions(runOptions);
 
       const loopConfig = {
         agentName: this.name,
@@ -822,6 +1014,10 @@ export class Agent {
         runOptions,
         maxTurns: this.maxTurns,
         bypassInputFileModality: this.bypassInputFileModality,
+        ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
+        onFailure: this.onFailure,
+        ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
+        ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
         steerInbox,
         onSteerInjected: () => this.persistNow(),
@@ -854,7 +1050,7 @@ export class Agent {
     options?: AgentRunOptions
   ): AssistantMessageEventStream {
     const resolved = resolveModel(this.modelStringOrSpec);
-    const effectiveLevel = options?.thinkingLevel || this.thinkingConfig?.level;
+    const effectiveLevel = normalizeThinkingV2(options?.thinking, options?.thinkingLevel) || this.thinkingConfig?.level;
     if (effectiveLevel) {
       validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
     }
@@ -863,23 +1059,13 @@ export class Agent {
     this.prepareTurn(prompt, options, targetContext);
     this.persistNow();
 
+    this.resetBudgetState();
     const runController = new AbortController();
     const mergedSignal = this.mergeUserSignal(options?.signal, runController);
-    const runOptions = { ...options, signal: mergedSignal };
+    const runOptions = this.withResolvedThinking({ ...options, signal: mergedSignal });
     const steerInbox: SteerEntry[] = [];
 
-    const providerOptions = {
-      apiKey: this.apiKey,
-      baseUrl: this.baseUrl,
-      headers: { ...(this.customHeaders ?? {}), ...(runOptions?.headers ?? {}) },
-      thinking: resolveEffectiveThinking(this.thinkingConfig, runOptions?.thinkingLevel),
-      cache: this.stateless
-        ? { sessionId: runOptions?.sessionId || this.sessionId }
-        : { ...this.cacheConfig, sessionId: runOptions?.sessionId || this.sessionId },
-      serviceTier: this.serviceTier,
-      sessionId: runOptions?.sessionId || this.sessionId,
-      ...(this.outputSpec ? { output: this.outputSpec } : {}),
-    };
+    const providerOptions = this.buildProviderOptions(runOptions);
 
     const loopConfig = {
       agentName: this.name,
@@ -891,6 +1077,10 @@ export class Agent {
       runOptions,
       maxTurns: this.maxTurns,
       bypassInputFileModality: this.bypassInputFileModality,
+      ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
+      onFailure: this.onFailure,
+      ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
+      ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
       onProgress: () => this.persistNow(),
       steerInbox,
       onSteerInjected: () => this.persistNow(),
@@ -936,7 +1126,14 @@ export class Agent {
       const hit = own?.[trackingId];
       if (hit) return { ...hit, steps: hit.steps.map((s) => ({ ...s })) };
     } catch {}
-    return getSubAgentTrace(trackingId);
+    // Process-wide store, filtered to sessions THIS agent owns: another
+    // agent's workers (e.g. a different tenant) are never reachable.
+    return getSubAgentTraceForSessions(trackingId, this.ownedSessionIds());
+  }
+
+  /** Session ids whose spawned workers this agent may inspect (default + named sessions). */
+  private ownedSessionIds(): ReadonlySet<string> {
+    return new Set<string>([this.sessionId, ...this.sessions.keys()]);
   }
 
   /** Lists TrackingIDs of worker traces visible to this agent (deduped). */
@@ -947,7 +1144,10 @@ export class Agent {
     };
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const id of [...Object.keys((this as any).subagentTraces ?? {}), ...listSubAgentTraceIds()]) {
+    for (const id of [
+      ...Object.keys((this as any).subagentTraces ?? {}),
+      ...listSubAgentTraceIdsForSessions(this.ownedSessionIds()),
+    ]) {
       const raw = rawOf(id);
       if (!seen.has(raw)) {
         seen.add(raw);
@@ -964,7 +1164,7 @@ export class Agent {
    * @example `const off = agent.subscribeToSubAgent(id, (t) => render(t));`
    */
   subscribeToSubAgent(trackingId: string, fn: (trace: SubAgentTrace) => void): () => void {
-    return subscribeToSubAgent(trackingId, fn);
+    return subscribeToSubAgentForSessions(trackingId, this.ownedSessionIds(), fn);
   }
 
   /**
@@ -1063,6 +1263,13 @@ export class Agent {
    */
   importSession(data?: PersistedAgentSession | null): void {
     if (!data) return;
+    const badIndex = findInvalidMessage(data.messages ?? []);
+    if (badIndex !== -1) {
+      throw new SessionLoadError(
+        `[Agent Accelerator] Cannot import session: messages[${badIndex}] is not a valid message (expected role system|user|assistant|tool and string or part-array content).`
+      );
+    }
+    this.warnOnLocalMediaPaths(data.messages ?? []);
     const prevSid = this.sessionId;
     if (data.sessionId) (this as any).sessionId = data.sessionId;
     if ((data as any).parentSessionId) (this as any).parentSessionId = (data as any).parentSessionId;
@@ -1120,6 +1327,32 @@ export class Agent {
     try { clearSessionRouting(prevSid); } catch {}
     try { clearInteractionChains(this.sessionId); } catch {}
     try { clearSessionRouting(this.sessionId); } catch {}
+  }
+
+  /**
+   * A loaded session may reference local files (`image: "/home/me/x.png"`)
+   * that the next turn would read and upload. Without a `fileAccess.roots`
+   * policy that is silent, so surface it once on the telemetry bus.
+   */
+  private warnOnLocalMediaPaths(messages: ReadonlyArray<{ content?: unknown }>): void {
+    if (this.fileAccess?.roots) return; // enforced every turn by the loop
+    const paths: string[] = [];
+    for (const m of messages) {
+      if (!Array.isArray(m.content)) continue;
+      for (const part of m.content as Array<Record<string, unknown>>) {
+        const key = ["image", "audio", "video", "file"].find((k) => k === part?.type);
+        const value = key ? part[key] : undefined;
+        if (isLocalPathInput(value) && !value.startsWith("media/")) paths.push(value);
+      }
+    }
+    if (paths.length === 0) return;
+    try {
+      telemetryBus.emitWarning(
+        "session.local_media_paths",
+        `[Agent Accelerator] Imported session references ${paths.length} local file path(s) that will be read and sent to the provider on the next turn. Set fileAccess.roots to restrict them.`,
+        { count: paths.length, examples: paths.slice(0, 3) }
+      );
+    } catch {}
   }
 
   private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): void {
@@ -1218,12 +1451,7 @@ export class Agent {
       const mode = this.resolveEnqueueMode(requested);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
-        this.assertSteerRoom(this.currentRun.steerInbox);
-        this.currentRun.steerInbox.push({ prompt, options });
-        this.persistNow();
-        const active = this.currentRun;
-        if (active.runPromise) return active.runPromise;
-        if (active.outerStream) return active.outerStream.result();
+        return this.steerInto(this.currentRun, prompt, options);
       } else {
         if (this.midSessionConfig.mode === "steer") {
           throw new Error(
@@ -1480,8 +1708,13 @@ export class Agent {
       // <think> open tag then needs its own leading newline, otherwise it
       // glues onto the streamed text mid-line. False at stream start and
       // after every tag (both end with newlines), preserving the exact
-      // "<think>\n...\n</think>\n\n" contract for thinking-first streams.
+      // "<think>\n...\n</think>\n" contract for thinking-first streams.
       let needThinkNewline = false;
+      // Set on every think close; consumed by the next text_delta(s) to strip
+      // model-leading blank lines display-only (cache-safe: outer events only).
+      // Stays set until non-empty text is emitted so split "\n" | "\nText"
+      // chunks cannot leak a blank line.
+      let justClosedThink = false;
       const collapseBlankLines = (s: string): string => s.replace(/\n{3,}/g, "\n\n");
       const userOnThinking = options.onThinkingDelta;
       const userOnDelta = options.onDelta;
@@ -1504,13 +1737,32 @@ export class Agent {
         if (isThinking) {
           isThinking = false;
           // Drop any withheld trailing newlines: the span ends cleanly and
-          // the tag supplies its own line breaks. Empty spans still close.
+          // the tag supplies its own single line break. Empty spans still close.
           pendingNewlines = "";
-          const close = emittedAny ? "\n</think>\n\n" : "</think>\n\n";
+          const close = emittedAny ? "\n</think>\n" : "</think>\n";
           emittedAny = false;
+          justClosedThink = true;
           if (userOnThinking) userOnThinking(close, e);
           else if (userOnDelta) userOnDelta(close, e as any);
         }
+      };
+
+      /**
+       * Strips model-leading blank lines after a think close, display-only.
+       * Mutates `e.delta` in place so `for-await` consumers see the same clean
+       * text; safe because loop context derives from the provider result, not
+       * these outer events. Returns the display string (`""` when nothing
+       * displayable yet — caller skips the callback but keeps the flag set so
+       * a split newline-only chunk cannot leak a blank line).
+       */
+      const stripLeadingAfterClose = (e: any): string => {
+        const raw: string = e.delta ?? "";
+        if (!justClosedThink) return raw;
+        const stripped = raw.replace(/^\n+/, "");
+        try { e.delta = stripped; } catch {}
+        if (!stripped) return "";
+        justClosedThink = false;
+        return stripped;
       };
 
       /** Buffers one raw thinking chunk, returning the display string to
@@ -1550,9 +1802,14 @@ export class Agent {
         });
         s.on("text_delta", (e: any) => {
           closeThink(e);
-          needThinkNewline = !((e.delta ?? "").endsWith("\n"));
-          if (userOnDelta) userOnDelta(e.delta!, e);
-          else if (userOnThinking) userOnThinking(e.delta!, e as any);
+          const display = stripLeadingAfterClose(e);
+          if (!display) {
+            needThinkNewline = false;
+            return;
+          }
+          needThinkNewline = !display.endsWith("\n");
+          if (userOnDelta) userOnDelta(display, e);
+          else if (userOnThinking) userOnThinking(display, e as any);
         });
         // Close thinking tag and reset turn state before tool/subagent execution or results
         s.on("tool_call_start" as any, (e: any) => closeThink(e));
@@ -1570,8 +1827,9 @@ export class Agent {
           if (isThinking) {
             isThinking = false;
             pendingNewlines = "";
-            const tag = emittedAny ? "\n</think>\n\n" : "</think>\n\n";
+            const tag = emittedAny ? "\n</think>\n" : "</think>\n";
             emittedAny = false;
+            justClosedThink = true;
             s.push({ type: "thinking_delta", thinkingDelta: tag, __synthetic: true } as any);
           }
         };
@@ -1596,6 +1854,12 @@ export class Agent {
         });
         s.on("text_delta", (e: any) => {
           closeSynthetic();
+          if (justClosedThink) {
+            const stripped: string = (e.delta ?? "").replace(/^\n+/, "");
+            try { e.delta = stripped; } catch {}
+            if (!stripped) return;
+            justClosedThink = false;
+          }
           needThinkNewline = !((e.delta ?? "").endsWith("\n"));
         });
         s.on("tool_call_start" as any, () => {
@@ -1626,7 +1890,16 @@ export class Agent {
 /** Normalizes the public `thinkingLevel` flag into provider-neutral thinking settings. */
 export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): ThinkingConfig | undefined {
   // DX4: only thinkingLevel, values: none, dynamic, minimal, low, medium, high, xhigh, max
-  const rawLevel = config.thinkingLevel ?? fallbackLevel;
+  // `thinking` (canonical) wins over legacy `thinkingLevel`; `{ level }` objects are unwrapped.
+  const rawLevel = normalizeThinkingV2(config.thinking, config.thinkingLevel) ?? fallbackLevel;
+  if (typeof config.thinking === "object" && config.thinking?.budgetTokens !== undefined) {
+    // No provider maps an explicit token budget yet: say so instead of ignoring it silently.
+    telemetryBus.emitWarning(
+      "config.thinking_budget_ignored",
+      "[Agent Accelerator] thinking.budgetTokens is not forwarded by any provider adapter yet; the level alone is used.",
+      { budgetTokens: config.thinking.budgetTokens }
+    );
+  }
   const level = rawLevel as ThinkingLevel | undefined;
 
   if (!level) return undefined;
@@ -1653,4 +1926,12 @@ export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): 
     return { enabled: true, level: "dynamic", budgetTokens: -1 };
   }
   return { enabled: true, level };
+}
+
+/** Maps the public `toolChoice` option onto the provider wire-neutral form. */
+function normalizeToolChoiceOption(choice: ToolChoiceOption | undefined): ProviderRequestOptions["toolChoice"] {
+  if (!choice) return undefined;
+  if (typeof choice === "string") return choice;
+  if (choice.tool) return { type: "function", function: { name: choice.tool } };
+  return choice.mode;
 }

@@ -16,9 +16,10 @@
  * - Stateful chaining via `previous_interaction_id` keyed by session; falls
  *   back to stateless full-history (`store: false`) when the session mixed
  *   providers, keeping the canonical conversation provider-agnostic.
- * - Unlike the legacy transport path, Gemini 2.x is NOT rejected here —
- *   the Interactions API documents 2.5 support; the catalog still governs
- *   thinking validation upstream.
+ * - Unlike the legacy transport path, Gemini 2.x is rejected here —
+ *   the minimum supported generation is Gemini 3 (deprecated 1.x/2.x fail
+ *   fast before any network call); the catalog still governs thinking
+ *   validation upstream.
  */
 import type {
   Provider,
@@ -43,14 +44,21 @@ import { withRetries } from "../utils/retry.ts";
 import { setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import {
   newToolCallId,
+  parseArguments,
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
+  isNotFoundChainError,
   combinedSignal,
   timeoutFor,
   hasAuthHeader,
   clampToolCallId,
+  openStreamResponse,
+  retryOptionsFrom,
+  headersToRecord,
+  parseRetryAfterMs,
 } from "./shared.ts";
+import { telemetryBus } from "../telemetry.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
@@ -61,7 +69,9 @@ import {
   lastProviderFor,
   noteProviderTurn,
   parseStreamedToolArguments,
+  selectRawArguments,
   mapOutputToGoogle,
+  mapGenerationParamsToGoogle,
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
   emitProviderWarning,
@@ -80,7 +90,7 @@ type InteractionContentBlock =
 
 type InteractionInputStep =
   | { type: "user_input"; content: string | InteractionContentBlock[] }
-  | { type: "thought"; signature: string; summary?: Array<{ type: string; text?: string }> }
+  | { type: "thought"; signature?: string; summary?: Array<{ type: string; text?: string }> }
   | { type: "function_call"; id: string; name: string; arguments: Record<string, unknown> }
   | {
       type: "function_result";
@@ -122,6 +132,7 @@ interface InteractionObject {
   created?: string;
   updated?: string;
   service_tier?: string;
+  error?: { message?: string; code?: string | number } | null;
   steps?: InteractionStep[];
   usage?: {
     total_tokens?: number;
@@ -149,8 +160,33 @@ const INTERNAL_HEADERS = new Set([
 interface ChainEntry {
   interactionId: string;
   model: string;
+  /** Wall-clock ms of the turn that established this chain (drives the TTL gate). */
+  at: number;
 }
 const interactionChains = new Map<string, ChainEntry>();
+
+/** Interaction storage TTLs: free 24h / paid 55d; local gate fires 1h/1d early. */
+const FREE_CHAIN_TTL_MS = 23 * 3600 * 1000;
+const PAID_CHAIN_TTL_MS = 54 * 24 * 3600 * 1000;
+
+/** Last-turn total tokens per session for the rehydration invariant (Rule 3). */
+const lastTurnTotals = new Map<string, number>();
+
+function resolveInteractionTier(options?: ProviderRequestOptions): "free" | "paid" {
+  return options?.googleTier === "paid" ? "paid" : "free";
+}
+
+function chainTtlMs(options?: ProviderRequestOptions): number {
+  return resolveInteractionTier(options) === "paid" ? PAID_CHAIN_TTL_MS : FREE_CHAIN_TTL_MS;
+}
+
+/** Emits a chain anomaly on the telemetry bus (+ legacy global hook). Never throws. */
+function reportChainAnomaly(detail: { type: string; [k: string]: unknown }): void {
+  telemetryBus.emitWarning(detail.type, `[Agent Accelerator] [google] ${String(detail.type)}`, detail);
+  try {
+    (globalThis as unknown as { __agentAccelAnomaly?: (d: unknown) => void }).__agentAccelAnomaly?.(detail);
+  } catch {}
+}
 
 function chainFor(sessionId: string | undefined): ChainEntry | undefined {
   if (!sessionId) return undefined;
@@ -162,10 +198,57 @@ function setChain(sessionId: string | undefined, entry: ChainEntry): void {
   interactionChains.set(sessionId, entry);
 }
 
+/**
+ * Drops a chain entry whose storage TTL elapsed locally (Rule 1: zero wasted
+ * RTT). Returns undefined when gated so the caller falls through to the
+ * full-history seeding branch. Also resets the token baseline so the reseed
+ * never trips the rehydration invariant.
+ */
+function liveChainFor(sessionId: string | undefined, options?: ProviderRequestOptions): ChainEntry | undefined {
+  const entry = chainFor(sessionId);
+  if (!entry || !sessionId) return entry;
+  if (typeof entry.at === "number" && Date.now() - entry.at >= chainTtlMs(options)) {
+    interactionChains.delete(sessionId);
+    lastTurnTotals.delete(sessionId);
+    reportChainAnomaly({ type: "interaction_chain_ttl_expired", sessionId, model: entry.model });
+    return undefined;
+  }
+  return entry;
+}
+
+/**
+ * Records a successful turn's token total and alerts when input tokens drop
+ * below the previous turn's total (Rule 3: a caller dropped the chain without
+ * rehydrating history). Never throws; observability-only.
+ */
+function checkTurnTokens(sessionId: string | undefined, usage: { inputTokens: number; outputTokens: number; cachedTokens?: number }): void {
+  try {
+    if (!sessionId) return;
+    const total = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+    const prev = lastTurnTotals.get(sessionId);
+    lastTurnTotals.set(sessionId, total);
+    if (prev !== undefined && prev > 0 && (usage.inputTokens ?? 0) < prev) {
+      const input = usage.inputTokens ?? 0;
+      reportChainAnomaly({
+        type: "interaction_history_shrink",
+        sessionId,
+        inputTokens: input,
+        previousTotalTokens: prev,
+        cacheHitRate: input > 0 ? (usage.cachedTokens ?? 0) / input : 0,
+      });
+    }
+  } catch {}
+}
+
 /** Clears chained interaction state (mainly for tests). */
 export function clearInteractionChains(sessionId?: string): void {
-  if (sessionId) interactionChains.delete(sessionId);
-  else interactionChains.clear();
+  if (sessionId) {
+    interactionChains.delete(sessionId);
+    lastTurnTotals.delete(sessionId);
+  } else {
+    interactionChains.clear();
+    lastTurnTotals.clear();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +274,33 @@ function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
 function cleanModelId(model: string | ModelSpec): string {
   const rawId = typeof model === "string" ? model : model.id;
   return rawId.replace(/^(google\/|gemini\/|models\/)/i, "");
+}
+
+/**
+ * Enforces the Gemini 3 minimum generation floor: Gemini 1.x/2.x are
+ * deprecated and unsupported — fail fast before any network call.
+ * Non-`gemini-` model ids are left to the catalog/provider verdict.
+ */
+function assertSupportedGeneration(clean: string): void {
+  const match = clean.match(/^gemini-(\d+)(?:[.\-]|$)/i);
+  if (match && Number(match[1]) < 3) {
+    throw new Error(
+      `[Agent Accelerator] [google/${clean}] Unsupported generation: Gemini ${match[1]}.x and older are strictly rejected by this SDK. ` +
+        `Use a Gemini 3 or later model for full support and feature coverage.`
+    );
+  }
+}
+
+/** Throws a concise error for failed/cancelled interactions (never silent empty success). */
+function throwIfFailedInteraction(interaction: InteractionObject, modelId: string): void {
+  if (interaction.status !== "failed" && interaction.status !== "cancelled") return;
+  const message =
+    interaction.error && typeof interaction.error.message === "string" && interaction.error.message
+      ? interaction.error.message
+      : `Google interaction ${interaction.status}`;
+  const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
+  if (interaction.error?.code !== undefined) failure["code"] = interaction.error.code;
+  throw toConciseProviderError(failure, "google", modelId);
 }
 
 function toGoogleTools(tools?: StandardToolDeclaration[]): Array<Record<string, unknown>> | undefined {
@@ -260,19 +370,40 @@ function resultToText(result: unknown): string {
   return safeStringify(result);
 }
 
-/** Latest-turn input for stateful chaining (server already holds history). */
+/**
+ * Latest-turn input for stateful chaining (the server already holds history):
+ * everything AFTER the last assistant message, in order. That is normally one
+ * user prompt (sent as plain text/blocks), but after tool execution it is the
+ * `function_result` steps, and a mid-run `steer()` can append user messages
+ * behind them. Sending only the last message would drop the tool results and
+ * leave the chained interaction waiting on its function calls.
+ */
 async function latestTurnInput(context: ProviderContext): Promise<string | InteractionContentBlock[] | InteractionInputStep[]> {
   const messages = context.messages;
-  // Trailing tool messages -> function_result steps.
-  const trailingTool: Message[] = [];
+  let lastAssistant = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.role === "tool") trailingTool.unshift(m);
-    else break;
+    if (messages[i]!.role === "assistant") {
+      lastAssistant = i;
+      break;
+    }
   }
-  if (trailingTool.length > 0) {
-    const steps: InteractionInputStep[] = [];
-    for (const m of trailingTool) {
+  const tail = messages.slice(lastAssistant + 1).filter((m) => m.role !== "system");
+  if (tail.length === 0) return "";
+
+  const hasToolResults = tail.some((m) => m.role === "tool");
+  if (!hasToolResults && tail.length === 1) {
+    const only = tail[0]!;
+    if (typeof only.content === "string") return only.content;
+    const blocks = await contentPartsToBlocks(only.content);
+    if (blocks.length === 1 && blocks[0]!.type === "text") {
+      return (blocks[0] as { type: "text"; text: string }).text;
+    }
+    return blocks;
+  }
+
+  const steps: InteractionInputStep[] = [];
+  for (const m of tail) {
+    if (m.role === "tool") {
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
@@ -284,17 +415,16 @@ async function latestTurnInput(context: ProviderContext): Promise<string | Inter
           });
         }
       }
+    } else if (m.role === "user") {
+      if (typeof m.content === "string") {
+        steps.push({ type: "user_input", content: [{ type: "text", text: m.content }] });
+      } else {
+        const blocks = await contentPartsToBlocks(m.content);
+        if (blocks.length > 0) steps.push({ type: "user_input", content: blocks });
+      }
     }
-    return steps;
   }
-  const last = messages[messages.length - 1];
-  if (!last) return "";
-  if (typeof last.content === "string") return last.content;
-  const blocks = await contentPartsToBlocks(last.content);
-  if (blocks.length === 1 && blocks[0]!.type === "text") {
-    return (blocks[0] as { type: "text"; text: string }).text;
-  }
-  return blocks;
+  return steps;
 }
 
 /** Full-history Steps for stateless (provider-switch) turns. */
@@ -324,16 +454,18 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
         if (part.type === "thinking" && part.thinking) {
           // Q-18: preserve namespaced signatures only — foreign-provider
           // signatures never echo here; untagged legacy echoes (compat).
+          // Absent signatures are omitted (never sent as empty strings).
           const partProvider = (part as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
           const msgProvider = (m as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
           const sig = shouldEchoSignature(partProvider ?? msgProvider, "google")
             ? part.thoughtSignature || m.thoughtSignature || ""
             : "";
-          steps.push({
+          const thoughtStep: { type: "thought"; signature?: string; summary: Array<{ type: string; text?: string }> } = {
             type: "thought",
-            signature: sig,
             summary: [{ type: "text", text: part.thinking }],
-          });
+          };
+          if (sig) thoughtStep.signature = sig;
+          steps.push(thoughtStep);
         } else if (part.type === "tool_call") {
           steps.push({
             type: "function_call",
@@ -382,7 +514,11 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
 
 function mapUsage(raw?: InteractionObject["usage"]): TokenUsage {
   const input = raw?.total_input_tokens ?? 0;
-  const output = raw?.total_output_tokens ?? 0;
+  // Google reports thought tokens separately from `total_output_tokens`, but bills them as output
+  // ("response pricing is the sum of output tokens and thinking tokens"). Fold them into output so
+  // pricing is right and `thinkingTokens` stays a subset of `outputTokens`.
+  const thought = raw?.total_thought_tokens ?? 0;
+  const output = (raw?.total_output_tokens ?? 0) + thought;
   // Canonical invariant: cached hits are a SUBSET of input. Google usually
   // honors this, but long chained runs have been observed reporting
   // total_cached_tokens > total_input_tokens (which yields >100% hit rates
@@ -395,13 +531,14 @@ function mapUsage(raw?: InteractionObject["usage"]): TokenUsage {
     cachedTokens: cached,
     cacheReadTokens: cached,
     cacheWriteTokens: 0,
-    thinkingTokens: raw?.total_thought_tokens ?? 0,
+    thinkingTokens: thought,
   };
 }
 
 function mapFinishReason(status?: string): string {
   if (status === "requires_action") return "tool_calls";
   if (status === "incomplete") return "length";
+  if (status === "failed" || status === "cancelled" || status === "error") return "error";
   return "stop";
 }
 
@@ -411,6 +548,9 @@ function parseInteraction(
   durationMs: number,
   raw: ProviderRawData
 ): ProviderGenerateResult {
+  // Failed/cancelled interactions must surface loudly — never resolve as
+  // empty successful stops.
+  throwIfFailedInteraction(interaction, modelId);
   let text = "";
   const thinkingParts: string[] = [];
   let thoughtSignature: string | undefined;
@@ -434,8 +574,15 @@ function parseInteraction(
         if (block.type === "text" && block.text) text += block.text;
       }
     } else if (step.type === "function_call") {
+      // Object args as-is; a JSON string is parsed (unparseable text becomes the
+      // truncated marker); absent args mean a zero-argument call.
+      const rawArgs: unknown = step.arguments;
       const args =
-        step.arguments && typeof step.arguments === "object" ? step.arguments : { raw: step.arguments };
+        rawArgs && typeof rawArgs === "object"
+          ? rawArgs
+          : typeof rawArgs === "string"
+            ? parseArguments(rawArgs)
+            : {};
       toolCalls.push({
         id: step.id || newToolCallId(),
         name: step.name || "unknown",
@@ -520,6 +667,8 @@ export class GoogleInteractionsProvider implements Provider {
         options?.thinking?.enabled !== false && (options?.thinking?.level ?? "dynamic") !== "none";
       if (thinkingActive) generationConfig["thinking_summaries"] = "auto";
       if (toolChoice) generationConfig["tool_choice"] = toolChoice;
+      // max_output_tokens only; stop and seed warn+drop.
+      Object.assign(generationConfig, mapGenerationParamsToGoogle(options, `google/${modelId}`));
 
       const body: InteractionRequestBody = {
         model: modelId,
@@ -566,10 +715,15 @@ export class GoogleInteractionsProvider implements Provider {
 
       const prevProvider = lastProviderFor(sessionId);
       const switched = !!prevProvider && prevProvider !== "google";
-      const chain = chainFor(sessionId);
+      // Proactive TTL gate (Rule 1): expired chains are dropped locally so
+      // this turn seeds fresh instead of wasting an RTT on a dead pointer.
+      const chain = liveChainFor(sessionId, options);
       // Interaction ids are model-scoped server-side: chaining a 2.5 id into
       // a 3.5 request 400s, so a same-provider model switch resumes stateless.
       const continuing = !!chain && !switched && chain.model === modelId && context.messages.length > 1;
+      // A model switch reseeds from full history and tokenizes differently: drop the token
+      // baseline so the new model's first turn is not mistaken for a shrunken history.
+      if (chain && sessionId && chain.model !== modelId) lastTurnTotals.delete(sessionId);
 
       if (switched) {
         // Cross-provider turn: the Google server never saw the other
@@ -620,7 +774,7 @@ export class GoogleInteractionsProvider implements Provider {
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
     try {
-      const res = await fetch(url, this.requestInit(body, options, apiKey, effective));
+      const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, effective));
       const text = await res.text();
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => {
@@ -637,7 +791,8 @@ export class GoogleInteractionsProvider implements Provider {
     statusText: string,
     url: string,
     bodyText: string,
-    modelId: string
+    modelId: string,
+    headers?: Record<string, string>
   ): void {
     if (status >= 200 && status < 300) return;
     const { message, code, errorType, raw } = readErrorPayload(bodyText);
@@ -655,6 +810,8 @@ export class GoogleInteractionsProvider implements Provider {
     if (code !== undefined) (err as Record<string, unknown>)["code"] = code;
     if (errorType) (err as Record<string, unknown>)["errorType"] = errorType;
     if (raw) (err as Record<string, unknown>)["raw"] = raw;
+    const retryAfterMs = parseRetryAfterMs(headers);
+    if (retryAfterMs !== undefined) (err as Record<string, unknown>)["retryAfterMs"] = retryAfterMs;
     throw toConciseProviderError(err, "google", modelId);
   }
 
@@ -665,6 +822,8 @@ export class GoogleInteractionsProvider implements Provider {
   ): Promise<ProviderGenerateResult> {
     const startTime = Date.now();
     const clean = cleanModelId(model);
+    // Hard generation floor: Gemini 1.x/2.x fail fast before any network call.
+    assertSupportedGeneration(clean);
     const apiKey = resolveApiKey(options);
     if (!apiKey) {
       throw new Error(
@@ -679,9 +838,9 @@ export class GoogleInteractionsProvider implements Provider {
     const url = `${baseUrl}/interactions`;
     const sessionId = options?.sessionId || options?.cache?.sessionId;
     const tools = options?.tools as StandardToolDeclaration[] | undefined;
-    const body = await this.buildBody(clean, context, options, sessionId, tools, false);
+    let body = await this.buildBody(clean, context, options, sessionId, tools, false);
 
-    const rawRequest = {
+    const makeRawRequest = (b: InteractionRequestBody): ProviderRawData["request"] => ({
       url,
       method: "POST",
       headers: redactedHeaders({
@@ -691,12 +850,13 @@ export class GoogleInteractionsProvider implements Provider {
         ),
         "x-goog-api-key": "[REDACTED]",
       }),
-      body,
-    };
+      body: b,
+    });
+    let rawRequest = makeRawRequest(body);
 
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, options?.signal);
-      this.throwIfError(res.status, res.statusText, url, res.text, clean);
+      this.throwIfError(res.status, res.statusText, url, res.text, clean, res.headers);
       let interaction: InteractionObject;
       try {
         interaction = JSON.parse(res.text) as InteractionObject;
@@ -712,28 +872,41 @@ export class GoogleInteractionsProvider implements Provider {
         );
       }
       if (interaction.id && sessionId && body.store !== false) {
-        setChain(sessionId, { interactionId: interaction.id, model: clean });
+        setChain(sessionId, { interactionId: interaction.id, model: clean, at: Date.now() });
       } else if (body.store === false && sessionId) {
         interactionChains.delete(sessionId);
+        lastTurnTotals.delete(sessionId);
       }
       noteProviderTurn(sessionId, "google");
-      return parseInteraction(
+      const parsed = parseInteraction(
         interaction,
         clean,
         Date.now() - startTime,
         { request: rawRequest, response: { status: res.status, statusText: res.statusText, headers: res.headers, body: interaction } }
       );
+      checkTurnTokens(sessionId, parsed.usage);
+      return parsed;
     };
 
+    const retryOptions = {
+      ...retryOptionsFrom(options),
+      signal: options?.signal,
+      label: { providerId: "google", modelId: clean },
+    };
     try {
-      return await withRetries(doCall, {
-        maxRetries: options?.maxRetries,
-        maxRetryDelayMs: options?.maxRetryDelayMs,
-        signal: options?.signal,
-        label: { providerId: "google", modelId: clean },
-      });
+      return await withRetries(doCall, retryOptions);
     } catch (err) {
       if (err instanceof Error && (err as { name?: string }).name === "AbortError") throw err;
+      // Reactive self-heal (Rule 2): a chained pointer the server no longer
+      // has is retried once against the full canonical history with the dead
+      // chain cleared, so the turn succeeds instead of wedging the session.
+      if (sessionId && body.previous_interaction_id && isNotFoundChainError(err)) {
+        reportChainAnomaly({ type: "interaction_chain_evicted", sessionId, model: clean });
+        clearInteractionChains(sessionId);
+        body = await this.buildBody(clean, context, options, sessionId, tools, false);
+        rawRequest = makeRawRequest(body);
+        return await withRetries(doCall, retryOptions);
+      }
       throw err;
     }
   }
@@ -766,7 +939,13 @@ export class GoogleInteractionsProvider implements Provider {
     });
 
     (async () => {
+      // Hoisted for the catch-block self-heal (consts inside try are not
+      // visible in catch).
+      let evictSessionId: string | undefined;
+      let usedChain = false;
       try {
+        // Hard generation floor (mirrors generate): no network on legacy ids.
+        assertSupportedGeneration(clean);
         const apiKey = resolveApiKey(options);
         if (!apiKey) {
           throw new Error(
@@ -779,6 +958,8 @@ export class GoogleInteractionsProvider implements Provider {
         const sessionId = options?.sessionId || options?.cache?.sessionId;
         const tools = options?.tools as StandardToolDeclaration[] | undefined;
         const body = await this.buildBody(clean, context, options, sessionId, tools, true);
+        evictSessionId = sessionId;
+        usedChain = body.previous_interaction_id !== undefined;
 
         // Audit trail mirrors generate (custom headers included); the
         // Interactions API sends no session-affinity headers (implicit
@@ -797,25 +978,30 @@ export class GoogleInteractionsProvider implements Provider {
         };
 
         const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
-        const streamTimeoutTimer =
-          streamTimeoutMs && streamTimeoutMs > 0
-            ? setTimeout(() => {
-                try {
-                  linked.abort();
-                } catch {}
-              }, streamTimeoutMs)
-            : undefined;
-        let res: Response;
-        try {
-          res = await fetch(url, this.requestInit(body, options, apiKey, linked.signal));
-        } finally {
-          if (streamTimeoutTimer) clearTimeout(streamTimeoutTimer);
-        }
-        if (!res.ok || !res.body) {
-          const text = !res.ok ? await res.text().catch(() => "") : "";
-          if (!res.ok) this.throwIfError(res.status, res.statusText, url, text, clean);
-          throw toConciseProviderError(new Error("Google streaming response had no body"), "google", clean);
-        }
+        // Transient failures (429/5xx/network) are retried here, before the
+        // first byte; once the stream is live it is never retried.
+        const res = await openStreamResponse({
+          fetchOnce: async () => {
+            const timer =
+              streamTimeoutMs && streamTimeoutMs > 0
+                ? setTimeout(() => {
+                    try {
+                      linked.abort();
+                    } catch {}
+                  }, streamTimeoutMs)
+                : undefined;
+            try {
+              return await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, linked.signal));
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          },
+          onHttpError: (r, text) => this.throwIfError(r.status, r.statusText, url, text, clean, headersToRecord(r.headers)),
+          noBodyError: () => toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
+          retry: retryOptionsFrom(options),
+          signal: linked.signal,
+          label: { providerId: "google", modelId: clean },
+        });
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -824,7 +1010,7 @@ export class GoogleInteractionsProvider implements Provider {
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         const parser = new SSEParser();
-        const reader = res.body.getReader();
+        const reader = res.body!.getReader(); // openStreamResponse guarantees a body
         const decoder = new TextDecoder();
         let text = "";
         let thinking = "";
@@ -921,6 +1107,9 @@ export class GoogleInteractionsProvider implements Provider {
             }
           } else if (type === "interaction.completed") {
             const interaction = (msg["interaction"] as InteractionObject) ?? {};
+            // Failed/cancelled interactions must surface loudly — never
+            // resolve as empty successful stops.
+            throwIfFailedInteraction(interaction, clean);
             completedBody = msg["interaction"];
             if (interaction.id) responseId = interaction.id;
             if (interaction.usage) {
@@ -961,17 +1150,21 @@ export class GoogleInteractionsProvider implements Provider {
             id: c.id,
             name: c.name,
             arguments: args,
-            rawArguments: c.startArgs + c.deltaArgs,
+            rawArguments: selectRawArguments(c.startArgs, c.deltaArgs),
           };
           toolCalls.push(record);
           eventStream.push({ type: "tool_call_complete", toolCall: record });
         }
 
         if (sessionId) {
-          if (responseId && body.store !== false) setChain(sessionId, { interactionId: responseId, model: clean });
-          else if (body.store === false) interactionChains.delete(sessionId);
+          if (responseId && body.store !== false) setChain(sessionId, { interactionId: responseId, model: clean, at: Date.now() });
+          else if (body.store === false) {
+            interactionChains.delete(sessionId);
+            lastTurnTotals.delete(sessionId);
+          }
         }
         noteProviderTurn(sessionId, "google");
+        checkTurnTokens(sessionId, usage);
 
         // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
         // instead of resolving empty success. Skipped for non-SSE payloads
@@ -1015,11 +1208,26 @@ export class GoogleInteractionsProvider implements Provider {
         const isAbort =
           linked.signal.aborted ||
           eventStream.isCancelled() ||
-          (raw as { name?: string }).name === "AbortError" ||
-          /abort|cancell?ed/i.test(String((raw as { message?: string }).message ?? raw));
-        eventStream.fail(
-          isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw
-        );
+          (raw as { name?: string }).name === "AbortError";
+        if (isAbort) {
+          eventStream.fail(
+            Object.assign(new Error("Stream aborted"), { name: "AbortError" })
+          );
+        } else if (evictSessionId && usedChain && isNotFoundChainError(raw)) {
+          // Reactive self-heal, fail-clean variant (Rule 2): the `start`
+          // event is already delivered, so a transparent in-stream retry
+          // would duplicate it. Clear the dead pointer now so the next turn
+          // reseeds from full history; mark retryable so a plain caller retry
+          // of this turn succeeds.
+          reportChainAnomaly({ type: "interaction_chain_evicted", sessionId: evictSessionId, model: clean });
+          clearInteractionChains(evictSessionId);
+          const retryable = toConciseProviderError(raw, "google", clean);
+          (retryable as unknown as Record<string, unknown>)["retryable"] = true;
+          (retryable as unknown as Record<string, unknown>)["transient"] = true;
+          eventStream.fail(retryable);
+        } else {
+          eventStream.fail(raw);
+        }
       } finally {
         try {
           options?.signal?.removeEventListener("abort", forwardUserAbort);

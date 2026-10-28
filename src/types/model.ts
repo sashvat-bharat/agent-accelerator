@@ -177,6 +177,24 @@ export interface ProviderRequestOptions {
   maxRetryDelayMs?: number;
   /** Normalized structured-output spec (see `normalizeStructuredOutput`). */
   output?: StructuredOutputSpec;
+  /**
+   * Google Interactions storage tier for the proactive chain-TTL gate
+   * (free: 23h local gate; paid: 54d). Default `free` (safe). Display-only
+   * cache behavior is unaffected; unknown values fall back to `free`.
+   */
+  googleTier?: "free" | "paid";
+  /** Upper bound on generated tokens for one model call. */
+  maxOutputTokens?: number;
+  /** Stop sequence(s). Chat Completions only; other wires warn+drop. */
+  stop?: string[];
+  /** Deterministic-sampling seed. Chat Completions only; other wires warn+drop. */
+  seed?: number;
+  /** `fetch` implementation used for the provider request (defaults to global `fetch`). */
+  fetch?: typeof fetch;
+  /** Base backoff delay in ms for provider retries (default 250). */
+  retryBaseDelayMs?: number;
+  /** Total time budget in ms for provider retries (default 30000). */
+  retryBudgetMs?: number;
 }
 
 /** Auditable request/response wire payload captured in AgentResponse. */

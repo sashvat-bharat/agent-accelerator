@@ -205,7 +205,7 @@ describe("OpenAICompatibleChatProvider (native REST, mocked)", () => {
       return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
     };
     try {
-      const provider = new OpenAICompatibleChatProvider("groq");
+      const provider = new OpenAICompatibleChatProvider("groq", { baseUrl: "https://api.groq.com/openai/v1" });
       await provider.generate(
         "m",
         { messages: [{ role: "user", content: "hi" }] },
@@ -262,6 +262,38 @@ describe("OpenAICompatibleChatProvider (native REST, mocked)", () => {
       .catch((e) => e);
     expect(err.name).toBe("AgentAccelProviderError");
     expect(String(err.message)).toContain("[groq/nope] request failed (404): model not found");
+  });
+
+  it("does not disguise a provider error that merely mentions 'cancelled/aborted' as a user abort", async () => {
+    const frame = 'data: {"error":{"message":"Your subscription was cancelled; upstream request aborted","code":402}}\n\n';
+    (globalThis as any).fetch = async () => {
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(frame));
+          c.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    };
+    const provider = new OpenAICompatibleChatProvider("groq", { baseUrl: "https://api.groq.com/openai/v1" });
+    const s = provider.stream("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    const err: any = await s.result().then(() => null, (e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).not.toBe("AbortError");
+    expect(String(err.message)).toContain("Your subscription was cancelled");
+  });
+
+  it("a real caller abort is still reported as AbortError", async () => {
+    (globalThis as any).fetch = async (_u: unknown, init: any) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })));
+      });
+    const provider = new OpenAICompatibleChatProvider("groq", { baseUrl: "https://api.groq.com/openai/v1" });
+    const ctrl = new AbortController();
+    const s = provider.stream("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k", signal: ctrl.signal });
+    setTimeout(() => ctrl.abort(), 5);
+    const err: any = await s.result().then(() => null, (e) => e);
+    expect(err.name).toBe("AbortError");
   });
 
   it("aliases and factory helpers resolve to the native class", () => {
