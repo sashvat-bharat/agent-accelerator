@@ -1,4 +1,3 @@
-import { z } from "zod";
 import type { AssistantMessageEventStream as AssistantMessageEventStreamT } from "./streaming/event-stream.ts";
 import type { AgentResponse as AgentResponseT } from "./types/response.ts";
 
@@ -56,23 +55,6 @@ export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
  */
 export { executeToolCalls } from "./tools/executor.ts";
 
-// Client-side document conversion (optional anydoc peer — see utils/documents.ts)
-export {
-  convertDocumentToMarkdown,
-  convertDocumentInput,
-  convert_document_to_markdown,
-  createConvertDocumentTool,
-  isAnydocAvailable,
-  resolveDocumentFormat,
-  truncateMarkdown,
-  buildDocumentXml,
-  modelSupportsFileInput,
-  preprocessFilePartsForBypass,
-  DocumentConversionError,
-  DEFAULT_DOCUMENT_MAX_CHARS,
-  MAX_DOCUMENT_FETCH_BYTES,
-} from "./utils/documents.ts";
-export type { ConvertDocumentOptions, ConvertedDocument, ConvertDocumentToolOptions } from "./utils/documents.ts";
 export { assertPathAllowed, enforceFileAccess, fetchRemoteBytes, isPrivateAddress, RemoteFetchError, MAX_REMOTE_FETCH_BYTES } from "./utils/safe-io.ts";
 
 // Multi-Agent Delegation & Tools
@@ -223,17 +205,14 @@ export {
   clearSessionRouting,
   mapThinkingLevelToGoogle,
   mapServiceTierToGoogle,
-  applyCacheForGoogle,
   mapThinkingLevelToOpenRouter,
   mapServiceTierToOpenRouter,
-  applyCacheForOpenRouter,
   mapToolChoiceToOpenRouter,
   mapThinkingLevelToOpenRouterChat,
   mapToolChoiceToOpenRouterChat,
   mapThinkingLevelToOpenAI,
   mapServiceTierToOpenAI,
-  applyCacheForOpenAI,
-  applyCacheForCustom,
+  resolveCache,
   mapToolChoiceToOpenAI,
   normalizeToolChoice,
   parseStreamedToolArguments,
@@ -278,16 +257,7 @@ export {
 
 export { stripSchemaForGoogle } from "./tools/schema.ts";
 
-export {
-  createExplicitCache,
-  retentionToTtlSeconds,
-  getPromptCacheRetention,
-  clampCacheKey,
-} from "./utils/cache.ts";
-export type {
-  CreateExplicitCacheOptions,
-  CachedContentMetadata,
-} from "./utils/cache.ts";
+export { clampCacheKey } from "./utils/cache.ts";
 
 // Streaming & Events
 export { AssistantMessageEventStream } from "./streaming/event-stream.ts";
@@ -368,20 +338,13 @@ export { normalizeMediaInput, inferMimeType, sniffMimeType } from "./utils/media
 export { base64ToBytes, bytesToBase64 } from "./utils/base64.ts";
 export { toJsonSafe, safeStringify, escapeXml } from "./utils/serialization.ts";
 
-// Re-export Zod (compat only)
-/**
- * @deprecated Compat re-export: prefer adding `zod` as a direct (peer)
- * dependency and importing from `"zod"` (Q-50). Kept so existing
- * `import { z } from "agent-accelerator"` code keeps working.
- */
-export { z };
+export { CACHE_OPTIONS } from "./types/core.ts";
 
 // TypeScript Type Exports
 export type {
   ThinkingLevel,
   ThinkingConfig,
-  CacheRetention,
-  CacheConfig,
+  CacheOption,
   ServiceTier,
   TokenUsage,
 } from "./types/core.ts";

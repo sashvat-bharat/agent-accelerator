@@ -3,7 +3,6 @@ import { OpenAIResponsesProvider } from "../src/providers/openai.ts";
 import {
   mapThinkingLevelToOpenAI,
   mapServiceTierToOpenAI,
-  applyCacheForOpenAI,
   mapToolChoiceToOpenAI,
   clearEmittedWarnings,
 } from "../src/providers.ts";
@@ -103,16 +102,23 @@ describe("Canonical OpenAI mappings", () => {
     expect(mapServiceTierToOpenAI(undefined)).toBeUndefined();
   });
 
-  it("warns and drops OpenAI cache retention instead of sending it", () => {
+  it("maps cache 12h to prompt_cache_retention 24h and warns+drops other TTLs", async () => {
     clearEmittedWarnings();
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+    };
     const w = captureWarnings();
     try {
-      applyCacheForOpenAI({ retention: "medium" }, "openai/x");
-      applyCacheForOpenAI({ cachedContentId: "cachedContents/abc" }, "openai/x");
-      applyCacheForOpenAI({ retention: "implicit" }, "openai/x");
-      applyCacheForOpenAI(undefined, "openai/x");
-      expect(w.messages.length).toBe(2);
-      expect(w.messages[0]).toMatch(/openai.*cache retention/i);
+      const provider = new OpenAIResponsesProvider();
+      const ctx = { messages: [{ role: "user" as const, content: "Hi" }] };
+      await provider.generate("gpt-4o", ctx, { apiKey: "k", cache: "12h" });
+      await provider.generate("gpt-4o", ctx, { apiKey: "k", cache: "5m" });
+      expect(bodies[0].prompt_cache_retention).toBe("24h");
+      expect(bodies[1].prompt_cache_retention).toBeUndefined();
+      expect(w.messages.length).toBe(1);
+      expect(w.messages[0]).toMatch(/openai.*cache.*"12h"/i);
     } finally {
       w.restore();
       clearEmittedWarnings();

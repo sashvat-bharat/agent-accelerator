@@ -15,11 +15,11 @@
 import {
   Agent,
   tool,
-  z,
   getModelFromCatalog,
   getModelThinkingInfo,
   resolveModel,
 } from "agent-accelerator";
+import { z } from "zod";
 
 // ---------------------------------------------------------------------------
 // 1. Tool Setup to demonstrate Tool Calls & Results Metadata
@@ -66,7 +66,7 @@ try {
       workerTimeoutMs: 0,
     },
     thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
-    cache: { retention: "implicit" },
+    cache: "implicit",
     captureRaw: "redacted",
     budget: { maxCostUsd: 2 },
     limits: { requestTimeoutMs: 300_000, streamIdleTimeoutMs: 300_000 },

@@ -27,7 +27,6 @@ export class AgentContext {
   systemPrompt?: string;
   messages: Message[] = [];
   thoughtSignatures: string[] = [];
-  cachedContentId?: string;
 
   constructor(systemPrompt?: string) {
     this.systemPrompt = systemPrompt;
@@ -158,7 +157,6 @@ export class AgentContext {
       }
     }
     next.thoughtSignatures = [...this.thoughtSignatures];
-    next.cachedContentId = this.cachedContentId;
     return next;
   }
 

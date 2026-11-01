@@ -201,7 +201,8 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
   });
 
   it("should support clean separation of tools: { get_status } and subagents: [critique, researcher]", () => {
-    const { SubAgent, tool, z } = require("../src/index.ts");
+    const { SubAgent, tool } = require("../src/index.ts");
+    const { z } = require("zod");
 
     const get_status = tool({
       name: "get_status",

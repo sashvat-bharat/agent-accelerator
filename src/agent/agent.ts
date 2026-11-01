@@ -3,7 +3,7 @@ import type { TokenUsage } from "../types/core.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
 import { normalizeThinkingV2, resolveWhenBusy, normalizeWorkerTimeout } from "../tools/tool.ts";
 import type { ToolDefinition } from "../types/tool.ts";
-import type { ThinkingLevel, ThinkingConfig, CacheConfig, ServiceTier } from "../types/core.ts";
+import { CACHE_OPTIONS, type ThinkingLevel, type ThinkingConfig, type CacheOption, type ServiceTier } from "../types/core.ts";
 import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -16,7 +16,6 @@ import {
   resolveMainModel,
 } from "./worker.ts";
 import * as path from "node:path";
-import { createConvertDocumentTool } from "../utils/documents.ts";
 import { registerAgent } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../scheduler/store.ts";
 import { persistTelemetry } from "../telemetry-file.ts";
@@ -171,17 +170,13 @@ export class Agent {
   readonly output?: unknown;
   /** Normalized structured-output spec sent to providers. */
   readonly outputSpec?: StructuredOutputSpec;
-  /** Cache retention/session settings. */
-  readonly cacheConfig?: CacheConfig;
+  /** Prompt-cache lifetime (see `AgentConfig.cache`); unset = provider default. */
+  readonly cache?: CacheOption;
   /** Provider service tier. */
   readonly serviceTier?: ServiceTier;
-  /** Convert `file` parts client-side for pdf-incapable models. */
-  readonly bypassInputFileModality: boolean;
   /**
-   * Local-file policy. `roots` set: every local-path media part and the
-   * built-in document tool must resolve inside them (`[]` denies all paths).
-   * Unset: developer-supplied parts are unrestricted and the model-callable
-   * tool is limited to the working directory.
+   * Local-file policy. `roots` set: every local-path media part must resolve
+   * inside them (`[]` denies all paths). Unset: local paths are unrestricted.
    */
   readonly fileAccess?: { roots?: string[] };
   /** Failure policy for the conversation (see `AgentConfig.onFailure`). */
@@ -310,7 +305,7 @@ export class Agent {
         : Number.isFinite(config.maxTurns as number)
           ? Math.max(1, Math.floor(config.maxTurns as number))
           : Infinity;
-    this.sessionId = config.sessionId || config.cache?.sessionId || createSessionId();
+    this.sessionId = config.sessionId || createSessionId();
     (this as any).subagentTraces = {};
     this.home = resolveHome(config.home);
     // `persist: {}` (neither dir nor file) means the default sessions folder under home.
@@ -346,16 +341,14 @@ export class Agent {
       this.outputSpec = normalizeStructuredOutput(config.output);
     }
 
-    // DX5: cache retention short|medium|long, undefined = no explicit
-    this.cacheConfig = {
-      sessionId: this.sessionId,
-      ...(config.cache ?? {}),
-    };
-    // C11: wire explicit cachedContentId into context for Google explicit cache
-    const initialCachedId = (this.cacheConfig as any)?.cachedContentId;
+    if (config.cache !== undefined && !CACHE_OPTIONS.includes(config.cache)) {
+      throw new ConfigError(
+        `[Agent Accelerator] Invalid cache ${JSON.stringify(config.cache)}: expected one of ${CACHE_OPTIONS.map((v) => `"${v}"`).join(", ")}, or omit it for the provider default.`
+      );
+    }
+    this.cache = config.cache;
 
     this.serviceTier = config.serviceTier;
-    this.bypassInputFileModality = config.bypassInputFileModality ?? false;
     this.onFailure =
       config.onFailure === "rollback" || config.onFailure === "keep" ? config.onFailure : "auto";
     this.forkConfig = { ...config };
@@ -400,10 +393,6 @@ export class Agent {
       }
     }
 
-    if (this.bypassInputFileModality && !this.tools["convert_document_to_markdown"]) {
-      this.tools["convert_document_to_markdown"] = createConvertDocumentTool({ roots: this.fileAccess?.roots });
-    }
-
     const dyn = this.dynamicSubagents;
     if ((dyn?.enabled === true || dyn?.allowScheduledActions) && !this.subagentModel) {
       throw new SubAgentModelError(
@@ -425,9 +414,6 @@ export class Agent {
     assertNoToolCollisions(this.tools);
 
     this.context = new AgentContext(this.getFullInstructions());
-    if (initialCachedId) {
-      this.context.cachedContentId = initialCachedId;
-    }
     if (dyn?.allowScheduledActions) registerAgent(this);
   }
 
@@ -474,7 +460,6 @@ export class Agent {
     const sid = this.sessionId;
     this.context.messages = [];
     this.context.thoughtSignatures = [];
-    this.context.cachedContentId = (this.cacheConfig as any)?.cachedContentId;
     this.context.systemPrompt = this.getFullInstructions();
     // Q-25: reset also drops session-scoped provider chaining/routing.
     try { clearInteractionChains(sid); } catch {}
@@ -533,10 +518,6 @@ export class Agent {
       return existing.context;
     }
     const fresh = new AgentContext(this.getFullInstructions());
-    try {
-      const cached = (this.cacheConfig as unknown as { cachedContentId?: string })?.cachedContentId;
-      if (cached) fresh.cachedContentId = cached;
-    } catch {}
     this.sessions.set(sid, { context: fresh, lastAccess: now });
     // LRU eviction (oldest lastAccess first).
     try {
@@ -961,9 +942,7 @@ export class Agent {
       baseUrl: this.baseUrl,
       headers: { ...(this.customHeaders ?? {}), ...(runOptions?.headers ?? {}) },
       thinking: resolveEffectiveThinking(this.thinkingConfig, runOptions?.thinkingLevel),
-      cache: this.stateless
-        ? { sessionId }
-        : { ...this.cacheConfig, sessionId },
+      ...(this.cache ? { cache: this.cache } : {}),
       serviceTier: this.serviceTier,
       sessionId,
       ...(this.outputSpec ? { output: this.outputSpec } : {}),
@@ -1013,7 +992,6 @@ export class Agent {
         options: providerOptions,
         runOptions,
         maxTurns: this.maxTurns,
-        bypassInputFileModality: this.bypassInputFileModality,
         ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
         onFailure: this.onFailure,
         ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
@@ -1076,7 +1054,6 @@ export class Agent {
       options: providerOptions,
       runOptions,
       maxTurns: this.maxTurns,
-      bypassInputFileModality: this.bypassInputFileModality,
       ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
       onFailure: this.onFailure,
       ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
@@ -1291,13 +1268,7 @@ export class Agent {
             : { enabled: true, level: lvl };
     }
     if (typeof data.instructions === "string") this.instructions = data.instructions;
-    if (data.cache) {
-      (this as any).cacheConfig = {
-        ...this.cacheConfig,
-        ...data.cache,
-        sessionId: data.sessionId ?? this.sessionId,
-      };
-    }
+    if (data.cache) (this as { cache?: CacheOption }).cache = data.cache;
     if (data.subagentModel) {
       (this as any).subagentModel = data.subagentModel;
       const dyn = (this as any).dynamicSubagents;
@@ -1319,8 +1290,6 @@ export class Agent {
     } else {
       this.context.systemPrompt = this.getFullInstructions();
     }
-    this.context.cachedContentId =
-      data.cachedContentId ?? (this.cacheConfig as any)?.cachedContentId;
     // Q-25: importing a snapshot invalidates prior provider chaining/routing
     // for both the previous and the restored session.
     try { clearInteractionChains(prevSid); } catch {}
@@ -1382,10 +1351,6 @@ export class Agent {
       }
     } else if (ctx.systemPrompt !== fullInstructions) {
       ctx.systemPrompt = fullInstructions;
-    }
-    // C11: keep context cachedContentId in sync with cacheConfig if updated via options
-    if (options?.headers && (this.cacheConfig as any)?.cachedContentId && !ctx.cachedContentId) {
-      ctx.cachedContentId = (this.cacheConfig as any).cachedContentId;
     }
     ctx.addUserMessage(prompt);
   }

@@ -118,7 +118,7 @@ import { Agent } from "agent-accelerator";
 const agent = new Agent({
   model: process.env.MODEL ?? "openai/gpt-4o",
   instructions: "Long, stable system prompt...",
-  cache: { retention: "implicit" }, // automatic prefix caching (the only mode acted on)
+  cache: "implicit", // or "5m" | "30m" | "1h" | "12h" where the provider supports it
   serviceTier: "flex", // cheaper, slower; or "priority"
 });
 
@@ -126,14 +126,15 @@ const res = await agent.run("Hello");
 console.log(res.usage.cachedTokens, "of", res.usage.inputTokens, "input tokens were cached");
 ```
 
-Prefix caching is automatic; you earn hits by keeping the start of the prompt identical. Only `implicit` retention is acted on (OpenAI `long` maps to a 24 h cache when the catalog supports it); other values are warned and dropped, and `cachedContentId` is ignored. Session ids are clamped to 64 characters for affinity headers/keys. For Google explicit caches use `createExplicitCache`.
+Prefix caching is automatic; you earn hits by keeping the start of the prompt identical. `cache` takes one value: Google and custom endpoints support `implicit` only, OpenRouter adds `5m`/`1h` for `anthropic/*` models, OpenAI adds `12h` (sent as a 24 h retention). Any other value warns once and falls back to the provider default. Session ids are clamped to 64 characters for affinity headers/keys.
 
 **Recommendations:** ✅ stable `instructions` + stable tool order + stable `sessionId`; ✅ measure with `cachedTokens` or `SessionTelemetry` ([Data and media](data-and-media.md)). ❌ No timestamps or random text in `instructions`.
 
 ## Structured output
 
 ```ts
-import { Agent, ValidationError, z } from "agent-accelerator";
+import { Agent, ValidationError } from "agent-accelerator";
+import { z } from "zod";
 
 const Invoice = z.object({ vendor: z.string(), total: z.number(), currency: z.string() });
 const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite", output: Invoice });

@@ -86,7 +86,7 @@ const agent = new Agent({
     workerTimeoutMs: 60000,
   },
   thinking: THINKING_LEVEL,
-  cache: (saved?.cache as any) ?? { retention: "implicit" as const },
+  cache: saved?.cache ?? "implicit",
   sessionId: saved?.sessionId,
   maxTurns: 10,
   captureRaw: "redacted",

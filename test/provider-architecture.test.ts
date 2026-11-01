@@ -2,7 +2,6 @@ import { describe, it, expect } from "bun:test";
 import {
   Agent,
   tool,
-  z,
   getProvider,
   resolveModel,
   GoogleAIStudioProvider,
@@ -16,6 +15,7 @@ import {
   OPENAI_MODELS,
   OPENROUTER_MODELS,
 } from "../src/index.ts";
+import { z } from "zod";
 // Minimalist core: legacy wire types removed; structural records used instead.
 type GoogleGenerateContentRequest = Record<string, unknown>;
 type OpenAIChatCompletionRequest = Record<string, unknown>;

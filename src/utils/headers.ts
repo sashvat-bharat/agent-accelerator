@@ -1,5 +1,4 @@
 import type { ProviderId } from "../types/model.ts";
-import type { CacheConfig } from "../types/core.ts";
 import { clampCacheKey } from "./cache.ts";
 
 export function isBrowserRuntime(): boolean {
@@ -24,7 +23,7 @@ export function getPackageVersion(): string {
     const v = (globalThis as any).process?.env?.npm_package_version;
     if (typeof v === "string" && v) return v;
   } catch {}
-  return "0.5.0";
+  return "0.5.1";
 }
 
 function getAgentAccelUserAgent(): string {
@@ -107,19 +106,6 @@ export function setHeaderCaseInsensitive(
 // ---------------------------------------------------------------------------
 
 /**
- * Tags a captured thought signature with its issuing provider so history
- * builders echo it only on the same provider. Untagged (legacy) signatures
- * echo everywhere for backward compat.
- */
-export function withProviderSignature(
-  sig: string | undefined,
-  provider: string
-): { thoughtSignature?: string; thoughtSignatureProvider?: string } {
-  if (!sig) return {};
-  return { thoughtSignature: sig, thoughtSignatureProvider: provider };
-}
-
-/**
  * Returns true when a stored signature may be echoed on `currentProvider`:
  * untagged (legacy) echoes everywhere, tagged echoes only on a match.
  */
@@ -163,11 +149,10 @@ function stripForBrowser(headers: Record<string, string>): Record<string, string
  * runtimes this returns only CORS-safe attribution headers (OpenRouter
  * `HTTP-Referer` / `X-Title`); session affinity still flows via `providerOptions`
  * (`promptCacheKey`), never via headers.
- * @example `const headers = buildSessionHeaders("google", { sessionId: "session-123" });`
+ * @example `const headers = buildSessionHeaders("google", undefined, "session-123");`
  */
 export function buildSessionHeaders(
   provider: ProviderId | string,
-  cache?: CacheConfig,
   customHeaders?: Record<string, string>,
   explicitSessionId?: string
 ): Record<string, string> {
@@ -183,8 +168,7 @@ export function buildSessionHeaders(
     headers[k] = v;
   }
 
-  const rawSessionId = explicitSessionId || cache?.sessionId;
-  const sessionId = clampCacheKey(rawSessionId);
+  const sessionId = clampCacheKey(explicitSessionId);
   const isFirstClass = FIRST_CLASS.has(provider);
 
   const getHeader = (name: string): string | undefined => {

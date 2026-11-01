@@ -30,7 +30,8 @@
 ## Template: a safe production agent
 
 ```ts
-import { Agent, tool, z } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
+import { z } from "zod";
 
 const search_docs = tool({
   description: "Search internal docs. Read-only.",
@@ -77,7 +78,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | `stop`, `seed` on Google or OpenAI | Warn and dropped |
 | `temperature` / `topP` / `sampling` | Removed on every provider; do not pass them |
 | Gemini 1.x / 2.x | Rejected; minimum is Gemini 3 |
-| Cache retention `short` / `medium` / `long` | Only `implicit` is acted on |
+| `cache` TTLs (`5m`, `30m`, `1h`, `12h`) | Honoured only where the provider supports them (see README Cache table); others warn and fall back |
 | Multiple processes sharing one `home` | No cross-process lock yet |
 | The `SubAgent` class | Deprecated; use `Agent` + `subagents` |
 | OpenRouter Responses transport | Discontinued; OpenRouter uses Chat Completions |

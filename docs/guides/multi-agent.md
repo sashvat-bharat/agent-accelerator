@@ -33,7 +33,8 @@ Each call runs on its own isolated copy (`fork`), so parallel calls to one worke
 The main agent invents workers at runtime with the `spawn_subagents` tool. **You** fix the worker model, reasoning level, tool pool and limits; the model never picks them.
 
 ```ts
-import { Agent, tool, z } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
+import { z } from "zod";
 
 const recent_news = tool({ description: "Recent headlines for a topic.", input: z.object({ topic: z.string() }), execute: async ({ topic }) => [`${topic}: headline 1`, `${topic}: headline 2`] });
 
@@ -67,7 +68,8 @@ Tracking: `agent.track(id)` (live snapshot with `status` and `steps`), `agent.li
 A scheduled action is a dynamic sub-agent that runs **later** (once or on repeat) and saves its answer to a file instead of replying in chat. It is off by default.
 
 ```ts
-import { Agent, createScheduledAction, telemetryBus, tool, z } from "agent-accelerator";
+import { Agent, createScheduledAction, telemetryBus, tool } from "agent-accelerator";
+import { z } from "zod";
 
 const recent_news = tool({ description: "Three AI headlines.", input: z.object({}), execute: () => ["a", "b", "c"] });
 

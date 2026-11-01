@@ -17,7 +17,8 @@
  *   MODEL="openai/gpt-4o" / "openrouter/openai/gpt-4o" / "groq/llama-3.3-70b-versatile"
  */
 
-import { Agent, z } from "agent-accelerator";
+import { Agent } from "agent-accelerator";
+import { z } from "zod";
 import { fail } from "./_shared.ts";
 
 const MODEL = process.env.MODEL || "google/gemini-3.5-flash-lite";

@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { Agent, tool, z, getProvider, type ProviderGenerateResult, type ProviderContext } from "../src/index.ts";
+import { Agent, tool, getProvider, type ProviderGenerateResult, type ProviderContext } from "../src/index.ts";
+import { z } from "zod";
 
 const provider = getProvider("google") as any;
 const realGenerate = provider.generate.bind(provider);

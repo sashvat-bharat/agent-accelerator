@@ -8,7 +8,7 @@ import { setAttribution, getAttribution } from "../src/utils/headers.ts";
 describe("Caching & Session Affinity", () => {
   it("should generate proper session headers for OpenRouter (x-session-id)", () => {
     const sessionId = "session_or_999";
-    const headers = buildSessionHeaders("openrouter", { sessionId });
+    const headers = buildSessionHeaders("openrouter", undefined, sessionId);
     expect(headers["x-session-id"]).toBe(sessionId);
   });
 
@@ -16,13 +16,13 @@ describe("Caching & Session Affinity", () => {
     const before = getAttribution();
     try {
       setAttribution({});
-      const none = buildSessionHeaders("openrouter", { sessionId: "s1" });
+      const none = buildSessionHeaders("openrouter", undefined, "s1");
       expect(none["HTTP-Referer"]).toBeUndefined();
       expect(none["X-Title"]).toBeUndefined();
       const noSession = buildSessionHeaders("openrouter");
       expect(noSession["HTTP-Referer"]).toBeUndefined();
       setAttribution({ referer: "https://my.app", title: "My App" });
-      const opted = buildSessionHeaders("openrouter", { sessionId: "s1" });
+      const opted = buildSessionHeaders("openrouter", undefined, "s1");
       expect(opted["HTTP-Referer"]).toBe("https://my.app");
       expect(opted["X-Title"]).toBe("My App");
     } finally {
@@ -33,20 +33,19 @@ describe("Caching & Session Affinity", () => {
 
   it("should generate proper headers for Google (x-goog-api-client & session headers)", () => {
     const sessionId = "session_goog_777";
-    const headers = buildSessionHeaders("google", { sessionId });
+    const headers = buildSessionHeaders("google", undefined, sessionId);
     expect(headers["x-goog-api-client"]).toBe("agent-accel/1.0");
     expect(headers["x-session-id"]).toBe(sessionId);
     expect(headers["x-client-request-id"]).toBe(sessionId);
   });
 
-  it("should default SubAgent cache config to retention short", async () => {
-    const { SubAgent } = await import("../src/index.ts");
-    const sub = new SubAgent({
-      name: "analyst",
-      instructions: "Analyze data",
-      model: "google/gemini-3.5-flash-lite",
-    });
-    expect(sub.cacheConfig?.retention).toBe("short");
+  it("leaves SubAgent cache unset (provider default) and validates the cache value", async () => {
+    const { SubAgent, Agent, ConfigError } = await import("../src/index.ts");
+    const sub = new SubAgent({ name: "analyst", instructions: "Analyze data", model: "google/gemini-3.5-flash-lite" });
+    expect(sub.cache).toBeUndefined();
+    expect(new Agent({ model: "google/gemini-3.5-flash-lite", cache: "5m" }).cache).toBe("5m");
+    // The pre-0.5.1 object form is a hard break with a fix-it message.
+    expect(() => new Agent({ model: "google/gemini-3.5-flash-lite", cache: { retention: "short" } as any })).toThrow(ConfigError);
   });
 
   it("should send session affinity headers on native custom requests", async () => {

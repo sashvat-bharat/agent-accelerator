@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { Agent, tool, z, telemetryBus, clearInteractionChains, clearSessionRouting, clearEmittedWarnings } from "../src/index.ts";
+import { Agent, tool, telemetryBus, clearInteractionChains, clearSessionRouting, clearEmittedWarnings } from "../src/index.ts";
+import { z } from "zod";
 
 const ORIGINAL_WARN = console.warn;
 afterEach(() => {

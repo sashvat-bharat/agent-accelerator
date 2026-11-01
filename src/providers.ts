@@ -9,7 +9,7 @@
  * Rule: OpenAI, OpenRouter, and future providers must be addable here without
  * redesigning this abstraction — only new per-provider mappers/adapters.
  */
-import type { CacheConfig, ServiceTier, ThinkingLevel } from "./types/core.ts";
+import type { CacheOption, ServiceTier, ThinkingLevel } from "./types/core.ts";
 import type { StructuredOutputSpec } from "./types/model.ts";
 import { zodToJsonSchema } from "./tools/schema.ts";
 import { ValidationError } from "./types/errors.ts";
@@ -30,14 +30,14 @@ export type ProviderCapabilityStatus =
  * There is no pre-existing logger in `src/` (only CLI logs in
  * `update-models.ts`), so this `console.warn` line IS the mechanism — do not
  * introduce a second one. Used when a requested capability cannot be applied
- * as-is (e.g. Google explicit cache retention) so it never silently
+ * as-is (e.g. an unsupported `cache` TTL) so it never silently
  * disappears.
  *
  * Warnings are deduped per provider+capability+requested: agent loops call
  * mappers once per turn, and repeating the same warning every turn is noise.
  * A repeated identical request logs once per process.
  *
- * @example `emitProviderWarning({ provider: "google", capability: "cache retention", requested: "high", reason: "...", fallback: "..." })`
+ * @example `emitProviderWarning({ provider: "google", capability: "cache", requested: "12h", reason: "...", fallback: "..." })`
  */
 const emittedWarnings = new Set<string>();
 
@@ -229,68 +229,22 @@ export function mapServiceTierToOpenRouter(tier: ServiceTier | undefined): "flex
   return undefined;
 }
 
-/**
- * Applies canonical cache config for OpenRouter. Session affinity flows via
- * top-level body `session_id` (sent by the adapter) plus the `x-session-id`
- * header fallback; there is no retention body primitive, so explicit
- * retention/cachedContentId are UNSUPPORTED: warn and drop.
- */
-export function applyCacheForOpenRouter(
-  cache: CacheConfig | undefined,
+/** Returns the `cache` value a provider will honour; an unsupported one warns once and falls back to the provider default (`undefined`). In: `ProviderRequestOptions.cache` from each adapter's buildBody, out: the adapter's wire mapping. */
+export function resolveCache(
+  provider: string,
+  cache: CacheOption | undefined,
+  supported: readonly CacheOption[],
   modelRef: string
-): void {
-  if (!cache) return;
-  if (cache.retention && cache.retention !== "implicit") {
-    emitProviderWarning({
-      provider: "openrouter",
-      capability: "cache retention",
-      requested: `${cache.retention} (${modelRef})`,
-      reason: "OpenRouter documents no retention control on the stable Chat Completions endpoint.",
-      fallback: "default gateway caching with headers-only session affinity (no retention payload is sent)",
-    });
-  }
-  if (cache.cachedContentId) {
-    emitProviderWarning({
-      provider: "openrouter",
-      capability: "explicit cached content",
-      requested: cache.cachedContentId,
-      reason: "cached content references do not exist on the Responses API.",
-      fallback: "full-history sends instead (cachedContentId is ignored)",
-    });
-  }
-}
-
-/**
- * Applies canonical cache config for custom OpenAI-compatible endpoints.
- * Affinity is headers-only (`x-session-id`): unknown body properties make
- * strict endpoints (groq, ollama, …) fail, so nothing cache-related is ever
- * placed in the body. Explicit retention/cachedContentId are UNSUPPORTED:
- * warn and drop.
- */
-export function applyCacheForCustom(
-  prefix: string,
-  cache: CacheConfig | undefined,
-  modelRef: string
-): void {
-  if (!cache) return;
-  if (cache.retention && cache.retention !== "implicit") {
-    emitProviderWarning({
-      provider: prefix,
-      capability: "cache retention",
-      requested: `${cache.retention} (${modelRef})`,
-      reason: "custom OpenAI-compatible endpoints define no retention control, and strict endpoints reject unknown body properties.",
-      fallback: "default caching with headers-only session affinity (no retention payload is sent)",
-    });
-  }
-  if (cache.cachedContentId) {
-    emitProviderWarning({
-      provider: prefix,
-      capability: "explicit cached content",
-      requested: cache.cachedContentId,
-      reason: "cached content references do not exist on OpenAI-compatible endpoints.",
-      fallback: "full-history sends instead (cachedContentId is ignored)",
-    });
-  }
+): CacheOption | undefined {
+  if (cache === undefined || supported.includes(cache)) return cache;
+  emitProviderWarning({
+    provider,
+    capability: "cache",
+    requested: `${cache} (${modelRef})`,
+    reason: `supported values here are: ${supported.map((v) => `"${v}"`).join(", ")}.`,
+    fallback: "the provider default (implicit caching)",
+  });
+  return undefined;
 }
 
 /** OpenRouter Chat Completions `tool_choice` wire values. */
@@ -368,38 +322,6 @@ export function mapServiceTierToOpenAI(tier: ServiceTier | undefined): "flex" | 
   return undefined;
 }
 
-/**
- * Applies canonical cache config for OpenAI. Session affinity flows via
- * `prompt_cache_key` (handled by the adapter); `long` retention maps to
- * `prompt_cache_retention: "24h"` when the catalog supports it (handled by
- * the adapter, pi `api/openai-responses.ts:97` rule). Other explicit
- * retention modes and `cachedContentId` are UNSUPPORTED: warn and drop.
- */
-export function applyCacheForOpenAI(
-  cache: CacheConfig | undefined,
-  modelRef: string
-): void {
-  if (!cache) return;
-  if (cache.retention && cache.retention !== "implicit" && cache.retention !== "long") {
-    emitProviderWarning({
-      provider: "openai",
-      capability: "cache retention",
-      requested: `${cache.retention} (${modelRef})`,
-      reason: "the native Responses adapter uses prompt_cache_key affinity only; explicit retention modes are out of scope.",
-      fallback: "default caching with prompt_cache_key affinity (no retention payload is sent)",
-    });
-  }
-  if (cache.cachedContentId) {
-    emitProviderWarning({
-      provider: "openai",
-      capability: "explicit cached content",
-      requested: cache.cachedContentId,
-      reason: "cached content references do not exist on the Responses API.",
-      fallback: "full-history sends instead (cachedContentId is ignored)",
-    });
-  }
-}
-
 /** OpenAI Responses `tool_choice` wire values (most-important subset). */
 export type OpenAIToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
 
@@ -417,36 +339,6 @@ export function mapToolChoiceToOpenAI(
   const name = choice.function?.name;
   if (name) return { type: "function", name };
   return undefined;
-}
-
-/**
- * Applies canonical cache config for Google. The Interactions API supports
- * implicit/automatic caching ONLY — there is no cache payload to send.
- * Explicit retention/cachedContentId are UNSUPPORTED: warn and drop.
- */
-export function applyCacheForGoogle(
-  cache: CacheConfig | undefined,
-  modelRef: string
-): void {
-  if (!cache) return;
-  if (cache.retention && cache.retention !== "implicit") {
-    emitProviderWarning({
-      provider: "google",
-      capability: "cache retention",
-      requested: `${cache.retention} (${modelRef})`,
-      reason: "the Interactions API does not support user-defined explicit cache retention.",
-      fallback: "Google automatic/implicit caching (no cache payload is sent)",
-    });
-  }
-  if (cache.cachedContentId) {
-    emitProviderWarning({
-      provider: "google",
-      capability: "explicit cached content",
-      requested: cache.cachedContentId,
-      reason: "cachedContents resources do not exist on the Interactions API.",
-      fallback: "stateful interaction chaining / stateless history instead (cachedContentId is ignored)",
-    });
-  }
 }
 
 /** Normalized tool-choice mode shared by provider adapters. */

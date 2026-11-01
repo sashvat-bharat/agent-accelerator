@@ -1,4 +1,4 @@
-import type { ThinkingConfig, CacheConfig, ServiceTier, TokenUsage } from "./core.ts";
+import type { ThinkingConfig, CacheOption, ServiceTier, TokenUsage } from "./core.ts";
 import type { ProviderContext } from "./message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "./tool.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -166,7 +166,7 @@ export interface ProviderRequestOptions {
   baseUrl?: string;
   headers?: Record<string, string>;
   thinking?: ThinkingConfig;
-  cache?: CacheConfig;
+  cache?: CacheOption;
   serviceTier?: ServiceTier;
   tools?: StandardToolDeclaration[];
   toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };

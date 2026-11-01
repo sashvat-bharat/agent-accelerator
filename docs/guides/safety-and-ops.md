@@ -59,7 +59,7 @@ try {
 }
 ```
 
-All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError`, `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError`, `SubAgentModelError`, `DocumentConversionError`. Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line errors; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `code`, `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
+All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError`, `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError`, `SubAgentModelError`. Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line errors; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `code`, `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
 
 ## Telemetry
 
@@ -83,7 +83,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 |---|---|---|
 | API keys | Never sent to another vendor; custom prefixes need their own key and base URL; not enumerable on errors | `apiKey`, `env` |
 | Request audit | Header names containing key/token/secret/cookie/authorization and credential-looking values are redacted | `captureRaw`: `"redacted"` (default, no bodies), `true` (full bodies, debugging), `false` |
-| Local files | Media paths and the built-in document tool must resolve inside `roots`; `[]` denies all; unset = your own parts unrestricted, model-callable document tool limited to the working directory | `fileAccess: { roots }` |
+| Local files | Local media paths must resolve inside `roots`; `[]` denies all; unset = unrestricted | `fileAccess: { roots }` |
 | URLs | Model-controlled URLs refuse private/loopback/link-local hosts (including DNS results), re-check redirects, cap size | automatic |
 | Tool errors | Stack frames dropped; absolute paths and URL credentials scrubbed | `redactError` |
 | Sub-agent traces | Visible only to the agent that spawned them; results are Symbol-branded | automatic |

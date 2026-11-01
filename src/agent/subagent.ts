@@ -59,7 +59,7 @@ export function agentFromEnv(
 export class SubAgent extends Agent {
   /**
    * Creates a delegated worker, defaulting to `SUB_AGENT_MODEL` or `MODEL`
-   * when `model` is omitted, and retaining short-lived cache state by default.
+   * when `model` is omitted.
    *
    * @param config Worker configuration. It accepts the same options as `Agent`
    * and can be registered with a parent via `subagents`.
@@ -83,7 +83,6 @@ export class SubAgent extends Agent {
     super({
       ...config,
       model: resolvedModel,
-      cache: config.cache ?? { retention: "short" },
     });
   }
 

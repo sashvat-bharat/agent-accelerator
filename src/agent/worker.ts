@@ -99,8 +99,7 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
  * Unwraps `ModelProviderInstance` / `ModelSpec` the same way.
  */
 export function resolveDynamicWorkerModel(
-  dynModelRawInput: unknown,
-  subagentModelInput: unknown
+  dynModelRawInput: unknown
 ): string | Record<string, unknown> | undefined {
   const dynModelRaw = dynModelRawInput as
     | { model?: unknown; id?: unknown; provider?: unknown }
@@ -119,7 +118,6 @@ export function resolveDynamicWorkerModel(
   } else {
     dynModel = (dynModelRaw as string | undefined) || getSubModel() as string | undefined;
   }
-  void subagentModelInput;
   return dynModel;
 }
 
@@ -133,7 +131,7 @@ export function resolveDynamicModelInput(
   subagentModel: unknown
 ): string | Record<string, unknown> | undefined {
   const dynModelRaw = (dynamicSubagents as { model?: unknown } | undefined)?.model ?? subagentModel;
-  return resolveDynamicWorkerModel(dynModelRaw, subagentModel);
+  return resolveDynamicWorkerModel(dynModelRaw);
 }
 
 /**
@@ -337,7 +335,6 @@ export function createLiveWorker(
   hooks: LiveWorkerHooks = {}
 ): {
   onWorkerTurn: (turn: LiveWorkerTurn) => void;
-  onWorkerDelta: (delta?: string, thinkingDelta?: string) => void;
   attachToStream: (workerStream: {
     on: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
     off: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
@@ -431,5 +428,5 @@ export function createLiveWorker(
     };
   };
 
-  return { onWorkerTurn, onWorkerDelta, attachToStream };
+  return { onWorkerTurn, attachToStream };
 }

@@ -64,7 +64,7 @@ import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutpu
 import {
   mapThinkingLevelToGoogle,
   mapServiceTierToGoogle,
-  applyCacheForGoogle,
+  resolveCache,
   normalizeToolChoice,
   lastProviderFor,
   noteProviderTurn,
@@ -148,13 +148,6 @@ interface InteractionObject {
 }
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-
-/** Internal headers that must never leak onto Google REST requests. */
-const INTERNAL_HEADERS = new Set([
-  "x-thought-signature-map",
-  "x-cached-content-id",
-  "x-multimodal-user-content",
-]);
 
 /** Per-session interaction chaining (provider-generated ids only). */
 interface ChainEntry {
@@ -607,13 +600,6 @@ function parseInteraction(
   };
 }
 
-/** Local per-provider signature tag (Q-18): google history preserves only
- * google/untagged signatures; foreign-provider signatures never echo here. */
-function withGoogleSignature(sig: string | undefined): { thoughtSignature?: string; thoughtSignatureProvider?: string } {
-  if (!sig) return {};
-  return { thoughtSignature: sig, thoughtSignatureProvider: "google" };
-}
-
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
@@ -652,7 +638,8 @@ export class GoogleInteractionsProvider implements Provider {
     return (async () => {
       const { thinkingLevel } = mapThinkingLevelToGoogle(options?.thinking?.level);
       const serviceTier = mapServiceTierToGoogle(options?.serviceTier);
-      applyCacheForGoogle(options?.cache, `google/${modelId}`);
+      // The Interactions API caches implicitly only (docs: caching.md).
+      resolveCache("google", options?.cache, ["implicit"], `google/${modelId}`);
 
       const toolNames = (tools ?? []).map((t) => t.name);
       const toolChoice = toGoogleToolChoice(options?.toolChoice, toolNames);
@@ -753,10 +740,7 @@ export class GoogleInteractionsProvider implements Provider {
     apiKey: string,
     signal?: AbortSignal
   ): RequestInit {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    for (const [k, v] of Object.entries(options?.headers ?? {})) {
-      if (!INTERNAL_HEADERS.has(k.toLowerCase())) headers[k] = v;
-    }
+    const headers: Record<string, string> = { "Content-Type": "application/json", ...options?.headers };
     // Q-17: key travels as the `x-goog-api-key` header (never `?key=` in the
     // URL, which would leak into logs). Case-insensitive merge so a custom
     // `X-Goog-Api-Key` never duplicates the canonical header. Proxy flows
@@ -836,7 +820,7 @@ export class GoogleInteractionsProvider implements Provider {
     assertModalitiesSupported(context, "google", clean);
     const baseUrl = resolveBaseUrl(options);
     const url = `${baseUrl}/interactions`;
-    const sessionId = options?.sessionId || options?.cache?.sessionId;
+    const sessionId = options?.sessionId;
     const tools = options?.tools as StandardToolDeclaration[] | undefined;
     let body = await this.buildBody(clean, context, options, sessionId, tools, false);
 
@@ -845,9 +829,7 @@ export class GoogleInteractionsProvider implements Provider {
       method: "POST",
       headers: redactedHeaders({
         "Content-Type": "application/json",
-        ...Object.fromEntries(
-          Object.entries(options?.headers ?? {}).filter(([k]) => !INTERNAL_HEADERS.has(k.toLowerCase()))
-        ),
+        ...options?.headers,
         "x-goog-api-key": "[REDACTED]",
       }),
       body: b,
@@ -955,7 +937,7 @@ export class GoogleInteractionsProvider implements Provider {
         assertModalitiesSupported(context, "google", clean);
         const baseUrl = resolveBaseUrl(options);
         const url = `${baseUrl}/interactions?alt=sse`;
-        const sessionId = options?.sessionId || options?.cache?.sessionId;
+        const sessionId = options?.sessionId;
         const tools = options?.tools as StandardToolDeclaration[] | undefined;
         const body = await this.buildBody(clean, context, options, sessionId, tools, true);
         evictSessionId = sessionId;
@@ -969,9 +951,7 @@ export class GoogleInteractionsProvider implements Provider {
           method: "POST",
           headers: redactedHeaders({
             "Content-Type": "application/json",
-            ...Object.fromEntries(
-              Object.entries(options?.headers ?? {}).filter(([k]) => !INTERNAL_HEADERS.has(k.toLowerCase()))
-            ),
+            ...options?.headers,
             "x-goog-api-key": "[REDACTED]",
           }),
           body,
@@ -1083,12 +1063,10 @@ export class GoogleInteractionsProvider implements Provider {
               // Wire truth: signature arrives as its own delta (no text event).
               if (!signature) signature = delta["signature"] as string;
             } else if (dType === "arguments" || dType === "arguments_delta") {
-              // Wire truth is `arguments`; prose says `partial_arguments` — accept both.
-              // Deltas accumulate separately from step.start (see
-              // parseStreamedToolArguments): start may be `{}` with the full
-              // JSON in one delta, or a genuine first partial.
-              const chunk =
-                (delta["arguments"] as string) ?? (delta["partial_arguments"] as string) ?? "";
+              // `arguments` carries a JSON string chunk (docs: streaming.md). Deltas accumulate
+              // separately from step.start (see parseStreamedToolArguments): start may be `{}`
+              // with the full JSON in one delta, or a genuine first partial.
+              const chunk = (delta["arguments"] as string) ?? "";
               const entry = calls.get(index);
               if (entry && typeof chunk === "string") entry.deltaArgs += chunk;
             }

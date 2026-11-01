@@ -3,11 +3,11 @@
 import type { Message } from "../types/message.ts";
 import { SecurityPolicyError } from "../types/errors.ts";
 
-/** Default cap for one remote media/document download (bytes). */
+/** Default cap for one remote media download (bytes). */
 export const MAX_REMOTE_FETCH_BYTES = 200_000_000;
 
 /**
- * True when a media/document string would be read from the local filesystem
+ * True when a media string would be read from the local filesystem
  * by `normalizeMediaInput` (i.e. it is not a data URL, an http(s) URL, or an
  * embedded base64 payload). Mirrors the classification order used there.
  */

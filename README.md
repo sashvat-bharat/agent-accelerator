@@ -17,7 +17,7 @@ import { Agent } from "agent-accelerator";
 const agent = new Agent({
   model: "google/gemini-3.5-flash-lite",
   instructions: "You are a concise research engineer.",
-  cache: { retention: "short" },
+  cache: "implicit",
 });
 
 const res = await agent.run("Explain HBM pricing in 3 bullets");
@@ -32,10 +32,10 @@ console.log(res.usage);
 
 ```bash
 # Bun (recommended)
-bun add agent-accelerator
+bun add agent-accelerator zod
 
 # npm
-npm install agent-accelerator
+npm install agent-accelerator zod
 
 # pnpm
 pnpm add agent-accelerator
@@ -46,7 +46,7 @@ yarn add agent-accelerator
 
 Requires `bun` or `node 22+`.
 
-Core dependencies are `zod` only. Document conversion additionally uses the optional `@firecrawl/anydoc` peer. All provider transports are native REST (`fetch`, no SDK).
+The only dependency is `zod` (a peer dependency: install it next to the SDK and import `z` from `"zod"`). All provider transports are native REST (`fetch`, no SDK).
 
 ---
 
@@ -123,9 +123,8 @@ An `Agent` holds:
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Falls back to `SUB_AGENT_MODEL`. |
 | `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }`. See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
-| `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
+| `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
-| `bypassInputFileModality` | `boolean`                                      | When `true`, `file` parts are converted client-side to Markdown for models lacking native support. Capable models still receive files natively. Defaults to `false`. |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Infinite by default (`0` or omitted = no limit). Hitting a finite limit with pending tool calls warns and sets `finishReason: "max_turns"`. |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
@@ -239,7 +238,6 @@ const lead = new Agent({
 ### Differences from Agent
 
 * `model` resolves as `config.model ?? SUB_AGENT_MODEL ?? MODEL` and throws if empty.
-* `cache` defaults to `{ retention: "short" }`.
 * `.asTool(name?, desc?)` / `.toTool(name?, desc?)` converts the subagent into a `ToolDefinition` for manual registration.
 * `stateless: true` is supported for one-shot judges that must not retain history.
 
@@ -378,7 +376,8 @@ telemetryBus.onEvent((e) => {
 ## Tools
 
 ```ts
-import { Agent, tool, z } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
+import { z } from "zod";
 
 const agent = new Agent({
   model: "google/gemini-3.5-flash-lite",
@@ -404,7 +403,6 @@ const agent = new Agent({
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
 * `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls validate Zod input, use bounded parallelism, enforce per-tool timeouts, retry transient failures, recover namespace/camel-case tool-name aliases, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
-* `convert_document_to_markdown` — built-in, model-callable version of `convertDocumentToMarkdown` (PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV, local path or URL) for models without native document parsing. Returns a `<Document>` envelope, is auto-registered with `bypassInputFileModality: true`, and requires the optional `@firecrawl/anydoc` peer.
 
 The agent loop answers the 3rd consecutive identical call (same name and arguments) with a `repeat_blocked` error, so the model can reuse the prior result or change its arguments. Tools marked `repeatable: true`, or `idempotent: true` unless `repeatable` is set, are exempt.
 
@@ -587,11 +585,10 @@ Google-specific handling includes:
 
 * Isolating `thoughtSignature` per part for prefix stability.
 * Converting JSON Schema to OpenAPI 3.0 through `stripSchemaForGoogle`.
-* Implicit/automatic caching only; explicit retention and `cachedContentId` are dropped (see [Cache](#cache)).
+* Implicit caching only; other `cache` values warn and fall back (see [Cache](#cache)).
 
 Helpers:
 
-* `createExplicitCache({ model, systemInstruction?, contents?, tools?, displayName?, ttlSeconds?, expireTime?, apiKey?, baseUrl? })`
 * `isValidThoughtSignature(sig)`
 * `retainThoughtSignature(existing, incoming)`
 * `extractGoogleThoughtSignature(obj)`
@@ -724,26 +721,20 @@ Fixed-reasoning models reject `none`.
 ## Cache
 
 ```ts
-CacheConfig {
-  retention?,
-  cachedContentId?,
-  sessionId?,
-  ttlSeconds?
-}
+cache?: "implicit" | "5m" | "30m" | "1h" | "12h"   // CacheOption; omit for the provider default
 ```
 
-```ts
-CacheRetention =
-  | "implicit"
-  | "short"
-  | "medium"
-  | "long";
-```
+One value sets the prompt-cache lifetime. Each provider honours only the values it supports; any other value falls back to the provider default and emits one `provider_warning` naming the supported values.
 
-### Retention
+| Provider | Supported | Sent on the wire |
+| --- | --- | --- |
+| Google (Interactions) | `implicit` | nothing (implicit caching is always on) |
+| OpenRouter, `anthropic/*` models | `implicit`, `5m`, `1h` | top-level `cache_control: { type: "ephemeral", ttl }` |
+| OpenRouter, other models | `implicit` | nothing (automatic caching + sticky routing) |
+| OpenAI | `implicit`, `12h` | `12h` sends `prompt_cache_retention: "24h"` when the catalog allows long retention |
+| Custom endpoints | `implicit` | nothing (strict endpoints reject unknown fields) |
 
-* `implicit` — automatic prefix reuse without an explicit cache object or storage fee. This is the only retention the native adapters act on (by doing nothing special — stable prompts plus session affinity do the work).
-* `short` / `medium` / `long` — TTL hints (`5m` / `1h` / `12h`) consumed only by the opt-in `createExplicitCache` helper. Provider adapters warn about and drop any non-`implicit` retention: none of the native transports expose retention control.
+Session files written before 0.5.1 with the old `{ retention }` object still load (`short`=`5m`, `medium`=`1h`, `long`=`12h`). Passing the object form to `new Agent()` throws `ConfigError`.
 
 ### Session Affinity
 
@@ -757,26 +748,7 @@ Reuse the same session ID across turns when cache affinity is desired.
 
 In browser runtimes custom `x-*` headers are stripped to avoid CORS preflights: OpenAI keeps affinity through its body key, while custom endpoints lose affinity entirely on browsers.
 
-### Explicit Caches
-
-`createExplicitCache` mints a Google `cachedContents/...` resource directly (TTL via `retention`/`ttlSeconds`).
-
-`cachedContentId` is accepted and carried in context, but no native adapter currently sends it — explicit references are warned about and dropped, so stable prompts plus session affinity remain the cache-reuse path.
-
-`ttlSeconds` overrides the retention mapping.
-
-### Provider Cache Mechanisms
-
-* **Google** keeps system prompts and tools stable and isolates signatures (implicit caching only).
-* **OpenAI** pins affinity with `prompt_cache_key`.
-* **OpenRouter** pins affinity with body `session_id` plus headers (sticky routing from the first request).
-* **Custom endpoints** get headers-only affinity; anything else cache-related is warned about and dropped.
-
-The following cache helpers are exported:
-
-* `getPromptCacheRetention`
-* `retentionToTtlSeconds`
-* `clampCacheKey`
+`clampCacheKey` (exported) shortens affinity keys to the provider-safe 64 characters.
 
 For the best cache reuse, keep `instructions` and the tool set stable. Put changing data in user messages or `additionalContext`.
 
@@ -1156,8 +1128,7 @@ Message {
 ProviderContext {
   systemPrompt?,
   messages,
-  tools?,
-  cachedContentId?
+  tools?
 }
 ```
 
@@ -1219,8 +1190,6 @@ never in the gitignored snapshot.
 * `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
 * `withRetries(fn, { maxRetries?, maxRetryDelayMs?, signal?, label? })` / `isTransientError(err)` — bounded retries for transient provider failures (defaults: 2 retries, 5s cap, aborts never retried).
-* `convertDocumentToMarkdown(input, { filename?, format?, mimeType?, maxChars? })` — converts PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV to Markdown via the optional `@firecrawl/anydoc` peer. Throws `DocumentConversionError` on failure.
-* `z` — re-exported from Zod so tools do not require a separate Zod import.
 
 ---
 ## Examples
@@ -1252,9 +1221,6 @@ bun run examples/09-multimodal_document.ts
 
 bun run examples/08-multimodal_video.ts
 # video input (video-capable model required)
-
-bun run examples/10-document_markdown.ts
-# document → Markdown preprocessing (any model, optional @firecrawl/anydoc peer)
 
 bun run examples/11-session-identity.ts
 # sub-agent TrackingIDs, live worker boxes, lineage, track(), durable sessions
@@ -1347,7 +1313,7 @@ src/
 ├── tools/      # tool(), schema, executor
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
-└── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, documents, retry, errors
+└── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, retry, errors
 examples/        # live demos 01-14 (see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
 test/            # unit + mocked-provider tests mirroring src/
 ```

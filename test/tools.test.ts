@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { tool, toStandardToolDeclarations, zodToJsonSchema, executeToolCalls, z } from "../src/index.ts";
+import { tool, toStandardToolDeclarations, zodToJsonSchema, executeToolCalls } from "../src/index.ts";
+import { z } from "zod";
 
 describe("Tools & Parallel Execution", () => {
   it("should convert Zod schemas to OpenAPI JSON Schema", () => {
@@ -226,7 +227,7 @@ describe("Tools & Parallel Execution", () => {
 
 describe("truncated-argument marker vs. a real `raw` parameter", () => {
   it("executes a tool whose only parameter is named `raw`, and still refuses truncated streams", async () => {
-    const { executeToolCalls, tool, z, parseStreamedToolArguments } = await import("../src/index.ts");
+    const { executeToolCalls, tool, parseStreamedToolArguments } = await import("../src/index.ts");
     const { isTruncatedToolCall } = await import("../src/tools/executor.ts");
     let ran: unknown;
     const run_shell = tool({

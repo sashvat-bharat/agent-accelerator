@@ -24,40 +24,13 @@ export interface ThinkingConfig {
 }
 
 /**
- * Cache retention:
- * - "implicit": automatic prefix caching ($0.00 storage fee, session affinity preserved)
- * - "short": 5 minutes explicit TTL
- * - "medium": 1 hour explicit TTL
- * - "long": 12 hours explicit TTL
- * - undefined: no explicit caching enforced (implicit may still happen)
+ * Prompt-cache lifetime: `"implicit"` (automatic prefix caching) or an explicit TTL. Each provider honours only
+ * the values it supports; others fall back to its default with one warning. Omit for the provider default.
  */
-/** Prompt-cache retention policy. */
-export type CacheRetention = "implicit" | "short" | "medium" | "long";
+export type CacheOption = "implicit" | "5m" | "30m" | "1h" | "12h";
 
-/** Prompt-cache IDs, retention, TTL, and session-affinity settings. */
-export interface CacheConfig {
-  /**
-   * Retention duration:
-   * - "implicit": automatic prefix caching ($0.00 storage fee, no explicit cloud cache entities created)
-   * - "short": 5 minutes TTL
-   * - "medium": 1 hour TTL
-   * - "long": 12 hours TTL
-   * - undefined: no explicit caching enforced (implicit may still happen)
-   */
-  retention?: CacheRetention;
-  /**
-   * Explicit cache ID / reference if using pre-created context cache
-   */
-  cachedContentId?: string;
-  /**
-   * Session ID for cache affinity routing (e.g. x-session-id)
-   */
-  sessionId?: string;
-  /**
-   * Explicit TTL in seconds for created caches (overrides retention mapping)
-   */
-  ttlSeconds?: number;
-}
+/** Every accepted {@link CacheOption}, for runtime validation. */
+export const CACHE_OPTIONS: readonly CacheOption[] = ["implicit", "5m", "30m", "1h", "12h"];
 
 /**
  * Service tier controls — bloatfree: only flex / priority (standard is default, no flag needed)

@@ -57,7 +57,7 @@ describe("OpenAICompatibleChatProvider (native REST, mocked)", () => {
     const res = await provider.generate(
       "llama-3.3-70b-versatile",
       { systemPrompt: "Be concise.", messages: [{ role: "user", content: "Hi" }] },
-      { apiKey: "k", sessionId: "s-groq", thinking: { enabled: true, level: "low" }, serviceTier: "priority", cache: { retention: "long" } }
+      { apiKey: "k", sessionId: "s-groq", thinking: { enabled: true, level: "low" }, serviceTier: "priority", cache: "12h" }
     );
     expect(res.text).toBe("Hello there");
     expect(res.responseId).toBe("chatcmpl-test123");

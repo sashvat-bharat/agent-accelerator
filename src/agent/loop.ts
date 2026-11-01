@@ -20,7 +20,6 @@ import {
   traceToolEvent,
 } from "../tools/executor.ts";
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
-import { preprocessFilePartsForBypass } from "../utils/documents.ts";
 import { enforceFileAccess } from "../utils/safe-io.ts";
 import { isSubagentResult, normalizeSubagentMetadata } from "../tools/subagent-result.ts";
 import { BudgetExceededError } from "../types/errors.ts";
@@ -49,8 +48,6 @@ export interface AgentLoopConfig {
   options?: ProviderRequestOptions;
   runOptions?: AgentRunOptions;
   maxTurns?: number;
-  /** Convert `file` parts client-side for pdf-incapable models (see Agent flag). */
-  bypassInputFileModality?: boolean;
   /** Local-file policy: media paths must resolve inside `roots` (see `AgentConfig.fileAccess`). */
   fileAccess?: { roots?: string[] };
   /**
@@ -343,8 +340,7 @@ function loopSessionId(config: AgentLoopConfig): string | undefined {
   try {
     return (
       (config.runOptions as { sessionId?: string } | undefined)?.sessionId ||
-      (config.options as { sessionId?: string } | undefined)?.sessionId ||
-      (config.options as { cache?: { sessionId?: string } } | undefined)?.cache?.sessionId
+      (config.options as { sessionId?: string } | undefined)?.sessionId
     );
   } catch { return undefined; }
 }
@@ -622,15 +618,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   const repeatCounts = new Map<string, number>();
 
   try {
-  if (config.bypassInputFileModality) {
-    await preprocessFilePartsForBypass(config.context.messages, {
-      providerId: provider.id,
-      modelId,
-      signal: runOptions?.signal,
-      roots: config.fileAccess?.roots,
-    });
-  }
-
   const standardTools = toStandardToolDeclarations(tools);
 
   while (turns < maxTurns) {
@@ -647,8 +634,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     const providerOptions: ProviderRequestOptions = {
       ...options,
-      // Merge sessionId from cache or top-level (C4 fix: read both)
-      sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+      sessionId: runOptions?.sessionId || options?.sessionId,
       cache: options?.cache,
       tools: standardTools.length > 0 ? standardTools : undefined,
       signal: runOptions?.signal,
@@ -686,7 +672,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         {
           systemPrompt: context.systemPrompt,
           messages: context.messages,
-          cachedContentId: context.cachedContentId,
         },
         providerOptions
       ),
@@ -697,14 +682,12 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     // Canonical session routing: lets adapters detect provider switches.
     noteProviderTurn(
-      runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+      runOptions?.sessionId || options?.sessionId,
       provider.id
     );
 
-    // Thinking is exposed via events/traces and onTurn (see shouldExposeThinking,
-    // default true). Promoting thinking to answer text is gated (Q-15, default
-    // OFF): without the explicit opt-in the run returns the provider's empty
-    // text with its finishReason instead of fabricating an answer from reasoning.
+    // Thinking is exposed via events/traces and onTurn. Promoting it to answer text is gated (Q-15,
+    // default OFF): without the opt-in the run returns the provider's empty text and finishReason.
     if ((!genResult.text || genResult.text.trim() === "") && (!genResult.toolCalls || genResult.toolCalls.length === 0) && genResult.thinking) {
       if (shouldPromoteThinkingToAnswer(config, runOptions)) {
         if (genResult.thinking.includes("</think>")) {
@@ -742,7 +725,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
             turns,
             model: modelId,
             provider: provider.id,
-            sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+            sessionId: runOptions?.sessionId || options?.sessionId,
             thinking: genResult.thinking,
             ...(genResult.thoughtSignature ? { thoughtSignature: genResult.thoughtSignature } : {}),
           },
@@ -763,14 +746,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       emitTurn(runOptions, { turns, text: genResult.text, thinking: genResult.thinking });
       if (noToolSteered.length > 0) {
         try { config.onSteerInjected?.(noToolSteered); } catch {}
-        if (config.bypassInputFileModality) {
-          await preprocessFilePartsForBypass(config.context.messages, {
-            providerId: provider.id,
-            modelId,
-            signal: runOptions?.signal,
-            roots: config.fileAccess?.roots,
-          });
-        }
       }
       emitProgress(config);
       if (noToolSteered.length > 0) continue;
@@ -795,7 +770,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       repeatCounts,
       agentName,
       signal: runOptions?.signal,
-      sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+      sessionId: runOptions?.sessionId || options?.sessionId,
     });
     const results = guarded.results;
     previousToolCallFingerprints = guarded.fingerprints;
@@ -839,14 +814,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     const toolSteered = drainSteerInbox(context, config.steerInbox);
     if (toolSteered.length > 0) {
       try { config.onSteerInjected?.(toolSteered); } catch {}
-      if (config.bypassInputFileModality) {
-        await preprocessFilePartsForBypass(config.context.messages, {
-          providerId: provider.id,
-          modelId,
-          signal: runOptions?.signal,
-          roots: config.fileAccess?.roots,
-        });
-      }
     }
     emitProgress(config);
 
@@ -1005,14 +972,6 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           }
         }
       }
-      if (config.bypassInputFileModality) {
-        await preprocessFilePartsForBypass(config.context.messages, {
-          providerId: config.provider.id,
-          modelId: config.modelId,
-          signal: config.runOptions?.signal,
-          roots: config.fileAccess?.roots,
-        });
-      }
       const {
         agentName,
         provider,
@@ -1067,7 +1026,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 
         const providerOptions: ProviderRequestOptions = {
           ...options,
-          sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+          sessionId: runOptions?.sessionId || options?.sessionId,
           cache: options?.cache,
           tools: standardTools.length > 0 ? standardTools : undefined,
           signal: linked.signal,
@@ -1099,7 +1058,6 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           {
             systemPrompt: context.systemPrompt,
             messages: context.messages,
-            cachedContentId: context.cachedContentId,
           },
           providerOptions
         );
@@ -1161,7 +1119,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         lastResponse = turnResponse;
         // Canonical session routing: lets adapters detect provider switches.
         noteProviderTurn(
-          runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+          runOptions?.sessionId || options?.sessionId,
           provider.id
         );
 
@@ -1203,7 +1161,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
                 turns,
                 model: modelId,
                 provider: provider.id,
-                sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+                sessionId: runOptions?.sessionId || options?.sessionId,
                 thinking: turnResponse.thinking,
                 ...(turnResponse.thoughtSignature ? { thoughtSignature: turnResponse.thoughtSignature } : {}),
               },
@@ -1254,7 +1212,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       repeatCounts,
           agentName,
           signal: linked.signal,
-          sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+          sessionId: runOptions?.sessionId || options?.sessionId,
           onSubagentEvent: (ev) => {
             try {
               outerStream.push({
@@ -1452,35 +1410,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 }
 
 // ---------------------------------------------------------------------------
-// Q-15: single thinking-exposure policy + Q-04 canonical finish helper.
+// Q-15: thinking-promotion policy + Q-04 canonical finish helper.
 // (Appended here to avoid conflicts with other loop sections.)
 // ---------------------------------------------------------------------------
-
-/**
- * Single expose-thinking policy (Q-15).
- * - Events/traces/onTurn always carry thinking separately (default true).
- * - Promoting thinking to answer *text* is a separate opt-in
- *   (`thinkingAsAnswerFallback`, default false) — see
- *   `shouldPromoteThinkingToAnswer`.
- *
- * Reads `exposeThinking` from the loop config, run options, or provider
- * options; any explicit `false` hides thinking from events/traces.
- */
-export function shouldExposeThinking(config?: unknown): boolean {
-  try {
-    const c = config as {
-      exposeThinking?: unknown;
-      runOptions?: { exposeThinking?: unknown };
-      options?: { exposeThinking?: unknown };
-    } | null | undefined;
-    const v = c?.exposeThinking ?? c?.runOptions?.exposeThinking ?? c?.options?.exposeThinking;
-    if (v === undefined) return true;
-    return Boolean(v);
-  } catch {
-    // why: policy lookup is best-effort — default to exposing thinking.
-    return true;
-  }
-}
 
 /**
  * Whether an empty-text turn may promote `thinking` to answer `text` (Q-15).

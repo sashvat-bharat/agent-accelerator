@@ -2,7 +2,7 @@ import type { ModelSpec } from "./model.ts";
 import type { ToolDefinition } from "./tool.ts";
 import type {
   ThinkingLevel,
-  CacheConfig,
+  CacheOption,
   ServiceTier,
 } from "./core.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
@@ -17,7 +17,7 @@ import type { z } from "zod";
 //   is a deprecated alias (still honored: dynamicSubagents.model ??
 //   subagentModel ?? SUB_AGENT_MODEL ?? parent model).
 // - Session identity: agent-level `sessionId` only (per-run `sessionId`
-//   selects a named session entry; `cache.sessionId` is a deprecated alias).
+//   selects a named session entry).
 // - Model identity: `ModelRef` = string (`provider/model`) | catalog
 //   `ModelSpec` | `ModelProviderInstance` ({ provider, model, apiKey?,
 //   baseUrl? }). Explicit `Agent` config always wins over env; constructing
@@ -96,17 +96,13 @@ export interface AgentConfig {
    * See `normalizeThinkingV2` (re-exported from the root entry).
    */
   thinking?: ThinkingOption;
-  /** Prompt-cache retention and session-affinity settings. */
-  cache?: CacheConfig;
+  /**
+   * Prompt-cache lifetime: `"implicit" | "5m" | "30m" | "1h" | "12h"`. Omit for the provider default.
+   * A value the provider does not support falls back to its default with one `provider_warning`.
+   */
+  cache?: CacheOption;
   /** Provider service tier, when supported. */
   serviceTier?: ServiceTier;
-  /**
-   * When true, `file` parts are converted client-side to `<Document>` Markdown
-   * for models lacking native support (capable models still receive files
-   * natively; unknown models count as capable). Also auto-registers the
-   * `convert_document_to_markdown` tool for path/URL mentions in plain text.
-   */
-  bypassInputFileModality?: boolean;
   /** Stable conversation/cache session ID. */
   sessionId?: string;
   /** Headers merged into every provider request. */
@@ -186,10 +182,9 @@ export interface AgentConfig {
    */
   telemetry?: { persist?: boolean };
   /**
-   * Local file policy. With `roots` set, every local-path media part and the
-   * built-in `convert_document_to_markdown` tool must resolve inside them
-   * (`[]` denies all local paths). Without it, developer-supplied parts are
-   * unrestricted and the model-callable tool is limited to `process.cwd()`.
+   * Local file policy. With `roots` set, every local-path media part must
+   * resolve inside them (`[]` denies all local paths). Without it, local
+   * paths in message parts are unrestricted.
    */
   fileAccess?: { roots?: string[] };
   /**
