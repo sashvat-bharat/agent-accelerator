@@ -140,10 +140,6 @@ export const SUBAGENT_SUBSCRIBE_TTL_MS = 5 * 60 * 1000;
 /** Last-write wall-clock per canonical trackingId (drives TTL; reads do not extend it). */
 const traceTouchedAt = new Map<string, number>();
 
-function canonicalOf(trace: SubAgentTrace): string {
-  return trace.trackingId;
-}
-
 function deleteTraceByCanonical(canonical: string): void {
   for (const [key, t] of [...subagentTraces]) {
     if (t.trackingId === canonical) subagentTraces.delete(key);
@@ -379,10 +375,6 @@ export function appendSubAgentStep(trackingId: string, step: SubAgentStep): void
 
 function readBudget(parentAgent: Agent): Budget | undefined {
   return (parentAgent as unknown as { budget?: Budget }).budget;
-}
-
-function readBudgetState(parentAgent: Agent): BudgetState | undefined {
-  return (parentAgent as unknown as { budgetState?: BudgetState }).budgetState;
 }
 
 function ensureBudgetState(parentAgent: Agent): BudgetState {
@@ -711,7 +703,7 @@ export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
               try { (parentAgent as any).persistNow?.(); } catch {}
             };
             // Unified live worker state machine (shared with fixed workers).
-            const { onWorkerTurn, onWorkerDelta, attachToStream } = createLiveWorker(trace, trackingId, displayId, {
+            const { onWorkerTurn, attachToStream } = createLiveWorker(trace, trackingId, displayId, {
               trim: (t) => trimTraceSteps(t),
               touch: (id) => touchTrace(id),
               notify: (id) => notifyTrace(id),

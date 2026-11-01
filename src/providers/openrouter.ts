@@ -181,19 +181,6 @@ interface ChatResponse {
 
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 
-/** Q-18: Chat transport never echoes thought signatures (no wire field).
- * Local helper documents the namespacing decision per provider file. */
-function withProviderSignature(_sig: string | undefined): { thoughtSignature?: undefined } {
-  return {};
-}
-
-/** Internal headers that must never leak onto native REST requests. */
-const INTERNAL_HEADERS = new Set([
-  "x-thought-signature-map",
-  "x-cached-content-id",
-  "x-multimodal-user-content",
-]);
-
 // ---------------------------------------------------------------------------
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
@@ -671,9 +658,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       options?.headers,
       sessionId
     );
-    for (const [k, v] of Object.entries(headers)) {
-      if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
-    }
     setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
     if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
@@ -760,9 +744,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       "Content-Type": "application/json",
       Authorization: "[REDACTED]",
     };
-    for (const k of Object.keys(auditRaw)) {
-      if (INTERNAL_HEADERS.has(k.toLowerCase())) delete auditRaw[k];
-    }
     const rawRequest = {
       url,
       method: "POST",
@@ -857,9 +838,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           "Content-Type": "application/json",
           Authorization: "[REDACTED]",
         };
-        for (const k of Object.keys(streamAuditRaw)) {
-          if (INTERNAL_HEADERS.has(k.toLowerCase())) delete streamAuditRaw[k];
-        }
         const rawRequest = {
           url,
           method: "POST",

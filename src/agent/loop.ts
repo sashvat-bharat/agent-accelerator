@@ -686,10 +686,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       provider.id
     );
 
-    // Thinking is exposed via events/traces and onTurn (see shouldExposeThinking,
-    // default true). Promoting thinking to answer text is gated (Q-15, default
-    // OFF): without the explicit opt-in the run returns the provider's empty
-    // text with its finishReason instead of fabricating an answer from reasoning.
+    // Thinking is exposed via events/traces and onTurn. Promoting it to answer text is gated (Q-15,
+    // default OFF): without the opt-in the run returns the provider's empty text and finishReason.
     if ((!genResult.text || genResult.text.trim() === "") && (!genResult.toolCalls || genResult.toolCalls.length === 0) && genResult.thinking) {
       if (shouldPromoteThinkingToAnswer(config, runOptions)) {
         if (genResult.thinking.includes("</think>")) {
@@ -1412,35 +1410,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 }
 
 // ---------------------------------------------------------------------------
-// Q-15: single thinking-exposure policy + Q-04 canonical finish helper.
+// Q-15: thinking-promotion policy + Q-04 canonical finish helper.
 // (Appended here to avoid conflicts with other loop sections.)
 // ---------------------------------------------------------------------------
-
-/**
- * Single expose-thinking policy (Q-15).
- * - Events/traces/onTurn always carry thinking separately (default true).
- * - Promoting thinking to answer *text* is a separate opt-in
- *   (`thinkingAsAnswerFallback`, default false) — see
- *   `shouldPromoteThinkingToAnswer`.
- *
- * Reads `exposeThinking` from the loop config, run options, or provider
- * options; any explicit `false` hides thinking from events/traces.
- */
-export function shouldExposeThinking(config?: unknown): boolean {
-  try {
-    const c = config as {
-      exposeThinking?: unknown;
-      runOptions?: { exposeThinking?: unknown };
-      options?: { exposeThinking?: unknown };
-    } | null | undefined;
-    const v = c?.exposeThinking ?? c?.runOptions?.exposeThinking ?? c?.options?.exposeThinking;
-    if (v === undefined) return true;
-    return Boolean(v);
-  } catch {
-    // why: policy lookup is best-effort — default to exposing thinking.
-    return true;
-  }
-}
 
 /**
  * Whether an empty-text turn may promote `thinking` to answer `text` (Q-15).

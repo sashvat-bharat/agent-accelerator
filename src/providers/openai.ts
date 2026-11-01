@@ -156,19 +156,6 @@ interface ResponsesObject {
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
-/** Q-18: Responses transport never echoes thought signatures (no wire field).
- * Local helper documents the namespacing decision per provider file. */
-function withProviderSignature(_sig: string | undefined): { thoughtSignature?: undefined } {
-  return {};
-}
-
-/** Internal headers that must never leak onto native REST requests. */
-const INTERNAL_HEADERS = new Set([
-  "x-thought-signature-map",
-  "x-cached-content-id",
-  "x-multimodal-user-content",
-]);
-
 // ---------------------------------------------------------------------------
 // Request building (canonical -> Responses)
 // ---------------------------------------------------------------------------
@@ -637,9 +624,6 @@ export class OpenAIResponsesProvider implements Provider {
       options?.headers,
       sessionId
     );
-    for (const [k, v] of Object.entries(headers)) {
-      if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
-    }
     // Case-insensitive merge so a lowercase `authorization` custom header
     // never coexists with the canonical bearer. Proxy flows
     // (`apiKey === "unused"`) preserve custom auth instead of overwriting.
@@ -733,9 +717,6 @@ export class OpenAIResponsesProvider implements Provider {
       "Content-Type": "application/json",
       Authorization: "[REDACTED]",
     };
-    for (const k of Object.keys(auditHeadersRaw)) {
-      if (INTERNAL_HEADERS.has(k.toLowerCase())) delete auditHeadersRaw[k];
-    }
     const auditHeaders = redactedHeaders(auditHeadersRaw);
     const rawRequest = {
       url,
@@ -832,9 +813,6 @@ export class OpenAIResponsesProvider implements Provider {
           "Content-Type": "application/json",
           Authorization: "[REDACTED]",
         };
-        for (const k of Object.keys(streamAuditRaw)) {
-          if (INTERNAL_HEADERS.has(k.toLowerCase())) delete streamAuditRaw[k];
-        }
         const rawRequest = {
           url,
           method: "POST",

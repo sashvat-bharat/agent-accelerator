@@ -181,13 +181,6 @@ interface ChatResponse {
   [k: string]: unknown;
 }
 
-/** Headers that must never leak onto native REST requests. */
-const INTERNAL_HEADERS = new Set([
-  "x-thought-signature-map",
-  "x-cached-content-id",
-  "x-multimodal-user-content",
-]);
-
 // ---------------------------------------------------------------------------
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
@@ -799,9 +792,6 @@ export class OpenAICompatibleChatProvider implements Provider {
       options?.headers,
       sessionId
     );
-    for (const [k, v] of Object.entries(headers)) {
-      if (INTERNAL_HEADERS.has(k.toLowerCase())) delete headers[k];
-    }
     // Strict-endpoint opt-out (pi sendSessionAffinityHeaders pattern):
     // `COMPAT_NO_SESSION_HEADERS=1` or per-call `sendSessionHeaders:false`
     // drops affinity headers that trigger CORS preflights / strict 400s.
@@ -899,9 +889,6 @@ export class OpenAICompatibleChatProvider implements Provider {
       "Content-Type": "application/json",
       ...(apiKey ? { Authorization: "[REDACTED]" } : {}),
     };
-    for (const k of Object.keys(auditRaw)) {
-      if (INTERNAL_HEADERS.has(k.toLowerCase())) delete auditRaw[k];
-    }
     const rawRequest = {
       url,
       method: "POST",
@@ -994,9 +981,6 @@ export class OpenAICompatibleChatProvider implements Provider {
           "Content-Type": "application/json",
           ...(apiKey ? { Authorization: "[REDACTED]" } : {}),
         };
-        for (const k of Object.keys(streamAuditRaw)) {
-          if (INTERNAL_HEADERS.has(k.toLowerCase())) delete streamAuditRaw[k];
-        }
         const rawRequest = {
           url,
           method: "POST",

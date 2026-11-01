@@ -106,19 +106,6 @@ export function setHeaderCaseInsensitive(
 // ---------------------------------------------------------------------------
 
 /**
- * Tags a captured thought signature with its issuing provider so history
- * builders echo it only on the same provider. Untagged (legacy) signatures
- * echo everywhere for backward compat.
- */
-export function withProviderSignature(
-  sig: string | undefined,
-  provider: string
-): { thoughtSignature?: string; thoughtSignatureProvider?: string } {
-  if (!sig) return {};
-  return { thoughtSignature: sig, thoughtSignatureProvider: provider };
-}
-
-/**
  * Returns true when a stored signature may be echoed on `currentProvider`:
  * untagged (legacy) echoes everywhere, tagged echoes only on a match.
  */
