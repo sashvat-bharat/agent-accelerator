@@ -46,7 +46,7 @@ yarn add agent-accelerator
 
 Requires `bun` or `node 22+`.
 
-Core dependencies are `zod` only. Document conversion additionally uses the optional `@firecrawl/anydoc` peer. All provider transports are native REST (`fetch`, no SDK).
+Core dependencies are `zod` only. All provider transports are native REST (`fetch`, no SDK).
 
 ---
 
@@ -125,7 +125,6 @@ An `Agent` holds:
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
-| `bypassInputFileModality` | `boolean`                                      | When `true`, `file` parts are converted client-side to Markdown for models lacking native support. Capable models still receive files natively. Defaults to `false`. |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Infinite by default (`0` or omitted = no limit). Hitting a finite limit with pending tool calls warns and sets `finishReason: "max_turns"`. |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
@@ -404,7 +403,6 @@ const agent = new Agent({
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
 * `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls validate Zod input, use bounded parallelism, enforce per-tool timeouts, retry transient failures, recover namespace/camel-case tool-name aliases, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
-* `convert_document_to_markdown` — built-in, model-callable version of `convertDocumentToMarkdown` (PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV, local path or URL) for models without native document parsing. Returns a `<Document>` envelope, is auto-registered with `bypassInputFileModality: true`, and requires the optional `@firecrawl/anydoc` peer.
 
 The agent loop answers the 3rd consecutive identical call (same name and arguments) with a `repeat_blocked` error, so the model can reuse the prior result or change its arguments. Tools marked `repeatable: true`, or `idempotent: true` unless `repeatable` is set, are exempt.
 
@@ -1219,7 +1217,6 @@ never in the gitignored snapshot.
 * `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
 * `withRetries(fn, { maxRetries?, maxRetryDelayMs?, signal?, label? })` / `isTransientError(err)` — bounded retries for transient provider failures (defaults: 2 retries, 5s cap, aborts never retried).
-* `convertDocumentToMarkdown(input, { filename?, format?, mimeType?, maxChars? })` — converts PDF/Word/PowerPoint/Excel/OpenDocument/RTF/EPUB/CSV to Markdown via the optional `@firecrawl/anydoc` peer. Throws `DocumentConversionError` on failure.
 * `z` — re-exported from Zod so tools do not require a separate Zod import.
 
 ---
@@ -1252,9 +1249,6 @@ bun run examples/09-multimodal_document.ts
 
 bun run examples/08-multimodal_video.ts
 # video input (video-capable model required)
-
-bun run examples/10-document_markdown.ts
-# document → Markdown preprocessing (any model, optional @firecrawl/anydoc peer)
 
 bun run examples/11-session-identity.ts
 # sub-agent TrackingIDs, live worker boxes, lineage, track(), durable sessions
@@ -1347,7 +1341,7 @@ src/
 ├── tools/      # tool(), schema, executor
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
-└── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, documents, retry, errors
+└── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, retry, errors
 examples/        # live demos 01-14 (see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
 test/            # unit + mocked-provider tests mirroring src/
 ```

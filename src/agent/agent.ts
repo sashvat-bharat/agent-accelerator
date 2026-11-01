@@ -16,7 +16,6 @@ import {
   resolveMainModel,
 } from "./worker.ts";
 import * as path from "node:path";
-import { createConvertDocumentTool } from "../utils/documents.ts";
 import { registerAgent } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../scheduler/store.ts";
 import { persistTelemetry } from "../telemetry-file.ts";
@@ -175,13 +174,9 @@ export class Agent {
   readonly cacheConfig?: CacheConfig;
   /** Provider service tier. */
   readonly serviceTier?: ServiceTier;
-  /** Convert `file` parts client-side for pdf-incapable models. */
-  readonly bypassInputFileModality: boolean;
   /**
-   * Local-file policy. `roots` set: every local-path media part and the
-   * built-in document tool must resolve inside them (`[]` denies all paths).
-   * Unset: developer-supplied parts are unrestricted and the model-callable
-   * tool is limited to the working directory.
+   * Local-file policy. `roots` set: every local-path media part must resolve
+   * inside them (`[]` denies all paths). Unset: local paths are unrestricted.
    */
   readonly fileAccess?: { roots?: string[] };
   /** Failure policy for the conversation (see `AgentConfig.onFailure`). */
@@ -355,7 +350,6 @@ export class Agent {
     const initialCachedId = (this.cacheConfig as any)?.cachedContentId;
 
     this.serviceTier = config.serviceTier;
-    this.bypassInputFileModality = config.bypassInputFileModality ?? false;
     this.onFailure =
       config.onFailure === "rollback" || config.onFailure === "keep" ? config.onFailure : "auto";
     this.forkConfig = { ...config };
@@ -398,10 +392,6 @@ export class Agent {
       for (const [toolName, toolDef] of Object.entries(subagentTools)) {
         this.tools[toolName] = toolDef;
       }
-    }
-
-    if (this.bypassInputFileModality && !this.tools["convert_document_to_markdown"]) {
-      this.tools["convert_document_to_markdown"] = createConvertDocumentTool({ roots: this.fileAccess?.roots });
     }
 
     const dyn = this.dynamicSubagents;
@@ -1013,7 +1003,6 @@ export class Agent {
         options: providerOptions,
         runOptions,
         maxTurns: this.maxTurns,
-        bypassInputFileModality: this.bypassInputFileModality,
         ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
         onFailure: this.onFailure,
         ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
@@ -1076,7 +1065,6 @@ export class Agent {
       options: providerOptions,
       runOptions,
       maxTurns: this.maxTurns,
-      bypassInputFileModality: this.bypassInputFileModality,
       ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
       onFailure: this.onFailure,
       ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),

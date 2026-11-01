@@ -18,9 +18,8 @@
  *   (groq, ollama, …) fail unknown body properties, so anything unsupported
  *   is warn+drop, never sent.
  * - `text`, `image_url`, and `input_audio` parts are sent; `video`/`file`
- *   parts fail fast with a one-line error naming the remedy (files point at
- *   `convertDocumentToMarkdown`). The old transport let these through to
- *   confusing provider 400s.
+ *   parts fail fast with a one-line error naming the remedy. The old transport
+ *   let these through to confusing provider 400s.
  * - Prior-turn reasoning is NOT resent (chat history is messages + tool calls
  *   only), except echoed Gemini thought signatures (see below).
  * - Gemini models served through OpenAI-compatible endpoints keep working:
@@ -345,7 +344,7 @@ function assertNoVideoOrFileParts(
   const message =
     kind === "video"
       ? `[${prefix}/${modelId}] unsupported video input (generic OpenAI-compatible endpoints carry text/image/audio only). Use a video-capable model (e.g. google/gemini-*) or drop the video part.`
-      : `[${prefix}/${modelId}] unsupported file input (generic OpenAI-compatible endpoints carry text/image/audio only). Convert the document to Markdown with the convert_document_to_markdown tool (or Agent bypassInputFileModality) and send it as text instead.`;
+      : `[${prefix}/${modelId}] unsupported file input (generic OpenAI-compatible endpoints carry text/image/audio only). Use a file-capable model (e.g. google/gemini-*) or convert the document to text before sending it.`;
   const err = new Error(message);
   err.name = "AgentAccelProviderError";
   Object.defineProperties(err, {

@@ -20,7 +20,6 @@ import {
   traceToolEvent,
 } from "../tools/executor.ts";
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
-import { preprocessFilePartsForBypass } from "../utils/documents.ts";
 import { enforceFileAccess } from "../utils/safe-io.ts";
 import { isSubagentResult, normalizeSubagentMetadata } from "../tools/subagent-result.ts";
 import { BudgetExceededError } from "../types/errors.ts";
@@ -49,8 +48,6 @@ export interface AgentLoopConfig {
   options?: ProviderRequestOptions;
   runOptions?: AgentRunOptions;
   maxTurns?: number;
-  /** Convert `file` parts client-side for pdf-incapable models (see Agent flag). */
-  bypassInputFileModality?: boolean;
   /** Local-file policy: media paths must resolve inside `roots` (see `AgentConfig.fileAccess`). */
   fileAccess?: { roots?: string[] };
   /**
@@ -622,15 +619,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   const repeatCounts = new Map<string, number>();
 
   try {
-  if (config.bypassInputFileModality) {
-    await preprocessFilePartsForBypass(config.context.messages, {
-      providerId: provider.id,
-      modelId,
-      signal: runOptions?.signal,
-      roots: config.fileAccess?.roots,
-    });
-  }
-
   const standardTools = toStandardToolDeclarations(tools);
 
   while (turns < maxTurns) {
@@ -763,14 +751,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       emitTurn(runOptions, { turns, text: genResult.text, thinking: genResult.thinking });
       if (noToolSteered.length > 0) {
         try { config.onSteerInjected?.(noToolSteered); } catch {}
-        if (config.bypassInputFileModality) {
-          await preprocessFilePartsForBypass(config.context.messages, {
-            providerId: provider.id,
-            modelId,
-            signal: runOptions?.signal,
-            roots: config.fileAccess?.roots,
-          });
-        }
       }
       emitProgress(config);
       if (noToolSteered.length > 0) continue;
@@ -839,14 +819,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     const toolSteered = drainSteerInbox(context, config.steerInbox);
     if (toolSteered.length > 0) {
       try { config.onSteerInjected?.(toolSteered); } catch {}
-      if (config.bypassInputFileModality) {
-        await preprocessFilePartsForBypass(config.context.messages, {
-          providerId: provider.id,
-          modelId,
-          signal: runOptions?.signal,
-          roots: config.fileAccess?.roots,
-        });
-      }
     }
     emitProgress(config);
 
@@ -1004,14 +976,6 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
             return;
           }
         }
-      }
-      if (config.bypassInputFileModality) {
-        await preprocessFilePartsForBypass(config.context.messages, {
-          providerId: config.provider.id,
-          modelId: config.modelId,
-          signal: config.runOptions?.signal,
-          roots: config.fileAccess?.roots,
-        });
       }
       const {
         agentName,

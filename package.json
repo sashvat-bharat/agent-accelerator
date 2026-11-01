@@ -46,17 +46,8 @@
     "fetch-latest-provider-docs": "bun references/documentations/fetch-latest.ts"
   },
   "devDependencies": {
-    "@firecrawl/anydoc": "^0.2.4",
     "@types/bun": "latest",
     "typescript": "^7.0.0"
-  },
-  "peerDependencies": {
-    "@firecrawl/anydoc": "^0.2.4"
-  },
-  "peerDependenciesMeta": {
-    "@firecrawl/anydoc": {
-      "optional": true
-    }
   },
   "dependencies": {
     "zod": "^4.4.3"

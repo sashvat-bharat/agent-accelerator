@@ -140,11 +140,8 @@ export function assertModalitiesSupported(
   if (!supported) return;
   const missing = [...needed].filter((k) => !supported.includes(k));
   if (missing.length === 0) return;
-  const docHint = missing.includes("pdf")
-    ? " Documents can be converted client-side with the convert_document_to_markdown tool (bun add @firecrawl/anydoc) or Agent bypassInputFileModality: true."
-    : "";
   const err = new Error(
-    `[${displayModel(providerId, modelId)}] unsupported ${missing.join("+")} input (supports: ${supported.join(", ") || "text"}). Use a capable model or drop the ${missing.join("+")} part.${docHint}`
+    `[${displayModel(providerId, modelId)}] unsupported ${missing.join("+")} input (supports: ${supported.join(", ") || "text"}). Use a capable model or drop the ${missing.join("+")} part.`
   );
   err.name = "AgentAccelProviderError";
   Object.defineProperties(err, {

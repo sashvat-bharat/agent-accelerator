@@ -137,7 +137,9 @@ describe("native chat wire mapping (text, image, audio)", () => {
       )
       .then(() => null)
       .catch((e) => e);
-    expect(String(err?.message ?? err)).toMatch(/unsupported file input.*convert_document_to_markdown/);
+    const message = String(err?.message ?? err);
+    expect(message).toMatch(/unsupported file input.*file-capable model/);
+    expect(message).not.toContain("convert_document_to_markdown");
   });
 });
 

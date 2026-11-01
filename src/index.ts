@@ -56,23 +56,6 @@ export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
  */
 export { executeToolCalls } from "./tools/executor.ts";
 
-// Client-side document conversion (optional anydoc peer — see utils/documents.ts)
-export {
-  convertDocumentToMarkdown,
-  convertDocumentInput,
-  convert_document_to_markdown,
-  createConvertDocumentTool,
-  isAnydocAvailable,
-  resolveDocumentFormat,
-  truncateMarkdown,
-  buildDocumentXml,
-  modelSupportsFileInput,
-  preprocessFilePartsForBypass,
-  DocumentConversionError,
-  DEFAULT_DOCUMENT_MAX_CHARS,
-  MAX_DOCUMENT_FETCH_BYTES,
-} from "./utils/documents.ts";
-export type { ConvertDocumentOptions, ConvertedDocument, ConvertDocumentToolOptions } from "./utils/documents.ts";
 export { assertPathAllowed, enforceFileAccess, fetchRemoteBytes, isPrivateAddress, RemoteFetchError, MAX_REMOTE_FETCH_BYTES } from "./utils/safe-io.ts";
 
 // Multi-Agent Delegation & Tools

@@ -100,13 +100,6 @@ export interface AgentConfig {
   cache?: CacheConfig;
   /** Provider service tier, when supported. */
   serviceTier?: ServiceTier;
-  /**
-   * When true, `file` parts are converted client-side to `<Document>` Markdown
-   * for models lacking native support (capable models still receive files
-   * natively; unknown models count as capable). Also auto-registers the
-   * `convert_document_to_markdown` tool for path/URL mentions in plain text.
-   */
-  bypassInputFileModality?: boolean;
   /** Stable conversation/cache session ID. */
   sessionId?: string;
   /** Headers merged into every provider request. */
@@ -186,10 +179,9 @@ export interface AgentConfig {
    */
   telemetry?: { persist?: boolean };
   /**
-   * Local file policy. With `roots` set, every local-path media part and the
-   * built-in `convert_document_to_markdown` tool must resolve inside them
-   * (`[]` denies all local paths). Without it, developer-supplied parts are
-   * unrestricted and the model-callable tool is limited to `process.cwd()`.
+   * Local file policy. With `roots` set, every local-path media part must
+   * resolve inside them (`[]` denies all local paths). Without it, local
+   * paths in message parts are unrestricted.
    */
   fileAccess?: { roots?: string[] };
   /**

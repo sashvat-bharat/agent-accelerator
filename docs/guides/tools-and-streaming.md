@@ -44,7 +44,7 @@ How a call is executed, in order:
 - ✅ Write descriptions like instructions to a colleague; `.describe()` every field.
 - ✅ Mark read-only tools `idempotent`; leave side-effecting tools at one attempt and make them idempotent with an id.
 - ✅ Always pass `ctx.signal` to `fetch`/DB calls. ❌ Don't return huge payloads; return what the model needs.
-- 💡 Built-in tools: `convert_document_to_markdown`, `spawn_subagents`, `scheduled_actions`, `get_datetime`.
+- 💡 Built-in tools: `spawn_subagents`, `scheduled_actions`, `get_datetime`.
 
 ## Streaming
 

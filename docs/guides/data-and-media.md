@@ -60,7 +60,7 @@ const res = await agent.run([
 console.log(res.text);
 ```
 
-Part types: `text`, `image`, `audio`, `video`, `file`. MIME types are inferred from the extension or magic bytes (`sniffMimeType`). Unsupported modalities fail **before** the network with a one-line error (the catalog knows what each model accepts; custom endpoints reject video and files). For models without native file input, set `bypassInputFileModality: true`: `file` parts become `<Document>` Markdown (needs the optional `@firecrawl/anydoc`; PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV). `convertDocumentToMarkdown(path)` does the same on demand and `createConvertDocumentTool({ roots })` gives the model a safe converter. Remote downloads refuse private hosts and are size-capped.
+Part types: `text`, `image`, `audio`, `video`, `file`. MIME types are inferred from the extension or magic bytes (`sniffMimeType`). Unsupported modalities fail **before** the network with a one-line error (the catalog knows what each model accepts; custom endpoints reject video and files). A model without native file input fails fast: convert the document to text yourself before `run` (the SDK ships no converter). Remote downloads re-check redirects and are size-capped.
 
 **Recommendations:** ✅ prefer URLs for large media (not inlined). ✅ Restrict local reads with `fileAccess.roots`. ❌ Don't pass untrusted paths without `roots`.
 
@@ -113,4 +113,4 @@ Behavior: the default TTL is 12 h; an expired catalog is used **immediately** an
 - Prompt is `string | ContentPart[]`; part keys: `image`, `audio`, `video`, `file` (+ `filename`, `mimeType`).
 - Cost may be `undefined`; handle it. Use `SessionTelemetry` for running totals.
 - Never edit `<home>/catalog/models.dev.json`; use `registerModel`.
-- See also: [Agents and models](agents-and-models.md), [Safety and operations](safety-and-ops.md), [`examples/05-chat.ts`](../../examples/05-chat.ts), [`examples/06-multimodal_image.ts`](../../examples/06-multimodal_image.ts), [`examples/10-document_markdown.ts`](../../examples/10-document_markdown.ts).
+- See also: [Agents and models](agents-and-models.md), [Safety and operations](safety-and-ops.md), [`examples/05-chat.ts`](../../examples/05-chat.ts), [`examples/06-multimodal_image.ts`](../../examples/06-multimodal_image.ts), [`examples/09-multimodal_document.ts`](../../examples/09-multimodal_document.ts).

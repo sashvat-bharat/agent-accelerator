@@ -9,7 +9,7 @@
 bun add agent-accelerator
 ```
 
-Built for Bun (it ships TypeScript source, no build step). The only runtime dependency is `zod`. Optional: `bun add @firecrawl/anydoc` lets models without native file input read PDF/Word/Excel files (see [Data and media](guides/data-and-media.md)).
+Built for Bun (it ships TypeScript source, no build step). The only runtime dependency is `zod`.
 
 ## 2. Set a key and a model
 
