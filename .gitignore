@@ -1,11 +1,14 @@
-# dependencies (bun install)
-node_modules
-
-ai/
-references/
-
+# NEVER REMOVE THESE LINES NO MATTER WHAT!
+memory/
+harness/
 AGENTS.md
 codebase.md
+references/
+.agent-accel/
+
+#------------------------------------------
+# dependencies (bun install)
+node_modules
 
 # output
 out
@@ -38,13 +41,3 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
-
-# models.dev database snapshot & cache (regenerate with bun run update-models)
-models.dev.json
-
-# chat session runtime artifacts (examples/05-chat.ts)
-.session.json
-sessions/
-
-# default Agent Accelerator home (sessions, scheduled actions)
-.agent-accel/

@@ -42,7 +42,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test test/",
-    "update-models": "bun src/update-models.ts"
+    "update-models": "bun src/update-models.ts",
+    "fetch-latest-provider-docs": "bun references/documentations/fetch-latest.ts"
   },
   "devDependencies": {
     "@firecrawl/anydoc": "^0.2.4",
