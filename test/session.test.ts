@@ -212,11 +212,17 @@ describe("session serialize/deserialize", () => {
     expect(calls[1].rawArguments).toBe('{}{"a":1}');
   });
 
-  it("drops cache.sessionId echoing the top-level sessionId", () => {
-    const a = new Agent({ model: "google/gemini-3.5-flash-lite", cache: { retention: "implicit" } });
+  it("stores cache as a plain value and maps legacy { retention } objects on load", () => {
+    const a = new Agent({ model: "google/gemini-3.5-flash-lite", cache: "1h" });
     const data = buildSessionData(a as any, null);
     expect(data.sessionId).toBe(a.sessionId);
-    expect(data.cache).toEqual({ retention: "implicit" });
+    expect(data.cache).toBe("1h");
+    const legacy = (retention: string) =>
+      deserializeSession(JSON.stringify({ version: 1, sessionId: "s", model: "m", cache: { retention, sessionId: "s" }, messages: [] }))?.cache;
+    expect(legacy("short")).toBe("5m");
+    expect(legacy("medium")).toBe("1h");
+    expect(legacy("long")).toBe("12h");
+    expect(legacy("implicit")).toBe("implicit");
   });
 });
 

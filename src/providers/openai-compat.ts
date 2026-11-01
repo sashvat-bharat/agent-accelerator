@@ -80,7 +80,7 @@ import {
 } from "./shared.ts";
 import { getModelFromCatalog, createGenericModelSpec, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
-  applyCacheForCustom,
+  resolveCache,
   mapToolChoiceToOpenAI,
   emitProviderWarning,
   noteProviderTurn,
@@ -709,7 +709,8 @@ export class OpenAICompatibleChatProvider implements Provider {
         fallback: "standard routing (no service_tier payload is sent)",
       });
     }
-    applyCacheForCustom(this.prefix, options?.cache, `${this.prefix}/${modelId}`);
+    // Strict endpoints reject unknown body fields: implicit caching only.
+    resolveCache(this.prefix, options?.cache, ["implicit"], `${this.prefix}/${modelId}`);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system prompt (strict endpoints would 400 on json_schema
@@ -795,7 +796,6 @@ export class OpenAICompatibleChatProvider implements Provider {
   ): RequestInit {
     const headers: Record<string, string> = buildSessionHeaders(
       this.prefix,
-      options?.cache,
       options?.headers,
       sessionId
     );
@@ -890,12 +890,12 @@ export class OpenAICompatibleChatProvider implements Provider {
     const baseUrl = this.baseUrl(options);
     const apiKey = this.requireApiKey(baseUrl, options);
     const url = `${baseUrl}/chat/completions`;
-    const sessionId = options?.sessionId || options?.cache?.sessionId;
+    const sessionId = options?.sessionId;
     const tools = options?.tools as StandardToolDeclaration[] | undefined;
     const body = await this.buildBody(clean, context, options, tools, false);
 
     const auditRaw: Record<string, string> = {
-      ...buildSessionHeaders(this.prefix, options?.cache, options?.headers, sessionId),
+      ...buildSessionHeaders(this.prefix, options?.headers, sessionId),
       "Content-Type": "application/json",
       ...(apiKey ? { Authorization: "[REDACTED]" } : {}),
     };
@@ -985,12 +985,12 @@ export class OpenAICompatibleChatProvider implements Provider {
         const baseUrl = this.baseUrl(options);
         const apiKey = this.requireApiKey(baseUrl, options);
         const url = `${baseUrl}/chat/completions`;
-        const sessionId = options?.sessionId || options?.cache?.sessionId;
+        const sessionId = options?.sessionId;
         const tools = options?.tools as StandardToolDeclaration[] | undefined;
         const body = await this.buildBody(clean, context, options, tools, true);
 
         const streamAuditRaw: Record<string, string> = {
-          ...buildSessionHeaders(prefix, options?.cache, options?.headers, sessionId),
+          ...buildSessionHeaders(prefix, options?.headers, sessionId),
           "Content-Type": "application/json",
           ...(apiKey ? { Authorization: "[REDACTED]" } : {}),
         };

@@ -75,7 +75,7 @@ import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutpu
 import {
   mapThinkingLevelToOpenAI,
   mapServiceTierToOpenAI,
-  applyCacheForOpenAI,
+  resolveCache,
   mapToolChoiceToOpenAI,
   noteProviderTurn,
   parseStreamedToolArguments,
@@ -535,7 +535,8 @@ export class OpenAIResponsesProvider implements Provider {
   ): Promise<ResponsesRequestBody> {
     const { effort } = mapThinkingLevelToOpenAI(options?.thinking?.level);
     const serviceTier = mapServiceTierToOpenAI(options?.serviceTier);
-    applyCacheForOpenAI(options?.cache, `openai/${modelId}`);
+    // `12h` maps to `prompt_cache_retention: "24h"`; everything else stays on implicit prompt_cache_key affinity.
+    const cache = resolveCache("openai", options?.cache, ["implicit", "12h"], `openai/${modelId}`);
 
     // Structured outputs: native `text.format` when supported, else emulated
     // via instructions (catalog `structured_output: false` would 400).
@@ -598,10 +599,8 @@ export class OpenAIResponsesProvider implements Provider {
       const cacheKey = clampCacheKey(sessionId);
       if (cacheKey) body.prompt_cache_key = cacheKey;
     }
-    // Long retention: `prompt_cache_retention: "24h"` when the catalog
-    // supports it (pi api/openai-responses.ts:97 rule). Other explicit modes
-    // stay warn+drop via applyCacheForOpenAI above.
-    if (options?.cache?.retention === "long") {
+    // Long retention: `prompt_cache_retention: "24h"` when the catalog supports it.
+    if (cache === "12h") {
       let supportsLong = true;
       try {
         const spec = getModelFromCatalog("openai", modelId);
@@ -614,8 +613,8 @@ export class OpenAIResponsesProvider implements Provider {
       } else {
         emitProviderWarning({
           provider: "openai",
-          capability: "cache retention",
-          requested: `long (openai/${modelId})`,
+          capability: "cache",
+          requested: `12h (openai/${modelId})`,
           reason: "the catalog reports no long-cache support for this model.",
           fallback: "default caching with prompt_cache_key affinity (no retention payload is sent)",
         });
@@ -635,7 +634,6 @@ export class OpenAIResponsesProvider implements Provider {
   ): RequestInit {
     const headers: Record<string, string> = buildSessionHeaders(
       "openai",
-      options?.cache,
       options?.headers,
       sessionId
     );
@@ -723,7 +721,7 @@ export class OpenAIResponsesProvider implements Provider {
     assertNoVideoPartsOnResponses(context, "openai", clean);
     const baseUrl = resolveBaseUrl(options);
     const url = `${baseUrl}/responses`;
-    const sessionId = options?.sessionId || options?.cache?.sessionId;
+    const sessionId = options?.sessionId;
     const tools = options?.tools as StandardToolDeclaration[] | undefined;
     const body = await this.buildBody(clean, context, options, sessionId, tools, false);
 
@@ -731,7 +729,7 @@ export class OpenAIResponsesProvider implements Provider {
     // redacted. Previously only Content-Type + custom headers were stored,
     // hiding the x-session-id affinity actually sent.
     const auditHeadersRaw: Record<string, string> = {
-      ...buildSessionHeaders("openai", options?.cache, options?.headers, sessionId),
+      ...buildSessionHeaders("openai", options?.headers, sessionId),
       "Content-Type": "application/json",
       Authorization: "[REDACTED]",
     };
@@ -825,12 +823,12 @@ export class OpenAIResponsesProvider implements Provider {
     assertNoVideoPartsOnResponses(context, "openai", clean);
         const baseUrl = resolveBaseUrl(options);
         const url = `${baseUrl}/responses`;
-        const sessionId = options?.sessionId || options?.cache?.sessionId;
+        const sessionId = options?.sessionId;
         const tools = options?.tools as StandardToolDeclaration[] | undefined;
         const body = await this.buildBody(clean, context, options, sessionId, tools, true);
 
         const streamAuditRaw: Record<string, string> = {
-          ...buildSessionHeaders("openai", options?.cache, options?.headers, sessionId),
+          ...buildSessionHeaders("openai", options?.headers, sessionId),
           "Content-Type": "application/json",
           Authorization: "[REDACTED]",
         };

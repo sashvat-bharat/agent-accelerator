@@ -1,5 +1,4 @@
 import type { ProviderId } from "../types/model.ts";
-import type { CacheConfig } from "../types/core.ts";
 import { clampCacheKey } from "./cache.ts";
 
 export function isBrowserRuntime(): boolean {
@@ -163,11 +162,10 @@ function stripForBrowser(headers: Record<string, string>): Record<string, string
  * runtimes this returns only CORS-safe attribution headers (OpenRouter
  * `HTTP-Referer` / `X-Title`); session affinity still flows via `providerOptions`
  * (`promptCacheKey`), never via headers.
- * @example `const headers = buildSessionHeaders("google", { sessionId: "session-123" });`
+ * @example `const headers = buildSessionHeaders("google", undefined, "session-123");`
  */
 export function buildSessionHeaders(
   provider: ProviderId | string,
-  cache?: CacheConfig,
   customHeaders?: Record<string, string>,
   explicitSessionId?: string
 ): Record<string, string> {
@@ -183,8 +181,7 @@ export function buildSessionHeaders(
     headers[k] = v;
   }
 
-  const rawSessionId = explicitSessionId || cache?.sessionId;
-  const sessionId = clampCacheKey(rawSessionId);
+  const sessionId = clampCacheKey(explicitSessionId);
   const isFirstClass = FIRST_CLASS.has(provider);
 
   const getHeader = (name: string): string | undefined => {

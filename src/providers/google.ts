@@ -64,7 +64,7 @@ import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutpu
 import {
   mapThinkingLevelToGoogle,
   mapServiceTierToGoogle,
-  applyCacheForGoogle,
+  resolveCache,
   normalizeToolChoice,
   lastProviderFor,
   noteProviderTurn,
@@ -652,7 +652,8 @@ export class GoogleInteractionsProvider implements Provider {
     return (async () => {
       const { thinkingLevel } = mapThinkingLevelToGoogle(options?.thinking?.level);
       const serviceTier = mapServiceTierToGoogle(options?.serviceTier);
-      applyCacheForGoogle(options?.cache, `google/${modelId}`);
+      // The Interactions API caches implicitly only (docs: caching.md).
+      resolveCache("google", options?.cache, ["implicit"], `google/${modelId}`);
 
       const toolNames = (tools ?? []).map((t) => t.name);
       const toolChoice = toGoogleToolChoice(options?.toolChoice, toolNames);
@@ -836,7 +837,7 @@ export class GoogleInteractionsProvider implements Provider {
     assertModalitiesSupported(context, "google", clean);
     const baseUrl = resolveBaseUrl(options);
     const url = `${baseUrl}/interactions`;
-    const sessionId = options?.sessionId || options?.cache?.sessionId;
+    const sessionId = options?.sessionId;
     const tools = options?.tools as StandardToolDeclaration[] | undefined;
     let body = await this.buildBody(clean, context, options, sessionId, tools, false);
 
@@ -955,7 +956,7 @@ export class GoogleInteractionsProvider implements Provider {
         assertModalitiesSupported(context, "google", clean);
         const baseUrl = resolveBaseUrl(options);
         const url = `${baseUrl}/interactions?alt=sse`;
-        const sessionId = options?.sessionId || options?.cache?.sessionId;
+        const sessionId = options?.sessionId;
         const tools = options?.tools as StandardToolDeclaration[] | undefined;
         const body = await this.buildBody(clean, context, options, sessionId, tools, true);
         evictSessionId = sessionId;

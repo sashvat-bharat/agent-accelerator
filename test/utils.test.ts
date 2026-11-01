@@ -2,7 +2,6 @@ import { describe, it, expect } from "bun:test";
 import { resolveEffectiveThinking } from "../src/agent/agent.ts";
 import { withRetries, isTransientError } from "../src/utils/retry.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../src/utils/errors.ts";
-import { retentionToTtlSeconds } from "../src/utils/cache.ts";
 
 describe("per-run thinking override", () => {
   it("resolves per-run thinking override without mutating base", () => {
@@ -11,16 +10,6 @@ describe("per-run thinking override", () => {
     expect(resolveEffectiveThinking(base, "high")).toEqual({ enabled: true, level: "high" });
     expect(resolveEffectiveThinking(base, "none")).toEqual({ enabled: false, level: "none", budgetTokens: 0 });
     expect(resolveEffectiveThinking(base, "dynamic")).toEqual({ enabled: true, level: "dynamic", budgetTokens: -1 });
-  });
-});
-
-describe("cache retention TTL mapping", () => {
-  it("maps retention to TTL seconds", () => {
-    expect(retentionToTtlSeconds("short")).toBe(300);
-    expect(retentionToTtlSeconds("medium")).toBe(3600);
-    expect(retentionToTtlSeconds("long")).toBe(43200);
-    expect(retentionToTtlSeconds("implicit")).toBeUndefined();
-    expect(retentionToTtlSeconds("short", 999)).toBe(999);
   });
 });
 

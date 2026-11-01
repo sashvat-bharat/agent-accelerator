@@ -8,7 +8,7 @@ import {
 import {
   mapThinkingLevelToOpenAI,
   mapServiceTierToOpenAI,
-  applyCacheForOpenAI,
+  resolveCache,
   mapToolChoiceToOpenAI,
   clearEmittedWarnings,
 } from "../src/providers.ts";
@@ -33,7 +33,7 @@ describe("Canonical OpenAI mappings", () => {
     expect(mapServiceTierToOpenAI(undefined)).toBeUndefined();
   });
 
-  test("warns and drops OpenAI cache retention instead of sending it", () => {
+  test("resolveCache keeps supported values and warns+drops the rest", () => {
     clearEmittedWarnings();
     const messages: string[] = [];
     const orig = console.warn;
@@ -41,12 +41,13 @@ describe("Canonical OpenAI mappings", () => {
       messages.push(args.map(String).join(" "));
     };
     try {
-      applyCacheForOpenAI({ retention: "medium" }, "openai/x");
-      applyCacheForOpenAI({ cachedContentId: "cachedContents/abc" }, "openai/x");
-      applyCacheForOpenAI({ retention: "implicit" }, "openai/x");
-      applyCacheForOpenAI(undefined, "openai/x");
-      expect(messages.length).toBe(2);
-      expect(messages[0]).toMatch(/openai.*cache retention/i);
+      const supported = ["implicit", "12h"] as const;
+      expect(resolveCache("openai", "1h", supported, "openai/x")).toBeUndefined();
+      expect(resolveCache("openai", "12h", supported, "openai/x")).toBe("12h");
+      expect(resolveCache("openai", "implicit", supported, "openai/x")).toBe("implicit");
+      expect(resolveCache("openai", undefined, supported, "openai/x")).toBeUndefined();
+      expect(messages.length).toBe(1);
+      expect(messages[0]).toMatch(/openai.*cache/i);
     } finally {
       console.warn = orig;
       clearEmittedWarnings();

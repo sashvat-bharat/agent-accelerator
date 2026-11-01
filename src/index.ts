@@ -206,17 +206,14 @@ export {
   clearSessionRouting,
   mapThinkingLevelToGoogle,
   mapServiceTierToGoogle,
-  applyCacheForGoogle,
   mapThinkingLevelToOpenRouter,
   mapServiceTierToOpenRouter,
-  applyCacheForOpenRouter,
   mapToolChoiceToOpenRouter,
   mapThinkingLevelToOpenRouterChat,
   mapToolChoiceToOpenRouterChat,
   mapThinkingLevelToOpenAI,
   mapServiceTierToOpenAI,
-  applyCacheForOpenAI,
-  applyCacheForCustom,
+  resolveCache,
   mapToolChoiceToOpenAI,
   normalizeToolChoice,
   parseStreamedToolArguments,
@@ -261,16 +258,7 @@ export {
 
 export { stripSchemaForGoogle } from "./tools/schema.ts";
 
-export {
-  createExplicitCache,
-  retentionToTtlSeconds,
-  getPromptCacheRetention,
-  clampCacheKey,
-} from "./utils/cache.ts";
-export type {
-  CreateExplicitCacheOptions,
-  CachedContentMetadata,
-} from "./utils/cache.ts";
+export { clampCacheKey } from "./utils/cache.ts";
 
 // Streaming & Events
 export { AssistantMessageEventStream } from "./streaming/event-stream.ts";
@@ -359,12 +347,13 @@ export { toJsonSafe, safeStringify, escapeXml } from "./utils/serialization.ts";
  */
 export { z };
 
+export { CACHE_OPTIONS } from "./types/core.ts";
+
 // TypeScript Type Exports
 export type {
   ThinkingLevel,
   ThinkingConfig,
-  CacheRetention,
-  CacheConfig,
+  CacheOption,
   ServiceTier,
   TokenUsage,
 } from "./types/core.ts";

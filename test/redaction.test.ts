@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { Agent, createExplicitCache, type StreamEvent } from "../src/index.ts";
+import { Agent, type StreamEvent } from "../src/index.ts";
 import { redactedHeaders } from "../src/providers/shared.ts";
 import { applyCaptureRaw } from "../src/utils/raw-capture.ts";
 
@@ -106,19 +106,5 @@ describe("AgentResponse.raw end to end", () => {
     const start = events.find((e) => e.type === "start");
     expect(start?.raw).toBeDefined();
     expect(JSON.stringify(start!.raw)).not.toContain("TOP SECRET PROMPT");
-  });
-});
-
-describe("createExplicitCache", () => {
-  it("sends the API key in a header, never in the URL", async () => {
-    let seen: { url: string; headers: Record<string, string> } | undefined;
-    (globalThis as any).fetch = async (url: string, init: any) => {
-      seen = { url, headers: init.headers };
-      return new Response(JSON.stringify({ name: "cachedContents/1", model: "m", createTime: "", updateTime: "", expireTime: "" }), { status: 200 });
-    };
-    await createExplicitCache({ model: "gemini-3.5-flash-lite", apiKey: "SECRET-KEY-123" });
-    expect(seen!.url).not.toContain("SECRET-KEY-123");
-    expect(seen!.url).not.toContain("key=");
-    expect(seen!.headers["x-goog-api-key"]).toBe("SECRET-KEY-123");
   });
 });

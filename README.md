@@ -17,7 +17,7 @@ import { Agent } from "agent-accelerator";
 const agent = new Agent({
   model: "google/gemini-3.5-flash-lite",
   instructions: "You are a concise research engineer.",
-  cache: { retention: "short" },
+  cache: "implicit",
 });
 
 const res = await agent.run("Explain HBM pricing in 3 bullets");
@@ -123,7 +123,7 @@ An `Agent` holds:
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Falls back to `SUB_AGENT_MODEL`. |
 | `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }`. See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
-| `cache`           | `CacheConfig`                                        | `{ retention, sessionId, cachedContentId, ttlSeconds }`. Controls cache reuse.                                                                             |
+| `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Infinite by default (`0` or omitted = no limit). Hitting a finite limit with pending tool calls warns and sets `finishReason: "max_turns"`. |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
@@ -238,7 +238,6 @@ const lead = new Agent({
 ### Differences from Agent
 
 * `model` resolves as `config.model ?? SUB_AGENT_MODEL ?? MODEL` and throws if empty.
-* `cache` defaults to `{ retention: "short" }`.
 * `.asTool(name?, desc?)` / `.toTool(name?, desc?)` converts the subagent into a `ToolDefinition` for manual registration.
 * `stateless: true` is supported for one-shot judges that must not retain history.
 
@@ -585,11 +584,10 @@ Google-specific handling includes:
 
 * Isolating `thoughtSignature` per part for prefix stability.
 * Converting JSON Schema to OpenAPI 3.0 through `stripSchemaForGoogle`.
-* Implicit/automatic caching only; explicit retention and `cachedContentId` are dropped (see [Cache](#cache)).
+* Implicit caching only; other `cache` values warn and fall back (see [Cache](#cache)).
 
 Helpers:
 
-* `createExplicitCache({ model, systemInstruction?, contents?, tools?, displayName?, ttlSeconds?, expireTime?, apiKey?, baseUrl? })`
 * `isValidThoughtSignature(sig)`
 * `retainThoughtSignature(existing, incoming)`
 * `extractGoogleThoughtSignature(obj)`
@@ -722,26 +720,20 @@ Fixed-reasoning models reject `none`.
 ## Cache
 
 ```ts
-CacheConfig {
-  retention?,
-  cachedContentId?,
-  sessionId?,
-  ttlSeconds?
-}
+cache?: "implicit" | "5m" | "30m" | "1h" | "12h"   // CacheOption; omit for the provider default
 ```
 
-```ts
-CacheRetention =
-  | "implicit"
-  | "short"
-  | "medium"
-  | "long";
-```
+One value sets the prompt-cache lifetime. Each provider honours only the values it supports; any other value falls back to the provider default and emits one `provider_warning` naming the supported values.
 
-### Retention
+| Provider | Supported | Sent on the wire |
+| --- | --- | --- |
+| Google (Interactions) | `implicit` | nothing (implicit caching is always on) |
+| OpenRouter, `anthropic/*` models | `implicit`, `5m`, `1h` | top-level `cache_control: { type: "ephemeral", ttl }` |
+| OpenRouter, other models | `implicit` | nothing (automatic caching + sticky routing) |
+| OpenAI | `implicit`, `12h` | `12h` sends `prompt_cache_retention: "24h"` when the catalog allows long retention |
+| Custom endpoints | `implicit` | nothing (strict endpoints reject unknown fields) |
 
-* `implicit` — automatic prefix reuse without an explicit cache object or storage fee. This is the only retention the native adapters act on (by doing nothing special — stable prompts plus session affinity do the work).
-* `short` / `medium` / `long` — TTL hints (`5m` / `1h` / `12h`) consumed only by the opt-in `createExplicitCache` helper. Provider adapters warn about and drop any non-`implicit` retention: none of the native transports expose retention control.
+Session files written before 0.5.1 with the old `{ retention }` object still load (`short`=`5m`, `medium`=`1h`, `long`=`12h`). Passing the object form to `new Agent()` throws `ConfigError`.
 
 ### Session Affinity
 
@@ -755,26 +747,7 @@ Reuse the same session ID across turns when cache affinity is desired.
 
 In browser runtimes custom `x-*` headers are stripped to avoid CORS preflights: OpenAI keeps affinity through its body key, while custom endpoints lose affinity entirely on browsers.
 
-### Explicit Caches
-
-`createExplicitCache` mints a Google `cachedContents/...` resource directly (TTL via `retention`/`ttlSeconds`).
-
-`cachedContentId` is accepted and carried in context, but no native adapter currently sends it — explicit references are warned about and dropped, so stable prompts plus session affinity remain the cache-reuse path.
-
-`ttlSeconds` overrides the retention mapping.
-
-### Provider Cache Mechanisms
-
-* **Google** keeps system prompts and tools stable and isolates signatures (implicit caching only).
-* **OpenAI** pins affinity with `prompt_cache_key`.
-* **OpenRouter** pins affinity with body `session_id` plus headers (sticky routing from the first request).
-* **Custom endpoints** get headers-only affinity; anything else cache-related is warned about and dropped.
-
-The following cache helpers are exported:
-
-* `getPromptCacheRetention`
-* `retentionToTtlSeconds`
-* `clampCacheKey`
+`clampCacheKey` (exported) shortens affinity keys to the provider-safe 64 characters.
 
 For the best cache reuse, keep `instructions` and the tool set stable. Put changing data in user messages or `additionalContext`.
 
@@ -1154,8 +1127,7 @@ Message {
 ProviderContext {
   systemPrompt?,
   messages,
-  tools?,
-  cachedContentId?
+  tools?
 }
 ```
 

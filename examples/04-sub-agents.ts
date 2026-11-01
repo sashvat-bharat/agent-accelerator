@@ -76,7 +76,7 @@ const researcherAgent = new Agent({
     "providing deep technical breakthroughs, quantifiable metrics, and positive growth indicators.",
   model: process.env.SUB_AGENT_MODEL,
   thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
-  cache: { retention: "implicit" },
+  cache: "implicit",
 });
 // agentToTool(researcherAgent) available for manual tool registration; subagents[] below uses isolated Sessions.
 
@@ -90,7 +90,7 @@ const criticAgent = new Agent({
   model: process.env.SUB_AGENT_MODEL,
   stateless: true, // One-shot evaluation mode: does not persist history across turns
   thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
-  cache: { retention: "implicit" },
+  cache: "implicit",
 });
 
 
@@ -113,7 +113,7 @@ const lead = new Agent({
     { name: "adversarial_critic", description: "Adversarial critic", agent: criticAgent },
   ],
   thinking: "high",
-  cache: { retention: "implicit" },
+  cache: "implicit",
 });
 
 // 5. Execution Pipeline with Streaming & Telemetry

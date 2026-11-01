@@ -18,7 +18,7 @@ try {
       workerTimeoutMs: 60000,
     },
     thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
-    cache: { retention: (process.env.CACHE_RETENTION as any) ?? "implicit" },
+    cache: (process.env.CACHE as any) ?? "implicit",
     budget: { maxCostUsd: 5, maxTotalSubagents: 12 },
     limits: { requestTimeoutMs: 300_000 },
   });

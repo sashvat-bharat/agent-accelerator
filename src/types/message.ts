@@ -116,5 +116,4 @@ export interface ProviderContext {
   systemPrompt?: string;
   messages: Message[];
   tools?: Record<string, unknown>[];
-  cachedContentId?: string;
 }

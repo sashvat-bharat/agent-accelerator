@@ -66,7 +66,7 @@ try {
       workerTimeoutMs: 0,
     },
     thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
-    cache: { retention: "implicit" },
+    cache: "implicit",
     captureRaw: "redacted",
     budget: { maxCostUsd: 2 },
     limits: { requestTimeoutMs: 300_000, streamIdleTimeoutMs: 300_000 },

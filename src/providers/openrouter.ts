@@ -67,7 +67,7 @@ import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutpu
 import {
   mapThinkingLevelToOpenRouterChat,
   mapServiceTierToOpenRouter,
-  applyCacheForOpenRouter,
+  resolveCache,
   mapToolChoiceToOpenRouterChat,
   noteProviderTurn,
   parseStreamedToolArguments,
@@ -115,6 +115,7 @@ interface ChatRequestBody {
   service_tier?: string;
   session_id?: string;
   plugins?: Array<{ id: string }>;
+  cache_control?: { type: "ephemeral"; ttl: "5m" | "1h" };
   response_format?: { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
   stream?: boolean;
   [k: string]: unknown;
@@ -586,7 +587,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
   ): Promise<ChatRequestBody> {
     const { effort } = mapThinkingLevelToOpenRouterChat(options?.thinking?.level);
     const serviceTier = mapServiceTierToOpenRouter(options?.serviceTier);
-    applyCacheForOpenRouter(options?.cache, `openrouter/${modelId}`);
+    // Anthropic models take a top-level `cache_control` TTL; every other route caches implicitly (docs: prompt-caching.md).
+    const cache = resolveCache("openrouter", options?.cache, modelId.startsWith("anthropic/") ? ["implicit", "5m", "1h"] : ["implicit"], `openrouter/${modelId}`);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system-prompt instruction + client validation (catalog
@@ -628,6 +630,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;
+    if (cache === "5m" || cache === "1h") body.cache_control = { type: "ephemeral", ttl: cache };
     // Documented Chat Completions generation controls (only those the caller set).
     Object.assign(body, mapGenerationParamsToChat(options));
     // Structured outputs: Chat Completions `response_format{type:json_schema,json_schema}`.
@@ -665,7 +668,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     // (HTTP-Referer / X-Title / x-session-id / x-client-request-id).
     const headers: Record<string, string> = buildSessionHeaders(
       "openrouter",
-      options?.cache,
       options?.headers,
       sessionId
     );
@@ -747,14 +749,14 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     assertModalitiesSupported(context, "openrouter", clean);
     const baseUrl = resolveBaseUrl(options);
     const url = `${baseUrl}/chat/completions`;
-    const sessionId = options?.sessionId || options?.cache?.sessionId;
+    const sessionId = options?.sessionId;
     const tools = options?.tools as StandardToolDeclaration[] | undefined;
     const body = await this.buildBody(clean, context, options, sessionId, tools, false);
 
     // Audit trail: record the actual wire headers (attribution + session
     // affinity included), redacted.
     const auditRaw: Record<string, string> = {
-      ...buildSessionHeaders("openrouter", options?.cache, options?.headers, sessionId),
+      ...buildSessionHeaders("openrouter", options?.headers, sessionId),
       "Content-Type": "application/json",
       Authorization: "[REDACTED]",
     };
@@ -846,12 +848,12 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         assertModalitiesSupported(context, "openrouter", clean);
         const baseUrl = resolveBaseUrl(options);
         const url = `${baseUrl}/chat/completions`;
-        const sessionId = options?.sessionId || options?.cache?.sessionId;
+        const sessionId = options?.sessionId;
         const tools = options?.tools as StandardToolDeclaration[] | undefined;
         const body = await this.buildBody(clean, context, options, sessionId, tools, true);
 
         const streamAuditRaw: Record<string, string> = {
-          ...buildSessionHeaders("openrouter", options?.cache, options?.headers, sessionId),
+          ...buildSessionHeaders("openrouter", options?.headers, sessionId),
           "Content-Type": "application/json",
           Authorization: "[REDACTED]",
         };

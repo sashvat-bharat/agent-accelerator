@@ -3,7 +3,6 @@ import { OpenRouterChatCompletionsProvider } from "../src/providers/openrouter.t
 import {
   mapThinkingLevelToOpenRouterChat,
   mapServiceTierToOpenRouter,
-  applyCacheForOpenRouter,
   mapToolChoiceToOpenRouterChat,
   clearEmittedWarnings,
 } from "../src/providers.ts";
@@ -108,16 +107,25 @@ describe("Canonical OpenRouter Chat Completions mappings", () => {
     expect(mapServiceTierToOpenRouter(undefined)).toBeUndefined();
   });
 
-  it("warns and drops cache retention instead of sending it", () => {
+  it("sends cache_control TTL for anthropic models and warns+drops it elsewhere", async () => {
     clearEmittedWarnings();
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+    };
     const w = captureWarnings();
     try {
-      applyCacheForOpenRouter({ retention: "medium" }, "openrouter/x");
-      applyCacheForOpenRouter({ cachedContentId: "cachedContents/abc" }, "openrouter/x");
-      applyCacheForOpenRouter({ retention: "implicit" }, "openrouter/x");
-      applyCacheForOpenRouter(undefined, "openrouter/x");
-      expect(w.messages.length).toBe(2);
-      expect(w.messages[0]).toMatch(/openrouter.*cache retention/i);
+      const provider = new OpenRouterChatCompletionsProvider();
+      const ctx = { messages: [{ role: "user" as const, content: "Hi" }] };
+      await provider.generate("anthropic/claude-x", ctx, { apiKey: "k", cache: "1h" });
+      await provider.generate("anthropic/claude-x", ctx, { apiKey: "k", cache: "implicit" });
+      await provider.generate("z-ai/glm-5.3-flash", ctx, { apiKey: "k", cache: "5m" });
+      expect(bodies[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+      expect(bodies[1].cache_control).toBeUndefined();
+      expect(bodies[2].cache_control).toBeUndefined();
+      expect(w.messages.length).toBe(1);
+      expect(w.messages[0]).toMatch(/openrouter.*cache.*"implicit"/i);
     } finally {
       w.restore();
       clearEmittedWarnings();

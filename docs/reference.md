@@ -18,7 +18,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `subagents` | Fixed sub-agents (`Agent`s or `{ name, description, agent }`) | [Multi-agent](guides/multi-agent.md) |
 | `dynamicSubagents` | Runtime-spawned workers and scheduled actions (keys below) | [Multi-agent](guides/multi-agent.md) |
 | `thinking`, `thinkingLevel` | Reasoning level (`thinking` wins; `thinkingLevel` is legacy) | [Agents](guides/agents-and-models.md) |
-| `cache`, `serviceTier`, `googleTier` | Caching, `flex`/`priority`, Google chain TTL (`free` 23 h, `paid` 54 d) | [Agents](guides/agents-and-models.md) |
+| `cache`, `serviceTier`, `googleTier` | `"implicit"\|"5m"\|"30m"\|"1h"\|"12h"` cache lifetime, `flex`/`priority`, Google chain TTL (`free` 23 h, `paid` 54 d) | [Agents](guides/agents-and-models.md) |
 | `sessionId` | Default session key (clamped to 64 chars) | [Data](guides/data-and-media.md) |
 | `maxTurns` | Model calls per run; `0`/omitted = unlimited | [Safety](guides/safety-and-ops.md) |
 | `stateless` | Clear history around every run | [Agents](guides/agents-and-models.md) |

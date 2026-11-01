@@ -340,8 +340,7 @@ function loopSessionId(config: AgentLoopConfig): string | undefined {
   try {
     return (
       (config.runOptions as { sessionId?: string } | undefined)?.sessionId ||
-      (config.options as { sessionId?: string } | undefined)?.sessionId ||
-      (config.options as { cache?: { sessionId?: string } } | undefined)?.cache?.sessionId
+      (config.options as { sessionId?: string } | undefined)?.sessionId
     );
   } catch { return undefined; }
 }
@@ -635,8 +634,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     const providerOptions: ProviderRequestOptions = {
       ...options,
-      // Merge sessionId from cache or top-level (C4 fix: read both)
-      sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+      sessionId: runOptions?.sessionId || options?.sessionId,
       cache: options?.cache,
       tools: standardTools.length > 0 ? standardTools : undefined,
       signal: runOptions?.signal,
@@ -674,7 +672,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         {
           systemPrompt: context.systemPrompt,
           messages: context.messages,
-          cachedContentId: context.cachedContentId,
         },
         providerOptions
       ),
@@ -685,7 +682,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
     // Canonical session routing: lets adapters detect provider switches.
     noteProviderTurn(
-      runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+      runOptions?.sessionId || options?.sessionId,
       provider.id
     );
 
@@ -730,7 +727,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
             turns,
             model: modelId,
             provider: provider.id,
-            sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+            sessionId: runOptions?.sessionId || options?.sessionId,
             thinking: genResult.thinking,
             ...(genResult.thoughtSignature ? { thoughtSignature: genResult.thoughtSignature } : {}),
           },
@@ -775,7 +772,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       repeatCounts,
       agentName,
       signal: runOptions?.signal,
-      sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+      sessionId: runOptions?.sessionId || options?.sessionId,
     });
     const results = guarded.results;
     previousToolCallFingerprints = guarded.fingerprints;
@@ -1031,7 +1028,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 
         const providerOptions: ProviderRequestOptions = {
           ...options,
-          sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+          sessionId: runOptions?.sessionId || options?.sessionId,
           cache: options?.cache,
           tools: standardTools.length > 0 ? standardTools : undefined,
           signal: linked.signal,
@@ -1063,7 +1060,6 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           {
             systemPrompt: context.systemPrompt,
             messages: context.messages,
-            cachedContentId: context.cachedContentId,
           },
           providerOptions
         );
@@ -1125,7 +1121,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         lastResponse = turnResponse;
         // Canonical session routing: lets adapters detect provider switches.
         noteProviderTurn(
-          runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+          runOptions?.sessionId || options?.sessionId,
           provider.id
         );
 
@@ -1167,7 +1163,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
                 turns,
                 model: modelId,
                 provider: provider.id,
-                sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+                sessionId: runOptions?.sessionId || options?.sessionId,
                 thinking: turnResponse.thinking,
                 ...(turnResponse.thoughtSignature ? { thoughtSignature: turnResponse.thoughtSignature } : {}),
               },
@@ -1218,7 +1214,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       repeatCounts,
           agentName,
           signal: linked.signal,
-          sessionId: runOptions?.sessionId || options?.sessionId || options?.cache?.sessionId,
+          sessionId: runOptions?.sessionId || options?.sessionId,
           onSubagentEvent: (ev) => {
             try {
               outerStream.push({

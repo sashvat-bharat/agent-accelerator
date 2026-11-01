@@ -5,7 +5,7 @@ import { noteProviderTurn, clearSessionRouting } from "../src/providers.ts";
 import {
   mapThinkingLevelToGoogle,
   mapServiceTierToGoogle,
-  applyCacheForGoogle,
+  resolveCache,
   normalizeToolChoice,
   noteProviderTurn,
   lastProviderFor,
@@ -91,18 +91,18 @@ describe("Canonical provider contract", () => {
     expect(mapServiceTierToGoogle(undefined)).toBeUndefined();
   });
 
-  it("warns and drops Google cache retention instead of sending it", () => {
+  it("keeps Google on implicit caching: other cache values warn and are dropped", () => {
+    clearEmittedWarnings();
     const w = captureWarnings();
     try {
-      applyCacheForGoogle({ retention: "long" }, "google/gemini-3.5-flash-lite");
-      applyCacheForGoogle({ cachedContentId: "cachedContents/abc" }, "google/x");
-      applyCacheForGoogle({ retention: "implicit" }, "google/x");
-      applyCacheForGoogle(undefined, "google/x");
-      expect(w.messages.length).toBe(2);
-      expect(w.messages[0]).toMatch(/google.*cache retention/i);
-      expect(w.messages[1]).toMatch(/cachedContentId|cached content/i);
+      expect(resolveCache("google", "12h", ["implicit"], "google/gemini-3.5-flash-lite")).toBeUndefined();
+      expect(resolveCache("google", "implicit", ["implicit"], "google/x")).toBe("implicit");
+      expect(resolveCache("google", undefined, ["implicit"], "google/x")).toBeUndefined();
+      expect(w.messages.length).toBe(1);
+      expect(w.messages[0]).toMatch(/google.*cache.*"implicit"/i);
     } finally {
       w.restore();
+      clearEmittedWarnings();
     }
   });
 
@@ -132,9 +132,9 @@ describe("Canonical provider contract", () => {
     clearEmittedWarnings();
     const w = captureWarnings();
     try {
-      applyCacheForGoogle({ retention: "long" }, "google/m");
-      applyCacheForGoogle({ retention: "long" }, "google/m");
-      applyCacheForGoogle({ retention: "long" }, "google/m");
+      resolveCache("google", "12h", ["implicit"], "google/m");
+      resolveCache("google", "12h", ["implicit"], "google/m");
+      resolveCache("google", "12h", ["implicit"], "google/m");
       expect(w.messages.length).toBe(1);
     } finally {
       w.restore();

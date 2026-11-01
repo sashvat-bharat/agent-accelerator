@@ -24,7 +24,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Message, ContentPart } from "../types/message.ts";
-import type { TokenUsage, CacheConfig, ServiceTier } from "../types/core.ts";
+import { CACHE_OPTIONS, type TokenUsage, type CacheOption, type ServiceTier } from "../types/core.ts";
 import type { ModelSpec } from "../types/model.ts";
 import type { AgentResponse } from "../types/response.ts";
 import { base64ToBytes, bytesToBase64 } from "../utils/base64.ts";
@@ -68,12 +68,11 @@ export interface PersistedAgentSession {
   model: string;
   subagentModel?: string;
   thinkingLevel?: string;
-  cache?: CacheConfig;
+  cache?: CacheOption;
   /** Legacy read-only: pre-compact files duplicated base instructions here;
   * no longer written (`systemPrompt` already embeds them). */
   instructions?: string;
   systemPrompt?: string;
-  cachedContentId?: string;
   messages: Message[];
   totals?: SessionTotals;
   /** Parent session this snapshot was spawned from, when applicable. */
@@ -283,11 +282,11 @@ export interface SessionAgentLike {
   modelStringOrSpec: unknown;
   subagentModel?: unknown;
   thinkingConfig?: { level?: string };
-  cacheConfig?: CacheConfig;
+  cache?: CacheOption;
   instructions?: string;
   parentSessionId?: unknown;
   subagentTraces?: Record<string, PersistedSubAgentTrace>;
-  context: { systemPrompt?: string; messages: Message[]; cachedContentId?: string };
+  context: { systemPrompt?: string; messages: Message[] };
 }
 
 function snapshotSubagents(traces: Record<string, PersistedSubAgentTrace> | undefined): Record<string, PersistedSubAgentTrace> | undefined {
@@ -416,17 +415,6 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
     typeof (agent as any)?.parentSessionId === "string" ? (agent as any).parentSessionId as string : undefined;
   const subagents = snapshotSubagents((agent as any)?.subagentTraces as Record<string, PersistedSubAgentTrace> | undefined);
   const messages = inlineBinaryMedia(stripRedundantRawArguments(agent.context.messages));
-  // `cache.sessionId` echoes the top-level `sessionId` (affinity alias): drop
-  // it from the file when identical so it isn't stored twice. Readers still
-  // accept legacy files carrying it (`importSession`, loop fallbacks).
-  const cacheForFile = (() => {
-    if (!agent.cacheConfig) return undefined;
-    if (agent.cacheConfig.sessionId === agent.sessionId) {
-      const { sessionId: _dropped, ...rest } = agent.cacheConfig;
-      return Object.keys(rest).length > 0 ? rest : undefined;
-    }
-    return agent.cacheConfig;
-  })();
   // Field order is the on-disk layout contract: identity → config →
   // systemPrompt → totals → messages → lineage/traces. `instructions` is
   // intentionally never written: `systemPrompt` already embeds it (plus the
@@ -438,9 +426,8 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
     model,
     ...(subagentModel ? { subagentModel: String(subagentModel) } : {}),
     ...(agent.thinkingConfig?.level ? { thinkingLevel: agent.thinkingConfig.level as string } : {}),
-    ...(cacheForFile ? { cache: cacheForFile } : {}),
+    ...(agent.cache ? { cache: agent.cache } : {}),
     ...(agent.context.systemPrompt ? { systemPrompt: agent.context.systemPrompt } : {}),
-    ...(agent.context.cachedContentId ? { cachedContentId: agent.context.cachedContentId } : {}),
     ...(totals ? { totals } : {}),
     messages,
     ...(parentSessionId ? { parentSessionId } : {}),
@@ -511,6 +498,14 @@ export interface SessionLimits {
 /** Marker for a structurally valid payload that exceeds the configured limits. */
 const OVER_LIMIT = Symbol("session-over-limit");
 
+// Reads a stored `cache` field: a current string value, or a pre-0.5.1 `{ retention }` object (short=5m, medium=1h, long=12h); in: a parsed session file, out: `PersistedAgentSession.cache`.
+function toCacheOption(raw: unknown): CacheOption | undefined {
+  if (typeof raw === "string") return (CACHE_OPTIONS as readonly string[]).includes(raw) ? (raw as CacheOption) : undefined;
+  const legacy: Record<string, CacheOption> = { implicit: "implicit", short: "5m", medium: "1h", long: "12h" };
+  const retention = (raw as { retention?: unknown } | null)?.retention;
+  return typeof retention === "string" ? legacy[retention] : undefined;
+}
+
 function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSession | null | typeof OVER_LIMIT {
   const maxMessages = limits?.maxMessages ?? MAX_SESSION_MESSAGES;
   const maxBytes = limits?.maxBytes ?? MAX_SESSION_JSON_BYTES;
@@ -525,8 +520,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       let model = "";
       let subagentModel: string | undefined;
       let thinkingLevel: string | undefined;
-      let cache: CacheConfig | undefined;
-      let cachedContentId: string | undefined;
+      let cache: CacheOption | undefined;
       let systemPrompt: string | undefined;
       let instructions: string | undefined;
       let parentSessionId: string | undefined;
@@ -540,8 +534,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
           const obj: any = JSON.parse(t);
           if (obj.type === "session") {
             sessionId = obj.id ?? obj.sessionId ?? sessionId;
-            cache = obj.cache ?? cache;
-            cachedContentId = obj.cachedContentId ?? cachedContentId;
+            cache = toCacheOption(obj.cache) ?? cache;
             model = obj.model ?? model;
             thinkingLevel = obj.thinkingLevel ?? thinkingLevel;
             parentSessionId = obj.parentSessionId ?? parentSessionId;
@@ -553,8 +546,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
             subagentModel = obj.id ?? obj.model ?? subagentModel;
           } else if (obj.type === "metrics" || obj.type === "totals") {
             totals = (obj.metrics ?? obj.totals ?? totals) as SessionTotals | undefined;
-            cache = obj.cache ?? cache;
-            cachedContentId = obj.cachedContentId ?? cachedContentId;
+            cache = toCacheOption(obj.cache) ?? cache;
           } else if (obj.type === "modelChange") {
             model = obj.modelId ?? obj.model ?? model;
           } else if (obj.type === "thinkingLevelChange") {
@@ -581,7 +573,6 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
         ...(cache ? { cache } : {}),
         ...(instructions ? { instructions } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
-        ...(cachedContentId ? { cachedContentId } : {}),
         messages,
         ...(totals ? { totals } : {}),
         ...(parentSessionId ? { parentSessionId } : {}),
@@ -602,10 +593,9 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
         model: obj.model ?? "",
         subagentModel: obj.subagentModel,
         thinkingLevel: obj.thinkingLevel ?? obj.thinkingLevelChange,
-        cache: obj.cache,
+        cache: toCacheOption(obj.cache),
         instructions: obj.instructions,
         systemPrompt: obj.context.systemPrompt,
-        cachedContentId: obj.cachedContentId ?? obj.context.cachedContentId,
         messages: obj.context.messages as Message[],
         totals: obj.totals ?? obj.metrics,
         parentSessionId: obj.parentSessionId,
@@ -622,10 +612,9 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       model: obj.model ?? "",
       subagentModel: obj.subagentModel,
       thinkingLevel: obj.thinkingLevel,
-      cache: obj.cache,
+      cache: toCacheOption(obj.cache),
       instructions: obj.instructions,
       systemPrompt: obj.systemPrompt,
-      cachedContentId: obj.cachedContentId,
       messages: Array.isArray(obj.messages) ? (obj.messages as Message[]) : [],
       totals: obj.totals,
       parentSessionId: obj.parentSessionId,
