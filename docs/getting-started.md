@@ -6,10 +6,10 @@
 ## 1. Install
 
 ```bash
-bun add agent-accelerator
+bun add agent-accelerator zod
 ```
 
-Built for Bun (it ships TypeScript source, no build step). The only runtime dependency is `zod`.
+Built for Bun (it ships TypeScript source, no build step). The only dependency is `zod`, a peer dependency: install it yourself and import `z` from `"zod"`.
 
 ## 2. Set a key and a model
 
@@ -58,7 +58,8 @@ console.log(`\n${final.turns} turn(s)`);
 ## 5. Give it a tool
 
 ```ts
-import { Agent, tool, z } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
+import { z } from "zod";
 
 const get_weather = tool({
   description: "Get the current weather for a city.",

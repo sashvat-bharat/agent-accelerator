@@ -133,7 +133,8 @@ Prefix caching is automatic; you earn hits by keeping the start of the prompt id
 ## Structured output
 
 ```ts
-import { Agent, ValidationError, z } from "agent-accelerator";
+import { Agent, ValidationError } from "agent-accelerator";
+import { z } from "zod";
 
 const Invoice = z.object({ vendor: z.string(), total: z.number(), currency: z.string() });
 const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite", output: Invoice });

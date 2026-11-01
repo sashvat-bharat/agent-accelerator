@@ -1,4 +1,3 @@
-import { z } from "zod";
 import type { AssistantMessageEventStream as AssistantMessageEventStreamT } from "./streaming/event-stream.ts";
 import type { AgentResponse as AgentResponseT } from "./types/response.ts";
 
@@ -338,14 +337,6 @@ export type { AttributionConfig } from "./utils/headers.ts";
 export { normalizeMediaInput, inferMimeType, sniffMimeType } from "./utils/media.ts";
 export { base64ToBytes, bytesToBase64 } from "./utils/base64.ts";
 export { toJsonSafe, safeStringify, escapeXml } from "./utils/serialization.ts";
-
-// Re-export Zod (compat only)
-/**
- * @deprecated Compat re-export: prefer adding `zod` as a direct (peer)
- * dependency and importing from `"zod"` (Q-50). Kept so existing
- * `import { z } from "agent-accelerator"` code keeps working.
- */
-export { z };
 
 export { CACHE_OPTIONS } from "./types/core.ts";
 

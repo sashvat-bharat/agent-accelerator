@@ -6,7 +6,8 @@
 ## Tools
 
 ```ts
-import { Agent, tool, z } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
+import { z } from "zod";
 
 const lookup_order = tool({
   description: "Look up an order by id. Read-only.",

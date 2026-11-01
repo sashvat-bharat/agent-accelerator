@@ -30,7 +30,8 @@
 ## Template: a safe production agent
 
 ```ts
-import { Agent, tool, z } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
+import { z } from "zod";
 
 const search_docs = tool({
   description: "Search internal docs. Read-only.",

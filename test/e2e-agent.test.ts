@@ -2,11 +2,11 @@ import { describe, it, expect } from "bun:test";
 import {
   Agent,
   tool,
-  z,
   type ProviderGenerateResult,
   type ProviderRequestOptions,
   type ProviderContext,
 } from "../src/index.ts";
+import { z } from "zod";
 import { getProvider } from "../src/index.ts";
 import { AssistantMessageEventStream } from "../src/streaming/event-stream.ts";
 

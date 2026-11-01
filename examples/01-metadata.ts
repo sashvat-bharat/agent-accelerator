@@ -15,11 +15,11 @@
 import {
   Agent,
   tool,
-  z,
   getModelFromCatalog,
   getModelThinkingInfo,
   resolveModel,
 } from "agent-accelerator";
+import { z } from "zod";
 
 // ---------------------------------------------------------------------------
 // 1. Tool Setup to demonstrate Tool Calls & Results Metadata

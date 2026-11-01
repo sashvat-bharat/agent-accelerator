@@ -8,7 +8,6 @@ import {
   ConfigError,
   ValidationError,
   tool,
-  z,
   telemetryBus,
   executeToolCalls,
   createScheduledAction,
@@ -22,6 +21,7 @@ import {
   type ScheduledActionInput,
   type TelemetryEvent,
 } from "../src/index.ts";
+import { z } from "zod";
 import { getScheduler, resetSchedulers, type Scheduler } from "../src/scheduler/scheduler.ts";
 import { createScheduledActionsTool } from "../src/scheduler/tool.ts";
 import {

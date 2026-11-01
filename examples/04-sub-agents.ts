@@ -1,4 +1,5 @@
-import { Agent, agentToTool, tool, z } from "agent-accelerator";
+import { Agent, agentToTool, tool } from "agent-accelerator";
+import { z } from "zod";
 import { fail } from "./_shared";
 
 // 1. Standard Function Tool (Tools are strictly deterministic functions)

@@ -32,10 +32,10 @@ console.log(res.usage);
 
 ```bash
 # Bun (recommended)
-bun add agent-accelerator
+bun add agent-accelerator zod
 
 # npm
-npm install agent-accelerator
+npm install agent-accelerator zod
 
 # pnpm
 pnpm add agent-accelerator
@@ -46,7 +46,7 @@ yarn add agent-accelerator
 
 Requires `bun` or `node 22+`.
 
-Core dependencies are `zod` only. All provider transports are native REST (`fetch`, no SDK).
+The only dependency is `zod` (a peer dependency: install it next to the SDK and import `z` from `"zod"`). All provider transports are native REST (`fetch`, no SDK).
 
 ---
 
@@ -376,7 +376,8 @@ telemetryBus.onEvent((e) => {
 ## Tools
 
 ```ts
-import { Agent, tool, z } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
+import { z } from "zod";
 
 const agent = new Agent({
   model: "google/gemini-3.5-flash-lite",
@@ -1189,7 +1190,6 @@ never in the gitignored snapshot.
 * `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
 * `withRetries(fn, { maxRetries?, maxRetryDelayMs?, signal?, label? })` / `isTransientError(err)` — bounded retries for transient provider failures (defaults: 2 retries, 5s cap, aborts never retried).
-* `z` — re-exported from Zod so tools do not require a separate Zod import.
 
 ---
 ## Examples

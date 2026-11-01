@@ -1,4 +1,5 @@
-import { Agent, tool, z } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
+import { z } from "zod";
 import { fail } from "./_shared";
 
 const C = "\x1b[36m";
