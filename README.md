@@ -520,6 +520,24 @@ Model resolution never silently selects a default model: an empty model throws.
 
 An unknown prefix with no catalog match still routes to a custom provider, allowing private model IDs and endpoints.
 
+### Google long decode (Gemini 4)
+
+Google caps one request at 65,536 output tokens. Set `maxOutputTokens` above
+that on a `gemini-4-*` model and the SDK runs the request as a background
+interaction automatically (no extra option): up to 1,048,576 tokens minus the
+input, for up to 24 hours. `run()` polls until it finishes (2 s, then every
+5 s); `stream()` reconnects after a dropped or silent connection
+(`last_event_id`, 15 min of silence counts as dropped). Aborting cancels the
+interaction on Google's side, so it stops billing. Each HTTP request is still
+timed by `limits.requestTimeoutMs`, but the whole run is not. Any other Google
+model with `maxOutputTokens` above 65,536 fails before the network with a
+`ConfigError`. Use it for hard reasoning, not chat: you pay for every token of
+every 64K hop.
+
+A custom `Provider` can opt into the same treatment with the optional
+`isLongRunning(model, options)` method: when it returns `true`, the loop skips
+its whole-call, first-byte and idle timers and leaves timing to the adapter.
+
 ### Registry
 
 * `resolveModel("google/x" | ModelSpec)` → `{ provider, modelId, modelSpec? }`. Use to inspect routing before execution.
@@ -1118,9 +1136,18 @@ Message {
   role: "system" | "user" | "assistant" | "tool",
   content: string | ContentPart[],
   name?,
-  thoughtSignature?
+  thoughtSignature?,
+  providerSteps?   // { provider, steps }: raw output steps of an assistant turn
 }
 ```
+
+`providerSteps` keeps a provider's raw output for one assistant turn (today:
+Google's `steps`, including thought signatures). When Google needs the full
+history again (after a restart, an expired chain or a provider switch), those
+turns are resent exactly as received, which keeps reasoning continuity and
+the implicit-cache prefix intact. Other providers ignore it. Adapters return
+it on `ProviderGenerateResult` / per-turn stream `AgentResponse`; it is never
+part of `toJSON()`.
 
 ### ProviderContext
 
@@ -1140,9 +1167,9 @@ Supported content parts include:
 * `ThinkingPart { type:"thinking", thinking, thoughtSignature? }` — preserved reasoning.
 * `ToolCallPart { type:"tool_call", id, name, arguments, rawArguments?, thoughtSignature? }`
 * `ToolResultPart { type:"tool_result", id, name, result, isError? }`
-* `ImagePart { type:"image", image, mimeType? }`
+* `ImagePart { type:"image", image, mimeType?, resolution? }`
 * `AudioPart { type:"audio", audio, mimeType? }`
-* `VideoPart { type:"video", video, mimeType? }`
+* `VideoPart { type:"video", video, mimeType?, resolution? }`
 * `FilePart { type:"file", file, mimeType?, filename? }` — PDFs/documents.
 
 `image`, `audio`, `video`, and `file` inputs accept:
@@ -1170,6 +1197,20 @@ Media normalization is handled automatically by providers (mapped to provider-na
 
 Provider matrix: text + image + wav/mp3 audio + PDF work on all supported
 providers. Video works on Gemini only.
+
+On Google, links Google fetches itself go as a `uri` without downloading:
+YouTube links, Files API links, `gs://` objects and public `https://` URLs of
+URL-supported types (PDF, CSV, text, JSON, PNG/JPEG/WebP/BMP, common video;
+max 15 MB). Audio URLs and `http://` links are downloaded and inlined. Inline
+types are checked before the network; Google reads only PDF and CSV
+documents. The supported lists are the `GOOGLE_*_MIME` constants at the top of
+`src/providers/google.ts`.
+
+`resolution` (`MediaResolution`: `"low" | "medium" | "high" | "ultra_high"`)
+sets how much detail Google spends on one image or video, and so how many
+input tokens it costs (image: 280 / 560 / 1120 / 2240; video per frame:
+`low` and `medium` 70, `high` 280). Omit it for Google's default. Other
+providers ignore it with one `provider_warning`.
 
 Before any network call, the executor checks `image` / `audio` / `video` /
 `file`-as-PDF parts against the catalog's `modalities.input` for that
@@ -1285,7 +1326,7 @@ saveSessionFile(".session.json", agent, telemetry);
 
 * `agent.exportSession(telemetry)` / `agent.importSession(saved)` round-trip messages, system prompt, model, thinking level, instructions, cache, worker model, and sub-agent traces without touching `AgentContext` internals.
 * `SessionTelemetry` accumulates `input / output / cacheRead / cacheWrite / reasoning / cost`, with clamped `turnHitRate()` / `totalHitRate()`, a dual `formatBar(res)`, and `formatSessionBanner(saved, telemetry, path)` for startup. Cost follows the [TokenUsage](#response-usage-and-raw-data) rules.
-* Files are JSON with one line per top-level field and one line per turn (2-space indent), written atomically (temp + rename).
+* Files are JSON with one line per top-level field and one line per turn (2-space indent), written atomically (temp + rename). Google turns also store their raw `providerSteps`, so a resumed session replays them exactly.
 * Binary media (bytes, data URLs, base64) is extracted to `media/` on save via `saveSessionDir("sessions", agent, telemetry)` → `sessions/<sessionId>/{session.json, media/*}`; remote URLs and local paths stay references. `loadSessionDir(dir)` resolves `media/…` refs back to absolute paths, and `findLatestSessionDir("sessions")` resumes the most recent session.
 * Sub-agent traces persist in a dedicated `subagents` section keyed by TrackingID (`{ trackingId, name, sessionId, parentSessionId, status, task, turns, usage, steps, text }`). Files stay lean: redundant `rawArguments` and repeated step text are dropped on save (rebuilt/kept live in memory).
 * With `persist: { dir }` or `{ file }`, the session file is rewritten after every step, so a crash loses at most the in-flight step.

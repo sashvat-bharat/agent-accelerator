@@ -85,6 +85,7 @@ import {
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
   emitProviderWarning,
+  warnIgnoredMediaResolution,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -524,6 +525,7 @@ export class OpenAIResponsesProvider implements Provider {
     const serviceTier = mapServiceTierToOpenAI(options?.serviceTier);
     // `12h` maps to `prompt_cache_retention: "24h"`; everything else stays on implicit prompt_cache_key affinity.
     const cache = resolveCache("openai", options?.cache, ["implicit", "12h"], `openai/${modelId}`);
+    warnIgnoredMediaResolution("openai", context.messages, `openai/${modelId}`);
 
     // Structured outputs: native `text.format` when supported, else emulated
     // via instructions (catalog `structured_output: false` would 400).

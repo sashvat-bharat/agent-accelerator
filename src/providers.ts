@@ -11,6 +11,7 @@
  */
 import type { CacheOption, ServiceTier, ThinkingLevel } from "./types/core.ts";
 import type { StructuredOutputSpec } from "./types/model.ts";
+import type { Message } from "./types/message.ts";
 import { zodToJsonSchema } from "./tools/schema.ts";
 import { ValidationError } from "./types/errors.ts";
 import { TRUNCATED_ARGS_KEY } from "./types/tool.ts";
@@ -245,6 +246,21 @@ export function resolveCache(
     fallback: "the provider default (implicit caching)",
   });
   return undefined;
+}
+
+/** Warns once per provider/model that per-media `resolution` is ignored (no such control on that wire); in: an adapter's request messages, out: telemetry bus only. */
+export function warnIgnoredMediaResolution(provider: string, messages: Message[], modelRef: string): void {
+  const used = messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => (p.type === "image" || p.type === "video") && p.resolution)
+  );
+  if (!used) return;
+  emitProviderWarning({
+    provider,
+    capability: "media resolution",
+    requested: modelRef,
+    reason: "this provider has no per-media detail control (Google only).",
+    fallback: "the provider's default detail",
+  });
 }
 
 /** OpenRouter Chat Completions `tool_choice` wire values. */

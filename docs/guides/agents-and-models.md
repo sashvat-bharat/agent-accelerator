@@ -75,13 +75,13 @@ Provider behavior differences the SDK handles for you:
 | Capability | Google | OpenAI | OpenRouter | Custom |
 |---|---|---|---|---|
 | History | stateful chaining (full history on reseed) | full history each turn | full history | full history |
-| `maxOutputTokens` | sent | sent | sent | sent |
+| `maxOutputTokens` | sent; above 65,536 on Gemini 4 = background long decode, other models fail fast | sent | sent | sent |
 | `stop`, `seed` | warn + drop | warn + drop | sent | sent |
 | `serviceTier` | `flex`/`priority` | `flex`/`priority` | `flex`/`priority` | warn + drop |
 | `thinking` | `thinking_level` (max `high`) | `reasoning.effort` | `reasoning.effort` | warn + drop |
 | Video / files | native | images + files | images, video, files | images + audio only |
 
-Unsupported options are **warned on the telemetry bus and dropped**, never sent. Google keeps a conversation server-side for up to 23 h (`googleTier: "free"`, default) or 54 d (`"paid"`) and reseeds from full history when it expires. Attribution headers for OpenRouter are opt-in via `setAttribution({ referer, title })`.
+Unsupported options are **warned on the telemetry bus and dropped**, never sent. Google keeps a conversation server-side for up to 23 h (`googleTier: "free"`, default) or 54 d (`"paid"`) and reseeds from full history when it expires. Attribution headers for OpenRouter are opt-in via `setAttribution({ referer, title })`. **Long decode:** `maxOutputTokens` above 65,536 on a `gemini-4-*` model runs as a background interaction (up to 1M tokens, up to 24 h): `run()` polls, `stream()` reconnects after drops, an abort cancels it on Google's side.
 
 **Recommendations**
 - ✅ Use explicit `ModelProvider.*` or `apiKey`/`baseUrl` when running several providers in one process.

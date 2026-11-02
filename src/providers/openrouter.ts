@@ -77,6 +77,7 @@ import {
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
   emitProviderWarning,
+  warnIgnoredMediaResolution,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -576,6 +577,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     const serviceTier = mapServiceTierToOpenRouter(options?.serviceTier);
     // Anthropic models take a top-level `cache_control` TTL; every other route caches implicitly (docs: prompt-caching.md).
     const cache = resolveCache("openrouter", options?.cache, modelId.startsWith("anthropic/") ? ["implicit", "5m", "1h"] : ["implicit"], `openrouter/${modelId}`);
+    warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system-prompt instruction + client validation (catalog

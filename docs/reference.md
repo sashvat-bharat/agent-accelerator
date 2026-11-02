@@ -36,7 +36,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 **`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (4), `thinkingLevel`, `tools` (pool), `workerTimeoutMs` (canonical; `0` none, `-1` model sets per task, `>0` fixed), `timeout` (legacy), `modelMaySetTimeout`.
 **`midSession`**: `mode`, `whenBusy`, `maxQueued` (20).
 **`budget`** (per run, includes workers): `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`.
-**`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s).
+**`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). A long-running call (Google long decode, or any `Provider` whose `isLongRunning()` returns true) times each HTTP request only, never the whole call or stream.
 
 Precedence: explicit config > environment; per-run options > agent defaults (objects merge per key).
 

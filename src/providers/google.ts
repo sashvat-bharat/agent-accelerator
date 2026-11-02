@@ -29,18 +29,19 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, Message, ContentPart } from "../types/message.ts";
+import type { ProviderContext, Message, ContentPart, ProviderSteps, ToolResultPart, MediaResolution } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { getApiKey, getEnv } from "../utils/env.ts";
-import { normalizeMediaInput } from "../utils/media.ts";
+import { normalizeMediaInput, inferMimeType } from "../utils/media.ts";
+import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { stripSchemaForGoogle } from "../tools/schema.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
-import { withRetries } from "../utils/retry.ts";
+import { withRetries, sleep } from "../utils/retry.ts";
 import { setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import {
   newToolCallId,
@@ -78,15 +79,101 @@ import {
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
+// Supported inputs (api-ref `interactions-api.md` enums, `docs/file-input-methods.md`)
+// ---------------------------------------------------------------------------
+
+/** Image MIME types Google accepts inline. */
+export const GOOGLE_IMAGE_MIME = ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp", "image/tiff"] as const;
+/** Audio MIME types Google accepts inline (audio is never fetched by URL). */
+export const GOOGLE_AUDIO_MIME = ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm"] as const;
+/** Video MIME types Google accepts inline. */
+export const GOOGLE_VIDEO_MIME = ["video/mp4", "video/mpeg", "video/mpg", "video/mov", "video/avi", "video/x-flv", "video/webm", "video/wmv", "video/3gpp"] as const;
+/** Document MIME types Google accepts (the only two). */
+export const GOOGLE_DOCUMENT_MIME = ["application/pdf", "text/csv"] as const;
+/** MIME types Google fetches itself from a public `https://` URL. */
+export const GOOGLE_URL_MIME = [
+  "text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf", "text/javascript",
+  "application/json", "application/pdf",
+  "image/bmp", "image/jpeg", "image/png", "image/webp",
+  "video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp",
+] as const;
+/** Common MIME spellings mapped to Google's inline names. */
+export const GOOGLE_INLINE_MIME_ALIASES: Readonly<Record<string, string>> = {
+  "video/quicktime": "video/mov",
+  "audio/x-wav": "audio/wav",
+  "audio/wave": "audio/wav",
+  "image/jpg": "image/jpeg",
+};
+// Documented size limits. Not enforced yet: oversized inputs get Google's own error.
+/** Max inline payload per request (bytes). */
+export const GOOGLE_MAX_INLINE_REQUEST_BYTES = 100 * 1024 * 1024;
+/** Max inline PDF size (bytes). */
+export const GOOGLE_MAX_INLINE_PDF_BYTES = 50 * 1024 * 1024;
+/** Max size of one file Google fetches by URL (bytes). */
+export const GOOGLE_MAX_URL_FILE_BYTES = 15 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Long decode (`docs/long-decode.md`, `docs/background-execution.md`)
+// ---------------------------------------------------------------------------
+
+/** Output tokens one non-background request may produce; above it Gemini 4 runs as a background interaction (long decode). */
+export const GOOGLE_MAX_SYNC_OUTPUT_TOKENS = 65_536;
+// A background stream pauses between ~5K-token chunks; only this much silence counts as a dropped connection (docs: 15-20 min).
+const BACKGROUND_STREAM_STALL_MS = 15 * 60_000;
+// Reconnects in a row that bring no new event before a background stream gives up.
+const BACKGROUND_MAX_RECONNECTS = 5;
+
+// True when a request needs Gemini 4 long decode (background); any other model above the limit fails before the network; in: model id + maxOutputTokens, out: buildBody, isLongRunning.
+function needsLongDecode(modelId: string, maxOutputTokens: number | undefined): boolean {
+  if (!maxOutputTokens || maxOutputTokens <= GOOGLE_MAX_SYNC_OUTPUT_TOKENS) return false;
+  if (/^gemini-4/i.test(modelId)) return true;
+  throw new ConfigError(
+    `[Agent Accelerator] [google/${modelId}] maxOutputTokens ${maxOutputTokens} is above Google's ${GOOGLE_MAX_SYNC_OUTPUT_TOKENS} limit; only Gemini 4 models can write more (long decode). Lower maxOutputTokens or use a gemini-4 model.`
+  );
+}
+
+// True while a background interaction is still working; in: Interaction.status, out: polling and stream reconnects.
+function isRunning(status: string | undefined): boolean {
+  return status === "queued" || status === "in_progress";
+}
+
+// The two reader calls the stream loop uses (Bun ships two incompatible reader typings, so only these are typed).
+type StreamReader = { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> };
+
+// Reads the next chunk, or cancels the reader and rejects after `ms` of silence; in: a background stream reader, out: the stream read loop.
+async function readWithin(reader: StreamReader, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      void reader.cancel().catch(() => {});
+      reject(new Error("Google background stream stalled"));
+    }, ms);
+  });
+  try {
+    return await Promise.race([reader.read(), stalled]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+type MediaBlockType = "image" | "audio" | "video" | "document";
+
+const INLINE_MIME: Record<MediaBlockType, readonly string[]> = {
+  image: GOOGLE_IMAGE_MIME,
+  audio: GOOGLE_AUDIO_MIME,
+  video: GOOGLE_VIDEO_MIME,
+  document: GOOGLE_DOCUMENT_MIME,
+};
+
+const FILES_API_PREFIX = "https://generativelanguage.googleapis.com/v1beta/files/";
+const YOUTUBE_URL = /^https:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
+
+// ---------------------------------------------------------------------------
 // Interactions wire shapes (subset used by this adapter)
 // ---------------------------------------------------------------------------
 
-type InteractionContentBlock =
-  | { type: "text"; text: string }
-  | { type: "image"; mime_type: string; data?: string; uri?: string }
-  | { type: "audio"; mime_type: string; data?: string; uri?: string }
-  | { type: "video"; mime_type: string; data?: string; uri?: string }
-  | { type: "document"; mime_type: string; data?: string; uri?: string };
+type MediaBlock = { type: MediaBlockType; mime_type?: string; data?: string; uri?: string; resolution?: MediaResolution };
+type InteractionContentBlock = { type: "text"; text: string } | MediaBlock;
 
 type InteractionInputStep =
   | { type: "user_input"; content: string | InteractionContentBlock[] }
@@ -97,6 +184,7 @@ type InteractionInputStep =
       name: string;
       call_id: string;
       result: InteractionContentBlock[];
+      is_error?: boolean;
     }
   | { type: string; [k: string]: unknown };
 
@@ -111,6 +199,7 @@ interface InteractionRequestBody {
   store?: boolean;
   previous_interaction_id?: string;
   stream?: boolean;
+  background?: boolean;
 }
 
 interface InteractionStep {
@@ -145,6 +234,14 @@ interface InteractionObject {
     [k: string]: unknown;
   };
   [k: string]: unknown;
+}
+
+/** One parsed Interactions HTTP reply (create POST or poll GET). */
+interface InteractionReply {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  interaction: InteractionObject;
 }
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
@@ -321,46 +418,100 @@ function toGoogleToolChoice(
   return { allowed_tools: { mode: norm.mode } };
 }
 
-function mediaBlockType(partType: string): "image" | "audio" | "video" | "document" {
-  if (partType === "image" || partType === "audio" || partType === "video") return partType;
-  // Canonical `file` parts are PDFs/documents. The guides reference document
-  // processing with the same content-block pattern; the wire type is
-  // `document`. If the server ever rejects it, the concise error surfaces it.
-  return "document";
+type MediaValue = string | Uint8Array | ArrayBuffer;
+
+// Lower-cases a MIME type and drops parameters (`text/csv; charset=utf-8` -> `text/csv`); in: part or response MIME, out: list checks.
+function bareMime(mime: string | undefined): string | undefined {
+  return mime ? mime.split(";")[0]!.trim().toLowerCase() || undefined : undefined;
 }
 
+// Returns the `uri` block for a link Google fetches itself (YouTube, Files API, `gs://`, https URL of a URL-supported type), else undefined; in: a media part's string value, out: contentPartsToBlocks.
+function uriBlock(type: MediaBlockType, value: string, mimeType?: string): MediaBlock | undefined {
+  const explicit = bareMime(mimeType);
+  const withMime = (mime?: string): MediaBlock => ({ type, uri: value, ...(mime ? { mime_type: mime } : {}) });
+  if (type === "video" && YOUTUBE_URL.test(value)) return withMime(explicit);
+  const mime = explicit ?? bareMime(inferMimeType(value, ""));
+  if (value.startsWith(FILES_API_PREFIX) || value.startsWith("gs://")) return withMime(mime);
+  return value.startsWith("https://") && mime && (GOOGLE_URL_MIME as readonly string[]).includes(mime) ? withMime(mime) : undefined;
+}
+
+// Inlines a media part as base64 under Google's MIME name, failing before the network on an unsupported type; in: any media value (bytes, data URL, path, http URL), out: contentPartsToBlocks.
+async function inlineBlock(type: MediaBlockType, value: MediaValue, mimeType?: string): Promise<MediaBlock> {
+  const norm = await normalizeMediaInput(value, mimeType);
+  const raw = bareMime(norm.mimeType) ?? "";
+  const mime = GOOGLE_INLINE_MIME_ALIASES[raw] ?? raw;
+  if (!INLINE_MIME[type].includes(mime)) {
+    const what = type === "document" ? "Google reads only PDF and CSV documents" : `Google does not accept ${type} type "${mime}"`;
+    throw new ValidationError(
+      `[Agent Accelerator] ${what} (got "${mime}"; supported: ${INLINE_MIME[type].join(", ")}). Convert the file or pass the correct mimeType.`
+    );
+  }
+  return { type, mime_type: mime, data: norm.base64Data };
+}
+
+// Maps canonical text and media parts to Interactions content blocks (one builder for chained and full-history input); in: a message's parts, out: request `input`.
 async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionContentBlock[]> {
   const blocks: InteractionContentBlock[] = [];
   for (const part of parts) {
-    if (part.type === "text" && part.text) {
-      blocks.push({ type: "text", text: part.text });
-    } else if (
-      part.type === "image" ||
-      part.type === "audio" ||
-      part.type === "video" ||
-      part.type === "file"
-    ) {
-      const raw = (part as { image?: unknown; audio?: unknown; video?: unknown; file?: unknown }).image ??
-        (part as { audio?: unknown }).audio ??
-        (part as { video?: unknown }).video ??
-        (part as { file?: unknown }).file;
-      const norm = await normalizeMediaInput(
-        raw as string | Uint8Array | ArrayBuffer,
-        (part as { mimeType?: string }).mimeType
-      );
-      blocks.push({
-        type: mediaBlockType(part.type),
-        mime_type: norm.mimeType,
-        data: norm.base64Data,
-      } as InteractionContentBlock);
+    if (part.type === "text") {
+      if (part.text) blocks.push({ type: "text", text: part.text });
+      continue;
     }
+    if (part.type !== "image" && part.type !== "audio" && part.type !== "video" && part.type !== "file") continue;
+    const type: MediaBlockType = part.type === "file" ? "document" : part.type;
+    const value = (part as unknown as Record<string, MediaValue>)[part.type]!;
+    const uri = typeof value === "string" ? uriBlock(type, value, part.mimeType) : undefined;
+    const block = uri ?? (await inlineBlock(type, value, part.mimeType));
+    // Per-item detail level (image and video blocks only, api-ref `MediaResolution`).
+    const resolution = part.type === "image" || part.type === "video" ? part.resolution : undefined;
+    blocks.push(resolution ? { ...block, resolution } : block);
   }
   return blocks;
+}
+
+// Keeps a turn's model-generated steps exactly as received (input echoes and empty signatures dropped); in: REST `steps` or assembled stream steps, out: ProviderGenerateResult.providerSteps.
+function replaySteps(steps: unknown[] | undefined): ProviderSteps | undefined {
+  const kept = (steps ?? [])
+    .filter((s) => {
+      const type = (s as { type?: unknown } | null)?.type;
+      return typeof type === "string" && type !== "user_input" && type !== "function_result";
+    })
+    .map((s) => {
+      const { signature, ...rest } = s as Record<string, unknown>;
+      return signature === "" ? rest : s;
+    });
+  return kept.length > 0 ? { provider: "google", steps: kept } : undefined;
+}
+
+// Appends streamed text to the last text block of a step's `content`/`summary`, or starts one; in: step.delta, out: the assembled stream step.
+function appendBlockText(step: Record<string, unknown> | undefined, key: "content" | "summary", text: string): void {
+  if (!step) return;
+  const blocks = (Array.isArray(step[key]) ? step[key] : (step[key] = [])) as Array<{ type?: string; text?: string }>;
+  const last = blocks[blocks.length - 1];
+  if (last?.type === "text" && typeof last.text === "string") last.text += text;
+  else blocks.push({ type: "text", text });
+}
+
+// Joins the `text` of content/summary blocks; in: a `step.start` step's `content` or `summary`, out: stream text/thinking.
+function blockText(blocks: unknown): string {
+  if (!Array.isArray(blocks)) return "";
+  return blocks.map((b) => (typeof b?.text === "string" ? b.text : "")).join("");
 }
 
 function resultToText(result: unknown): string {
   if (typeof result === "string") return result;
   return safeStringify(result);
+}
+
+// Builds the documented `function_result` step (`is_error` only when the tool failed); in: a canonical tool_result part, out: chained or full-history `input`.
+function functionResultStep(part: ToolResultPart): InteractionInputStep {
+  return {
+    type: "function_result",
+    name: part.name,
+    call_id: part.id,
+    result: [{ type: "text", text: resultToText(part.result) }],
+    ...(part.isError ? { is_error: true } : {}),
+  };
 }
 
 /**
@@ -400,12 +551,7 @@ async function latestTurnInput(context: ProviderContext): Promise<string | Inter
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push({
-            type: "function_result",
-            name: part.name,
-            call_id: part.id,
-            result: [{ type: "text", text: resultToText(part.result) }],
-          });
+          steps.push(functionResultStep(part));
         }
       }
     } else if (m.role === "user") {
@@ -420,7 +566,7 @@ async function latestTurnInput(context: ProviderContext): Promise<string | Inter
   return steps;
 }
 
-/** Full-history Steps for stateless (provider-switch) turns. */
+// Rebuilds the whole conversation as Interactions steps; Google turns replay their stored raw steps verbatim, others are reconstructed; in: AgentContext messages, out: request `input` on reseed/switch turns.
 async function fullHistorySteps(context: ProviderContext): Promise<InteractionInputStep[]> {
   const steps: InteractionInputStep[] = [];
   for (const m of context.messages) {
@@ -433,6 +579,11 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
         if (blocks.length > 0) steps.push({ type: "user_input", content: blocks });
       }
     } else if (m.role === "assistant") {
+      // Exact replay: same bytes as the server returned (thought signatures included), best for implicit caching.
+      if (m.providerSteps?.provider === "google") {
+        steps.push(...(m.providerSteps.steps as InteractionInputStep[]));
+        continue;
+      }
       if (typeof m.content === "string") {
         if (m.content) {
           steps.push({
@@ -443,6 +594,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
         continue;
       }
       const texts: string[] = [];
+      const turnStart = steps.length;
       for (const part of m.content) {
         if (part.type === "thinking" && part.thinking) {
           // Q-18: preserve namespaced signatures only — foreign-provider
@@ -475,7 +627,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
           type: "model_output",
           content: texts.map((t) => ({ type: "text", text: t })),
         } as InteractionInputStep);
-      } else if (m.thoughtSignature && !steps.some((s) => s.type === "thought")) {
+      } else if (m.thoughtSignature && !steps.slice(turnStart).some((s) => s.type === "thought")) {
         // Preserve a signature-only thought so stateless chaining keeps
         // reasoning continuity even when no summary text was retained.
         // Q-18: only for google/untagged signatures.
@@ -488,12 +640,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push({
-            type: "function_result",
-            name: part.name,
-            call_id: part.id,
-            result: [{ type: "text", text: resultToText(part.result) }],
-          });
+          steps.push(functionResultStep(part));
         }
       }
     }
@@ -597,6 +744,7 @@ function parseInteraction(
     provider: "google",
     raw,
     durationMs,
+    providerSteps: replaySteps(interaction.steps),
   };
 }
 
@@ -661,6 +809,7 @@ export class GoogleInteractionsProvider implements Provider {
         model: modelId,
         input: "",
         ...(stream ? { stream: true } : {}),
+        ...(needsLongDecode(modelId, options?.maxOutputTokens) ? { background: true } : {}),
       };
       // Structured outputs: native `response_format` when supported, else
       // emulated via system instruction (catalog `structured_output: false`
@@ -717,7 +866,8 @@ export class GoogleInteractionsProvider implements Provider {
         // provider's turns, so send the full canonical history explicitly and
         // statelessly, then resume chaining fresh on the next turn.
         body.input = await fullHistorySteps(context);
-        body.store = false;
+        // Background runs need storage (`store: false` is a 400); this turn then simply starts a fresh chain.
+        if (!body.background) body.store = false;
       } else if (continuing) {
         body.input = await latestTurnInput(context);
         body.previous_interaction_id = chain!.interactionId;
@@ -735,7 +885,8 @@ export class GoogleInteractionsProvider implements Provider {
   }
 
   private requestInit(
-    body: InteractionRequestBody,
+    method: "POST" | "GET",
+    body: InteractionRequestBody | undefined,
     options: ProviderRequestOptions | undefined,
     apiKey: string,
     signal?: AbortSignal
@@ -746,19 +897,20 @@ export class GoogleInteractionsProvider implements Provider {
     // `X-Goog-Api-Key` never duplicates the canonical header. Proxy flows
     // (`apiKey === "unused"`) preserve custom auth instead of overwriting.
     if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "x-goog-api-key", apiKey);
-    return { method: "POST", headers, body: JSON.stringify(body), signal };
+    return { method, headers, ...(body ? { body: JSON.stringify(body) } : {}), signal };
   }
 
   private async doFetch(
     url: string,
-    body: InteractionRequestBody,
+    method: "POST" | "GET",
+    body: InteractionRequestBody | undefined,
     options: ProviderRequestOptions | undefined,
     apiKey: string,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
     try {
-      const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, effective));
+      const res = await (options?.fetch ?? fetch)(url, this.requestInit(method, body, options, apiKey, effective));
       const text = await res.text();
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => {
@@ -799,6 +951,45 @@ export class GoogleInteractionsProvider implements Provider {
     throw toConciseProviderError(err, "google", modelId);
   }
 
+  /** Poll delays (ms) for background interactions: before the first poll, then between polls. */
+  pollDelaysMs: [number, number] = [2_000, 5_000];
+
+  /** True for Gemini 4 long decode (`maxOutputTokens` above 65,536): the request runs in the background for up to 24 h. */
+  isLongRunning(model: string | ModelSpec, options?: ProviderRequestOptions): boolean {
+    return needsLongDecode(cleanModelId(model), options?.maxOutputTokens);
+  }
+
+  // One Interactions HTTP call parsed into its interaction (errors mapped concisely); in: create POST or poll GET, out: generate.
+  private async fetchInteraction(
+    url: string,
+    method: "POST" | "GET",
+    body: InteractionRequestBody | undefined,
+    options: ProviderRequestOptions | undefined,
+    apiKey: string,
+    modelId: string
+  ): Promise<InteractionReply> {
+    const res = await this.doFetch(url, method, body, options, apiKey, options?.signal);
+    this.throwIfError(res.status, res.statusText, url, res.text, modelId, res.headers);
+    try {
+      return { status: res.status, statusText: res.statusText, headers: res.headers, interaction: JSON.parse(res.text) as InteractionObject };
+    } catch {
+      throw toConciseProviderError(
+        Object.assign(new Error("Invalid JSON response from Google Interactions API"), {
+          statusCode: res.status,
+          responseBody: res.text.slice(0, 500),
+          url,
+        }),
+        "google",
+        modelId
+      );
+    }
+  }
+
+  // Fire-and-forget cancel so an aborted background run stops billing; in: an aborted generate/stream, out: POST {id}/cancel.
+  private cancelInteraction(baseUrl: string, id: string, options: ProviderRequestOptions | undefined, apiKey: string): void {
+    void this.doFetch(`${baseUrl}/interactions/${id}/cancel`, "POST", undefined, options, apiKey).catch(() => {});
+  }
+
   async generate(
     model: string | ModelSpec,
     context: ProviderContext,
@@ -835,24 +1026,33 @@ export class GoogleInteractionsProvider implements Provider {
       body: b,
     });
     let rawRequest = makeRawRequest(body);
+    const retryOptions = {
+      ...retryOptionsFrom(options),
+      signal: options?.signal,
+      label: { providerId: "google", modelId: clean },
+    };
 
-    const doCall = async (): Promise<ProviderGenerateResult> => {
-      const res = await this.doFetch(url, body, options, apiKey, options?.signal);
-      this.throwIfError(res.status, res.statusText, url, res.text, clean, res.headers);
-      let interaction: InteractionObject;
+    // Polls a background interaction until it leaves queued/in_progress; an abort also cancels it server-side.
+    const waitForCompletion = async (reply: InteractionReply): Promise<InteractionReply> => {
+      const id = reply.interaction.id;
+      if (!id) return reply;
       try {
-        interaction = JSON.parse(res.text) as InteractionObject;
-      } catch {
-        throw toConciseProviderError(
-          Object.assign(new Error("Invalid JSON response from Google Interactions API"), {
-            statusCode: res.status,
-            responseBody: res.text.slice(0, 500),
-            url,
-          }),
-          "google",
-          clean
-        );
+        for (let poll = 0; isRunning(reply.interaction.status); poll++) {
+          await sleep(this.pollDelaysMs[poll === 0 ? 0 : 1], options?.signal);
+          reply = await withRetries(() => this.fetchInteraction(`${url}/${id}`, "GET", undefined, options, apiKey, clean), retryOptions);
+        }
+        return reply;
+      } catch (err) {
+        if (options?.signal?.aborted || isAbortError(err)) this.cancelInteraction(baseUrl, id, options, apiKey);
+        throw err;
       }
+    };
+
+    // Create (retried as a whole), wait if it runs in the background, then record the chain and map the result.
+    const run = async (): Promise<ProviderGenerateResult> => {
+      let reply = await withRetries(() => this.fetchInteraction(url, "POST", body, options, apiKey, clean), retryOptions);
+      if (body.background) reply = await waitForCompletion(reply);
+      const { interaction } = reply;
       if (interaction.id && sessionId && body.store !== false) {
         setChain(sessionId, { interactionId: interaction.id, model: clean, at: Date.now() });
       } else if (body.store === false && sessionId) {
@@ -864,19 +1064,14 @@ export class GoogleInteractionsProvider implements Provider {
         interaction,
         clean,
         Date.now() - startTime,
-        { request: rawRequest, response: { status: res.status, statusText: res.statusText, headers: res.headers, body: interaction } }
+        { request: rawRequest, response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: interaction } }
       );
       checkTurnTokens(sessionId, parsed.usage);
       return parsed;
     };
 
-    const retryOptions = {
-      ...retryOptionsFrom(options),
-      signal: options?.signal,
-      label: { providerId: "google", modelId: clean },
-    };
     try {
-      return await withRetries(doCall, retryOptions);
+      return await run();
     } catch (err) {
       if (err instanceof Error && (err as { name?: string }).name === "AbortError") throw err;
       // Reactive self-heal (Rule 2): a chained pointer the server no longer
@@ -887,7 +1082,7 @@ export class GoogleInteractionsProvider implements Provider {
         clearInteractionChains(sessionId);
         body = await this.buildBody(clean, context, options, sessionId, tools, false);
         rawRequest = makeRawRequest(body);
-        return await withRetries(doCall, retryOptions);
+        return await run();
       }
       throw err;
     }
@@ -925,6 +1120,8 @@ export class GoogleInteractionsProvider implements Provider {
       // visible in catch).
       let evictSessionId: string | undefined;
       let usedChain = false;
+      // Set once a background interaction id is known: an abort then cancels it server-side.
+      let cancelBackground = (): void => {};
       try {
         // Hard generation floor (mirrors generate): no network on legacy ids.
         assertSupportedGeneration(clean);
@@ -958,30 +1155,32 @@ export class GoogleInteractionsProvider implements Provider {
         };
 
         const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
-        // Transient failures (429/5xx/network) are retried here, before the
-        // first byte; once the stream is live it is never retried.
-        const res = await openStreamResponse({
-          fetchOnce: async () => {
-            const timer =
-              streamTimeoutMs && streamTimeoutMs > 0
-                ? setTimeout(() => {
-                    try {
-                      linked.abort();
-                    } catch {}
-                  }, streamTimeoutMs)
-                : undefined;
-            try {
-              return await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, linked.signal));
-            } finally {
-              if (timer) clearTimeout(timer);
-            }
-          },
-          onHttpError: (r, text) => this.throwIfError(r.status, r.statusText, url, text, clean, headersToRecord(r.headers)),
-          noBodyError: () => toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
-          retry: retryOptionsFrom(options),
-          signal: linked.signal,
-          label: { providerId: "google", modelId: clean },
-        });
+        // Opens one SSE connection (the create POST, or a background resume GET). Transient failures
+        // (429/5xx/network) are retried before the first byte; a live stream is never retried.
+        const open = (target: string, method: "POST" | "GET"): Promise<Response> =>
+          openStreamResponse({
+            fetchOnce: async () => {
+              const timer =
+                streamTimeoutMs && streamTimeoutMs > 0
+                  ? setTimeout(() => {
+                      try {
+                        linked.abort();
+                      } catch {}
+                    }, streamTimeoutMs)
+                  : undefined;
+              try {
+                return await (options?.fetch ?? fetch)(target, this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, linked.signal));
+              } finally {
+                if (timer) clearTimeout(timer);
+              }
+            },
+            onHttpError: (r, text) => this.throwIfError(r.status, r.statusText, target, text, clean, headersToRecord(r.headers)),
+            noBodyError: () => toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
+            retry: retryOptionsFrom(options),
+            signal: linked.signal,
+            label: { providerId: "google", modelId: clean },
+          });
+        const res = await open(url, "POST");
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -989,13 +1188,14 @@ export class GoogleInteractionsProvider implements Provider {
         const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
-        const parser = new SSEParser();
-        const reader = res.body!.getReader(); // openStreamResponse guarantees a body
-        const decoder = new TextDecoder();
+        let reader: StreamReader | undefined;
+        let lastEventId: string | undefined;
         let text = "";
         let thinking = "";
         let signature: string | undefined;
         const calls = new Map<number, { id: string; name: string; startArgs: string; deltaArgs: string }>();
+        // Every step as the server would return it (start + deltas), for exact history replay.
+        const steps = new Map<number, Record<string, unknown>>();
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
         let sawFinishReason = false;
@@ -1010,11 +1210,14 @@ export class GoogleInteractionsProvider implements Provider {
           () => {
             aborted = true;
             try {
-              void reader.cancel();
+              void reader?.cancel();
             } catch {}
           },
           { once: true }
         );
+        cancelBackground = () => {
+          if (body.background && responseId) this.cancelInteraction(baseUrl, responseId, options, apiKey);
+        };
 
         const handleMessage = (event: string | undefined, data: string): void => {
           if (!data) return;
@@ -1031,6 +1234,7 @@ export class GoogleInteractionsProvider implements Provider {
             return;
           }
           const type = (msg["event_type"] as string) || event;
+          if (typeof msg["event_id"] === "string") lastEventId = msg["event_id"] as string;
           if (type === "error") {
             // SSE error event (e.g. rate_limit_exceeded mid-stream). Must
             // surface — silently ending with empty text + zero usage hides it.
@@ -1050,16 +1254,20 @@ export class GoogleInteractionsProvider implements Provider {
             const delta = (msg["delta"] as Record<string, unknown>) ?? {};
             const dType = delta["type"] as string;
             if (dType === "text" && typeof delta["text"] === "string") {
+              appendBlockText(steps.get(index), "content", delta["text"] as string);
               text += delta["text"] as string;
               eventStream.push({ type: "text_delta", delta: delta["text"] as string, partialText: text });
             } else if (dType === "thought_summary") {
               const content = delta["content"] as { type?: string; text?: string } | undefined;
               const t = content?.text ?? (typeof delta["text"] === "string" ? (delta["text"] as string) : "");
               if (t) {
+                appendBlockText(steps.get(index), "summary", t);
                 thinking += t;
                 eventStream.push({ type: "thinking_delta", thinkingDelta: t, partialThinking: thinking });
               }
             } else if (dType === "thought_signature" && typeof delta["signature"] === "string") {
+              const s = steps.get(index);
+              if (s) s["signature"] = delta["signature"];
               // Wire truth: signature arrives as its own delta (no text event).
               if (!signature) signature = delta["signature"] as string;
             } else if (dType === "arguments" || dType === "arguments_delta") {
@@ -1073,7 +1281,21 @@ export class GoogleInteractionsProvider implements Provider {
           } else if (type === "step.start") {
             const index = (msg["index"] as number) ?? 0;
             const step = (msg["step"] as Record<string, unknown>) ?? {};
-            if (step["type"] === "function_call") {
+            steps.set(index, step);
+            if (step["type"] === "model_output") {
+              const t = blockText(step["content"]);
+              if (t) {
+                text += t;
+                eventStream.push({ type: "text_delta", delta: t, partialText: text });
+              }
+            } else if (step["type"] === "thought") {
+              const t = blockText(step["summary"]);
+              if (t) {
+                thinking += t;
+                eventStream.push({ type: "thinking_delta", thinkingDelta: t, partialThinking: thinking });
+              }
+              if (!signature && typeof step["signature"] === "string" && step["signature"]) signature = step["signature"];
+            } else if (step["type"] === "function_call") {
               const args = step["arguments"];
               const startArgs = typeof args === "string" ? args : args ? JSON.stringify(args) : "";
               calls.set(index, {
@@ -1082,6 +1304,13 @@ export class GoogleInteractionsProvider implements Provider {
                 startArgs,
                 deltaArgs: "",
               });
+            }
+          } else if (type === "step.stop" || type === "interaction.status_update") {
+            // Cumulative usage so far: keeps usage when the stream is cut before `interaction.completed`.
+            const stepUsage = msg["usage"] as InteractionObject["usage"] | undefined;
+            if (stepUsage) {
+              usage = mapUsage(stepUsage);
+              sawUsage = true;
             }
           } else if (type === "interaction.completed") {
             const interaction = (msg["interaction"] as InteractionObject) ?? {};
@@ -1100,30 +1329,57 @@ export class GoogleInteractionsProvider implements Provider {
           }
         };
 
-        while (true) {
-          if (linked.signal.aborted || eventStream.isCancelled()) {
+        // Reads one connection to its end. A background connection that drops or stalls just ends
+        // (the caller reconnects); provider error events from handleMessage always throw.
+        const readAll = async (response: Response): Promise<void> => {
+          const parser = new SSEParser();
+          const decoder = new TextDecoder();
+          const current = (reader = response.body!.getReader()); // openStreamResponse guarantees a body
+          try {
+            while (true) {
+              if (linked.signal.aborted || eventStream.isCancelled()) {
+                try {
+                  await current.cancel();
+                } catch {}
+                throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+              }
+              let chunk: { done: boolean; value?: Uint8Array };
+              try {
+                chunk = body.background ? await readWithin(current, BACKGROUND_STREAM_STALL_MS) : await current.read();
+              } catch (err) {
+                if (!body.background || aborted || isAbortError(err)) throw err;
+                break;
+              }
+              if (chunk.done) break;
+              for (const m of parser.feed(decoder.decode(chunk.value, { stream: true }))) handleMessage(m.event, m.data);
+            }
+            for (const m of parser.flush()) handleMessage(m.event, m.data);
+          } finally {
             try {
-              await reader.cancel();
+              current.releaseLock();
             } catch {}
-            throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
           }
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          for (const m of parser.feed(chunk)) handleMessage(m.event, m.data);
+        };
+
+        await readAll(res);
+        // Long decode: a background stream may drop; resume after the last event until the interaction ends.
+        for (let misses = 0; body.background && completedBody === undefined && !aborted; ) {
+          if (!responseId || ++misses > BACKGROUND_MAX_RECONNECTS) throw incompleteStreamError("google", clean);
+          const before = framesSeen;
+          const resume = `${baseUrl}/interactions/${responseId}?stream=true${lastEventId ? `&last_event_id=${encodeURIComponent(lastEventId)}` : ""}`;
+          await readAll(await open(resume, "GET"));
+          if (framesSeen > before) misses = 0;
         }
-        for (const m of parser.flush()) handleMessage(m.event, m.data);
-        try {
-          reader.releaseLock();
-        } catch {}
 
         if (linked.signal.aborted || eventStream.isCancelled() || aborted) {
           throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
         }
 
         const toolCalls: ToolCallRecord[] = [];
-        for (const c of calls.values()) {
+        for (const [index, c] of calls) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
+          const step = steps.get(index);
+          if (step) step["arguments"] = args;
           const record: ToolCallRecord = {
             id: c.id,
             name: c.name,
@@ -1178,6 +1434,7 @@ export class GoogleInteractionsProvider implements Provider {
             response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
           },
           durationMs: Date.now() - startTime,
+          providerSteps: replaySteps([...steps.entries()].sort(([a], [b]) => a - b).map(([, s]) => s)),
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);
@@ -1188,6 +1445,7 @@ export class GoogleInteractionsProvider implements Provider {
           eventStream.isCancelled() ||
           (raw as { name?: string }).name === "AbortError";
         if (isAbort) {
+          cancelBackground();
           eventStream.fail(
             Object.assign(new Error("Stream aborted"), { name: "AbortError" })
           );

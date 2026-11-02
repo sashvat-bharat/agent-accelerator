@@ -1,5 +1,5 @@
 import type { ThinkingConfig, CacheOption, ServiceTier, TokenUsage } from "./core.ts";
-import type { ProviderContext } from "./message.ts";
+import type { ProviderContext, ProviderSteps } from "./message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "./tool.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 
@@ -226,6 +226,8 @@ export interface ProviderGenerateResult {
   provider: ProviderId;
   raw: ProviderRawData;
   durationMs: number;
+  /** Raw output steps for exact history replay (stored on the assistant message). */
+  providerSteps?: ProviderSteps;
 }
 
 /** Provider contract implemented by native REST transports. */
@@ -244,4 +246,6 @@ export interface Provider {
     context: ProviderContext,
     options?: ProviderRequestOptions
   ): AssistantMessageEventStream;
+  /** True when this call may legitimately run far past the request timeouts (e.g. Google long decode); the loop then leaves timing to the adapter's own per-request timeouts. */
+  isLongRunning?(model: string | ModelSpec, options?: ProviderRequestOptions): boolean;
 }

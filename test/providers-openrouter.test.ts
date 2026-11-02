@@ -469,3 +469,33 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
     expect(final.text).toBe("Hi");
   });
 });
+
+describe("per-media resolution is Google-only", () => {
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    clearEmittedWarnings();
+  });
+
+  it("warns once on the bus and never sends the field", async () => {
+    const { telemetryBus } = await import("../src/telemetry.ts");
+    clearEmittedWarnings();
+    const bodies: string[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(req.body), new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 }));
+    const warnings: unknown[] = [];
+    const off = telemetryBus.onEvent((e) => {
+      if (e.code === "provider_warning" && (e.data as any)?.capability === "media resolution") warnings.push(e.data);
+    });
+    const w = captureWarnings();
+    try {
+      const provider = new OpenRouterChatCompletionsProvider();
+      const content = [{ type: "image", image: "https://example.com/a.png", resolution: "high" }] as any;
+      await provider.generate("x/model", { messages: [{ role: "user", content }] }, { apiKey: "k" });
+      await provider.generate("x/model", { messages: [{ role: "user", content }] }, { apiKey: "k" });
+    } finally {
+      off();
+      w.restore();
+    }
+    expect(warnings.length).toBe(1);
+    expect(bodies.join("")).not.toContain("resolution");
+  });
+});
