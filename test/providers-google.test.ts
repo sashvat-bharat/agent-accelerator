@@ -1225,3 +1225,106 @@ describe("Google exact replay of recorded steps", () => {
     expect(signatures).toEqual(["sig1", "sig2"]);
   });
 });
+
+describe("Google tool calling matches the documented wire (function-calling.md + api-ref)", () => {
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    clearInteractionChains();
+    clearSessionRouting();
+  });
+
+  const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+
+  it("declares a Zod tool as {type, name, description, parameters} in the OpenAPI subset", async () => {
+    const { Agent, tool } = await import("../src/index.ts");
+    const { z } = await import("zod");
+    let body: any = null;
+    const fn = (async (_u: string, init: any) => ((body = JSON.parse(init.body)), reply(TEXT_INTERACTION))) as any;
+    const temp = tool({
+      name: "get_current_temperature",
+      description: "Gets the current temperature for a given location.",
+      input: z.object({ location: z.string().describe("The city name") }),
+      execute: () => "21C",
+    });
+    await new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", fetch: fn, tools: [temp] }).run("Hi");
+    expect(body.tools).toEqual([
+      {
+        type: "function",
+        name: "get_current_temperature",
+        description: "Gets the current temperature for a given location.",
+        parameters: { type: "object", properties: { location: { type: "string", description: "The city name" } }, required: ["location"] },
+      },
+    ]);
+  });
+
+  it("maps toolChoice to generation_config.tool_choice.allowed_tools", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), reply(TEXT_INTERACTION));
+    const tools = ["a", "b"].map((name) => ({ name, description: "d", parameters: { type: "object", properties: {} } }));
+    const provider = new GoogleInteractionsProvider();
+    for (const toolChoice of ["required", "none", { type: "function", function: { name: "b" } }] as const) {
+      await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", tools, toolChoice });
+    }
+    expect(bodies.map((b) => b.generation_config.tool_choice)).toEqual([
+      { allowed_tools: { mode: "any", tools: ["a", "b"] } },
+      { allowed_tools: { mode: "none" } },
+      { allowed_tools: { mode: "any", tools: ["b"] } },
+    ]);
+  });
+
+  it("runs parallel calls and chains ONLY their function_result steps back, is_error on the failed one", async () => {
+    const { Agent, tool } = await import("../src/index.ts");
+    const PARALLEL = {
+      ...TEXT_INTERACTION,
+      id: "v1_par",
+      status: "requires_action",
+      steps: [
+        { type: "thought", signature: "sig_p" },
+        { type: "function_call", id: "call_a", name: "power_disco_ball", arguments: { power: true } },
+        { type: "function_call", id: "call_b", name: "dim_lights", arguments: { brightness: 0.5 } },
+      ],
+    };
+    const bodies: any[] = [];
+    const fn = (async (_u: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return reply(bodies.length === 1 ? PARALLEL : TEXT_INTERACTION);
+    }) as any;
+    const received: Record<string, unknown> = {};
+    const power = tool({ name: "power_disco_ball", description: "d", parameters: { type: "object", properties: {} }, execute: (a) => ((received.power = a), "on") });
+    const dim = tool({
+      name: "dim_lights",
+      description: "d",
+      parameters: { type: "object", properties: {} },
+      execute: (a) => {
+        received.dim = a;
+        throw new Error("bulb offline");
+      },
+    });
+    const res = await new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", fetch: fn, tools: [power, dim] }).run("Party mode");
+    expect(res.toolCalls.map((c) => c.id)).toEqual(["call_a", "call_b"]);
+    expect(received).toEqual({ power: { power: true }, dim: { brightness: 0.5 } });
+    expect(bodies[1].previous_interaction_id).toBe("v1_par");
+    expect(bodies[1].input).toEqual([
+      { type: "function_result", name: "power_disco_ball", call_id: "call_a", result: [{ type: "text", text: "on" }] },
+      { type: "function_result", name: "dim_lights", call_id: "call_b", result: [{ type: "text", text: expect.stringContaining("bulb offline") }], is_error: true },
+    ]);
+  });
+
+  it("treats a function_call without arguments as a zero-argument call (REST and stream)", async () => {
+    mockFetchOnce({ ...TOOL_INTERACTION, steps: [{ type: "function_call", id: "call_z", name: "get_time" }] });
+    const rest = await new GoogleInteractionsProvider().generate("m", { messages: [{ role: "user", content: "Time?" }] }, { apiKey: "k" });
+    expect(rest.toolCalls).toEqual([{ id: "call_z", name: "get_time", arguments: {}, rawArguments: "{}" }]);
+
+    const sse = [
+      "event: step.start",
+      'data: {"index":0,"step":{"id":"call_z","type":"function_call","name":"get_time","arguments":{}},"event_type":"step.start"}',
+      "",
+      "event: interaction.completed",
+      'data: {"interaction":{"id":"v1_z","status":"requires_action","usage":{"total_tokens":2,"total_input_tokens":1,"total_output_tokens":1}},"event_type":"interaction.completed"}',
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async () => new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const streamed = await new GoogleInteractionsProvider().stream("m", { messages: [{ role: "user", content: "Time?" }] }, { apiKey: "k" }).result();
+    expect(streamed.toolCalls.map((c) => c.arguments)).toEqual([{}]);
+  });
+});

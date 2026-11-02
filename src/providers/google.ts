@@ -29,7 +29,7 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, Message, ContentPart, ProviderSteps } from "../types/message.ts";
+import type { ProviderContext, Message, ContentPart, ProviderSteps, ToolResultPart } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -141,6 +141,7 @@ type InteractionInputStep =
       name: string;
       call_id: string;
       result: InteractionContentBlock[];
+      is_error?: boolean;
     }
   | { type: string; [k: string]: unknown };
 
@@ -447,6 +448,17 @@ function resultToText(result: unknown): string {
   return safeStringify(result);
 }
 
+// Builds the documented `function_result` step (`is_error` only when the tool failed); in: a canonical tool_result part, out: chained or full-history `input`.
+function functionResultStep(part: ToolResultPart): InteractionInputStep {
+  return {
+    type: "function_result",
+    name: part.name,
+    call_id: part.id,
+    result: [{ type: "text", text: resultToText(part.result) }],
+    ...(part.isError ? { is_error: true } : {}),
+  };
+}
+
 /**
  * Latest-turn input for stateful chaining (the server already holds history):
  * everything AFTER the last assistant message, in order. That is normally one
@@ -484,12 +496,7 @@ async function latestTurnInput(context: ProviderContext): Promise<string | Inter
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push({
-            type: "function_result",
-            name: part.name,
-            call_id: part.id,
-            result: [{ type: "text", text: resultToText(part.result) }],
-          });
+          steps.push(functionResultStep(part));
         }
       }
     } else if (m.role === "user") {
@@ -578,12 +585,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push({
-            type: "function_result",
-            name: part.name,
-            call_id: part.id,
-            result: [{ type: "text", text: resultToText(part.result) }],
-          });
+          steps.push(functionResultStep(part));
         }
       }
     }
