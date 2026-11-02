@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { GoogleInteractionsProvider, clearInteractionChains } from "../src/providers/google.ts";
-import { parseStreamedToolArguments } from "../src/providers.ts";
-import { noteProviderTurn, clearSessionRouting } from "../src/providers.ts";
 import {
+  parseStreamedToolArguments,
   mapThinkingLevelToGoogle,
   mapServiceTierToGoogle,
   resolveCache,
@@ -461,6 +460,57 @@ describe("GoogleInteractionsProvider (REST, mocked)", () => {
     expect(seen).toContain("text_delta");
     expect(seen).toContain("done");
     expect(final.raw.response?.status).toBe(200);
+  });
+
+  it("keeps text and thought summary carried on step.start (docs/thinking.md wire)", async () => {
+    const sse = [
+      "event: step.start",
+      'data: {"index":0,"step":{"signature":"","summary":[{"text":"Evaluating","type":"text"}],"type":"thought"},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":0,"delta":{"signature":"sig_ss","type":"thought_signature"},"event_type":"step.delta"}',
+      "",
+      "event: step.start",
+      'data: {"index":1,"step":{"content":[{"text":"Based on the clues, here","type":"text"}],"type":"model_output"},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":1,"delta":{"text":" is the answer.","type":"text"},"event_type":"step.delta"}',
+      "",
+      "event: interaction.completed",
+      'data: {"interaction":{"id":"v1_ss","status":"completed","usage":{"total_tokens":3,"total_input_tokens":2,"total_output_tokens":1}},"event_type":"interaction.completed"}',
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async () => new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const stream = new GoogleInteractionsProvider().stream("m", { messages: [{ role: "user", content: "Q" }] }, { apiKey: "k" });
+    const deltas: string[] = [];
+    for await (const e of stream) if (e.type === "text_delta") deltas.push(e.delta!);
+    const final = await stream.result();
+    expect(deltas).toEqual(["Based on the clues, here", " is the answer."]);
+    expect(final.text).toBe("Based on the clues, here is the answer.");
+    expect(final.thinking).toBe("Evaluating");
+    expect(final.thoughtSignature).toBe("sig_ss");
+  });
+
+  it("keeps cumulative usage from step.stop when the stream is cut before interaction.completed", async () => {
+    const sse = [
+      "event: step.start",
+      'data: {"index":0,"step":{"type":"model_output"},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":0,"delta":{"text":"partial","type":"text"},"event_type":"step.delta"}',
+      "",
+      "event: step.stop",
+      'data: {"index":0,"event_type":"step.stop","usage":{"total_tokens":40,"total_input_tokens":30,"total_output_tokens":10,"total_cached_tokens":5},"step_usage":{"total_tokens":10}}',
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async () => new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const stream = new GoogleInteractionsProvider().stream("m", { messages: [{ role: "user", content: "Q" }] }, { apiKey: "k" });
+    for await (const _ of stream) {}
+    const final = await stream.result();
+    expect(final.text).toBe("partial");
+    expect(final.usage.inputTokens).toBe(30);
+    expect(final.usage.outputTokens).toBe(10);
+    expect(final.usage.cachedTokens).toBe(5);
   });
 
   it("streams tool calls with empty-start + full-delta args (live wire shape)", async () => {

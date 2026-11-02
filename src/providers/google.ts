@@ -358,6 +358,12 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionCo
   return blocks;
 }
 
+// Joins the `text` of content/summary blocks; in: a `step.start` step's `content` or `summary`, out: stream text/thinking.
+function blockText(blocks: unknown): string {
+  if (!Array.isArray(blocks)) return "";
+  return blocks.map((b) => (typeof b?.text === "string" ? b.text : "")).join("");
+}
+
 function resultToText(result: unknown): string {
   if (typeof result === "string") return result;
   return safeStringify(result);
@@ -1073,7 +1079,20 @@ export class GoogleInteractionsProvider implements Provider {
           } else if (type === "step.start") {
             const index = (msg["index"] as number) ?? 0;
             const step = (msg["step"] as Record<string, unknown>) ?? {};
-            if (step["type"] === "function_call") {
+            if (step["type"] === "model_output") {
+              const t = blockText(step["content"]);
+              if (t) {
+                text += t;
+                eventStream.push({ type: "text_delta", delta: t, partialText: text });
+              }
+            } else if (step["type"] === "thought") {
+              const t = blockText(step["summary"]);
+              if (t) {
+                thinking += t;
+                eventStream.push({ type: "thinking_delta", thinkingDelta: t, partialThinking: thinking });
+              }
+              if (!signature && typeof step["signature"] === "string" && step["signature"]) signature = step["signature"];
+            } else if (step["type"] === "function_call") {
               const args = step["arguments"];
               const startArgs = typeof args === "string" ? args : args ? JSON.stringify(args) : "";
               calls.set(index, {
@@ -1082,6 +1101,13 @@ export class GoogleInteractionsProvider implements Provider {
                 startArgs,
                 deltaArgs: "",
               });
+            }
+          } else if (type === "step.stop") {
+            // Cumulative usage so far: keeps usage when the stream is cut before `interaction.completed`.
+            const stepUsage = msg["usage"] as InteractionObject["usage"] | undefined;
+            if (stepUsage) {
+              usage = mapUsage(stepUsage);
+              sawUsage = true;
             }
           } else if (type === "interaction.completed") {
             const interaction = (msg["interaction"] as InteractionObject) ?? {};
