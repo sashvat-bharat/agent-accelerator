@@ -1033,3 +1033,95 @@ describe("Google thought tokens are billed as output", () => {
     expect(res.usage.cost?.totalCost).toBeCloseTo(0.001255, 6); // 1254.5 micro-USD, rounded to whole micro-USD
   });
 });
+
+describe("Google media inputs (documented MIME types, URLs, YouTube)", () => {
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    clearInteractionChains();
+    clearSessionRouting();
+  });
+
+  // Captures the Interactions request body; any other URL is served as a media download.
+  function captureInput(downloads: Record<string, { body: string; type: string }> = {}) {
+    const seen = { body: null as any, apiCalls: 0, downloads: [] as string[] };
+    (globalThis as any).fetch = async (url: unknown, req: any) => {
+      const u = String(url);
+      if (u.includes("/interactions")) {
+        seen.apiCalls++;
+        seen.body = JSON.parse(req.body);
+        return new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 });
+      }
+      seen.downloads.push(u);
+      const d = downloads[u]!;
+      return new Response(d.body, { status: 200, headers: { "Content-Type": d.type } });
+    };
+    return seen;
+  }
+
+  const send = (content: any[]) =>
+    new GoogleInteractionsProvider().generate("m", { messages: [{ role: "user", content }] }, { apiKey: "k" });
+
+  it("passes public https URLs of URL-supported types as uri without downloading them", async () => {
+    const seen = captureInput();
+    await send([
+      { type: "file", file: "https://example.com/paper.pdf" },
+      { type: "image", image: "https://example.com/cat.png" },
+      { type: "video", video: "https://example.com/clip.mov" },
+    ]);
+    expect(seen.downloads).toEqual([]);
+    expect(seen.body.input).toEqual([
+      { type: "document", uri: "https://example.com/paper.pdf", mime_type: "application/pdf" },
+      { type: "image", uri: "https://example.com/cat.png", mime_type: "image/png" },
+      { type: "video", uri: "https://example.com/clip.mov", mime_type: "video/quicktime" },
+    ]);
+  });
+
+  it("passes YouTube, Files API and gs:// links as uri", async () => {
+    const seen = captureInput();
+    await send([
+      { type: "video", video: "https://www.youtube.com/watch?v=9hE5-98ZeCg" },
+      { type: "file", file: "https://generativelanguage.googleapis.com/v1beta/files/abc123", mimeType: "application/pdf" },
+      { type: "image", image: "gs://bucket/scones.jpg" },
+    ]);
+    expect(seen.downloads).toEqual([]);
+    expect(seen.body.input).toEqual([
+      { type: "video", uri: "https://www.youtube.com/watch?v=9hE5-98ZeCg" },
+      { type: "document", uri: "https://generativelanguage.googleapis.com/v1beta/files/abc123", mime_type: "application/pdf" },
+      { type: "image", uri: "gs://bucket/scones.jpg", mime_type: "image/jpeg" },
+    ]);
+  });
+
+  it("downloads and inlines audio URLs (Google never fetches audio) and bare MIME parameters", async () => {
+    const seen = captureInput({
+      "https://example.com/talk.mp3": { body: "ID3abc", type: "audio/mpeg" },
+      "http://example.com/data.csv": { body: "a,b\n1,2", type: "text/csv; charset=utf-8" },
+    });
+    await send([
+      { type: "audio", audio: "https://example.com/talk.mp3" },
+      { type: "file", file: "http://example.com/data.csv" },
+    ]);
+    expect(seen.downloads).toEqual(["https://example.com/talk.mp3", "http://example.com/data.csv"]);
+    expect(seen.body.input.map((b: any) => [b.type, b.mime_type, typeof b.data])).toEqual([
+      ["audio", "audio/mpeg", "string"],
+      ["document", "text/csv", "string"],
+    ]);
+  });
+
+  it("renames inline MIME aliases to Google's names (.mov -> video/mov)", async () => {
+    const seen = captureInput();
+    await send([{ type: "video", video: new Uint8Array([0, 0, 0, 20]), mimeType: "video/quicktime" }]);
+    expect(seen.body.input).toEqual([{ type: "video", mime_type: "video/mov", data: "AAAAFA==" }]);
+  });
+
+  it("rejects unsupported inline types before any network call", async () => {
+    const seen = captureInput();
+    const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    await expect(send([{ type: "file", file: new Uint8Array([1, 2, 3]), mimeType: docx }])).rejects.toThrow(
+      /Google reads only PDF and CSV documents/
+    );
+    await expect(send([{ type: "image", image: new Uint8Array([1, 2, 3]), mimeType: "image/svg+xml" }])).rejects.toThrow(
+      /Google does not accept image type "image\/svg\+xml"/
+    );
+    expect(seen.apiCalls).toBe(0);
+  });
+});

@@ -36,7 +36,8 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { getApiKey, getEnv } from "../utils/env.ts";
-import { normalizeMediaInput } from "../utils/media.ts";
+import { normalizeMediaInput, inferMimeType } from "../utils/media.ts";
+import { ValidationError } from "../types/errors.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { stripSchemaForGoogle } from "../tools/schema.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
@@ -78,15 +79,58 @@ import {
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
+// Supported inputs (api-ref `interactions-api.md` enums, `docs/file-input-methods.md`)
+// ---------------------------------------------------------------------------
+
+/** Image MIME types Google accepts inline. */
+export const GOOGLE_IMAGE_MIME = ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp", "image/tiff"] as const;
+/** Audio MIME types Google accepts inline (audio is never fetched by URL). */
+export const GOOGLE_AUDIO_MIME = ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm"] as const;
+/** Video MIME types Google accepts inline. */
+export const GOOGLE_VIDEO_MIME = ["video/mp4", "video/mpeg", "video/mpg", "video/mov", "video/avi", "video/x-flv", "video/webm", "video/wmv", "video/3gpp"] as const;
+/** Document MIME types Google accepts (the only two). */
+export const GOOGLE_DOCUMENT_MIME = ["application/pdf", "text/csv"] as const;
+/** MIME types Google fetches itself from a public `https://` URL. */
+export const GOOGLE_URL_MIME = [
+  "text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf", "text/javascript",
+  "application/json", "application/pdf",
+  "image/bmp", "image/jpeg", "image/png", "image/webp",
+  "video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp",
+] as const;
+/** Common MIME spellings mapped to Google's inline names. */
+export const GOOGLE_INLINE_MIME_ALIASES: Readonly<Record<string, string>> = {
+  "video/quicktime": "video/mov",
+  "audio/x-wav": "audio/wav",
+  "audio/wave": "audio/wav",
+  "image/jpg": "image/jpeg",
+};
+// Documented size limits. Not enforced yet: oversized inputs get Google's own error.
+/** Max inline payload per request (bytes). */
+export const GOOGLE_MAX_INLINE_REQUEST_BYTES = 100 * 1024 * 1024;
+/** Max inline PDF size (bytes). */
+export const GOOGLE_MAX_INLINE_PDF_BYTES = 50 * 1024 * 1024;
+/** Max size of one file Google fetches by URL (bytes). */
+export const GOOGLE_MAX_URL_FILE_BYTES = 15 * 1024 * 1024;
+
+type MediaBlockType = "image" | "audio" | "video" | "document";
+
+const INLINE_MIME: Record<MediaBlockType, readonly string[]> = {
+  image: GOOGLE_IMAGE_MIME,
+  audio: GOOGLE_AUDIO_MIME,
+  video: GOOGLE_VIDEO_MIME,
+  document: GOOGLE_DOCUMENT_MIME,
+};
+
+const FILES_API_PREFIX = "https://generativelanguage.googleapis.com/v1beta/files/";
+const YOUTUBE_URL = /^https:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
+
+// ---------------------------------------------------------------------------
 // Interactions wire shapes (subset used by this adapter)
 // ---------------------------------------------------------------------------
 
 type InteractionContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; mime_type: string; data?: string; uri?: string }
-  | { type: "audio"; mime_type: string; data?: string; uri?: string }
-  | { type: "video"; mime_type: string; data?: string; uri?: string }
-  | { type: "document"; mime_type: string; data?: string; uri?: string };
+  | { type: MediaBlockType; mime_type?: string; data?: string; uri?: string };
 
 type InteractionInputStep =
   | { type: "user_input"; content: string | InteractionContentBlock[] }
@@ -321,39 +365,50 @@ function toGoogleToolChoice(
   return { allowed_tools: { mode: norm.mode } };
 }
 
-function mediaBlockType(partType: string): "image" | "audio" | "video" | "document" {
-  if (partType === "image" || partType === "audio" || partType === "video") return partType;
-  // Canonical `file` parts are PDFs/documents. The guides reference document
-  // processing with the same content-block pattern; the wire type is
-  // `document`. If the server ever rejects it, the concise error surfaces it.
-  return "document";
+type MediaValue = string | Uint8Array | ArrayBuffer;
+
+// Lower-cases a MIME type and drops parameters (`text/csv; charset=utf-8` -> `text/csv`); in: part or response MIME, out: list checks.
+function bareMime(mime: string | undefined): string | undefined {
+  return mime ? mime.split(";")[0]!.trim().toLowerCase() || undefined : undefined;
 }
 
+// Returns the `uri` block for a link Google fetches itself (YouTube, Files API, `gs://`, https URL of a URL-supported type), else undefined; in: a media part's string value, out: contentPartsToBlocks.
+function uriBlock(type: MediaBlockType, value: string, mimeType?: string): InteractionContentBlock | undefined {
+  const explicit = bareMime(mimeType);
+  const withMime = (mime?: string): InteractionContentBlock => ({ type, uri: value, ...(mime ? { mime_type: mime } : {}) });
+  if (type === "video" && YOUTUBE_URL.test(value)) return withMime(explicit);
+  const mime = explicit ?? bareMime(inferMimeType(value, ""));
+  if (value.startsWith(FILES_API_PREFIX) || value.startsWith("gs://")) return withMime(mime);
+  return value.startsWith("https://") && mime && (GOOGLE_URL_MIME as readonly string[]).includes(mime) ? withMime(mime) : undefined;
+}
+
+// Inlines a media part as base64 under Google's MIME name, failing before the network on an unsupported type; in: any media value (bytes, data URL, path, http URL), out: contentPartsToBlocks.
+async function inlineBlock(type: MediaBlockType, value: MediaValue, mimeType?: string): Promise<InteractionContentBlock> {
+  const norm = await normalizeMediaInput(value, mimeType);
+  const raw = bareMime(norm.mimeType) ?? "";
+  const mime = GOOGLE_INLINE_MIME_ALIASES[raw] ?? raw;
+  if (!INLINE_MIME[type].includes(mime)) {
+    const what = type === "document" ? "Google reads only PDF and CSV documents" : `Google does not accept ${type} type "${mime}"`;
+    throw new ValidationError(
+      `[Agent Accelerator] ${what} (got "${mime}"; supported: ${INLINE_MIME[type].join(", ")}). Convert the file or pass the correct mimeType.`
+    );
+  }
+  return { type, mime_type: mime, data: norm.base64Data };
+}
+
+// Maps canonical text and media parts to Interactions content blocks (one builder for chained and full-history input); in: a message's parts, out: request `input`.
 async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionContentBlock[]> {
   const blocks: InteractionContentBlock[] = [];
   for (const part of parts) {
-    if (part.type === "text" && part.text) {
-      blocks.push({ type: "text", text: part.text });
-    } else if (
-      part.type === "image" ||
-      part.type === "audio" ||
-      part.type === "video" ||
-      part.type === "file"
-    ) {
-      const raw = (part as { image?: unknown; audio?: unknown; video?: unknown; file?: unknown }).image ??
-        (part as { audio?: unknown }).audio ??
-        (part as { video?: unknown }).video ??
-        (part as { file?: unknown }).file;
-      const norm = await normalizeMediaInput(
-        raw as string | Uint8Array | ArrayBuffer,
-        (part as { mimeType?: string }).mimeType
-      );
-      blocks.push({
-        type: mediaBlockType(part.type),
-        mime_type: norm.mimeType,
-        data: norm.base64Data,
-      } as InteractionContentBlock);
+    if (part.type === "text") {
+      if (part.text) blocks.push({ type: "text", text: part.text });
+      continue;
     }
+    if (part.type !== "image" && part.type !== "audio" && part.type !== "video" && part.type !== "file") continue;
+    const type: MediaBlockType = part.type === "file" ? "document" : part.type;
+    const value = (part as unknown as Record<string, MediaValue>)[part.type]!;
+    const uri = typeof value === "string" ? uriBlock(type, value, part.mimeType) : undefined;
+    blocks.push(uri ?? (await inlineBlock(type, value, part.mimeType)));
   }
   return blocks;
 }

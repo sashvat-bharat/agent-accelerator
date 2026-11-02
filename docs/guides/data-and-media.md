@@ -62,6 +62,8 @@ console.log(res.text);
 
 Part types: `text`, `image`, `audio`, `video`, `file`. MIME types are inferred from the extension or magic bytes (`sniffMimeType`). Unsupported modalities fail **before** the network with a one-line error (the catalog knows what each model accepts; custom endpoints reject video and files). A model without native file input fails fast: convert the document to text yourself before `run` (the SDK ships no converter). Remote downloads re-check redirects and are size-capped.
 
+**On Google**, links Google can fetch itself are sent as a `uri` (no download, no inlining): YouTube video links, Files API links (`https://generativelanguage.googleapis.com/v1beta/files/...`), `gs://` objects, and public `https://` URLs whose type (from `mimeType` or the extension) Google fetches: PDF, CSV, plain text/HTML/CSS/XML/RTF/JS, JSON, PNG/JPEG/WebP/BMP images and common video formats (max 15 MB per URL). Everything else, including **all audio URLs** and `http://` links, is downloaded and inlined. Inline types are checked before the network: images PNG/JPEG/WebP/HEIC/HEIF/GIF/BMP/TIFF, audio WAV/MP3/AIFF/AAC/OGG/FLAC/MPEG/M4A/L16/OPUS/ALAW/MULAW/WebM, video MP4/MPEG/MPG/MOV/AVI/FLV/WebM/WMV/3GPP, documents **PDF and CSV only** (convert other documents to text first). Google allows 100 MB inline per request (50 MB per PDF).
+
 **Recommendations:** ✅ prefer URLs for large media (not inlined). ✅ Restrict local reads with `fileAccess.roots`. ❌ Don't pass untrusted paths without `roots`.
 
 ## Usage and cost

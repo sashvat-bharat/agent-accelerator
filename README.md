@@ -1171,6 +1171,14 @@ Media normalization is handled automatically by providers (mapped to provider-na
 Provider matrix: text + image + wav/mp3 audio + PDF work on all supported
 providers. Video works on Gemini only.
 
+On Google, links Google fetches itself go as a `uri` without downloading:
+YouTube links, Files API links, `gs://` objects and public `https://` URLs of
+URL-supported types (PDF, CSV, text, JSON, PNG/JPEG/WebP/BMP, common video;
+max 15 MB). Audio URLs and `http://` links are downloaded and inlined. Inline
+types are checked before the network; Google reads only PDF and CSV
+documents. The supported lists are the `GOOGLE_*_MIME` constants at the top of
+`src/providers/google.ts`.
+
 Before any network call, the executor checks `image` / `audio` / `video` /
 `file`-as-PDF parts against the catalog's `modalities.input` for that
 provider/model and fails fast with a one-line error naming the gap
