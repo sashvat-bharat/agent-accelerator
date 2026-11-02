@@ -43,7 +43,8 @@ function readRetryAfterMs(error: unknown): number | undefined {
   return Math.min(60_000, secs * 1000);
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+// Waits `ms`, rejecting with an AbortError as soon as `signal` aborts; in: retry backoff and Google background polling, out: the awaiting caller.
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {

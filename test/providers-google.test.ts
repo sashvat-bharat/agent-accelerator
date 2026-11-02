@@ -1328,3 +1328,135 @@ describe("Google tool calling matches the documented wire (function-calling.md +
     expect(streamed.toolCalls.map((c) => c.arguments)).toEqual([{}]);
   });
 });
+
+describe("Gemini 4 long decode through background interactions (long-decode.md, background-execution.md)", () => {
+  const LONG = { apiKey: "k", maxOutputTokens: 262_144 };
+  const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+  const sseReply = (lines: string[]) => new Response(lines.join("\n"), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  const fast = () => {
+    const p = new GoogleInteractionsProvider();
+    p.pollDelaysMs = [1, 1];
+    return p;
+  };
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    clearInteractionChains();
+    clearSessionRouting();
+  });
+
+  it("sends background: true only for Gemini 4 above 65,536 tokens and fails fast for other models", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), reply(TEXT_INTERACTION));
+    const p = fast();
+    const hi = { messages: [{ role: "user", content: "Hi" }] } as any;
+    await p.generate("gemini-4-argon", hi, { apiKey: "k", maxOutputTokens: 65_536 });
+    await p.generate("gemini-3.5-flash", hi, { apiKey: "k", maxOutputTokens: 8_192 });
+    expect(bodies.map((b) => b.background)).toEqual([undefined, undefined]);
+    expect(p.isLongRunning("gemini-4-argon", LONG)).toBe(true);
+    expect(p.isLongRunning("gemini-4-argon", { maxOutputTokens: 65_536 })).toBe(false);
+    await expect(p.generate("gemini-3.5-flash", hi, LONG)).rejects.toThrow(/above Google's 65536 limit; only Gemini 4/);
+    expect(bodies.length).toBe(2);
+
+    // A provider-switch turn keeps storage on: background with store:false is a documented 400.
+    noteProviderTurn("s-bg-switch", "openai");
+    const history = { messages: [{ role: "user", content: "Hi" }, { role: "assistant", content: "Hello" }, { role: "user", content: "Prove it" }] } as any;
+    await p.generate("gemini-4-argon", history, { ...LONG, sessionId: "s-bg-switch" });
+    expect(bodies[2]).toMatchObject({ background: true, generation_config: { max_output_tokens: 262_144 } });
+    expect(bodies[2].store).toBeUndefined();
+  });
+
+  it("polls until completed and joins every model_output hop", async () => {
+    const calls: string[] = [];
+    const statuses = ["in_progress", "completed"];
+    (globalThis as any).fetch = async (u: unknown, req: any) => {
+      calls.push(`${req.method} ${String(u)}`);
+      if (req.method === "POST") return reply({ id: "v1_bg", status: "queued" });
+      const status = statuses.shift();
+      return reply(
+        status === "completed"
+          ? { id: "v1_bg", status, steps: [{ type: "model_output", content: [{ type: "text", text: "Part 1. " }] }, { type: "model_output", content: [{ type: "text", text: "Part 2." }] }], usage: { total_tokens: 9, total_input_tokens: 4, total_output_tokens: 5 } }
+          : { id: "v1_bg", status }
+      );
+    };
+    const res = await fast().generate("gemini-4-argon", { messages: [{ role: "user", content: "Prove it" }] }, { ...LONG, sessionId: "s-bg" });
+    expect(res.text).toBe("Part 1. Part 2.");
+    expect(res.finishReason).toBe("stop");
+    expect(calls).toEqual([
+      "POST https://generativelanguage.googleapis.com/v1beta/interactions",
+      "GET https://generativelanguage.googleapis.com/v1beta/interactions/v1_bg",
+      "GET https://generativelanguage.googleapis.com/v1beta/interactions/v1_bg",
+    ]);
+  });
+
+  it("cancels the background interaction when the caller aborts while it runs", async () => {
+    const calls: string[] = [];
+    const controller = new AbortController();
+    (globalThis as any).fetch = async (u: unknown, req: any) => {
+      calls.push(`${req.method} ${String(u)}`);
+      if (String(u).endsWith("/cancel")) return reply({ id: "v1_bg", status: "cancelled" });
+      if (req.method === "GET") controller.abort();
+      return reply({ id: "v1_bg", status: req.method === "POST" ? "queued" : "in_progress" });
+    };
+    const err = await fast()
+      .generate("gemini-4-argon", { messages: [{ role: "user", content: "Prove it" }] }, { ...LONG, signal: controller.signal })
+      .catch((e) => e);
+    expect(err?.name).toBe("AbortError");
+    await new Promise((r) => setTimeout(r, 5));
+    expect(calls).toContain("POST https://generativelanguage.googleapis.com/v1beta/interactions/v1_bg/cancel");
+  });
+
+  it("resumes a dropped background stream from the last event_id and reads it to the end", async () => {
+    const urls: string[] = [];
+    (globalThis as any).fetch = async (u: unknown) => {
+      urls.push(String(u));
+      if (urls.length === 1) {
+        return sseReply([
+          "event: interaction.created",
+          'data: {"interaction":{"id":"v1_bgs","status":"in_progress"},"event_type":"interaction.created","event_id":"evt_1"}',
+          "",
+          "event: step.start",
+          'data: {"index":0,"step":{"type":"model_output"},"event_type":"step.start","event_id":"evt_2"}',
+          "",
+          "event: step.delta",
+          'data: {"index":0,"delta":{"text":"Long ","type":"text"},"event_type":"step.delta","event_id":"evt_3"}',
+          "",
+        ]); // connection drops here: no interaction.completed
+      }
+      return sseReply([
+        "event: step.delta",
+        'data: {"index":0,"delta":{"text":"answer.","type":"text"},"event_type":"step.delta","event_id":"evt_4"}',
+        "",
+        "event: interaction.completed",
+        'data: {"interaction":{"id":"v1_bgs","status":"completed","usage":{"total_tokens":3,"total_input_tokens":2,"total_output_tokens":1}},"event_type":"interaction.completed","event_id":"evt_5"}',
+        "",
+      ]);
+    };
+    const final = await fast().stream("gemini-4-argon", { messages: [{ role: "user", content: "Q" }] }, LONG).result();
+    expect(final.text).toBe("Long answer.");
+    expect(final.providerSteps?.steps).toEqual([{ type: "model_output", content: [{ type: "text", text: "Long answer." }] }]);
+    expect(urls).toEqual([
+      "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse",
+      "https://generativelanguage.googleapis.com/v1beta/interactions/v1_bgs?stream=true&last_event_id=evt_3",
+    ]);
+  });
+
+  it("an Agent run outlives requestTimeoutMs: each HTTP call is timed, not the whole background run", async () => {
+    const { Agent, getProvider } = await import("../src/index.ts");
+    const google = getProvider("google") as GoogleInteractionsProvider;
+    const saved = google.pollDelaysMs;
+    google.pollDelaysMs = [60, 60];
+    let gets = 0;
+    const fn = (async (_u: string, init: any) =>
+      init.method === "POST"
+        ? reply({ id: "v1_agent", status: "queued" })
+        : reply(++gets < 3 ? { id: "v1_agent", status: "in_progress" } : { ...TEXT_INTERACTION, id: "v1_agent" })) as any;
+    try {
+      const agent = new Agent({ model: "google/gemini-4-argon", apiKey: "k", fetch: fn, maxOutputTokens: 262_144, limits: { requestTimeoutMs: 50 } });
+      const res = await agent.run("Prove it");
+      expect(res.text).toBe("Hello there");
+      expect(gets).toBe(3);
+    } finally {
+      google.pollDelaysMs = saved;
+    }
+  });
+});

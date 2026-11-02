@@ -666,6 +666,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
     } catch {}
 
+    // A long-running call (e.g. Google long decode) times each HTTP request itself: no whole-call race.
+    const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
     const genResult = await generateWithTimeout(
       () => provider.generate(
         modelId,
@@ -675,7 +677,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         },
         providerOptions
       ),
-      limits.requestTimeoutMs
+      longRunning ? Infinity : limits.requestTimeoutMs
     );
 
     finalResult = genResult;
@@ -1054,6 +1056,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
         } catch {}
 
+        const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
         const innerStream = provider.stream(
           modelId,
           {
@@ -1072,7 +1075,8 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           let first = true;
           let doneIter = false;
           while (!doneIter) {
-            const waitMs = first ? streamLimits.firstByteTimeoutMs : streamLimits.streamIdleTimeoutMs;
+            // Long-running streams pause for minutes between chunks; the adapter guards stalls and reconnects.
+            const waitMs = longRunning ? Infinity : first ? streamLimits.firstByteTimeoutMs : streamLimits.streamIdleTimeoutMs;
             let timer: ReturnType<typeof setTimeout> | undefined;
             const timeoutP =
               Number.isFinite(waitMs) && waitMs !== Infinity && waitMs > 0

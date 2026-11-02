@@ -520,6 +520,24 @@ Model resolution never silently selects a default model: an empty model throws.
 
 An unknown prefix with no catalog match still routes to a custom provider, allowing private model IDs and endpoints.
 
+### Google long decode (Gemini 4)
+
+Google caps one request at 65,536 output tokens. Set `maxOutputTokens` above
+that on a `gemini-4-*` model and the SDK runs the request as a background
+interaction automatically (no extra option): up to 1,048,576 tokens minus the
+input, for up to 24 hours. `run()` polls until it finishes (2 s, then every
+5 s); `stream()` reconnects after a dropped or silent connection
+(`last_event_id`, 15 min of silence counts as dropped). Aborting cancels the
+interaction on Google's side, so it stops billing. Each HTTP request is still
+timed by `limits.requestTimeoutMs`, but the whole run is not. Any other Google
+model with `maxOutputTokens` above 65,536 fails before the network with a
+`ConfigError`. Use it for hard reasoning, not chat: you pay for every token of
+every 64K hop.
+
+A custom `Provider` can opt into the same treatment with the optional
+`isLongRunning(model, options)` method: when it returns `true`, the loop skips
+its whole-call, first-byte and idle timers and leaves timing to the adapter.
+
 ### Registry
 
 * `resolveModel("google/x" | ModelSpec)` → `{ provider, modelId, modelSpec? }`. Use to inspect routing before execution.

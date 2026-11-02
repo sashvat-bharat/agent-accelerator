@@ -15,7 +15,7 @@ const agent = new Agent({
     deadlineMs: 120_000, // whole run
     maxToolCallsPerRun: 30,
     maxTotalTokens: 200_000,
-    requestTimeoutMs: 60_000, // one provider call (default 300 s)
+    requestTimeoutMs: 60_000, // one provider call (default 300 s); for Google long decode: each HTTP request
     firstByteTimeoutMs: 30_000, // streaming (default 120 s)
     streamIdleTimeoutMs: 60_000, // streaming (default 300 s)
   },

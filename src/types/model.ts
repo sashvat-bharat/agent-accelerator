@@ -246,4 +246,6 @@ export interface Provider {
     context: ProviderContext,
     options?: ProviderRequestOptions
   ): AssistantMessageEventStream;
+  /** True when this call may legitimately run far past the request timeouts (e.g. Google long decode); the loop then leaves timing to the adapter's own per-request timeouts. */
+  isLongRunning?(model: string | ModelSpec, options?: ProviderRequestOptions): boolean;
 }
