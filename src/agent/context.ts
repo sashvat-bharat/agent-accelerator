@@ -1,4 +1,4 @@
-import type { Message, ContentPart } from "../types/message.ts";
+import type { Message, ContentPart, ProviderSteps } from "../types/message.ts";
 import type { ToolCallRecord, ToolResultRecord } from "../types/tool.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { clearSessionRouting } from "../providers.ts";
@@ -56,11 +56,13 @@ export class AgentContext {
     });
   }
 
+  // Stores one model turn as an assistant message (text, thinking, tool calls, raw provider steps for replay); in: a provider turn from the loop, out: history.
   addAssistantMessage(
     text: string,
     toolCalls?: ToolCallRecord[],
     thinking?: string,
-    thoughtSignature?: string
+    thoughtSignature?: string,
+    providerSteps?: ProviderSteps
   ): void {
     const parts: ContentPart[] = [];
     const hasToolCalls = Boolean(toolCalls && toolCalls.length > 0);
@@ -110,6 +112,7 @@ export class AgentContext {
       role: "assistant",
       content: parts.length > 0 ? parts : text,
       thoughtSignature,
+      ...(providerSteps ? { providerSteps } : {}),
     });
 
     if (thoughtSignature) {

@@ -710,7 +710,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       genResult.text,
       genResult.toolCalls,
       genResult.thinking,
-      genResult.thoughtSignature
+      genResult.thoughtSignature,
+      genResult.providerSteps
     );
 
     // Thinking-trace telemetry (observability-only, full text, no limit):
@@ -1147,7 +1148,8 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           turnResponse.text,
           turnResponse.toolCalls,
           turnResponse.thinking,
-          turnResponse.thoughtSignature
+          turnResponse.thoughtSignature,
+          turnResponse.providerSteps
         );
 
         // Thinking-trace telemetry (observability-only, full text, no limit):

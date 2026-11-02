@@ -1118,9 +1118,18 @@ Message {
   role: "system" | "user" | "assistant" | "tool",
   content: string | ContentPart[],
   name?,
-  thoughtSignature?
+  thoughtSignature?,
+  providerSteps?   // { provider, steps }: raw output steps of an assistant turn
 }
 ```
+
+`providerSteps` keeps a provider's raw output for one assistant turn (today:
+Google's `steps`, including thought signatures). When Google needs the full
+history again (after a restart, an expired chain or a provider switch), those
+turns are resent exactly as received, which keeps reasoning continuity and
+the implicit-cache prefix intact. Other providers ignore it. Adapters return
+it on `ProviderGenerateResult` / per-turn stream `AgentResponse`; it is never
+part of `toJSON()`.
 
 ### ProviderContext
 
@@ -1293,7 +1302,7 @@ saveSessionFile(".session.json", agent, telemetry);
 
 * `agent.exportSession(telemetry)` / `agent.importSession(saved)` round-trip messages, system prompt, model, thinking level, instructions, cache, worker model, and sub-agent traces without touching `AgentContext` internals.
 * `SessionTelemetry` accumulates `input / output / cacheRead / cacheWrite / reasoning / cost`, with clamped `turnHitRate()` / `totalHitRate()`, a dual `formatBar(res)`, and `formatSessionBanner(saved, telemetry, path)` for startup. Cost follows the [TokenUsage](#response-usage-and-raw-data) rules.
-* Files are JSON with one line per top-level field and one line per turn (2-space indent), written atomically (temp + rename).
+* Files are JSON with one line per top-level field and one line per turn (2-space indent), written atomically (temp + rename). Google turns also store their raw `providerSteps`, so a resumed session replays them exactly.
 * Binary media (bytes, data URLs, base64) is extracted to `media/` on save via `saveSessionDir("sessions", agent, telemetry)` → `sessions/<sessionId>/{session.json, media/*}`; remote URLs and local paths stay references. `loadSessionDir(dir)` resolves `media/…` refs back to absolute paths, and `findLatestSessionDir("sessions")` resumes the most recent session.
 * Sub-agent traces persist in a dedicated `subagents` section keyed by TrackingID (`{ trackingId, name, sessionId, parentSessionId, status, task, turns, usage, steps, text }`). Files stay lean: redundant `rawArguments` and repeated step text are dropped on save (rebuilt/kept live in memory).
 * With `persist: { dir }` or `{ file }`, the session file is rewritten after every step, so a crash loses at most the in-flight step.

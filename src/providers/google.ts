@@ -29,7 +29,7 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, Message, ContentPart } from "../types/message.ts";
+import type { ProviderContext, Message, ContentPart, ProviderSteps } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -413,6 +413,29 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionCo
   return blocks;
 }
 
+// Keeps a turn's model-generated steps exactly as received (input echoes and empty signatures dropped); in: REST `steps` or assembled stream steps, out: ProviderGenerateResult.providerSteps.
+function replaySteps(steps: unknown[] | undefined): ProviderSteps | undefined {
+  const kept = (steps ?? [])
+    .filter((s) => {
+      const type = (s as { type?: unknown } | null)?.type;
+      return typeof type === "string" && type !== "user_input" && type !== "function_result";
+    })
+    .map((s) => {
+      const { signature, ...rest } = s as Record<string, unknown>;
+      return signature === "" ? rest : s;
+    });
+  return kept.length > 0 ? { provider: "google", steps: kept } : undefined;
+}
+
+// Appends streamed text to the last text block of a step's `content`/`summary`, or starts one; in: step.delta, out: the assembled stream step.
+function appendBlockText(step: Record<string, unknown> | undefined, key: "content" | "summary", text: string): void {
+  if (!step) return;
+  const blocks = (Array.isArray(step[key]) ? step[key] : (step[key] = [])) as Array<{ type?: string; text?: string }>;
+  const last = blocks[blocks.length - 1];
+  if (last?.type === "text" && typeof last.text === "string") last.text += text;
+  else blocks.push({ type: "text", text });
+}
+
 // Joins the `text` of content/summary blocks; in: a `step.start` step's `content` or `summary`, out: stream text/thinking.
 function blockText(blocks: unknown): string {
   if (!Array.isArray(blocks)) return "";
@@ -481,7 +504,7 @@ async function latestTurnInput(context: ProviderContext): Promise<string | Inter
   return steps;
 }
 
-/** Full-history Steps for stateless (provider-switch) turns. */
+// Rebuilds the whole conversation as Interactions steps; Google turns replay their stored raw steps verbatim, others are reconstructed; in: AgentContext messages, out: request `input` on reseed/switch turns.
 async function fullHistorySteps(context: ProviderContext): Promise<InteractionInputStep[]> {
   const steps: InteractionInputStep[] = [];
   for (const m of context.messages) {
@@ -494,6 +517,11 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
         if (blocks.length > 0) steps.push({ type: "user_input", content: blocks });
       }
     } else if (m.role === "assistant") {
+      // Exact replay: same bytes as the server returned (thought signatures included), best for implicit caching.
+      if (m.providerSteps?.provider === "google") {
+        steps.push(...(m.providerSteps.steps as InteractionInputStep[]));
+        continue;
+      }
       if (typeof m.content === "string") {
         if (m.content) {
           steps.push({
@@ -504,6 +532,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
         continue;
       }
       const texts: string[] = [];
+      const turnStart = steps.length;
       for (const part of m.content) {
         if (part.type === "thinking" && part.thinking) {
           // Q-18: preserve namespaced signatures only — foreign-provider
@@ -536,7 +565,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
           type: "model_output",
           content: texts.map((t) => ({ type: "text", text: t })),
         } as InteractionInputStep);
-      } else if (m.thoughtSignature && !steps.some((s) => s.type === "thought")) {
+      } else if (m.thoughtSignature && !steps.slice(turnStart).some((s) => s.type === "thought")) {
         // Preserve a signature-only thought so stateless chaining keeps
         // reasoning continuity even when no summary text was retained.
         // Q-18: only for google/untagged signatures.
@@ -658,6 +687,7 @@ function parseInteraction(
     provider: "google",
     raw,
     durationMs,
+    providerSteps: replaySteps(interaction.steps),
   };
 }
 
@@ -1057,6 +1087,8 @@ export class GoogleInteractionsProvider implements Provider {
         let thinking = "";
         let signature: string | undefined;
         const calls = new Map<number, { id: string; name: string; startArgs: string; deltaArgs: string }>();
+        // Every step as the server would return it (start + deltas), for exact history replay.
+        const steps = new Map<number, Record<string, unknown>>();
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
         let sawFinishReason = false;
@@ -1111,16 +1143,20 @@ export class GoogleInteractionsProvider implements Provider {
             const delta = (msg["delta"] as Record<string, unknown>) ?? {};
             const dType = delta["type"] as string;
             if (dType === "text" && typeof delta["text"] === "string") {
+              appendBlockText(steps.get(index), "content", delta["text"] as string);
               text += delta["text"] as string;
               eventStream.push({ type: "text_delta", delta: delta["text"] as string, partialText: text });
             } else if (dType === "thought_summary") {
               const content = delta["content"] as { type?: string; text?: string } | undefined;
               const t = content?.text ?? (typeof delta["text"] === "string" ? (delta["text"] as string) : "");
               if (t) {
+                appendBlockText(steps.get(index), "summary", t);
                 thinking += t;
                 eventStream.push({ type: "thinking_delta", thinkingDelta: t, partialThinking: thinking });
               }
             } else if (dType === "thought_signature" && typeof delta["signature"] === "string") {
+              const s = steps.get(index);
+              if (s) s["signature"] = delta["signature"];
               // Wire truth: signature arrives as its own delta (no text event).
               if (!signature) signature = delta["signature"] as string;
             } else if (dType === "arguments" || dType === "arguments_delta") {
@@ -1134,6 +1170,7 @@ export class GoogleInteractionsProvider implements Provider {
           } else if (type === "step.start") {
             const index = (msg["index"] as number) ?? 0;
             const step = (msg["step"] as Record<string, unknown>) ?? {};
+            steps.set(index, step);
             if (step["type"] === "model_output") {
               const t = blockText(step["content"]);
               if (t) {
@@ -1203,8 +1240,10 @@ export class GoogleInteractionsProvider implements Provider {
         }
 
         const toolCalls: ToolCallRecord[] = [];
-        for (const c of calls.values()) {
+        for (const [index, c] of calls) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
+          const step = steps.get(index);
+          if (step) step["arguments"] = args;
           const record: ToolCallRecord = {
             id: c.id,
             name: c.name,
@@ -1259,6 +1298,7 @@ export class GoogleInteractionsProvider implements Provider {
             response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
           },
           durationMs: Date.now() - startTime,
+          providerSteps: replaySteps([...steps.entries()].sort(([a], [b]) => a - b).map(([, s]) => s)),
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);

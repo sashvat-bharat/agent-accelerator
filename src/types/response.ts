@@ -1,6 +1,7 @@
 import type { TokenUsage } from "./core.ts";
 import type { ToolCallRecord, ToolResultRecord } from "./tool.ts";
 import type { ProviderRawData, ProviderId } from "./model.ts";
+import type { ProviderSteps } from "./message.ts";
 
 /** One logged step inside a sub-agent worker run (surfaced via `agent.track(id)`). */
 export interface SubAgentStep {
@@ -142,6 +143,8 @@ export class AgentResponse {
   readonly durationMs: number;
   readonly raw: ProviderRawData;
   readonly turns: number;
+  /** Raw provider output steps of a single streamed turn (history replay only; not in `toJSON`). */
+  readonly providerSteps?: ProviderSteps;
 
   /**
    * Constructs a normalized response. Agent runs create this automatically;
@@ -167,6 +170,7 @@ export class AgentResponse {
     durationMs: number;
     raw: ProviderRawData;
     turns?: number;
+    providerSteps?: ProviderSteps;
   }) {
     this.text = data.text;
     if (data.parsed !== undefined) (this as { parsed?: unknown }).parsed = data.parsed;
@@ -184,6 +188,7 @@ export class AgentResponse {
     this.durationMs = data.durationMs;
     this.raw = data.raw;
     this.turns = data.turns ?? 1;
+    if (data.providerSteps) this.providerSteps = data.providerSteps;
   }
 
   /** Returns the final assistant text. */

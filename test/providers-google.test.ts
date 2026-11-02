@@ -1125,3 +1125,103 @@ describe("Google media inputs (documented MIME types, URLs, YouTube)", () => {
     expect(seen.apiCalls).toBe(0);
   });
 });
+
+describe("Google exact replay of recorded steps", () => {
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    clearInteractionChains();
+    clearSessionRouting();
+  });
+
+  it("records the raw output steps of a REST turn", async () => {
+    mockFetchOnce(TOOL_INTERACTION);
+    const res = await new GoogleInteractionsProvider().generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k" });
+    expect(res.providerSteps).toEqual({ provider: "google", steps: TOOL_INTERACTION.steps });
+  });
+
+  it("assembles a streamed turn into the same steps the server would return", async () => {
+    const sse = [
+      "event: step.start",
+      'data: {"index":0,"step":{"signature":"","summary":[{"text":"Plan","type":"text"}],"type":"thought"},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":0,"delta":{"content":{"text":" more","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}',
+      "",
+      "event: step.delta",
+      'data: {"index":0,"delta":{"signature":"sig_r","type":"thought_signature"},"event_type":"step.delta"}',
+      "",
+      "event: step.start",
+      'data: {"index":1,"step":{"content":[{"text":"Hel","type":"text"}],"type":"model_output"},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":1,"delta":{"text":"lo","type":"text"},"event_type":"step.delta"}',
+      "",
+      "event: step.start",
+      'data: {"index":2,"step":{"id":"call_r","type":"function_call","name":"w","arguments":{}},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":2,"delta":{"arguments":"{\\"a\\":1}","type":"arguments_delta"},"event_type":"step.delta"}',
+      "",
+      "event: interaction.completed",
+      'data: {"interaction":{"id":"v1_r","status":"requires_action","usage":{"total_tokens":3,"total_input_tokens":2,"total_output_tokens":1}},"event_type":"interaction.completed"}',
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async () => new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const stream = new GoogleInteractionsProvider().stream("m", { messages: [{ role: "user", content: "Q" }] }, { apiKey: "k" });
+    const final = await stream.result();
+    expect(final.providerSteps?.steps).toEqual([
+      { signature: "sig_r", summary: [{ text: "Plan more", type: "text" }], type: "thought" },
+      { content: [{ text: "Hello", type: "text" }], type: "model_output" },
+      { id: "call_r", type: "function_call", name: "w", arguments: { a: 1 } },
+    ]);
+    expect(final.toJSON()).not.toHaveProperty("providerSteps");
+  });
+
+  it("reseeds history with the recorded steps verbatim (Agent run, restart, session round trip)", async () => {
+    const { Agent, tool, serializeSession, deserializeSession } = await import("../src/index.ts");
+    const bodies: any[] = [];
+    let n = 0;
+    const fn = (async (_u: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify(n++ === 0 ? TOOL_INTERACTION : TEXT_INTERACTION), { status: 200 });
+    }) as any;
+    const getWeather = tool({ name: "get_weather", description: "d", parameters: { type: "object", properties: {} }, execute: () => "21C" });
+    const agent = new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", fetch: fn, tools: [getWeather] });
+    await agent.run("Weather in Paris?");
+    const assistant = agent.context.messages.find((m) => m.providerSteps);
+    expect(assistant?.providerSteps?.steps).toEqual(TOOL_INTERACTION.steps);
+    const restored = deserializeSession(serializeSession(agent.exportSession()));
+    expect(restored?.messages.find((m) => m.providerSteps)?.providerSteps).toEqual(assistant!.providerSteps);
+
+    clearInteractionChains(); // a restart loses the server chain: the next turn sends full history
+    await agent.run("And Rome?");
+    const input = bodies[2].input as any[];
+    expect(bodies[2].previous_interaction_id).toBeUndefined();
+    expect(input.map((s) => s.type)).toEqual(["user_input", "thought", "function_call", "function_result", "thought", "model_output", "user_input"]);
+    expect(input.slice(1, 3)).toEqual(TOOL_INTERACTION.steps);
+    expect(input.slice(4, 6)).toEqual(TEXT_INTERACTION.steps);
+  });
+
+  it("keeps a signature-only thought for every legacy turn, not just the first", async () => {
+    let body: any = null;
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      body = JSON.parse(req.body);
+      return new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 });
+    };
+    await new GoogleInteractionsProvider().generate(
+      "m",
+      {
+        messages: [
+          { role: "user", content: "Hi" },
+          { role: "assistant", content: [{ type: "thinking", thinking: "t1", thoughtSignature: "sig1" }, { type: "text", text: "A" }] },
+          { role: "user", content: "Next" },
+          { role: "assistant", content: [{ type: "tool_call", id: "c2", name: "w", arguments: {} }], thoughtSignature: "sig2" },
+          { role: "tool", name: "w", content: [{ type: "tool_result", id: "c2", name: "w", result: "ok" }] },
+        ],
+      },
+      { apiKey: "k" }
+    );
+    const signatures = (body.input as any[]).filter((s) => s.type === "thought").map((s) => s.signature);
+    expect(signatures).toEqual(["sig1", "sig2"]);
+  });
+});

@@ -100,12 +100,20 @@ export type ContentPart =
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
+/** A provider's raw output steps for one assistant turn, kept to replay history byte-exact (only the tagged provider reads them). */
+export interface ProviderSteps {
+  provider: string;
+  steps: unknown[];
+}
+
 /** Normalized conversation message. */
 export interface Message {
   role: MessageRole;
   content: string | ContentPart[];
   name?: string;
   thoughtSignature?: string;
+  /** Raw provider output steps of an assistant turn (opaque; e.g. Google `steps`). */
+  providerSteps?: ProviderSteps;
 }
 
 /**

@@ -362,6 +362,7 @@ export type {
   ToolResultPart,
   ThinkingPart,
   ProviderContext,
+  ProviderSteps,
 } from "./types/message.ts";
 
 export type {
