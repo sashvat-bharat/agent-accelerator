@@ -9,6 +9,9 @@ export interface TextPart {
   thoughtSignature?: string;
 }
 
+/** Detail level a provider spends on one image or video (more detail = more input tokens). Google only; other providers ignore it with a warning. */
+export type MediaResolution = "low" | "medium" | "high" | "ultra_high";
+
 /** Image content accepted as a URL, data, path, or binary value. */
 export interface ImagePart {
   type: "image";
@@ -17,6 +20,8 @@ export interface ImagePart {
    */
   image: string | Uint8Array | ArrayBuffer;
   mimeType?: string;
+  /** Detail level for this image (Google: `low` 280, `medium` 560, `high` 1120, `ultra_high` 2240 tokens). */
+  resolution?: MediaResolution;
 }
 
 /** Audio content accepted as a URL, data, path, or binary value. */
@@ -48,6 +53,8 @@ export interface VideoPart {
    */
   video: string | Uint8Array | ArrayBuffer;
   mimeType?: string;
+  /** Detail level per frame (Google: `low`/`medium` 70, `high` 280 tokens). */
+  resolution?: MediaResolution;
 }
 
 /** Assistant-generated structured tool invocation. */

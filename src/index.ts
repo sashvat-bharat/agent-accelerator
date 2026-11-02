@@ -363,6 +363,7 @@ export type {
   ThinkingPart,
   ProviderContext,
   ProviderSteps,
+  MediaResolution,
 } from "./types/message.ts";
 
 export type {

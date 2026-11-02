@@ -1167,9 +1167,9 @@ Supported content parts include:
 * `ThinkingPart { type:"thinking", thinking, thoughtSignature? }` — preserved reasoning.
 * `ToolCallPart { type:"tool_call", id, name, arguments, rawArguments?, thoughtSignature? }`
 * `ToolResultPart { type:"tool_result", id, name, result, isError? }`
-* `ImagePart { type:"image", image, mimeType? }`
+* `ImagePart { type:"image", image, mimeType?, resolution? }`
 * `AudioPart { type:"audio", audio, mimeType? }`
-* `VideoPart { type:"video", video, mimeType? }`
+* `VideoPart { type:"video", video, mimeType?, resolution? }`
 * `FilePart { type:"file", file, mimeType?, filename? }` — PDFs/documents.
 
 `image`, `audio`, `video`, and `file` inputs accept:
@@ -1205,6 +1205,12 @@ max 15 MB). Audio URLs and `http://` links are downloaded and inlined. Inline
 types are checked before the network; Google reads only PDF and CSV
 documents. The supported lists are the `GOOGLE_*_MIME` constants at the top of
 `src/providers/google.ts`.
+
+`resolution` (`MediaResolution`: `"low" | "medium" | "high" | "ultra_high"`)
+sets how much detail Google spends on one image or video, and so how many
+input tokens it costs (image: 280 / 560 / 1120 / 2240; video per frame:
+`low` and `medium` 70, `high` 280). Omit it for Google's default. Other
+providers ignore it with one `provider_warning`.
 
 Before any network call, the executor checks `image` / `audio` / `video` /
 `file`-as-PDF parts against the catalog's `modalities.input` for that

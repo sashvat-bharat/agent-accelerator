@@ -29,7 +29,7 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, Message, ContentPart, ProviderSteps, ToolResultPart } from "../types/message.ts";
+import type { ProviderContext, Message, ContentPart, ProviderSteps, ToolResultPart, MediaResolution } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -172,9 +172,8 @@ const YOUTUBE_URL = /^https:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
 // Interactions wire shapes (subset used by this adapter)
 // ---------------------------------------------------------------------------
 
-type InteractionContentBlock =
-  | { type: "text"; text: string }
-  | { type: MediaBlockType; mime_type?: string; data?: string; uri?: string };
+type MediaBlock = { type: MediaBlockType; mime_type?: string; data?: string; uri?: string; resolution?: MediaResolution };
+type InteractionContentBlock = { type: "text"; text: string } | MediaBlock;
 
 type InteractionInputStep =
   | { type: "user_input"; content: string | InteractionContentBlock[] }
@@ -427,9 +426,9 @@ function bareMime(mime: string | undefined): string | undefined {
 }
 
 // Returns the `uri` block for a link Google fetches itself (YouTube, Files API, `gs://`, https URL of a URL-supported type), else undefined; in: a media part's string value, out: contentPartsToBlocks.
-function uriBlock(type: MediaBlockType, value: string, mimeType?: string): InteractionContentBlock | undefined {
+function uriBlock(type: MediaBlockType, value: string, mimeType?: string): MediaBlock | undefined {
   const explicit = bareMime(mimeType);
-  const withMime = (mime?: string): InteractionContentBlock => ({ type, uri: value, ...(mime ? { mime_type: mime } : {}) });
+  const withMime = (mime?: string): MediaBlock => ({ type, uri: value, ...(mime ? { mime_type: mime } : {}) });
   if (type === "video" && YOUTUBE_URL.test(value)) return withMime(explicit);
   const mime = explicit ?? bareMime(inferMimeType(value, ""));
   if (value.startsWith(FILES_API_PREFIX) || value.startsWith("gs://")) return withMime(mime);
@@ -437,7 +436,7 @@ function uriBlock(type: MediaBlockType, value: string, mimeType?: string): Inter
 }
 
 // Inlines a media part as base64 under Google's MIME name, failing before the network on an unsupported type; in: any media value (bytes, data URL, path, http URL), out: contentPartsToBlocks.
-async function inlineBlock(type: MediaBlockType, value: MediaValue, mimeType?: string): Promise<InteractionContentBlock> {
+async function inlineBlock(type: MediaBlockType, value: MediaValue, mimeType?: string): Promise<MediaBlock> {
   const norm = await normalizeMediaInput(value, mimeType);
   const raw = bareMime(norm.mimeType) ?? "";
   const mime = GOOGLE_INLINE_MIME_ALIASES[raw] ?? raw;
@@ -462,7 +461,10 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionCo
     const type: MediaBlockType = part.type === "file" ? "document" : part.type;
     const value = (part as unknown as Record<string, MediaValue>)[part.type]!;
     const uri = typeof value === "string" ? uriBlock(type, value, part.mimeType) : undefined;
-    blocks.push(uri ?? (await inlineBlock(type, value, part.mimeType)));
+    const block = uri ?? (await inlineBlock(type, value, part.mimeType));
+    // Per-item detail level (image and video blocks only, api-ref `MediaResolution`).
+    const resolution = part.type === "image" || part.type === "video" ? part.resolution : undefined;
+    blocks.push(resolution ? { ...block, resolution } : block);
   }
   return blocks;
 }

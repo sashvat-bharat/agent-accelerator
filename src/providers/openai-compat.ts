@@ -90,6 +90,7 @@ import {
   mapGenerationParamsToChat,
   normalizeStructuredOutput,
   augmentSystemPromptWithStructuredOutput,
+  warnIgnoredMediaResolution,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -704,6 +705,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     }
     // Strict endpoints reject unknown body fields: implicit caching only.
     resolveCache(this.prefix, options?.cache, ["implicit"], `${this.prefix}/${modelId}`);
+    warnIgnoredMediaResolution(this.prefix, context.messages, `${this.prefix}/${modelId}`);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system prompt (strict endpoints would 400 on json_schema

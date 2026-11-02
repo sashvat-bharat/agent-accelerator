@@ -1460,3 +1460,32 @@ describe("Gemini 4 long decode through background interactions (long-decode.md, 
     }
   });
 });
+
+describe("Google per-media resolution (media-resolution.md, api-ref MediaResolution)", () => {
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+  });
+
+  it("sends resolution on image and video blocks, inline or uri", async () => {
+    let body: any = null;
+    (globalThis as any).fetch = async (_u: unknown, req: any) => ((body = JSON.parse(req.body)), new Response(JSON.stringify(TEXT_INTERACTION), { status: 200 }));
+    await new GoogleInteractionsProvider().generate(
+      "m",
+      {
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", image: new Uint8Array([0x89, 0x50, 0x4e, 0x47]), mimeType: "image/png", resolution: "ultra_high" },
+              { type: "video", video: "https://www.youtube.com/watch?v=9hE5-98ZeCg", resolution: "low" },
+              { type: "image", image: "https://example.com/plain.png" },
+            ],
+          },
+        ],
+      },
+      { apiKey: "k" }
+    );
+    expect(body.input.map((b: any) => b.resolution)).toEqual(["ultra_high", "low", undefined]);
+    expect(body.input[1]).toEqual({ type: "video", uri: "https://www.youtube.com/watch?v=9hE5-98ZeCg", resolution: "low" });
+  });
+});
