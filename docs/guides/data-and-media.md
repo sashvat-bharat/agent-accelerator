@@ -134,4 +134,4 @@ Behavior: the default TTL is 12 h; an expired catalog is used **immediately** an
 - Prompt is `string | ContentPart[]`; part keys: `image`, `audio`, `video`, `file` (+ `filename`, `mimeType`).
 - Cost may be `undefined`; handle it. Use `SessionTelemetry` for running totals.
 - Never edit `<home>/catalog/models.dev.json`; use `registerModel`.
-- See also: [Agents and models](agents-and-models.md), [Safety and operations](safety-and-ops.md), [`examples/05-chat.ts`](../../examples/05-chat.ts), [`examples/06-multimodal_image.ts`](../../examples/06-multimodal_image.ts), [`examples/09-multimodal_document.ts`](../../examples/09-multimodal_document.ts).
+- See also: [`examples/15-durable-agent.ts`](../../examples/15-durable-agent.ts) (crash, resume, approval, tool logs), [Agents and models](agents-and-models.md), [Safety and operations](safety-and-ops.md), [`examples/05-chat.ts`](../../examples/05-chat.ts), [`examples/06-multimodal_image.ts`](../../examples/06-multimodal_image.ts), [`examples/09-multimodal_document.ts`](../../examples/09-multimodal_document.ts).

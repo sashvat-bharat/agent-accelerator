@@ -1320,6 +1320,10 @@ bun run examples/13-structured-output.ts
 bun run examples/14-scheduled-actions.ts [--quick]
 # scheduled actions walkthrough on your computer's clock: starts working ~1 minute from now,
 # delivers ~2 minutes from now (code-scheduled and model-scheduled); --quick skips the waiting
+
+bun run examples/15-durable-agent.ts
+# a durable agent: killed mid-tool (SIGKILL), picked up by a new process (interrupted()/resume()),
+# finished tools not repeated, run retry, ctx.stop approval, tool logs (about 5 s of waiting)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),

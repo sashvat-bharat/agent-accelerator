@@ -61,6 +61,14 @@ describe("resume after a cut-off run", () => {
     expect(await again.resume()).toBeUndefined();
   });
 
+  it("the disk is up to date the moment `await run()` returns, including how the run ended", async () => {
+    const root = tmp();
+    const agent = mk(root, async () => textReply("hi"));
+    await agent.run("one");
+    // No waiting: the run's ending is already saved.
+    expect(loadSessionDir(sessionDirFor(root, "s1"))!.session.runs!.map((r) => r.end)).toEqual(["done"]);
+  });
+
   it("explicit mode loads nothing to run, lists the cut-off run and resume() continues it from the saved conversation", async () => {
     const root = tmp();
     mk(root, () => never(), { resume: "explicit" }).run("write the report"); // hangs: the process 'dies' here

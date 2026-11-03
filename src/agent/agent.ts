@@ -544,12 +544,12 @@ export class Agent {
     return new Map(this.toolRecords.map((t) => [t.id, { id: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}), ...(t.stopped ? { stopped: true } : {}) } as ToolResultRecord]));
   }
 
-  // Closes a run's mark with how it ended and saves that; in: the run's promise handlers, out: runMarks + journal.
+  // Closes a run's mark with how it ended and saves that at once (not on the next tick), so the disk is up to date when `await run()` returns; in: the run's promise handlers, out: runMarks + journal.
   private endRun(mark: SessionRunMark | undefined, status: SessionRunEnd): void {
     if (!mark) return;
     if (!mark.end) mark.end = status;
     if (this.activeMark === mark) this.activeMark = undefined;
-    this.persistNow();
+    this.doPersist();
   }
 
   // Remembers a finished tool call and saves it at once (synchronously): the work is on disk before anything else can happen; in: the executor's per-call callback, out: toolRecords + journal.
