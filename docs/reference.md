@@ -28,7 +28,8 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `toolChoice` | `"auto"`, `"none"`, `"required"`, `{ tool }` | [Tools](guides/tools-and-streaming.md) |
 | `maxOutputTokens`, `stop`, `seed` | Generation controls (`stop`/`seed`: Chat Completions only) | [Agents](guides/agents-and-models.md) |
 | `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
-| `retry`, `fetch`, `env` | Retry policy, custom `fetch`, env-var overrides | [Safety](guides/safety-and-ops.md) |
+| `retry`, `fetch`, `env` | Retry policy of one provider call, custom `fetch`, env-var overrides | [Safety](guides/safety-and-ops.md) |
+| `runRetries` | Times a whole run that failed for a transient reason is tried again from where it stopped (default 3, `0` = off) | [Safety](guides/safety-and-ops.md) |
 | `fileAccess`, `captureRaw`, `onFailure` | `{ roots }`, `"redacted"`/`true`/`false`, `"auto"`/`"rollback"`/`"keep"` | [Safety](guides/safety-and-ops.md) |
 | `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text) to `<home>/telemetry/<date>.ndjson`. Off by default | [Safety](guides/safety-and-ops.md) |
@@ -112,6 +113,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `catalog_cache_write_failed` | Model catalog could not be saved |
 | `tool.call_started`, `tool.attempt_started`, `tool.progress`, `tool.attempt_failed`, `tool.retry_scheduled`, `tool.call_succeeded`, `tool.call_failed`, `tool.call_timed_out`, `tool.call_aborted`, `tool.call_blocked`, `tool.call_interrupted` | Tool call lifecycle. Each has `toolCallId`, `toolName`, `agentName`, `sessionId`; failures add the full error. A `call_started` with no ending event was in flight at a crash. Attach a sink to persist them |
 | `session.local_media_paths` | An imported session references local files without `fileAccess.roots` |
+| `agent.run_retry` | A failed run is being tried again (`attempt`, `of`, `delayMs`) |
 | `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed / resuming (or a prompt that was waiting) failed |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
 | `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.killed`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle |

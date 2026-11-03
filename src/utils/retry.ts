@@ -29,7 +29,21 @@ export function isTransientError(error: unknown): boolean {
   return false;
 }
 
-function readRetryAfterMs(error: unknown): number | undefined {
+/**
+ * Whether a FAILED RUN (the provider layer already retried the call) is worth trying again: the failure is transient
+ * (HTTP 408/425/429/5xx, network codes, `transient`/`retryable` flags, `incomplete_stream`, a request/stream timeout).
+ * Never for aborts, bad configuration or input (401/403/400/404, `ConfigError`, `ValidationError`, `SecurityPolicyError`,
+ * `ThinkingLevelError`) and never for budgets or limits, which a retry would only reset or hit again.
+ */
+export function isRetryableRun(error: unknown): boolean {
+  if (!error || isAbortError(error)) return false;
+  const name = (error as { name?: unknown }).name;
+  if (name === "TimeoutError") return true; // the loop's own request / first-byte / idle timeouts
+  if (["BudgetExceededError", "ConfigError", "ValidationError", "SecurityPolicyError", "SessionLoadError", "ThinkingLevelError", "ToolError"].includes(String(name))) return false;
+  return isTransientError(error);
+}
+
+export function readRetryAfterMs(error: unknown): number | undefined {
   const err = error as Record<string, unknown>;
   // Preferred: milliseconds attached by the adapter from the Retry-After header.
   const direct = err["retryAfterMs"];

@@ -21,6 +21,7 @@ const agent = new Agent({
   },
   budget: { maxCostUsd: 0.5, maxTotalTokens: 300_000, maxDurationMs: 180_000, maxTotalSubagents: 8 }, // per run, includes workers
   retry: { maxRetries: 2, baseDelayMs: 250, maxDelayMs: 5_000, budgetMs: 30_000 }, // defaults shown
+  runRetries: 3, // default: a run that failed for a transient reason is tried again (5 s, 15 s, 45 s); 0 = off
   onFailure: "auto",
 });
 
@@ -33,6 +34,7 @@ console.log((await agent.run("Hello")).finishReason);
 | `limits.*` | Deadline/tool-count: error with partial results; timeouts raise a retryable `TimeoutError`. |
 | `budget.*` | Throws `BudgetExceededError` with partial usage. Unknown pricing counts as $0 toward `maxCostUsd`. |
 | `retry` | Transient failures (HTTP 408/425/429/500/502/503/504, network codes, `transient`/`retryable` flags; never message text). `Retry-After` is honored within `budgetMs`; streams retry only before the first byte. |
+| `runRetries` | A whole run that failed for a transient reason (after `retry` gave up: provider down, timeouts, a cut stream) is tried again from where it stopped, after 5 s, 15 s, 45 s, then 60 s; each retry emits `agent.run_retry`. The prompt is not re-added and finished tool calls are not repeated; the final response includes the failed attempts' tool calls and usage. The agent stays busy meanwhile (queued prompts wait); `interrupt()` or a signal ends the wait. Never retried: aborts, 400/401/403/404, bad config or input, budgets and limits. `run()` and queued runs only, not `stream()`. |
 | `onFailure` | `"auto"` rolls the conversation back unless a tool already ran (side effects stay on record); `"rollback"` always; `"keep"` never. Aborts never roll back. |
 
 Cancel anytime with `{ signal }` or `agent.interrupt()`; the error carries `err.partial` (usage, turns, text, tool calls/results).

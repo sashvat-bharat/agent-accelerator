@@ -445,7 +445,7 @@ export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec): Tok
 // This function never mutates `source` (Q-35): the priced cost is cloned
 // into a local before folding into the target.
 // ---------------------------------------------------------------------------
-function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpec): void {
+export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpec): void {
   target.inputTokens += source.inputTokens || 0;
   target.outputTokens += source.outputTokens || 0;
   target.totalTokens += source.totalTokens || 0;

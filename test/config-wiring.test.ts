@@ -165,7 +165,8 @@ describe("generation + call controls are forwarded", () => {
         n++;
         return n === 1 ? new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 }) : new Response(JSON.stringify(chat()), { status: 200 });
       }) as unknown as typeof fetch;
-      const outcome = await groq({ ...(retry ? { retry: { ...retry, maxDelayMs: 10 } } : { retry: { maxDelayMs: 10 } }) }, fn).run("hi").then(() => "ok", () => "failed");
+      // runRetries: 0 isolates the provider-level retry under test.
+      const outcome = await groq({ runRetries: 0, ...(retry ? { retry: { ...retry, maxDelayMs: 10 } } : { retry: { maxDelayMs: 10 } }) }, fn).run("hi").then(() => "ok", () => "failed");
       return { outcome, n };
     };
     expect(await run({ maxRetries: 0 })).toEqual({ outcome: "failed", n: 1 });

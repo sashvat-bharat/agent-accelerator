@@ -23,7 +23,8 @@ import { persistTelemetry } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
-import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, type SteerEntry } from "./loop.ts";
+import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, accumulateUsage, type SteerEntry } from "./loop.ts";
+import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
 import { createSessionId, nowMs, newRunId } from "../utils/session.ts";
 import {
   chargeBudgetUsage,
@@ -64,6 +65,9 @@ import { ConfigError, SessionLoadError, isAbortError } from "../types/errors.ts"
  * properties are attached to AbortController instances.
  */
 const mergeDisposers = new WeakMap<AbortController, () => void>();
+
+/** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
+export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
 
 /** Max named sessions kept per Agent (Q-19a LRU). */
 const SESSION_LRU_MAX = 100;
@@ -259,6 +263,8 @@ export class Agent {
   private activeMark?: SessionRunMark;
   /** What to do with a cut-off run at construction (see `AgentConfig.resume`). */
   private readonly resumeMode: "automatic" | "explicit";
+  /** How often a failed run is tried again (see `AgentConfig.runRetries`). */
+  private readonly runRetries: number;
   /** The resume in flight, so a second `resume()` returns the same promise. */
   private resuming?: Promise<AgentResponse | undefined>;
 
@@ -371,6 +377,10 @@ export class Agent {
       throw new ConfigError(`[Agent Accelerator] Invalid resume ${JSON.stringify(config.resume)}: expected "automatic" (default) or "explicit".`);
     }
     this.resumeMode = config.resume ?? "automatic";
+    if (config.runRetries !== undefined && !(Number.isInteger(config.runRetries) && config.runRetries >= 0)) {
+      throw new ConfigError(`[Agent Accelerator] Invalid runRetries ${JSON.stringify(config.runRetries)}: expected a whole number >= 0 (default 3, 0 turns it off).`);
+    }
+    this.runRetries = config.runRetries ?? 3;
 
     this.serviceTier = config.serviceTier;
     this.onFailure =
@@ -521,6 +531,11 @@ export class Agent {
     this.resuming = run;
     run.then(clear, clear);
     return run;
+  }
+
+  // The finished tool calls of the current run as results the loop can reuse; in: toolRecords, out: loopConfig.resume.stored.
+  private storedToolResults(): Map<string, ToolResultRecord> {
+    return new Map(this.toolRecords.map((t) => [t.id, { id: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}) } as ToolResultRecord]));
   }
 
   // Closes a run's mark with how it ended and saves that; in: the run's promise handlers, out: runMarks + journal.
@@ -1140,9 +1155,7 @@ export class Agent {
         ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
         onToolResult: (r: ToolResultRecord) => this.recordTool(r),
-        ...(resumeMark
-          ? { resume: { stored: new Map(this.toolRecords.map((t) => [t.id, { id: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}) } as ToolResultRecord])) } }
-          : {}),
+        ...(resumeMark ? { resume: { stored: this.storedToolResults() } } : {}),
         steerInbox,
         onSteerInjected: () => this.persistNow(),
         // Q-22: loop enforces these (plus local timeout races).
@@ -1150,7 +1163,28 @@ export class Agent {
         ...(this.output !== undefined ? { output: this.output } : {}),
       };
 
-      const res = await runAgentLoop(loopConfig);
+      // A run that failed for a transient reason is tried again from where it stopped (the prompt is already in history,
+      // finished tool calls are kept), holding the agent busy meanwhile; anything else fails at once.
+      let res: AgentResponse;
+      const failedAttempts: FailedAttempt[] = [];
+      for (let attempt = 0; ; attempt++) {
+        try {
+          res = await runAgentLoop(attempt === 0 ? loopConfig : { ...loopConfig, resume: { stored: this.storedToolResults() } });
+          break;
+        } catch (err) {
+          if (attempt >= this.runRetries || runOptions?.signal?.aborted || !isRetryableRun(err)) throw err;
+          const partial = (err as { partial?: FailedAttempt }).partial;
+          if (partial?.usage) failedAttempts.push(partial);
+          const delayMs = Math.max(RUN_RETRY_DELAYS_MS[Math.min(attempt, RUN_RETRY_DELAYS_MS.length - 1)]!, readRetryAfterMs(err) ?? 0);
+          telemetryBus.emitWarning(
+            "agent.run_retry",
+            `[Agent Accelerator] Run failed (${err instanceof Error ? err.message : String(err)}); retry ${attempt + 1} of ${this.runRetries} in ${delayMs} ms.`,
+            { sessionId: this.sessionId, attempt: attempt + 1, of: this.runRetries, delayMs }
+          );
+          await sleep(delayMs, runOptions?.signal);
+        }
+      }
+      if (failedAttempts.length > 0) res = withFailedAttempts(res, failedAttempts);
       this.mergeSubagentTraces(res.subagents as any);
       this.persistNow();
       if (this.stateless) {
@@ -2034,6 +2068,35 @@ export class Agent {
       if (options?.onThinkingDelta) s.on("thinking_delta", (e: any) => options.onThinkingDelta!(e.thinkingDelta!, e));
     }
   }
+}
+
+/** What a failed run attempt got done before it failed (the `partial` the loop attaches to its error). */
+type FailedAttempt = Partial<AgentResponse> & { usage: TokenUsage };
+
+// Adds what failed attempts already did (tool calls, results, turns, token usage) to the response of the attempt that finally worked, so a retry never hides side effects or cost; in: the final response + each failed attempt's `err.partial`, out: the run's AgentResponse.
+function withFailedAttempts(res: AgentResponse, failed: FailedAttempt[]): AgentResponse {
+  const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  for (const f of failed) accumulateUsage(usage, f.usage);
+  accumulateUsage(usage, res.usage);
+  return new AgentResponse({
+    text: res.text,
+    ...(res.parsed !== undefined ? { parsed: res.parsed } : {}),
+    thinking: res.thinking,
+    thoughtSignature: res.thoughtSignature,
+    toolCalls: [...failed.flatMap((f) => f.toolCalls ?? []), ...res.toolCalls],
+    toolResults: [...failed.flatMap((f) => f.toolResults ?? []), ...res.toolResults],
+    subagents: res.subagents,
+    usage,
+    responseId: res.responseId,
+    model: res.model,
+    provider: res.provider,
+    finishReason: res.finishReason,
+    rawFinishReason: res.rawFinishReason,
+    durationMs: res.durationMs,
+    raw: res.raw,
+    turns: res.turns + failed.reduce((n, f) => n + (typeof f.turns === "number" ? f.turns : 0), 0),
+    providerSteps: res.providerSteps,
+  });
 }
 
 /** Normalizes the public `thinkingLevel` flag into provider-neutral thinking settings. */
