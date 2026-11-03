@@ -80,6 +80,8 @@ export interface PersistedAgentSession {
   parentSessionId?: string;
   /** Dedicated sub-agent traces, keyed by worker TrackingID (32-char hex). */
   subagents?: Record<string, PersistedSubAgentTrace>;
+  /** Written with a journal (dir mode): only a `journal.ndjson` whose header names this id belongs to this snapshot. */
+  epoch?: string;
 }
 
 export function emptyTotals(): SessionTotals {
@@ -355,7 +357,7 @@ function stableStringify(value: unknown): string {
  * stored `arguments` (pure duplicate, the common case). Divergent or
  * unparseable wire strings are kept — they carry info parsing lost.
  */
-function stripRedundantRawArguments(messages: Message[]): Message[] {
+export function stripRedundantRawArguments(messages: Message[]): Message[] {
   return messages.map((m) => {
     if (!Array.isArray((m as Message).content)) return m;
     let changed = false;
@@ -620,6 +622,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       totals: obj.totals,
       parentSessionId: obj.parentSessionId,
       subagents: obj.subagents,
+      ...(typeof obj.epoch === "string" ? { epoch: obj.epoch } : {}),
     };
   } catch {
     return null;
@@ -691,6 +694,15 @@ export function assertValidSessionId(sessionId: string): void {
   }
 }
 
+/** Renames a genuinely corrupt snapshot to `*.corrupt-<ts>` before it is overwritten (a healthy one over the load limits is our own prior save and is just rewritten). */
+export function quarantineIfCorrupt(file: string): void {
+  try {
+    if (inspectSessionPayload(fs.readFileSync(file, "utf8")).status === "corrupt") fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+  } catch {
+    // why: no file yet, or it cannot be read: nothing to quarantine.
+  }
+}
+
 /** Saves an agent + telemetry snapshot as a pretty-printed `.json` document (2-space indent). */
 export function saveSessionFile(
   filePath: string,
@@ -698,20 +710,7 @@ export function saveSessionFile(
   telemetry?: SessionTelemetry | SessionTotals | null
 ): void {
   const resolved = path.resolve(filePath);
-  // Q-28-partial: never overwrite a corrupt file in place — quarantine it
-  // as `*.corrupt-<ts>` first (load returns null for corrupt payloads).
-  try {
-    if (fs.existsSync(resolved)) {
-      try {
-        const raw = fs.readFileSync(resolved, "utf8");
-        // Only genuinely corrupt payloads are quarantined; a healthy snapshot
-        // over the load limits is simply rewritten (it is our own prior save).
-        if (inspectSessionPayload(raw).status === "corrupt") {
-          try { fs.renameSync(resolved, `${resolved}.corrupt-${Date.now()}`); } catch {}
-        }
-      } catch {}
-    }
-  } catch {}
+  quarantineIfCorrupt(resolved);
   const data = buildSessionData(agent, telemetry);
   try {
     writeFileAtomic(resolved, serializeSession(data) + "\n");
@@ -774,6 +773,28 @@ function extForMedia(mimeType?: string, filename?: string): string {
   return "bin";
 }
 
+// Finds embedded media bytes in a part (binary, `data:` URL or raw base64); remote URLs and local paths are references and give undefined; in: any content part, out: extractMediaToDir and the session journal.
+export function embeddedMedia(part: ContentPart): { key: (typeof MEDIA_PART_KEYS)[number]; bytes: Uint8Array; mimeType?: string; ext: string } | undefined {
+  const p = part as unknown as Record<string, unknown> | null;
+  if (!p || typeof p["type"] !== "string" || !(MEDIA_PART_KEYS as readonly string[]).includes(p["type"])) return undefined;
+  const key = p["type"] as (typeof MEDIA_PART_KEYS)[number];
+  const raw = p[key];
+  let bytes: Uint8Array;
+  let mimeType = typeof p["mimeType"] === "string" ? (p["mimeType"] as string) : undefined;
+  if (raw instanceof Uint8Array) bytes = raw;
+  else if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
+  else if (typeof raw === "string") {
+    if (isHttpRef(raw)) return undefined; // remote reference: the provider fetches it per turn
+    const dataUrl = raw.startsWith("data:") ? parseDataUrl(raw) : undefined;
+    if (dataUrl) {
+      bytes = base64ToBytes(dataUrl.base64);
+      mimeType = mimeType ?? dataUrl.mimeType;
+    } else if (looksLikeEmbeddedBase64(raw)) bytes = base64ToBytes(raw.replace(/\s/g, ""));
+    else return undefined; // local path or short label: keep as reference
+  } else return undefined;
+  return { key, bytes, ...(mimeType ? { mimeType } : {}), ext: extForMedia(mimeType, typeof p["filename"] === "string" ? (p["filename"] as string) : undefined) };
+}
+
 function cloneMessages(messages: Message[]): Message[] {
   try {
     const g: any = globalThis as any;
@@ -814,35 +835,15 @@ export function extractMediaToDir(
   } catch {}
   const wrote: string[] = [];
   const counters: Record<string, number> = {};
-  let hasBinary = false;
 
   for (const msg of cloned) {
     if (!Array.isArray((msg as Message).content)) continue;
     for (const part of (msg as Message).content as ContentPart[]) {
-      const p: any = part as any;
-      if (!p || typeof p.type !== "string") continue;
-      if (!(MEDIA_PART_KEYS as readonly string[]).includes(p.type)) continue;
-      const key = p.type as (typeof MEDIA_PART_KEYS)[number];
-      const raw = p[key] as unknown;
-      let bytes: Uint8Array | undefined;
-      let mimeType: string | undefined = typeof p.mimeType === "string" ? p.mimeType : undefined;
-      if (raw instanceof Uint8Array) bytes = raw;
-      else if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
-      else if (typeof raw === "string") {
-        if (isHttpRef(raw)) continue; // remote reference — provider fetches per turn
-        const dataUrl = raw.startsWith("data:") ? parseDataUrl(raw) : undefined;
-        if (dataUrl) {
-          bytes = base64ToBytes(dataUrl.base64);
-          mimeType = mimeType ?? dataUrl.mimeType;
-        } else if (looksLikeEmbeddedBase64(raw)) {
-          bytes = base64ToBytes(raw.replace(/\s/g, ""));
-        } else continue; // local path or short label — keep as reference
-      } else continue;
-
-      hasBinary = true;
+      const found = embeddedMedia(part);
+      if (!found) continue;
+      const { key, bytes, mimeType } = found;
       const n = (counters[key] = (counters[key] ?? 0) + 1);
-      const ext = extForMedia(mimeType, typeof p.filename === "string" ? p.filename : undefined);
-      const file = `${key}-${String(n).padStart(3, "0")}.${ext}`;
+      const file = `${key}-${String(n).padStart(3, "0")}.${found.ext}`;
       try {
         fs.mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
         const dest = path.resolve(mediaDir, file);
@@ -852,8 +853,9 @@ export function extractMediaToDir(
       } catch {
         continue;
       }
+      const p = part as unknown as Record<string, unknown>;
       p[key] = `media/${file}`;
-      if (mimeType) p.mimeType = mimeType;
+      if (mimeType) p["mimeType"] = mimeType;
       wrote.push(`media/${file}`);
     }
   }
@@ -921,22 +923,60 @@ export function saveSessionDir(
   );
   try {
     const target = path.join(sessionDir, "session.json");
-    // Q-28-partial: quarantine corrupt targets instead of overwriting.
-    try {
-      if (fs.existsSync(target)) {
-        try {
-          const raw = fs.readFileSync(target, "utf8");
-          if (inspectSessionPayload(raw).status === "corrupt") {
-            try { fs.renameSync(target, `${target}.corrupt-${Date.now()}`); } catch {}
-          }
-        } catch {}
-      }
-    } catch {}
+    quarantineIfCorrupt(target);
     writeFileAtomic(target, serializeSession(data) + "\n");
   } catch {
     // persistence must never crash a chat turn
   }
   return sessionDir;
+}
+
+/** Name of the append-only step log next to `session.json` (see `session/journal.ts`). */
+export const JOURNAL_FILE = "journal.ndjson";
+
+// Snapshot fields a `meta` journal record replaces (everything except messages, identity and totals).
+const JOURNAL_META_KEYS = ["model", "subagentModel", "thinkingLevel", "cache", "systemPrompt", "parentSessionId", "subagents"] as const;
+
+// Applies a journal to its snapshot: records of the snapshot's own epoch only, `msg` by index (already-present ones skipped), `meta` replaces config fields, unknown record types ignored; a torn last line is dropped, damage earlier stops the replay with a bus warning; in: the parsed snapshot + journal text, out: loadSessionDir.
+function replayJournal(snapshot: PersistedAgentSession, text: string, file: string): PersistedAgentSession {
+  if (!snapshot.epoch) return snapshot;
+  const lines = text.split("\n");
+  const session: PersistedAgentSession = { ...snapshot, messages: [...snapshot.messages] };
+  let sawHeader = false;
+  const stop = (reason: string, line: number): void => {
+    telemetryBus.emitWarning("session.journal_corrupt", `[Agent Accelerator] ${path.basename(file)} line ${line + 1}: ${reason}; the rest of the journal is ignored.`, { file, line: line + 1 });
+  };
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k]!.trim();
+    if (!line) continue;
+    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown };
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      if (lines.slice(k + 1).some((l) => l.trim())) stop("not valid JSON", k); // a torn LAST line is just a cut-off write
+      break;
+    }
+    if (!sawHeader) {
+      sawHeader = true;
+      if (rec.t !== "base" || rec.e !== snapshot.epoch) return snapshot; // a journal from before this snapshot
+      continue;
+    }
+    if (rec.t === "msg" && typeof rec.i === "number") {
+      if (rec.i < session.messages.length) continue; // already in the snapshot
+      if (rec.i > session.messages.length || findInvalidMessage([rec.m]) !== -1) {
+        stop(rec.i > session.messages.length ? "a message is missing before this one" : "invalid message", k);
+        break;
+      }
+      session.messages.push(rec.m as Message);
+    } else if (rec.t === "meta" && rec.m && typeof rec.m === "object") {
+      const meta = rec.m as Record<string, unknown>;
+      for (const key of JOURNAL_META_KEYS) {
+        if (key in meta) (session as unknown as Record<string, unknown>)[key] = meta[key];
+        else delete session[key];
+      }
+    }
+  }
+  return session;
 }
 
 /** A loaded session folder: snapshot (media paths resolved) + folder location. */
@@ -971,8 +1011,15 @@ export function loadSessionDir(sessionPath: string, limits?: SessionLimits): Loa
     const file = path.join(dir, "session.json");
     const read = readWithBackup(file, isLoadableSession);
     if (!read) return null;
-    const data = sessionFromPayload(read.text, file, limits);
-    if (!data) return null;
+    const snapshot = sessionFromPayload(read.text, file, limits);
+    if (!snapshot) return null;
+    let journal: string | undefined;
+    try {
+      journal = fs.readFileSync(path.join(dir, JOURNAL_FILE), "utf8");
+    } catch {
+      journal = undefined; // no journal: the snapshot is the whole session
+    }
+    const data = journal ? replayJournal(snapshot, journal, path.join(dir, JOURNAL_FILE)) : snapshot;
     data.messages = resolveMediaPaths(data.messages, dir);
     return { session: data, dir };
   } catch (err) {
@@ -992,7 +1039,13 @@ export function findLatestSessionDir(rootDir: string): string | null {
       try {
         const st = fs.statSync(file);
         if (!st.isFile()) continue;
-        if (!best || st.mtimeMs > best.mtime) best = { dir: path.join(root, entry), mtime: st.mtimeMs };
+        let mtime = st.mtimeMs;
+        try {
+          mtime = Math.max(mtime, fs.statSync(path.join(root, entry, JOURNAL_FILE)).mtimeMs); // steps land in the journal
+        } catch {
+          // why: no journal yet.
+        }
+        if (!best || mtime > best.mtime) best = { dir: path.join(root, entry), mtime };
       } catch {
         continue;
       }

@@ -11,7 +11,7 @@
  *  1. One main Agent with dynamic sub-agents spawns 2 workers concurrently.
  *  2. Lineage helpers run against the REAL parent session id and the REAL
  *     worker TrackingIDs returned in `res.subagents`.
- *  3. The REAL session is persisted with saveSessionDir, reloaded with
+ *  3. The REAL session is persisted by `persist: { dir }` (a step journal), reloaded with
  *     loadSessionDir, and resumed with sub-agent traces intact.
  *
  * Run: bun examples/11-session-identity.ts
@@ -20,8 +20,7 @@
 
 import {
   Agent,
-  SessionTelemetry,
-  saveSessionDir,
+  sessionDirFor,
   loadSessionDir,
   isSessionDescendant,
   formatSessionCost,
@@ -188,9 +187,10 @@ for (const s of res.subagents) {
 // ---------------------------------------------------------------------------
 // 3. Real persistence: save, reload, resume with sub-agent traces intact
 // ---------------------------------------------------------------------------
-const telemetry = new SessionTelemetry();
-telemetry.add(res.usage, MODEL!);
-const dir = saveSessionDir("sessions", agent, telemetry);
+// `persist: { dir }` already wrote every step (snapshot + journal.ndjson); just make sure the last one landed.
+agent.persistNow();
+await new Promise((resolve) => setTimeout(resolve, 0));
+const dir = sessionDirFor("sessions", agent.sessionId);
 console.log(GREEN + "\nsaved: " + dir + RESET);
 
 const loaded = loadSessionDir(dir);

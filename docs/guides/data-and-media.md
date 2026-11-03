@@ -10,7 +10,7 @@ import { Agent, findLatestSessionDir, loadSessionDir } from "agent-accelerator";
 
 const agent = new Agent({
   model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
-  persist: { dir: "sessions" }, // writes sessions/<sessionId>/session.json (+ media/) after every step
+  persist: { dir: "sessions" }, // saves sessions/<sessionId>/ (session.json + journal.ndjson + media/) after every step
 });
 
 const latest = findLatestSessionDir("sessions");
@@ -36,8 +36,8 @@ Move it with `setHome(dir)` (call once, before creating Agents), the `AGENT_ACCE
 
 | `persist` | Writes |
 |---|---|
-| `{ dir }` | `<dir>/<sessionId>/session.json` + `media/` files |
-| `{ file }` | one JSON file (binary media inlined as data URLs) |
+| `{ dir }` | `<dir>/<sessionId>/session.json` (snapshot) + `journal.ndjson` (one appended line per step, folded into the snapshot after 500 lines / 4 MB or when history changes another way) + `media/` files (written once, named by content hash) |
+| `{ file }` | one JSON file, rewritten each step (binary media inlined as data URLs; no journal) |
 | `{}` | `<home>/sessions` (`home` defaults to `setHome(dir)`, then `AGENT_ACCEL_HOME`, then `.agent-accel/` in the working directory) |
 
 Saves are durable (temp file, fsync of file and folder, the last good version kept as `session.json.bak`, atomic rename), so a crash or power cut never leaves a torn file; a damaged `session.json` loads from its `.bak`. Saves are coalesced and never fail a turn (`onPersistError` hook available). Also exported: `saveSessionFile`, `loadSessionFile`, `saveSessionDir`, `sessionDirFor`, `buildSessionData`, `serializeSession`, `deserializeSession`, `inspectSessionPayload`, `writeFileAtomic`, `extractMediaToDir`, `resolveMediaPaths`. Loading validates message shape; a **corrupt** file is renamed `*.corrupt-<ts>`, a valid file over the limits (50k messages / 100 MB) throws `SessionLoadError` and is never touched. Old pretty-printed and JSONL files still load. Sub-agent traces are saved too, and Google turns keep their raw output steps so a resumed session replays them exactly (thought signatures and cache prefix intact). Importing a session that points at local files warns (`session.local_media_paths`) unless `fileAccess.roots` is set.

@@ -32,7 +32,8 @@ import {
   listSubAgentTraceIdsForSessions,
   type SubAgentTrace,
 } from "./delegation.ts";
-import { saveSessionDir, saveSessionFile, findInvalidMessage, telemetryBus } from "../session/store.ts";
+import { saveSessionFile, sessionDirFor, findInvalidMessage, telemetryBus } from "../session/store.ts";
+import { SessionJournal } from "../session/journal.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
 import { clearSessionRouting, normalizeStructuredOutput, normalizeStop } from "../providers.ts";
 import type { StructuredOutputSpec } from "../types/model.ts";
@@ -247,6 +248,8 @@ export class Agent {
   private sessions = new Map<string, { context: AgentContext; lastAccess: number }>();
   /** Coalesced persistence single-flight flag (Q-28). */
   private persistScheduled = false;
+  /** Step journal of the persisted session folder (dir mode only). */
+  private journal?: SessionJournal;
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -1174,6 +1177,13 @@ export class Agent {
     });
   }
 
+  /** The step journal of this session's folder (recreated when `sessionId` changes). */
+  private journalFor(root: string): SessionJournal {
+    const dir = sessionDirFor(root, this.sessionId);
+    if (this.journal?.dir !== dir) this.journal = new SessionJournal(dir);
+    return this.journal;
+  }
+
   /** Synchronous persistence write behind the coalesced `persistNow()` gate. */
   private doPersist(): void {
     const cfg = this.persistConfig;
@@ -1182,7 +1192,7 @@ export class Agent {
       if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
     } catch {}
     try {
-      if (cfg.dir) saveSessionDir(cfg.dir, this as any, null);
+      if (cfg.dir) this.journalFor(cfg.dir).sync(this as any);
       else if (cfg.file) saveSessionFile(cfg.file, this as any, null);
     } catch (err) {
       // Q-28: surface via hook instead of swallowing silently.
