@@ -431,6 +431,20 @@ Every call also emits `tool.*` events on `telemetryBus` (nothing is written unle
 telemetryBus.onEvent((e) => e.code.startsWith("tool.") && appendFileSync("tools.ndjson", JSON.stringify(e) + "\n"));
 ```
 
+**Tool logs.** With `persist: { dir }` every tool call also gets its own log file in the session folder, `tool-logs/<n>-<tool>.ndjson` (numbered in the order calls start, continuing after restarts). The SDK writes the input, each attempt, retry, the full result or error (stack included) and the duration; your tool adds its own lines with `ctx.log(message, data?)`. Every line is flushed to disk as it is written, so after a crash the file shows how far the call got:
+
+```ts
+execute: async ({ files }, ctx) => {
+  for (const [i, f] of files.entries()) {
+    await upload(f);
+    ctx.log(`uploaded ${i + 1} of ${files.length}`, { file: f });
+  }
+}
+```
+
+The call's result carries `logFile` (relative to the session folder), and the saved session keeps only that reference. The log is for you and your harness: it is never sent to the model, nothing in the SDK reads it back (a tool that lets the agent read its own logs is yours to build), and it is not size-capped. Without `persist: { dir }` (or for `stateless` agents) nothing is written and `ctx.log` is a no-op.
+
+
 ### Tool Timing and Deadlines
 
 Every `ToolResultRecord` includes `durationMs`, measured in whole milliseconds with a minimum displayed value of `1ms`. The value covers the tool execution attempt (including retry/backoff time), but excludes queue wait and input-schema validation.

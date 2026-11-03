@@ -94,7 +94,7 @@ Every event has `type` and `schemaVersion`.
 |---|---|
 | `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`/`redact`; `strict` goes to the provider | `retry`, `tags`, `needsApproval`, `output` |
 
-`execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `runId`, `emit`, `logger`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
+`execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `runId`, `emit`, `logger`, `log(message, data?)` (writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the Agent persists to a folder, else a no-op). A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
 
 ## Telemetry codes
 

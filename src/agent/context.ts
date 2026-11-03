@@ -137,6 +137,7 @@ export class AgentContext {
             name: res.name,
             result: res.result,
             isError: res.isError,
+            ...(res.logFile ? { logFile: res.logFile } : {}),
           },
         ],
       });

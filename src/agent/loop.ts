@@ -18,6 +18,7 @@ import {
   shouldBlockRepeat,
   toolCallFingerprint,
   traceToolEvent,
+  type ExecuteToolsOptions,
 } from "../tools/executor.ts";
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
 import { enforceFileAccess } from "../utils/safe-io.ts";
@@ -72,6 +73,8 @@ export interface AgentLoopConfig {
   onProgress?: () => void;
   /** Called the moment each tool call finishes, before the rest of its batch (the crash-proof record of finished work). */
   onToolResult?: (result: ToolResultRecord) => void;
+  /** Opens the log file of one tool call (see `ToolLogs`); unset when the Agent does not persist to a folder. */
+  openToolLog?: ExecuteToolsOptions["openToolLog"];
   /**
    * Continue a run that a crash cut off instead of starting from a new prompt: tool calls the last assistant turn made
    * without a stored result are finished first (a result in `stored` is reused, anything else runs now), then the loop goes on.
@@ -514,6 +517,7 @@ async function executeToolCallsWithRepeatGuard(options: {
   tools: Record<string, ToolDefinition>;
   toolCalls: ToolCallRecord[];
   onResult?: (result: ToolResultRecord) => void;
+  openToolLog?: ExecuteToolsOptions["openToolLog"];
   previousFingerprints: Set<string>;
   repeatCounts: Map<string, number>;
   agentName?: string;
@@ -555,6 +559,7 @@ async function executeToolCallsWithRepeatGuard(options: {
         sessionId: options.sessionId,
         onSubagentEvent: options.onSubagentEvent,
         onResult: options.onResult,
+        openToolLog: options.openToolLog,
       })
     : [];
   const byId = new Map<string, ToolResultRecord[]>();
@@ -624,6 +629,7 @@ async function finishInterruptedTools(
         signal: config.runOptions?.signal,
         sessionId: config.runOptions?.sessionId || config.options?.sessionId,
         onResult: config.onToolResult,
+        openToolLog: config.openToolLog,
       })
     : [];
   const ran = new Map(executed.map((r) => [r.id, r]));
@@ -855,6 +861,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       signal: runOptions?.signal,
       sessionId: runOptions?.sessionId || options?.sessionId,
       onResult: config.onToolResult,
+      openToolLog: config.openToolLog,
     });
     const results = guarded.results;
     previousToolCallFingerprints = guarded.fingerprints;
@@ -1302,6 +1309,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           signal: linked.signal,
           sessionId: runOptions?.sessionId || options?.sessionId,
           onResult: config.onToolResult,
+          openToolLog: config.openToolLog,
           onSubagentEvent: (ev) => {
             try {
               outerStream.push({

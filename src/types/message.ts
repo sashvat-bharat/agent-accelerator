@@ -85,6 +85,8 @@ export interface ToolResultPart {
   name: string;
   result: unknown;
   isError?: boolean;
+  /** This call's log file, relative to the session folder (see `ToolExecutionContext.log`). */
+  logFile?: string;
 }
 
 /** Provider reasoning/thinking content. */

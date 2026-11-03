@@ -32,6 +32,8 @@ console.log(res.text);
 
 Move it with `setHome(dir)` (call once, before creating Agents), the `AGENT_ACCEL_HOME` env var, or a per-Agent `home`. Explicit paths you pass (`persist: { dir }`, `saveSessionFile`) are used as given.
 
+**Tool logs.** Each tool call also writes `tool-logs/<n>-<tool>.ndjson` next to the session (see [Tools and streaming](tools-and-streaming.md)); the session itself keeps only a `logFile` reference on the tool result.
+
 **What else is saved.** Each run's start is recorded (`runs`: run id, index of its user message, time) so turns can be counted later, and prompts still waiting in the steer inbox or follow-up queue are saved too (`pending`, in the journal only; media in them becomes a file under `media/`). `loadSessionDir(dir).session.pending` shows what was waiting when the process stopped.
 
 **Surviving a crash.** With `persist: { dir }` and the SAME `sessionId` after a restart, an Agent notices a run that was cut off (it began, never ended) or prompts that were still waiting, and continues on its own:

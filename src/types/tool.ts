@@ -29,6 +29,12 @@ export interface ToolExecutionContext {
   emit?: ToolEmitFn;
   /** Structured logger for tool implementations (defaults to no-op). */
   logger?: ToolLogger;
+  /**
+   * Writes one line to this call's log file (`tool-logs/<n>-<tool>.ndjson` in the session folder), flushed at once, so
+   * after a crash it shows how far the call got: `ctx.log("uploaded 3 of 5 files", { done: 3 })`. Only written when the
+   * Agent persists to a folder (`persist: { dir }`); otherwise a no-op. For developers, never sent to the model.
+   */
+  log: (message: string, data?: unknown) => void;
 }
 
 export type ToolExecuteFn<TInput = any, TOutput = any> = (
@@ -135,6 +141,8 @@ export interface ToolResultRecord {
   result: unknown;
   isError?: boolean;
   durationMs?: number;
+  /** This call's log file, relative to the session folder (only when the Agent persists to a folder). */
+  logFile?: string;
 }
 
 /**

@@ -36,6 +36,7 @@ import {
 } from "./delegation.ts";
 import { saveSessionFile, sessionDirFor, loadSessionDir, findInvalidMessage, telemetryBus, type SessionRunMark, type SessionRunEnd, type SessionPending, type SessionToolRecord } from "../session/store.ts";
 import { SessionJournal } from "../session/journal.ts";
+import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
 import { clearSessionRouting, normalizeStructuredOutput, normalizeStop } from "../providers.ts";
 import type { StructuredOutputSpec } from "../types/model.ts";
@@ -255,6 +256,9 @@ export class Agent {
   private persistScheduled = false;
   /** Step journal of the persisted session folder (dir mode only). */
   private journal?: SessionJournal;
+  /** Log files of tool calls in the persisted session folder (dir mode only). */
+  private toolLogs?: ToolLogs;
+  private toolLogsDir?: string;
   /** Where each run of the default session began (saved with the session). @internal */
   readonly runMarks: SessionRunMark[] = [];
   /** Tool calls finished in the current run; saved the moment each finishes so a crash never repeats them. @internal */
@@ -1155,6 +1159,7 @@ export class Agent {
         ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
         onToolResult: (r: ToolResultRecord) => this.recordTool(r),
+        openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
         ...(resumeMark ? { resume: { stored: this.storedToolResults() } } : {}),
         steerInbox,
         onSteerInjected: () => this.persistNow(),
@@ -1244,6 +1249,7 @@ export class Agent {
       ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
       onProgress: () => this.persistNow(),
       onToolResult: (r: ToolResultRecord) => this.recordTool(r),
+      openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
       steerInbox,
       onSteerInjected: () => this.persistNow(),
       // Q-22: loop enforces these (plus local timeout races).
@@ -1353,6 +1359,18 @@ export class Agent {
       this.persistScheduled = false;
       this.doPersist();
     });
+  }
+
+  // Opens the log file of one tool call when this Agent persists its default session to a folder, else nothing; in: the executor, once per call, out: a writer for `tool-logs/<n>-<tool>.ndjson`.
+  private openToolLog(call: { name: string }, sessionId: string | undefined): ToolLogWriter | undefined {
+    const root = this.persistConfig?.dir;
+    if (!root || this.stateless || sessionId !== this.sessionId) return undefined;
+    const dir = sessionDirFor(root, this.sessionId);
+    if (this.toolLogsDir !== dir) {
+      this.toolLogs = new ToolLogs(dir);
+      this.toolLogsDir = dir;
+    }
+    return this.toolLogs!.open(call);
   }
 
   /** The step journal of this session's folder (recreated when `sessionId` changes). */

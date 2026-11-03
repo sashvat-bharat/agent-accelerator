@@ -9,8 +9,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ConfigError } from "../types/errors.ts";
 
-// Flushes a folder's entries (a new or renamed file) to disk; best effort because some platforms cannot open a folder; in: the folder of a written file, out: nothing.
-function fsyncFolder(dir: string): void {
+/** Flushes a folder's entries (a new or renamed file) to disk; best effort because some platforms cannot open a folder. */
+export function fsyncFolder(dir: string): void {
   let fd: number | undefined;
   try {
     fd = fs.openSync(dir, "r");
