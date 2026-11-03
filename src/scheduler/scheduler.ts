@@ -16,6 +16,7 @@ import type { Agent } from "../agent/agent.ts";
 import { createChildSessionId } from "../agent/delegation.ts";
 import { buildDynamicWorkerConfig, grantWorkerTools, normalizeWorkerTimeoutValue } from "../agent/worker.ts";
 import { telemetryBus } from "../telemetry.ts";
+import { lockFolder } from "../utils/durable.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { AgentResponse } from "../types/response.ts";
@@ -649,6 +650,7 @@ const schedulers = new Map<string, Scheduler>();
 export function getScheduler(home: string): Scheduler {
   let s = schedulers.get(home);
   if (!s) {
+    lockFolder(home); // every scheduler function goes through here: one process per home
     migrateLegacyFolder(home);
     schedulers.set(home, (s = new Scheduler(home)));
   }

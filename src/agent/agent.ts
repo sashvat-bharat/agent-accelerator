@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { registerAgent } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../scheduler/store.ts";
 import { persistTelemetry } from "../telemetry-file.ts";
+import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
@@ -313,6 +314,11 @@ export class Agent {
       config.persist && !config.persist.dir && !config.persist.file
         ? { ...config.persist, dir: path.join(this.home, "sessions") }
         : config.persist;
+    // One process per folder: fail fast here, before anything is written (the home for `persist: {}`, else the folder named).
+    if (config.persist) {
+      const { dir, file } = config.persist;
+      lockFolder(dir ?? (file ? path.dirname(path.resolve(file)) : this.home));
+    }
     // `whenBusy` (canonical) wins over legacy `mode`; anything else is "auto".
     const normalizedMode = resolveWhenBusy(config.midSession);
     const rawMaxQueued = (config.midSession as any)?.maxQueued;

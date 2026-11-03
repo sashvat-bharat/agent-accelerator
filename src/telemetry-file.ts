@@ -4,12 +4,14 @@
  * Each event is a single synchronous append, so a process crash keeps every
  * event already emitted: a `tool.call_started` with no ending event was in
  * flight, and the last `tool.progress` shows how far it got. Power loss is not
- * covered (no fsync). `turn.thinking` (full reasoning text) is never written.
+ * covered (no fsync, by design: this is observability, not state). `turn.thinking`
+ * (full reasoning text) is never written. Takes the home's one-process lock.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { telemetryBus } from "./telemetry.ts";
 import { safeStringify } from "./utils/serialization.ts";
+import { lockFolder } from "./utils/durable.ts";
 
 const sinks = new Set<string>();
 
@@ -17,6 +19,7 @@ const sinks = new Set<string>();
 export function persistTelemetry(home: string): void {
   const dir = path.join(home, "telemetry");
   if (sinks.has(dir)) return;
+  lockFolder(home);
   sinks.add(dir);
   telemetryBus.onEvent((event) => {
     if (event.code === "turn.thinking") return;

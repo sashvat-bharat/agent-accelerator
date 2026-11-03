@@ -79,7 +79,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | `temperature` / `topP` / `sampling` | Removed on every provider; do not pass them |
 | Gemini 1.x / 2.x | Rejected; minimum is Gemini 3 |
 | `cache` TTLs (`5m`, `30m`, `1h`, `12h`) | Honoured only where the provider supports them (see README Cache table); others warn and fall back |
-| Multiple processes sharing one `home` | No cross-process lock yet |
+| Multiple processes sharing one folder you persist to | The folder is locked: the second process gets a `ConfigError`. Use one `home` per process |
 | The `SubAgent` class | Deprecated; use `Agent` + `subagents` |
 | OpenRouter Responses transport | Discontinued; OpenRouter uses Chat Completions |
 
