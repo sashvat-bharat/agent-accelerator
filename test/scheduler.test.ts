@@ -298,8 +298,8 @@ describe("scheduled actions config", () => {
     const h = harness();
     const a = new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1", home: h.home, persist: {} });
     expect(a.persistConfig?.dir).toBe(path.join(h.home, "sessions"));
-    const explicit = new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1", home: h.home, persist: { file: "x.json" } });
-    expect(explicit.persistConfig).toEqual({ file: "x.json" });
+    const explicit = new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1", home: h.home, persist: { file: path.join(h.home, "x.json") } });
+    expect(explicit.persistConfig).toEqual({ file: path.join(h.home, "x.json") });
     expect(new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1" }).persistConfig).toBeUndefined();
   });
 });

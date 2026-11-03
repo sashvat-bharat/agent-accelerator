@@ -131,7 +131,9 @@ An `Agent` holds:
 | `apiKey`          | `string`                                             | Overrides environment-based API-key lookup for this agent.                                                                                                 |
 | `baseUrl`         | `string`                                             | Overrides the default endpoint for this agent.                                                                                                             |
 | `stateless`       | `boolean`                                            | When `true`, history is cleared before and after each `run`. Useful for one-shot evaluators. Defaults to `false`.                                          |
-| `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions: rewrites the session file after every step (user/assistant/tool/sub-agent). `{ dir }` uses `sessions/<sessionId>/session.json`, `{ file }` a single `.session.json`, `{}` uses `<home>/sessions`. Writes are atomic and never fail a turn. |
+| `runRetries`      | `number`                                             | A run that FAILED for a transient reason (provider down or overloaded, timeouts, a cut stream, after `retry` gave up) is tried again from where it stopped, waiting 5 s, 15 s, 45 s, then 60 s. Default `3`, `0` = off. Finished tool calls are not repeated; the response reports the failed attempts' tool calls and usage. Never for aborts, 400/401/403/404, bad config, budgets or limits. `run()` and queued runs only, not `stream()`. |
+| `resume`          | `"automatic" \| "explicit"`                         | Crash recovery (needs `persist: { dir }` + the same `sessionId`): `automatic` (default) continues a cut-off run when the Agent is constructed, `explicit` waits for `agent.resume()`. Finished tool calls are never run again. `agent.interrupted()` lists cut-off runs. |
+| `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions, saved after every step (user/assistant/tool/sub-agent). `{ dir }` keeps `sessions/<sessionId>/session.json` (snapshot) plus an append-only `journal.ndjson` (one line per step, so a long chat costs the same per step as a short one), `{ file }` a single `.session.json`, `{}` uses `<home>/sessions`. Writes are durable (fsync, `.bak` of the last good file, atomic rename) and never fail a turn. |
 | `home`            | `string`                                             | Folder for everything the SDK writes to disk (`sessions/`, `scheduled_actions/`, `telemetry/`). Defaults to `setHome(dir)`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory. An explicit `persist.dir` / `persist.file` still wins.        |
 
 When `dynamicSubagents.enabled` is set without a resolvable worker model, construction throws `SubAgentModelError`.
@@ -364,7 +366,7 @@ telemetryBus.onEvent((e) => {
 
 **How it behaves**
 
-* **One local clock.** A single timer per home folder ticks once a second against the machine's own time and only asks what is overdue, so drift or sleep cannot skip a run. There is no timezone or daylight-saving logic. The timer is `unref`'d and runs only while something is pending, so actions run only while your process is alive.
+* **One local clock.** A single timer per home folder (guarded by a one-process lock, `<home>/.lock`) ticks once a second against the machine's own time and only asks what is overdue, so drift or sleep cannot skip a run. There is no timezone or daylight-saving logic. The timer is `unref`'d and runs only while something is pending, so actions run only while your process is alive.
 * **The creating `Agent` runs it.** The task stores the Agent's `name`; each run goes to the live Agent with that name (latest wins), using its worker model and tool pool. The scheduler holds only a weak reference, so keep your `Agent` referenced; if none is alive, the run counts as missed.
 * **Each run is fresh.** A new stateless dynamic sub-agent built from the saved fields, on your fixed worker model and tool pool, never touching the Main Agent's session. It inherits the parent's limits, retry policy, `fileAccess` and `captureRaw`.
 * **Files are the truth.** Everything lives in `<home>/scheduled_actions/`: `tasks.json` (every action), `deliveries.json` (saved results waiting for their delivery time) and one folder per action with one `.md` file per run (a small header, then the result). The file is re-read and validated before each run, so editing `instructions` or `task` there takes effect on the next run. API keys, the model and tool code are never stored. Don't put secrets in `instructions`.
@@ -406,6 +408,34 @@ const agent = new Agent({
 
 The agent loop answers the 3rd consecutive identical call (same name and arguments) with a `repeat_blocked` error, so the model can reuse the prior result or change its arguments. Tools marked `repeatable: true`, or `idempotent: true` unless `repeatable` is set, are exempt.
 
+
+### Asking permission: `ctx.stop`
+
+The SDK has no approval modes; you write the check inside `execute` (your own function that asks your user) and call `ctx.stop(reason)` when the answer is no:
+
+```ts
+const pay = tool({
+  description: "Pay an invoice.",
+  input: z.object({ invoiceId: z.string(), amount: z.number() }),
+  execute: async ({ invoiceId, amount }, ctx) => {
+    if (!(await getPermission(`Pay $${amount} for ${invoiceId}?`))) ctx.stop("user declined the payment");
+    return await payInvoice(invoiceId, amount);   // never reached after a stop
+  },
+});
+```
+
+`ctx.stop` throws, so the code after it never runs (even if you forget `return`). The reason is saved as that call's result, calls that were running in parallel in the same batch still run to completion (none is skipped or aborted), and then the run ends with `finishReason: "stopped"` and **no further model turn**. The agent waits for the next user message; the model then sees the reason as the tool's result. A steer typed while the batch ran becomes the next run. The stop is saved with the call, so a crash cannot turn a "no" into a "yes": after a restart the run is closed as stopped without calling the model. A tool's `timeoutMs` counts the time spent waiting for your check, so leave it off for tools that ask a person.
+
+To guard a built-in tool such as `spawn_subagents` or `scheduled_actions`, wrap it on the agent after construction:
+
+```ts
+const inner = agent.tools["spawn_subagents"]!;
+agent.tools["spawn_subagents"] = {
+  ...inner,
+  execute: async (input, ctx) => ((await getPermission("Spawn workers?")) ? inner.execute(input, ctx) : ctx.stop("spawning was not approved")),
+};
+```
+
 ### Tool Failures and Tracing
 
 When a tool throws, the model gets the error line plus a JSON block: error `name`/`code`/`status`, `attempts`, `timedOut`, the last progress the tool reported, and a hint not to repeat finished work. Report progress from inside a tool with `ctx.emit({ type: "progress", ... })`, or throw `new ToolError(msg, { context: { progress } })`.
@@ -428,6 +458,20 @@ Every call also emits `tool.*` events on `telemetryBus` (nothing is written unle
 ```ts
 telemetryBus.onEvent((e) => e.code.startsWith("tool.") && appendFileSync("tools.ndjson", JSON.stringify(e) + "\n"));
 ```
+
+**Tool logs.** With `persist: { dir }` every tool call also gets its own log file in the session folder, `tool-logs/<n>-<tool>.ndjson` (numbered in the order calls start, continuing after restarts). The SDK writes the input, each attempt, retry, the full result or error (stack included) and the duration; your tool adds its own lines with `ctx.log(message, data?)`. Every line is flushed to disk as it is written, so after a crash the file shows how far the call got:
+
+```ts
+execute: async ({ files }, ctx) => {
+  for (const [i, f] of files.entries()) {
+    await upload(f);
+    ctx.log(`uploaded ${i + 1} of ${files.length}`, { file: f });
+  }
+}
+```
+
+The call's result carries `logFile` (relative to the session folder), and the saved session keeps only that reference. The log is for you and your harness: it is never sent to the model, nothing in the SDK reads it back (a tool that lets the agent read its own logs is yours to build), and it is not size-capped. Without `persist: { dir }` (or for `stateless` agents) nothing is written and `ctx.log` is a no-op.
+
 
 ### Tool Timing and Deadlines
 
@@ -927,7 +971,7 @@ SubAgentExecutionMetadata {
 }
 ```
 
-`finishReason` is `"max_turns"` when a finite `maxTurns` limit stopped the run with tool calls still pending (with an `agent.max_turns_truncated` warning on `telemetryBus` naming the dropped tools).
+`finishReason` is `"stopped"` when a tool ended the run with `ctx.stop(reason)` (see *Asking permission*). It is `"max_turns"` when a finite `maxTurns` limit stopped the run with tool calls still pending (with an `agent.max_turns_truncated` warning on `telemetryBus` naming the dropped tools).
 
 ### SubAgentStep
 
@@ -1230,6 +1274,7 @@ never in the gitignored snapshot.
 * `getEnv(key, fallback?)` — resolves an environment variable.
 * `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
+* Two retry layers: `retry` repeats one failed provider CALL (seconds); `runRetries` repeats a whole failed RUN from where it stopped (minutes, `agent.run_retry` on the bus) while the agent stays busy, so queued prompts wait.
 * `withRetries(fn, { maxRetries?, maxRetryDelayMs?, signal?, label? })` / `isTransientError(err)` — bounded retries for transient provider failures (defaults: 2 retries, 5s cap, aborts never retried).
 
 ---
@@ -1275,6 +1320,10 @@ bun run examples/13-structured-output.ts
 bun run examples/14-scheduled-actions.ts [--quick]
 # scheduled actions walkthrough on your computer's clock: starts working ~1 minute from now,
 # delivers ~2 minutes from now (code-scheduled and model-scheduled); --quick skips the waiting
+
+bun run examples/15-durable-agent.ts
+# a durable agent: killed mid-tool (SIGKILL), picked up by a new process (interrupted()/resume()),
+# finished tools not repeated, run retry, ctx.stop approval, tool logs (about 5 s of waiting)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
@@ -1326,10 +1375,10 @@ saveSessionFile(".session.json", agent, telemetry);
 
 * `agent.exportSession(telemetry)` / `agent.importSession(saved)` round-trip messages, system prompt, model, thinking level, instructions, cache, worker model, and sub-agent traces without touching `AgentContext` internals.
 * `SessionTelemetry` accumulates `input / output / cacheRead / cacheWrite / reasoning / cost`, with clamped `turnHitRate()` / `totalHitRate()`, a dual `formatBar(res)`, and `formatSessionBanner(saved, telemetry, path)` for startup. Cost follows the [TokenUsage](#response-usage-and-raw-data) rules.
-* Files are JSON with one line per top-level field and one line per turn (2-space indent), written atomically (temp + rename). Google turns also store their raw `providerSteps`, so a resumed session replays them exactly.
+* Files are JSON with one line per top-level field and one line per turn (2-space indent), written durably (temp file, fsync, `.bak` of the last good version, atomic rename; a damaged file falls back to its `.bak` on load). Google turns also store their raw `providerSteps`, so a resumed session replays them exactly.
 * Binary media (bytes, data URLs, base64) is extracted to `media/` on save via `saveSessionDir("sessions", agent, telemetry)` → `sessions/<sessionId>/{session.json, media/*}`; remote URLs and local paths stay references. `loadSessionDir(dir)` resolves `media/…` refs back to absolute paths, and `findLatestSessionDir("sessions")` resumes the most recent session.
 * Sub-agent traces persist in a dedicated `subagents` section keyed by TrackingID (`{ trackingId, name, sessionId, parentSessionId, status, task, turns, usage, steps, text }`). Files stay lean: redundant `rawArguments` and repeated step text are dropped on save (rebuilt/kept live in memory).
-* With `persist: { dir }` or `{ file }`, the session file is rewritten after every step, so a crash loses at most the in-flight step.
+* With `persist: { dir }` each step appends one line to `journal.ndjson` (fsynced); the journal is folded into a fresh `session.json` after 500 lines or 4 MB, or when history changes another way (rollback, `reset()`, `importSession`). `loadSessionDir` replays the journal over the snapshot; a torn last line is ignored, damage earlier stops the replay with a `session.journal_corrupt` warning. A run that a crash cut off is picked up again by a new Agent with the same `sessionId` (see `resume`): the conversation is reloaded, tool calls with a saved result are not repeated, the rest run, then waiting prompts follow. The journal also records where each run began (`runs`: id, index of its user message, time) and the prompts still waiting in the steer inbox and follow-up queue (`pending`, read back by `loadSessionDir` as `session.pending`; `importSession` restores `runs`). Embedded media is written once as `media/<kind>-h<hash>.<ext>`. With `persist: { file }` the single file is rewritten after every step. Either way a crash loses at most the in-flight step. Do not call `saveSessionDir` on a folder an Agent persists to.
 
 ---
 ## Scripts and Structure

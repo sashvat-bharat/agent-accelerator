@@ -9,6 +9,7 @@ import { ConfigError } from "../types/errors.ts";
 import { isSubagentResult } from "./subagent-result.ts";
 import { isTruncatedArguments } from "../types/tool.ts";
 import { telemetryBus } from "../telemetry.ts";
+import type { ToolLogWriter } from "../session/tool-log.ts";
 
 export interface ExecuteToolsOptions {
   tools: Record<string, ToolDefinition>;
@@ -17,6 +18,10 @@ export interface ExecuteToolsOptions {
   parallel?: boolean;
   signal?: AbortSignal;
   sessionId?: string;
+  /** Called the moment EACH call finishes (before the whole batch does), so a caller can save a result before the next tool is done. Never throws into the run. */
+  onResult?: (result: ToolResultRecord) => void;
+  /** Opens the log file of one call (only when the Agent persists to a folder); the executor writes its steps into it and `ctx.log` writes through it. */
+  openToolLog?: (call: ToolCallRecord, sessionId: string | undefined) => ToolLogWriter | undefined;
   /** Forwards live sub-agent deltas (realtime worker thinking/text) to the caller. */
   onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
 }
@@ -50,6 +55,14 @@ export function normalizeToolName(name: string): string {
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/[\s-]+/g, "_")
     .toLowerCase();
+}
+
+// Thrown by `ctx.stop(reason)` to unwind the tool's code at once; the executor turns it into a stopped result and never retries it.
+class ToolStopSignal extends Error {
+  constructor() {
+    super("The tool ended the run with ctx.stop()");
+    this.name = "ToolStopSignal";
+  }
 }
 
 /** Default cap for string tool results kept for model context. */
@@ -467,7 +480,7 @@ async function executeAttempt(
 export async function executeToolCalls(
   options: ExecuteToolsOptions
 ): Promise<ToolResultRecord[]> {
-  const { tools, toolCalls, agentName, parallel = true, signal, sessionId, onSubagentEvent } = options;
+  const { tools, toolCalls, agentName, parallel = true, signal, sessionId, onSubagentEvent, onResult, openToolLog } = options;
   assertNoToolCollisions(tools);
   const globalSemaphore = new Semaphore(DEFAULT_TOOL_CONCURRENCY);
   const perToolSemaphores = new Map<string, Semaphore>();
@@ -485,8 +498,14 @@ export async function executeToolCalls(
   };
 
   const scope = { agentName, sessionId };
-  const runSingle = async (call: ToolCallRecord): Promise<ToolResultRecord> => {
+  const runSingle = async (call: ToolCallRecord, log: ToolLogWriter | undefined): Promise<ToolResultRecord> => {
     const startTime = nowMs();
+    // Every lifecycle step goes to the telemetry bus AND this call's log file.
+    const trace = (phase: string, level: "info" | "warn" | "error", data: Record<string, unknown> = {}): void => {
+      traceToolEvent(phase, level, call, scope, data);
+      log?.write({ phase, level, ...data });
+    };
+    log?.write({ phase: "input", name: call.name, input: toJsonSafe(call.arguments) });
     // Latest `ctx.emit({ type: "progress", ... })` snapshot: what the tool had finished before any failure.
     let progress: unknown;
     let attempts = 0;
@@ -497,7 +516,7 @@ export async function executeToolCalls(
     // finishReason here — return a synthetic error so the model retries with
     // complete JSON.
     if (isTruncatedToolCall(call)) {
-      traceToolEvent("call_blocked", "warn", call, scope, { reason: "truncated_arguments" });
+      trace("call_blocked", "warn", { reason: "truncated_arguments" });
       return {
         id: call.id,
         name: call.name,
@@ -513,7 +532,7 @@ export async function executeToolCalls(
     const toolDef = resolved.definition;
 
     if (!toolDef) {
-      traceToolEvent("call_blocked", "warn", call, scope, { reason: "tool_not_found", suggestion: resolved.suggestion });
+      trace("call_blocked", "warn", { reason: "tool_not_found", suggestion: resolved.suggestion });
       const suffix = resolved.suggestion ? ` Did you mean '${resolved.suggestion}'?` : "";
       return {
         id: call.id,
@@ -527,6 +546,12 @@ export async function executeToolCalls(
     let releaseGlobal: (() => void) | undefined;
     let releaseTool: (() => void) | undefined;
     let executionStartTime = startTime;
+    // Set by `ctx.stop(reason)`: the call's result becomes the reason and the run ends after this batch.
+    let stopReason: string | undefined;
+    const stoppedResult = (): ToolResultRecord => {
+      trace("call_stopped", "warn", { reason: stopReason, attempts, durationMs: elapsedMs(executionStartTime) });
+      return { id: call.id, name: resolved.name, result: stopReason, isError: false, stopped: true, durationMs: elapsedMs(executionStartTime) };
+    };
 
     try {
       if (signal?.aborted) {
@@ -542,9 +567,14 @@ export async function executeToolCalls(
         signal,
         sessionId,
         onSubagentEvent,
+        stop: (reason: string): never => {
+          stopReason ??= String(reason);
+          throw new ToolStopSignal();
+        },
+        log: (message, data) => log?.write({ phase: "log", message, ...(data !== undefined ? { data: toJsonSafe(data) } : {}) }),
         emit: (event) => {
           if (event?.type === "progress") progress = event;
-          traceToolEvent(event?.type === "progress" ? "progress" : "event", "info", call, scope, { event: capJson(event) });
+          trace(event?.type === "progress" ? "progress" : "event", "info", { event: capJson(event) });
         },
       };
 
@@ -565,7 +595,7 @@ export async function executeToolCalls(
           const hint = expectedParams
             ? ` Expected parameters: ${expectedParams}.`
             : "";
-          traceToolEvent("call_blocked", "warn", call, scope, { reason: "schema_validation", detail: parseRes.error.message });
+          trace("call_blocked", "warn", { reason: "schema_validation", detail: parseRes.error.message });
           return {
             id: call.id,
             name: call.name,
@@ -597,20 +627,21 @@ export async function executeToolCalls(
       executionStartTime = nowMs();
       let rawResult: unknown;
       let attempt = 0;
-      traceToolEvent("call_started", "info", call, scope, { maxAttempts, timeoutMs });
+      trace("call_started", "info", { maxAttempts, timeoutMs });
       while (true) {
         attempt++;
         attempts = attempt;
-        traceToolEvent("attempt_started", "info", call, scope, { attempt, maxAttempts });
+        trace("attempt_started", "info", { attempt, maxAttempts });
         try {
           rawResult = await executeAttempt(toolDef, parsedInput, context, timeoutMs);
           break;
         } catch (err: any) {
           if (signal?.aborted) throw new Error("Tool execution aborted");
+          if (stopReason !== undefined) throw err; // ctx.stop: not a failure, never retried
           timedOut = err?.toolTimeout === true;
           const willRetry =
             isTransientError(err) && attempt < maxAttempts && !(err?.code === "ETIMEDOUT" && (!configuredTries || configuredTries <= 0));
-          traceToolEvent("attempt_failed", "warn", call, scope, { attempt, maxAttempts, willRetry, error: describeError(err), progress: capJson(progress) });
+          trace("attempt_failed", "warn", { attempt, maxAttempts, willRetry, error: describeError(err), progress: capJson(progress) });
           if (!isTransientError(err) || attempt >= maxAttempts) throw err;
           // A timeout is a deliberate per-attempt deadline, not a parent
           // cancellation (which rejects via the abort signal instead and is
@@ -620,15 +651,19 @@ export async function executeToolCalls(
           // tool body, but a tool that ignores the signal still resolves.
           if (err?.code === "ETIMEDOUT" && (!configuredTries || configuredTries <= 0)) throw err;
           const delayMs = Math.min(30_000, 250 * 2 ** Math.min(attempt - 1, 7));
-          traceToolEvent("retry_scheduled", "info", call, scope, { attempt, nextAttempt: attempt + 1, delayMs });
+          trace("retry_scheduled", "info", { attempt, nextAttempt: attempt + 1, delayMs });
           await waitForRetry(delayMs, signal);
         }
       }
 
+      if (stopReason !== undefined) return stoppedResult(); // the tool caught the stop signal but the run still stops
+
       // Undefined means "no value", serialized null-safe as "null" (changed
       // from the legacy "Success" marker so model context stays valid JSON).
+      // The log keeps the full result (the model gets a capped copy below).
+      log?.write({ phase: "result", result: isSubagentResult(rawResult) ? rawResult.xml : toJsonSafe(rawResult) });
       const finishOk = (resultChars: number): void =>
-        traceToolEvent("call_succeeded", "info", call, scope, { attempts: attempt, durationMs: elapsedMs(executionStartTime), resultChars });
+        trace("call_succeeded", "info", { attempts: attempt, durationMs: elapsedMs(executionStartTime), resultChars });
       if (rawResult === undefined) {
         finishOk(4);
         return {
@@ -676,8 +711,9 @@ export async function executeToolCalls(
       // scrubbed message plus what the tool finished before failing, so it repairs
       // only the remainder instead of repeating completed side effects.
       const aborted = signal?.aborted === true;
+      if (stopReason !== undefined && !aborted) return stoppedResult();
       const done = err?.context?.progress ?? progress;
-      traceToolEvent(aborted ? "call_aborted" : timedOut ? "call_timed_out" : "call_failed", "error", call, scope, {
+      trace(aborted ? "call_aborted" : timedOut ? "call_timed_out" : "call_failed", "error", {
         attempts,
         durationMs: elapsedMs(executionStartTime),
         error: describeError(err),
@@ -726,14 +762,35 @@ export async function executeToolCalls(
     }
   };
 
+  // Runs one call and reports its result at once; a throwing observer must not fail the run.
+  const runAndReport = async (call: ToolCallRecord): Promise<ToolResultRecord> => {
+    let log: ToolLogWriter | undefined;
+    try {
+      log = openToolLog?.(call, sessionId);
+    } catch {
+      log = undefined; // logging is best effort: the call runs without a log
+    }
+    let result: ToolResultRecord;
+    try {
+      result = await runSingle(call, log);
+    } finally {
+      log?.close();
+    }
+    if (log) result.logFile = log.file;
+    try {
+      onResult?.(result);
+    } catch {
+      // why: observers (persistence) are best-effort.
+    }
+    return result;
+  };
   if (parallel && toolCalls.length > 1) {
-    const results = await Promise.all(toolCalls.map((tc) => runSingle(tc)));
-    return results;
+    return Promise.all(toolCalls.map((tc) => runAndReport(tc)));
   }
 
   const results: ToolResultRecord[] = [];
   for (const tc of toolCalls) {
-    results.push(await runSingle(tc));
+    results.push(await runAndReport(tc));
   }
   return results;
 }

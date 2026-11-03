@@ -22,10 +22,11 @@
 | Model-invented helpers | `dynamicSubagents: { model, tools }` | [Multi-agent](guides/multi-agent.md) |
 | Work later or on repeat | `dynamicSubagents.allowScheduledActions` + `createScheduledAction` | [Multi-agent](guides/multi-agent.md) |
 | Redirect a busy agent | `steer()`, `queue()`, `interrupt()` | [Tools and streaming](guides/tools-and-streaming.md) |
-| Save / resume | `persist: { dir }`, `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
+| Save / resume / survive a crash | `persist: { dir }` + same `sessionId` (cut-off runs resume by themselves), `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
-| Observe | `telemetryBus.onEvent` | [Safety](guides/safety-and-ops.md) |
+| Observe | `telemetryBus.onEvent` |
+| Ask permission before a tool acts | check inside `execute`, refuse with `ctx.stop(reason)` (run ends `stopped`) | [Tools and streaming](guides/tools-and-streaming.md) | [Safety](guides/safety-and-ops.md) |
 
 ## Template: a safe production agent
 
@@ -73,13 +74,14 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | Do not use | Why / instead |
 |---|---|
 | `hooks`, `contextManagement`, `logger` config | Placeholders that only warn. Use `telemetryBus` |
-| `needsApproval`, tool `retry` / `tags` / `output` | Stored but not enforced. Add your own approval step |
+| `needsApproval` | Removed. Ask inside `execute` and refuse with `ctx.stop(reason)` |
+| Tool `retry` / `tags` / `output` | Stored but not enforced |
 | `thinking.budgetTokens` | Not forwarded by any adapter |
 | `stop`, `seed` on Google or OpenAI | Warn and dropped |
 | `temperature` / `topP` / `sampling` | Removed on every provider; do not pass them |
 | Gemini 1.x / 2.x | Rejected; minimum is Gemini 3 |
 | `cache` TTLs (`5m`, `30m`, `1h`, `12h`) | Honoured only where the provider supports them (see README Cache table); others warn and fall back |
-| Multiple processes sharing one `home` | No cross-process lock yet |
+| Multiple processes sharing one folder you persist to | The folder is locked: the second process gets a `ConfigError`. Use one `home` per process |
 | The `SubAgent` class | Deprecated; use `Agent` + `subagents` |
 | OpenRouter Responses transport | Discontinued; OpenRouter uses Chat Completions |
 

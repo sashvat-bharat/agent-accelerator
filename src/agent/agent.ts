@@ -1,8 +1,9 @@
-import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState } from "../types/agent.ts";
+import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState, InterruptedRun } from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
 import { normalizeThinkingV2, resolveWhenBusy, normalizeWorkerTimeout } from "../tools/tool.ts";
-import type { ToolDefinition } from "../types/tool.ts";
+import type { ToolDefinition, ToolResultRecord } from "../types/tool.ts";
+import { isSubagentResult } from "../tools/subagent-result.ts";
 import { CACHE_OPTIONS, type ThinkingLevel, type ThinkingConfig, type CacheOption, type ServiceTier } from "../types/core.ts";
 import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type StreamEvent } from "../types/response.ts";
@@ -19,10 +20,12 @@ import * as path from "node:path";
 import { registerAgent } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../scheduler/store.ts";
 import { persistTelemetry } from "../telemetry-file.ts";
+import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
-import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
-import { createSessionId, nowMs } from "../utils/session.ts";
+import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, endsWithStop, accumulateUsage, type SteerEntry } from "./loop.ts";
+import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
+import { createSessionId, nowMs, newRunId } from "../utils/session.ts";
 import {
   chargeBudgetUsage,
   checkBudget,
@@ -31,7 +34,9 @@ import {
   listSubAgentTraceIdsForSessions,
   type SubAgentTrace,
 } from "./delegation.ts";
-import { saveSessionDir, saveSessionFile, findInvalidMessage, telemetryBus } from "../session/store.ts";
+import { saveSessionFile, sessionDirFor, loadSessionDir, findInvalidMessage, telemetryBus, type SessionRunMark, type SessionRunEnd, type SessionPending, type SessionToolRecord } from "../session/store.ts";
+import { SessionJournal } from "../session/journal.ts";
+import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
 import { clearSessionRouting, normalizeStructuredOutput, normalizeStop } from "../providers.ts";
 import type { StructuredOutputSpec } from "../types/model.ts";
@@ -53,7 +58,7 @@ export function resolveEffectiveThinking(
   return { enabled: true, level: overrideLevel as ThinkingConfig["level"] };
 }
 
-import { ConfigError, SessionLoadError } from "../types/errors.ts";
+import { ConfigError, SessionLoadError, isAbortError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (Q-21 fallback when
@@ -61,6 +66,9 @@ import { ConfigError, SessionLoadError } from "../types/errors.ts";
  * properties are attached to AbortController instances.
  */
 const mergeDisposers = new WeakMap<AbortController, () => void>();
+
+/** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
+export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
 
 /** Max named sessions kept per Agent (Q-19a LRU). */
 const SESSION_LRU_MAX = 100;
@@ -246,6 +254,23 @@ export class Agent {
   private sessions = new Map<string, { context: AgentContext; lastAccess: number }>();
   /** Coalesced persistence single-flight flag (Q-28). */
   private persistScheduled = false;
+  /** Step journal of the persisted session folder (dir mode only). */
+  private journal?: SessionJournal;
+  /** Log files of tool calls in the persisted session folder (dir mode only). */
+  private toolLogs?: ToolLogs;
+  private toolLogsDir?: string;
+  /** Where each run of the default session began (saved with the session). @internal */
+  readonly runMarks: SessionRunMark[] = [];
+  /** Tool calls finished in the current run; saved the moment each finishes so a crash never repeats them. @internal */
+  readonly toolRecords: SessionToolRecord[] = [];
+  /** The run in flight (its mark has no ending yet, but it is not "interrupted"). */
+  private activeMark?: SessionRunMark;
+  /** What to do with a cut-off run at construction (see `AgentConfig.resume`). */
+  private readonly resumeMode: "automatic" | "explicit";
+  /** How often a failed run is tried again (see `AgentConfig.runRetries`). */
+  private readonly runRetries: number;
+  /** The resume in flight, so a second `resume()` returns the same promise. */
+  private resuming?: Promise<AgentResponse | undefined>;
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -313,6 +338,11 @@ export class Agent {
       config.persist && !config.persist.dir && !config.persist.file
         ? { ...config.persist, dir: path.join(this.home, "sessions") }
         : config.persist;
+    // One process per folder: fail fast here, before anything is written (the home for `persist: {}`, else the folder named).
+    if (config.persist) {
+      const { dir, file } = config.persist;
+      lockFolder(dir ?? (file ? path.dirname(path.resolve(file)) : this.home));
+    }
     // `whenBusy` (canonical) wins over legacy `mode`; anything else is "auto".
     const normalizedMode = resolveWhenBusy(config.midSession);
     const rawMaxQueued = (config.midSession as any)?.maxQueued;
@@ -347,6 +377,14 @@ export class Agent {
       );
     }
     this.cache = config.cache;
+    if (config.resume !== undefined && config.resume !== "automatic" && config.resume !== "explicit") {
+      throw new ConfigError(`[Agent Accelerator] Invalid resume ${JSON.stringify(config.resume)}: expected "automatic" (default) or "explicit".`);
+    }
+    this.resumeMode = config.resume ?? "automatic";
+    if (config.runRetries !== undefined && !(Number.isInteger(config.runRetries) && config.runRetries >= 0)) {
+      throw new ConfigError(`[Agent Accelerator] Invalid runRetries ${JSON.stringify(config.runRetries)}: expected a whole number >= 0 (default 3, 0 turns it off).`);
+    }
+    this.runRetries = config.runRetries ?? 3;
 
     this.serviceTier = config.serviceTier;
     this.onFailure =
@@ -415,6 +453,115 @@ export class Agent {
 
     this.context = new AgentContext(this.getFullInstructions());
     if (dyn?.allowScheduledActions) registerAgent(this);
+    if (this.recoverSession() && this.resumeMode === "automatic") {
+      // Synchronously, so a run() issued right after construction queues BEHIND the resumed run.
+      this.resume().catch((err) => this.reportResumeFailure(err));
+    }
+  }
+
+  // Loads a persisted session that a crash cut off (a run without an ending) or that still had waiting prompts, so it can be resumed; true when there is something to resume; in: the session folder of `persist.dir`, out: context, runMarks, toolRecords, pendingQueue.
+  private recoverSession(): boolean {
+    const root = this.persistConfig?.dir;
+    if (!root || this.stateless) return false;
+    let dir: string;
+    try {
+      dir = sessionDirFor(root, this.sessionId);
+    } catch {
+      return false; // not a usable session id for a folder name: nothing was ever saved under it
+    }
+    const session = loadSessionDir(dir)?.session; // a session over the load limits throws SessionLoadError: better than overwriting it
+    if (!session) return false;
+    const waiting = [...(session.pending?.steer ?? []), ...(session.pending?.queue ?? [])];
+    if (!(session.runs ?? []).some((r) => !r.end) && waiting.length === 0) return false;
+    this.context.messages = session.messages;
+    this.runMarks.splice(0, this.runMarks.length, ...(session.runs ?? []));
+    const open = new Set(unfinishedToolCalls(this.context.messages).map((c) => c.id));
+    this.toolRecords.splice(0, this.toolRecords.length, ...(session.tools ?? []).filter((t) => open.has(t.id)));
+    for (const w of waiting) {
+      this.pendingQueue.push({
+        prompt: w.prompt,
+        options: w.additionalContext ? { additionalContext: w.additionalContext } : undefined,
+        isStream: false,
+        resolve: () => {},
+        reject: (err) => this.reportResumeFailure(err),
+      });
+    }
+    return true;
+  }
+
+  // Says on the telemetry bus that resuming (or a prompt that was waiting) failed; in: a rejected resume, out: telemetryBus.
+  private reportResumeFailure(err: unknown): void {
+    telemetryBus.emitWarning("agent.resume_failed", `[Agent Accelerator] Resuming session ${this.sessionId} failed: ${err instanceof Error ? err.message : String(err)}`, { sessionId: this.sessionId });
+  }
+
+  /** Runs that a crash cut off (they began, never ended and are not running now), oldest first. Needs `persist: { dir }` and the same `sessionId` as before the restart. */
+  interrupted(): InterruptedRun[] {
+    const calls = unfinishedToolCalls(this.context.messages).map((c) => c.name);
+    return this.runMarks
+      .filter((m) => !m.end && m !== this.activeMark)
+      .map((m) => ({
+        runId: m.id,
+        startedAt: m.at,
+        prompt: this.previewPrompt((this.context.messages[m.i]?.content ?? "") as string | ContentPart[]),
+        pendingToolCalls: calls,
+      }));
+  }
+
+  /**
+   * Continues the run a crash cut off, without a new prompt: tool calls that already have a saved result are NOT run
+   * again (only calls with no result are), then the model carries on from the saved conversation, and prompts that
+   * were waiting run afterwards. Resolves to that run's response, or `undefined` when nothing was cut off. Returns the
+   * same promise while a resume is in flight. With `resume: "automatic"` (default) the constructor already did this.
+   */
+  resume(): Promise<AgentResponse | undefined> {
+    if (this.resuming) return this.resuming;
+    if (this.currentRun) throw new Error("[Agent Accelerator] resume() needs an idle agent: a run is already active.");
+    const mark = this.runMarks.filter((m) => !m.end && m !== this.activeMark).pop();
+    const last = this.context.messages[this.context.messages.length - 1];
+    const nothingOpen = unfinishedToolCalls(this.context.messages).length === 0;
+    if (!mark || (nothingOpen && (last?.role === "assistant" || endsWithStop(this.context.messages)))) {
+      // The answer was complete (or a tool had ended the run); only the note that it ended was lost.
+      if (mark) this.endRun(mark, endsWithStop(this.context.messages) ? "stopped" : "done");
+      this.pumpQueue();
+      return Promise.resolve(undefined);
+    }
+    telemetryBus.emit({
+      code: "agent.resumed",
+      message: `[Agent Accelerator] resuming run ${mark.id} of session ${this.sessionId}`,
+      data: { sessionId: this.sessionId, runId: mark.id, pendingToolCalls: unfinishedToolCalls(this.context.messages).map((c) => c.name) },
+    });
+    const run = this.startNonStreamingRun("", undefined, mark);
+    const clear = (): void => {
+      if (this.resuming === run) this.resuming = undefined;
+    };
+    this.resuming = run;
+    run.then(clear, clear);
+    return run;
+  }
+
+  // The finished tool calls of the current run as results the loop can reuse; in: toolRecords, out: loopConfig.resume.stored.
+  private storedToolResults(): Map<string, ToolResultRecord> {
+    return new Map(this.toolRecords.map((t) => [t.id, { id: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}), ...(t.stopped ? { stopped: true } : {}) } as ToolResultRecord]));
+  }
+
+  // Closes a run's mark with how it ended and saves that at once (not on the next tick), so the disk is up to date when `await run()` returns; in: the run's promise handlers, out: runMarks + journal.
+  private endRun(mark: SessionRunMark | undefined, status: SessionRunEnd): void {
+    if (!mark) return;
+    if (!mark.end) mark.end = status;
+    if (this.activeMark === mark) this.activeMark = undefined;
+    this.doPersist();
+  }
+
+  // Remembers a finished tool call and saves it at once (synchronously): the work is on disk before anything else can happen; in: the executor's per-call callback, out: toolRecords + journal.
+  private recordTool(result: ToolResultRecord): void {
+    this.toolRecords.push({
+      id: result.id,
+      name: result.name,
+      result: isSubagentResult(result.result) ? result.result.xml : result.result,
+      ...(result.isError ? { isError: true } : {}),
+      ...(result.stopped ? { stopped: true } : {}),
+    });
+    this.doPersist();
   }
 
   private getFullInstructions(): string | undefined {
@@ -461,6 +608,7 @@ export class Agent {
     this.context.messages = [];
     this.context.thoughtSignatures = [];
     this.context.systemPrompt = this.getFullInstructions();
+    this.runMarks.length = 0;
     // Q-25: reset also drops session-scoped provider chaining/routing.
     try { clearInteractionChains(sid); } catch {}
     try { clearSessionRouting(sid); } catch {}
@@ -546,6 +694,7 @@ export class Agent {
       try { entry.reject(err); } catch {}
       try { entry.deferredStream?.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
     }
+    this.persistNow();
     return n;
   }
 
@@ -716,6 +865,7 @@ export class Agent {
     }
     return new Promise<AgentResponse>((resolve, reject) => {
       this.pendingQueue.push({ prompt, options, isStream: false, resolve, reject });
+      this.persistNow();
       try {
         this.currentRun?.outerStream?.push({
           type: "queued",
@@ -730,6 +880,7 @@ export class Agent {
     if (this.currentRun !== null) return;
     const next = this.pendingQueue.shift();
     if (!next) return;
+    this.persistNow();
     // Q-20: reject queued items whose signal aborted before start.
     try {
       if ((next.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
@@ -788,6 +939,8 @@ export class Agent {
     if (leftover.length > 0) {
       try {
         const max = this.midSessionConfig.maxQueued ?? 20;
+        // Late steers were typed BEFORE anything already queued: they go to the front, in the order they arrived.
+        const lateSteers: Agent["pendingQueue"] = [];
         for (const entry of leftover) {
           try {
             if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
@@ -795,14 +948,14 @@ export class Agent {
               continue;
             }
           } catch { continue; }
-          if (this.pendingQueue.length >= max) {
+          if (this.pendingQueue.length + lateSteers.length >= max) {
             entry.settle?.reject(new Error("[Agent Accelerator] Steer dropped: the follow-up queue is full."));
             continue;
           }
           // The steer was never injected: it now runs as a follow-up, and the
           // caller's promise resolves with that run's response.
           if (entry.settle) entry.settle.deferredToQueue = true;
-          this.pendingQueue.push({
+          lateSteers.push({
             prompt: entry.prompt,
             options: entry.options,
             isStream: false,
@@ -810,8 +963,10 @@ export class Agent {
             reject: entry.settle?.reject ?? (() => {}),
           });
         }
+        this.pendingQueue.unshift(...lateSteers);
       } catch {}
     }
+    this.persistNow();
     // Defer pump so the completing run's .then handlers settle first.
     queueMicrotask(() => this.pumpQueue());
   }
@@ -962,9 +1117,11 @@ export class Agent {
 
   private startNonStreamingRun(
     prompt: string | ContentPart[],
-    options?: AgentRunOptions
+    options?: AgentRunOptions,
+    resumeMark?: SessionRunMark
   ): Promise<AgentResponse> {
     this.resetBudgetState();
+    let mark: SessionRunMark | undefined;
     const runController = new AbortController();
     const steerInbox: SteerEntry[] = [];
     const mergedSignal = this.mergeUserSignal(options?.signal, runController);
@@ -978,7 +1135,14 @@ export class Agent {
       if (effectiveLevel) {
         validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
       }
-      this.prepareTurn(prompt, runOptions, targetContext);
+      if (resumeMark) {
+        // Continuing a cut-off run: no new prompt, the saved conversation is the input.
+        mark = resumeMark;
+        this.activeMark = mark;
+        targetContext.systemPrompt = this.getFullInstructions();
+      } else {
+        mark = this.prepareTurn(prompt, runOptions, targetContext);
+      }
       this.persistNow();
 
       const providerOptions = this.buildProviderOptions(runOptions);
@@ -997,6 +1161,9 @@ export class Agent {
         ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
         ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
+        onToolResult: (r: ToolResultRecord) => this.recordTool(r),
+        openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
+        ...(resumeMark ? { resume: { stored: this.storedToolResults() } } : {}),
         steerInbox,
         onSteerInjected: () => this.persistNow(),
         // Q-22: loop enforces these (plus local timeout races).
@@ -1004,7 +1171,28 @@ export class Agent {
         ...(this.output !== undefined ? { output: this.output } : {}),
       };
 
-      const res = await runAgentLoop(loopConfig);
+      // A run that failed for a transient reason is tried again from where it stopped (the prompt is already in history,
+      // finished tool calls are kept), holding the agent busy meanwhile; anything else fails at once.
+      let res: AgentResponse;
+      const failedAttempts: FailedAttempt[] = [];
+      for (let attempt = 0; ; attempt++) {
+        try {
+          res = await runAgentLoop(attempt === 0 ? loopConfig : { ...loopConfig, resume: { stored: this.storedToolResults() } });
+          break;
+        } catch (err) {
+          if (attempt >= this.runRetries || runOptions?.signal?.aborted || !isRetryableRun(err)) throw err;
+          const partial = (err as { partial?: FailedAttempt }).partial;
+          if (partial?.usage) failedAttempts.push(partial);
+          const delayMs = Math.max(RUN_RETRY_DELAYS_MS[Math.min(attempt, RUN_RETRY_DELAYS_MS.length - 1)]!, readRetryAfterMs(err) ?? 0);
+          telemetryBus.emitWarning(
+            "agent.run_retry",
+            `[Agent Accelerator] Run failed (${err instanceof Error ? err.message : String(err)}); retry ${attempt + 1} of ${this.runRetries} in ${delayMs} ms.`,
+            { sessionId: this.sessionId, attempt: attempt + 1, of: this.runRetries, delayMs }
+          );
+          await sleep(delayMs, runOptions?.signal);
+        }
+      }
+      if (failedAttempts.length > 0) res = withFailedAttempts(res, failedAttempts);
       this.mergeSubagentTraces(res.subagents as any);
       this.persistNow();
       if (this.stateless) {
@@ -1015,6 +1203,10 @@ export class Agent {
     })();
 
     this.currentRun = { steerInbox, abortController: runController, runPromise: task };
+    task.then(
+      (res) => this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done"),
+      (err) => this.endRun(mark, isAbortError(err) ? "aborted" : "failed")
+    );
     const cleanup = () => {
       try { this.cleanupMerge(runController); } catch {}
       if (this.currentRun?.runPromise === task) this.finishCurrentRun();
@@ -1034,7 +1226,7 @@ export class Agent {
     }
     // Q-19a: named session routing (default session for compat).
     const targetContext = this.getSessionContext(options?.sessionId || this.sessionId);
-    this.prepareTurn(prompt, options, targetContext);
+    const mark = this.prepareTurn(prompt, options, targetContext);
     this.persistNow();
 
     this.resetBudgetState();
@@ -1059,6 +1251,8 @@ export class Agent {
       ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
       ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
       onProgress: () => this.persistNow(),
+      onToolResult: (r: ToolResultRecord) => this.recordTool(r),
+      openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
       steerInbox,
       onSteerInjected: () => this.persistNow(),
       // Q-22: loop enforces these (plus local timeout races).
@@ -1070,6 +1264,7 @@ export class Agent {
     this.currentRun = { steerInbox, outerStream: s, abortController: runController };
     s.result().then(
       (res) => {
+        this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done");
         try {
           this.mergeSubagentTraces(res.subagents as any);
           this.persistNow();
@@ -1081,7 +1276,8 @@ export class Agent {
         }
         if (this.currentRun?.outerStream === s) this.finishCurrentRun();
       },
-      () => {
+      (err) => {
+        this.endRun(mark, isAbortError(err) ? "aborted" : "failed");
         try { this.cleanupMerge(runController); } catch {}
         if (this.currentRun?.outerStream === s) this.finishCurrentRun();
       }
@@ -1168,6 +1364,25 @@ export class Agent {
     });
   }
 
+  // Opens the log file of one tool call when this Agent persists its default session to a folder, else nothing; in: the executor, once per call, out: a writer for `tool-logs/<n>-<tool>.ndjson`.
+  private openToolLog(call: { name: string }, sessionId: string | undefined): ToolLogWriter | undefined {
+    const root = this.persistConfig?.dir;
+    if (!root || this.stateless || sessionId !== this.sessionId) return undefined;
+    const dir = sessionDirFor(root, this.sessionId);
+    if (this.toolLogsDir !== dir) {
+      this.toolLogs = new ToolLogs(dir);
+      this.toolLogsDir = dir;
+    }
+    return this.toolLogs!.open(call);
+  }
+
+  /** The step journal of this session's folder (recreated when `sessionId` changes). */
+  private journalFor(root: string): SessionJournal {
+    const dir = sessionDirFor(root, this.sessionId);
+    if (this.journal?.dir !== dir) this.journal = new SessionJournal(dir);
+    return this.journal;
+  }
+
   /** Synchronous persistence write behind the coalesced `persistNow()` gate. */
   private doPersist(): void {
     const cfg = this.persistConfig;
@@ -1176,7 +1391,7 @@ export class Agent {
       if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
     } catch {}
     try {
-      if (cfg.dir) saveSessionDir(cfg.dir, this as any, null);
+      if (cfg.dir) this.journalFor(cfg.dir).sync(this as any);
       else if (cfg.file) saveSessionFile(cfg.file, this as any, null);
     } catch (err) {
       // Q-28: surface via hook instead of swallowing silently.
@@ -1285,6 +1500,7 @@ export class Agent {
       this.context.messages = Array.isArray(data.messages) ? [...data.messages] : [];
     }
     this.context.thoughtSignatures = [];
+    this.runMarks.splice(0, this.runMarks.length, ...(data.runs ?? []).filter((r) => r.i < this.context.messages.length));
     if (data.systemPrompt) {
       this.context.systemPrompt = data.systemPrompt;
     } else {
@@ -1324,7 +1540,7 @@ export class Agent {
     } catch {}
   }
 
-  private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): void {
+  private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): SessionRunMark | undefined {
     // Q-20: prompt validation throws synchronously in both run() and
     // stream() (same timing; documented here).
     if (Array.isArray(prompt) && prompt.length === 0) {
@@ -1352,7 +1568,28 @@ export class Agent {
     } else if (ctx.systemPrompt !== fullInstructions) {
       ctx.systemPrompt = fullInstructions;
     }
+    const mark = ctx === this.context ? this.markRunStart(ctx.messages.length) : undefined;
     ctx.addUserMessage(prompt);
+    return mark;
+  }
+
+  // Records where a run of the default session begins; in: prepareTurn, out: runMarks, saved by the session journal.
+  private markRunStart(index: number): SessionRunMark {
+    for (const old of this.runMarks) if (!old.end) old.end = "abandoned"; // a newer run replaces a cut-off one
+    this.toolRecords.length = 0;
+    const mark: SessionRunMark = { id: newRunId(), i: index, at: Date.now() };
+    this.runMarks.push(mark);
+    this.activeMark = mark;
+    return mark;
+  }
+
+  /** Prompts still waiting (steers not yet injected, queued follow-ups), as the session journal saves them. @internal */
+  pendingPrompts(): SessionPending {
+    const pack = (e: { prompt: string | ContentPart[]; options?: AgentRunOptions }) => ({
+      prompt: e.prompt,
+      ...(e.options?.additionalContext ? { additionalContext: e.options.additionalContext } : {}),
+    });
+    return { steer: (this.currentRun?.steerInbox ?? []).map(pack), queue: this.pendingQueue.map(pack) };
   }
 
   /**
@@ -1432,6 +1669,7 @@ export class Agent {
         }
         return new Promise<AgentResponse>((resolve, reject) => {
           this.pendingQueue.push({ prompt, options, isStream: false, resolve, reject });
+          this.persistNow();
           try {
             this.currentRun?.outerStream?.push({
               type: "queued",
@@ -1615,6 +1853,7 @@ export class Agent {
         } catch {}
       });
       this.pendingQueue.push(queuedEntry as any);
+      this.persistNow();
       // Attach deferred completion to queued promise without exposing it.
       // Real events are piped in pumpQueue() when the turn starts.
       void done.then(
@@ -1850,6 +2089,35 @@ export class Agent {
       if (options?.onThinkingDelta) s.on("thinking_delta", (e: any) => options.onThinkingDelta!(e.thinkingDelta!, e));
     }
   }
+}
+
+/** What a failed run attempt got done before it failed (the `partial` the loop attaches to its error). */
+type FailedAttempt = Partial<AgentResponse> & { usage: TokenUsage };
+
+// Adds what failed attempts already did (tool calls, results, turns, token usage) to the response of the attempt that finally worked, so a retry never hides side effects or cost; in: the final response + each failed attempt's `err.partial`, out: the run's AgentResponse.
+function withFailedAttempts(res: AgentResponse, failed: FailedAttempt[]): AgentResponse {
+  const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  for (const f of failed) accumulateUsage(usage, f.usage);
+  accumulateUsage(usage, res.usage);
+  return new AgentResponse({
+    text: res.text,
+    ...(res.parsed !== undefined ? { parsed: res.parsed } : {}),
+    thinking: res.thinking,
+    thoughtSignature: res.thoughtSignature,
+    toolCalls: [...failed.flatMap((f) => f.toolCalls ?? []), ...res.toolCalls],
+    toolResults: [...failed.flatMap((f) => f.toolResults ?? []), ...res.toolResults],
+    subagents: res.subagents,
+    usage,
+    responseId: res.responseId,
+    model: res.model,
+    provider: res.provider,
+    finishReason: res.finishReason,
+    rawFinishReason: res.rawFinishReason,
+    durationMs: res.durationMs,
+    raw: res.raw,
+    turns: res.turns + failed.reduce((n, f) => n + (typeof f.turns === "number" ? f.turns : 0), 0),
+    providerSteps: res.providerSteps,
+  });
 }
 
 /** Normalizes the public `thinkingLevel` flag into provider-neutral thinking settings. */

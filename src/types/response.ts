@@ -60,6 +60,7 @@ export type FinishReason =
   | "content_filter"
   | "refusal"
   | "max_turns"
+  | "stopped"
   | "error"
   | (string & {});
 
@@ -88,6 +89,7 @@ export function normalizeFinishReason(raw?: string): {
     length: "length",
     max_tokens: "length",
     max_turns: "max_turns",
+    stopped: "stopped",
     content_filter: "content_filter",
     refusal: "refusal",
     refused: "refusal",

@@ -29,6 +29,20 @@ export interface ToolExecutionContext {
   emit?: ToolEmitFn;
   /** Structured logger for tool implementations (defaults to no-op). */
   logger?: ToolLogger;
+  /**
+   * Writes one line to this call's log file (`tool-logs/<n>-<tool>.ndjson` in the session folder), flushed at once, so
+   * after a crash it shows how far the call got: `ctx.log("uploaded 3 of 5 files", { done: 3 })`. Only written when the
+   * Agent persists to a folder (`persist: { dir }`); otherwise a no-op. For developers, never sent to the model.
+   */
+  log: (message: string, data?: unknown) => void;
+  /**
+   * Ends the whole run from inside a tool, for example when your own permission check says no:
+   * `if (!(await askUser("Pay $50?"))) ctx.stop("user declined the payment")`. It throws, so the code after it never runs
+   * (even if you forget `return`). The reason is saved as this call's result; the other tool calls of the same batch
+   * still run to completion; then the run ends with `finishReason: "stopped"` and NO further model turn, and the agent
+   * waits for the next user message. `timeoutMs` counts the time spent waiting for your check.
+   */
+  stop: (reason: string) => never;
 }
 
 export type ToolExecuteFn<TInput = any, TOutput = any> = (
@@ -93,12 +107,6 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
   /** Free-form tags for grouping/filtering tools (e.g. `["web", "readonly"]`). */
   tags?: string[];
   /**
-   * When true, the host must approve this call before execution (human-in-the-
-   * loop). The loop reads via `(toolDef as any).needsApproval`; enforcement
-   * is wired by the host, default open (undefined = no gate).
-   */
-  needsApproval?: boolean;
-  /**
    * Optional output schema (Zod or JSON Schema) used to validate/coerce the
    * tool's return value before it reaches model context. Stored as `unknown`
    * so `zod` stays an optional peer for type-only consumers.
@@ -135,6 +143,10 @@ export interface ToolResultRecord {
   result: unknown;
   isError?: boolean;
   durationMs?: number;
+  /** This call's log file, relative to the session folder (only when the Agent persists to a folder). */
+  logFile?: string;
+  /** The tool ended the run with `ctx.stop(reason)`; `result` is the reason. */
+  stopped?: boolean;
 }
 
 /**

@@ -85,6 +85,10 @@ export interface ToolResultPart {
   name: string;
   result: unknown;
   isError?: boolean;
+  /** This call's log file, relative to the session folder (see `ToolExecutionContext.log`). */
+  logFile?: string;
+  /** The tool ended the run with `ctx.stop(reason)` (see `ToolExecutionContext.stop`). */
+  stopped?: boolean;
 }
 
 /** Provider reasoning/thinking content. */
