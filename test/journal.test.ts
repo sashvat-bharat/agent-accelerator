@@ -209,3 +209,115 @@ describe("session journal", () => {
     expect(fs.readFileSync(path.join(sessionDirFor(root, agent.sessionId), JOURNAL_FILE), "utf8").split("\n").filter(Boolean).length).toBeGreaterThan(1);
   });
 });
+
+describe("run marks and waiting prompts", () => {
+  const ok = () =>
+    new Response(
+      JSON.stringify({ id: "r1", choices: [{ message: { role: "assistant", content: "hello" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 } }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  const mk = (root: string, fetchImpl: () => Promise<Response>) =>
+    new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1", fetch: fetchImpl as unknown as typeof fetch, persist: { dir: root } });
+  const settle = () => new Promise((r) => setTimeout(r, 15));
+
+  it("marks where each run began, saves it, and importSession restores it", async () => {
+    const root = tmp();
+    const agent = mk(root, async () => ok());
+    await agent.run("one");
+    await agent.run("two");
+    await settle();
+    const loaded = loadSessionDir(sessionDirFor(root, agent.sessionId))!.session;
+    expect(loaded.runs!.map((r) => r.i)).toEqual([0, 2]); // user messages sit at 0 and 2
+    expect(new Set(loaded.runs!.map((r) => r.id)).size).toBe(2);
+    const other = new Agent({ model });
+    other.importSession(loaded);
+    expect(other.runMarks.map((r) => r.i)).toEqual([0, 2]);
+  });
+
+  it("run marks survive a fold into a snapshot", async () => {
+    const root = tmp();
+    const agent = mk(root, async () => ok());
+    await agent.run("one");
+    await settle();
+    agent.context.messages = agent.context.messages.slice(); // new array, same objects: still a plain append
+    for (let k = 0; k < 520; k++) agent.context.messages.push(user(`filler ${k}`)); // pushes the journal past 500 lines
+    agent.persistNow();
+    await settle();
+    const dir = sessionDirFor(root, agent.sessionId);
+    expect(fs.readFileSync(path.join(dir, JOURNAL_FILE), "utf8").split("\n").filter(Boolean)).toHaveLength(1); // folded
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "session.json"), "utf8")).runs).toHaveLength(1);
+    expect(loadSessionDir(dir)!.session.runs).toHaveLength(1);
+  });
+
+  it("a failed run keeps its prompt in history, so its mark stays valid", async () => {
+    const root = tmp();
+    let calls = 0;
+    const agent = mk(root, async () =>
+      calls++ === 0 ? new Response(JSON.stringify({ error: { message: "bad request" } }), { status: 400 }) : ok()
+    );
+    await expect(agent.run("first try")).rejects.toThrow();
+    await agent.run("second try");
+    await settle();
+    const loaded = loadSessionDir(sessionDirFor(root, agent.sessionId))!.session;
+    expect(loaded.messages.map((m) => m.role)).toEqual(["user", "user", "assistant"]);
+    expect(loaded.runs!.map((r) => r.i)).toEqual([0, 1]); // each mark points at its own prompt
+  });
+
+  it("saves steers and follow-ups that are still waiting, and clears them once handled", async () => {
+    const root = tmp();
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let first = true;
+    const agent = mk(root, async () => {
+      if (first) {
+        first = false;
+        await held;
+      }
+      return ok();
+    });
+    const dir = sessionDirFor(root, agent.sessionId);
+    const run = agent.run("busy");
+    await settle();
+    void agent.steer("also this");
+    const queued = agent.queue("and then that", { additionalContext: "ctx" });
+    await settle();
+    const waiting = loadSessionDir(dir)!.session.pending!;
+    expect(waiting.steer.map((p) => p.prompt)).toEqual(["also this"]);
+    expect(waiting.queue).toEqual([{ prompt: "and then that", additionalContext: "ctx" }]);
+    release();
+    await run;
+    await queued;
+    await settle();
+    expect(loadSessionDir(dir)!.session.pending).toBeUndefined();
+  });
+
+  it("waiting prompts survive a fold, and their media is stored as a file", async () => {
+    const root = tmp();
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let first = true;
+    const agent = mk(root, async () => {
+      if (first) {
+        first = false;
+        await held;
+      }
+      return ok();
+    });
+    const dir = sessionDirFor(root, agent.sessionId);
+    const run = agent.run("busy");
+    await settle();
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 7]);
+    const queued = agent.queue([{ type: "text", text: "look" }, { type: "image", image: png, mimeType: "image/png" }]);
+    await settle();
+    for (let k = 0; k < 520; k++) agent.context.messages.push(user(`filler ${k}`));
+    agent.persistNow();
+    await settle();
+    const waiting = loadSessionDir(dir)!.session.pending!;
+    expect(waiting.queue).toHaveLength(1);
+    expect((waiting.queue[0]!.prompt as any[])[1].image).toMatch(/media\/image-h[0-9a-f]{16}\.png$/);
+    expect(fs.readdirSync(path.join(dir, "media"))).toHaveLength(1);
+    release();
+    await run;
+    await queued;
+  });
+});

@@ -18,12 +18,16 @@ import {
   serializeSession,
   stripRedundantRawArguments,
   type SessionAgentLike,
+  type SessionPending,
+  type SessionPendingPrompt,
 } from "./store.ts";
 
 /** A journal past this many lines is folded into a fresh snapshot. */
 const MAX_JOURNAL_LINES = 500;
 /** A journal past this many bytes is folded into a fresh snapshot. */
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
+
+const EMPTY_PENDING = JSON.stringify({ steer: [], queue: [] });
 
 /** Persists one session folder (`sessions/<id>/`) step by step. */
 export class SessionJournal {
@@ -36,23 +40,39 @@ export class SessionJournal {
   private bytes = 0;
   /** JSON of the last written non-message state (config, system prompt, worker traces). */
   private meta = "";
+  /** How many run marks are on disk, and the last one. */
+  private runCount = 0;
+  private lastRun: unknown;
+  /** JSON of the last journaled waiting prompts. */
+  private pending = EMPTY_PENDING;
   /** Disk form of each message already prepared (media replaced by `media/` files, redundant raw arguments dropped). */
   private readonly onDisk = new WeakMap<Message, Message>();
+  /** Same for waiting prompts made of content parts. */
+  private readonly promptOnDisk = new WeakMap<ContentPart[], ContentPart[]>();
 
   constructor(readonly dir: string) {}
 
   // Brings the folder up to date with the agent: appends new messages and changed state, or writes a fresh snapshot when history changed another way; in: Agent.doPersist after every step, out: files in this.dir.
   sync(agent: SessionAgentLike): void {
     const messages = agent.context.messages;
-    const grew = this.epoch !== undefined && messages.length >= this.count && (this.count === 0 || messages[this.count - 1] === this.last);
+    const runs = agent.runMarks ?? [];
+    const grew =
+      this.epoch !== undefined &&
+      messages.length >= this.count &&
+      (this.count === 0 || messages[this.count - 1] === this.last) &&
+      runs.length >= this.runCount &&
+      (this.runCount === 0 || runs[this.runCount - 1] === this.lastRun);
     if (!grew) {
       this.snapshot(agent);
       return;
     }
     const records: string[] = [];
     for (let i = this.count; i < messages.length; i++) records.push(JSON.stringify({ t: "msg", i, m: this.toDisk(messages[i]!) }));
+    for (let r = this.runCount; r < runs.length; r++) records.push(JSON.stringify({ t: "run", ...runs[r]! }));
     const meta = this.metaOf(agent);
     if (meta !== this.meta) records.push(`{"t":"meta","m":${meta}}`);
+    const pending = this.pendingOf(agent);
+    if (pending !== this.pending) records.push(`{"t":"pending","p":${pending}}`);
     if (records.length === 0) return;
     const text = records.join("\n") + "\n";
     try {
@@ -70,6 +90,9 @@ export class SessionJournal {
     this.count = messages.length;
     this.last = messages[messages.length - 1];
     this.meta = meta;
+    this.runCount = runs.length;
+    this.lastRun = runs[runs.length - 1];
+    this.pending = pending;
     this.lines += records.length;
     this.bytes += text.length;
     if (this.lines >= MAX_JOURNAL_LINES || this.bytes >= MAX_JOURNAL_BYTES) this.snapshot(agent);
@@ -83,18 +106,43 @@ export class SessionJournal {
     if (this.epoch === undefined) quarantineIfCorrupt(target);
     const data = buildSessionData({ ...agent, context: { ...agent.context, messages: messages.map((m) => this.toDisk(m)) } }, null);
     writeFileDurable(target, serializeSession({ ...data, epoch }) + "\n");
-    writeFileDurable(path.join(this.dir, JOURNAL_FILE), JSON.stringify({ t: "base", e: epoch }) + "\n", { backup: false });
+    const pending = this.pendingOf(agent);
+    const header = JSON.stringify({ t: "base", e: epoch }) + "\n" + (pending === EMPTY_PENDING ? "" : `{"t":"pending","p":${pending}}\n`); // waiting prompts live only in the journal
+    writeFileDurable(path.join(this.dir, JOURNAL_FILE), header, { backup: false });
     this.epoch = epoch;
+    this.pending = pending;
+    this.runs(agent);
     this.count = messages.length;
     this.last = messages[messages.length - 1];
-    this.lines = 0;
+    this.lines = pending === EMPTY_PENDING ? 0 : 1;
     this.bytes = 0;
     this.meta = this.metaOf(agent);
   }
 
+  // Remembers which run marks the snapshot already holds; in: snapshot, out: the next sync's "which marks are new".
+  private runs(agent: SessionAgentLike): void {
+    const runs = agent.runMarks ?? [];
+    this.runCount = runs.length;
+    this.lastRun = runs[runs.length - 1];
+  }
+
+  // JSON of the waiting prompts with media moved to files; in: the agent's steer inbox + follow-up queue, out: change detection + the `pending` record.
+  private pendingOf(agent: SessionAgentLike): string {
+    const waiting = agent.pendingPrompts?.();
+    if (!waiting || waiting.steer.length + waiting.queue.length === 0) return EMPTY_PENDING;
+    const parts = (prompt: ContentPart[]): ContentPart[] => {
+      let disk = this.promptOnDisk.get(prompt);
+      if (!disk) this.promptOnDisk.set(prompt, (disk = this.toDisk({ role: "user", content: prompt }).content as ContentPart[]));
+      return disk;
+    };
+    const slim = (list: SessionPendingPrompt[]): SessionPendingPrompt[] =>
+      list.map((w) => ({ ...w, prompt: typeof w.prompt === "string" ? w.prompt : parts(w.prompt) }));
+    return JSON.stringify({ steer: slim(waiting.steer), queue: slim(waiting.queue) } satisfies SessionPending);
+  }
+
   // JSON of everything in the snapshot that is not a message, identity or totals; in: the live agent, out: change detection + the `meta` record.
   private metaOf(agent: SessionAgentLike): string {
-    const { version: _v, sessionId: _s, messages: _m, totals: _t, ...rest } = buildSessionData(
+    const { version: _v, sessionId: _s, messages: _m, totals: _t, runs: _r, ...rest } = buildSessionData(
       { ...agent, context: { ...agent.context, messages: [] } },
       null
     );

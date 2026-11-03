@@ -70,6 +70,35 @@ describe("steer / queue / interrupt", () => {
     expect(calls).toBe(2);
   });
 
+  it("a late steer runs BEFORE follow-ups that were already queued, in arrival order", async () => {
+    const order: string[] = [];
+    const g = gate();
+    provider.generate = async (_m: unknown, ctx: ProviderContext) => {
+      const last = ctx.messages[ctx.messages.length - 1] as any;
+      const text = typeof last.content === "string" ? last.content : "";
+      if (text === "go") await g.promise;
+      order.push(text);
+      return base(`answer:${text}`);
+    };
+    const agent = mkAgent();
+    let turns = 0;
+    const run = agent.run("go", {
+      onTurn: () => {
+        if (turns++ === 0) {
+          void agent.steer("late one");
+          void agent.steer("late two");
+        }
+      },
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    const queued = agent.queue("queued earlier");
+    g.open();
+    await run;
+    await queued;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(order).toEqual(["go", "late one", "late two", "queued earlier"]);
+  });
+
   it("a fire-and-forget steer does not cause an unhandled rejection when the run fails", async () => {
     provider.generate = async () => {
       throw Object.assign(new Error("boom"), { statusCode: 400 });

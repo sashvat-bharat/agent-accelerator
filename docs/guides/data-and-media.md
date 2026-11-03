@@ -32,6 +32,8 @@ console.log(res.text);
 
 Move it with `setHome(dir)` (call once, before creating Agents), the `AGENT_ACCEL_HOME` env var, or a per-Agent `home`. Explicit paths you pass (`persist: { dir }`, `saveSessionFile`) are used as given.
 
+**What else is saved.** Each run's start is recorded (`runs`: run id, index of its user message, time) so turns can be counted later, and prompts still waiting in the steer inbox or follow-up queue are saved too (`pending`, in the journal only; media in them becomes a file under `media/`). `loadSessionDir(dir).session.pending` shows what was waiting when the process stopped.
+
 **One process per folder.** An Agent that writes to a folder (`persist`, `telemetry.persist`, scheduled actions) takes `<folder>/.lock` (pid, host, start time; the home for `persist: {}`, else the folder you named). A second process on the same folder fails at once with a `ConfigError` naming the owner. The lock is shared by all Agents of one process, a lock left by a killed process is taken over automatically, and leftover temp files of unfinished writes are removed when the lock is taken. Local disks only. Other processes may read the files, but must not write them.
 
 | `persist` | Writes |

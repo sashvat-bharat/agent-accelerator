@@ -23,7 +23,7 @@ import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
-import { createSessionId, nowMs } from "../utils/session.ts";
+import { createSessionId, nowMs, newRunId } from "../utils/session.ts";
 import {
   chargeBudgetUsage,
   checkBudget,
@@ -32,7 +32,7 @@ import {
   listSubAgentTraceIdsForSessions,
   type SubAgentTrace,
 } from "./delegation.ts";
-import { saveSessionFile, sessionDirFor, findInvalidMessage, telemetryBus } from "../session/store.ts";
+import { saveSessionFile, sessionDirFor, findInvalidMessage, telemetryBus, type SessionRunMark, type SessionPending } from "../session/store.ts";
 import { SessionJournal } from "../session/journal.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
 import { clearSessionRouting, normalizeStructuredOutput, normalizeStop } from "../providers.ts";
@@ -250,6 +250,8 @@ export class Agent {
   private persistScheduled = false;
   /** Step journal of the persisted session folder (dir mode only). */
   private journal?: SessionJournal;
+  /** Where each run of the default session began (saved with the session). @internal */
+  readonly runMarks: SessionRunMark[] = [];
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -470,6 +472,7 @@ export class Agent {
     this.context.messages = [];
     this.context.thoughtSignatures = [];
     this.context.systemPrompt = this.getFullInstructions();
+    this.runMarks.length = 0;
     // Q-25: reset also drops session-scoped provider chaining/routing.
     try { clearInteractionChains(sid); } catch {}
     try { clearSessionRouting(sid); } catch {}
@@ -555,6 +558,7 @@ export class Agent {
       try { entry.reject(err); } catch {}
       try { entry.deferredStream?.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
     }
+    this.persistNow();
     return n;
   }
 
@@ -725,6 +729,7 @@ export class Agent {
     }
     return new Promise<AgentResponse>((resolve, reject) => {
       this.pendingQueue.push({ prompt, options, isStream: false, resolve, reject });
+      this.persistNow();
       try {
         this.currentRun?.outerStream?.push({
           type: "queued",
@@ -739,6 +744,7 @@ export class Agent {
     if (this.currentRun !== null) return;
     const next = this.pendingQueue.shift();
     if (!next) return;
+    this.persistNow();
     // Q-20: reject queued items whose signal aborted before start.
     try {
       if ((next.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
@@ -797,6 +803,8 @@ export class Agent {
     if (leftover.length > 0) {
       try {
         const max = this.midSessionConfig.maxQueued ?? 20;
+        // Late steers were typed BEFORE anything already queued: they go to the front, in the order they arrived.
+        const lateSteers: Agent["pendingQueue"] = [];
         for (const entry of leftover) {
           try {
             if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
@@ -804,14 +812,14 @@ export class Agent {
               continue;
             }
           } catch { continue; }
-          if (this.pendingQueue.length >= max) {
+          if (this.pendingQueue.length + lateSteers.length >= max) {
             entry.settle?.reject(new Error("[Agent Accelerator] Steer dropped: the follow-up queue is full."));
             continue;
           }
           // The steer was never injected: it now runs as a follow-up, and the
           // caller's promise resolves with that run's response.
           if (entry.settle) entry.settle.deferredToQueue = true;
-          this.pendingQueue.push({
+          lateSteers.push({
             prompt: entry.prompt,
             options: entry.options,
             isStream: false,
@@ -819,8 +827,10 @@ export class Agent {
             reject: entry.settle?.reject ?? (() => {}),
           });
         }
+        this.pendingQueue.unshift(...lateSteers);
       } catch {}
     }
+    this.persistNow();
     // Defer pump so the completing run's .then handlers settle first.
     queueMicrotask(() => this.pumpQueue());
   }
@@ -1301,6 +1311,7 @@ export class Agent {
       this.context.messages = Array.isArray(data.messages) ? [...data.messages] : [];
     }
     this.context.thoughtSignatures = [];
+    this.runMarks.splice(0, this.runMarks.length, ...(data.runs ?? []).filter((r) => r.i < this.context.messages.length));
     if (data.systemPrompt) {
       this.context.systemPrompt = data.systemPrompt;
     } else {
@@ -1368,7 +1379,22 @@ export class Agent {
     } else if (ctx.systemPrompt !== fullInstructions) {
       ctx.systemPrompt = fullInstructions;
     }
+    if (ctx === this.context) this.markRunStart(ctx.messages.length);
     ctx.addUserMessage(prompt);
+  }
+
+  // Records where a run of the default session begins; in: prepareTurn, out: runMarks, saved by the session journal.
+  private markRunStart(index: number): void {
+    this.runMarks.push({ id: newRunId(), i: index, at: Date.now() });
+  }
+
+  /** Prompts still waiting (steers not yet injected, queued follow-ups), as the session journal saves them. @internal */
+  pendingPrompts(): SessionPending {
+    const pack = (e: { prompt: string | ContentPart[]; options?: AgentRunOptions }) => ({
+      prompt: e.prompt,
+      ...(e.options?.additionalContext ? { additionalContext: e.options.additionalContext } : {}),
+    });
+    return { steer: (this.currentRun?.steerInbox ?? []).map(pack), queue: this.pendingQueue.map(pack) };
   }
 
   /**
@@ -1448,6 +1474,7 @@ export class Agent {
         }
         return new Promise<AgentResponse>((resolve, reject) => {
           this.pendingQueue.push({ prompt, options, isStream: false, resolve, reject });
+          this.persistNow();
           try {
             this.currentRun?.outerStream?.push({
               type: "queued",
@@ -1631,6 +1658,7 @@ export class Agent {
         } catch {}
       });
       this.pendingQueue.push(queuedEntry as any);
+      this.persistNow();
       // Attach deferred completion to queued promise without exposing it.
       // Real events are piped in pumpQueue() when the turn starts.
       void done.then(

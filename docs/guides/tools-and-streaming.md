@@ -100,7 +100,7 @@ console.log((await next).text); // its own run and response
 | `clearQueue()` | Rejects all queued follow-ups. |
 | `stream(prompt, { enqueue: "steer" \| "queue" })` | Streaming variants. |
 
-`midSession: { mode \| whenBusy: "steer" \| "queue" \| "auto" }` can enforce one policy (the other verb then throws). `isBusy`, `pendingCount`, `steerPendingCount` expose state. A steer that arrives after the run ended becomes a queued follow-up, and its promise resolves with *that* run's response.
+`midSession: { mode \| whenBusy: "steer" \| "queue" \| "auto" }` can enforce one policy (the other verb then throws). `isBusy`, `pendingCount`, `steerPendingCount` expose state. A steer that arrives after the run ended becomes a queued follow-up (placed at the FRONT of the queue, in arrival order, since it was typed before anything queued later), and its promise resolves with *that* run's response. With `persist: { dir }` the prompts still waiting (steers not yet injected, queued follow-ups, with their `additionalContext`) are saved with the session, so a crash does not lose a message the user already typed.
 
 ## For AI agents
 

@@ -62,6 +62,25 @@ export interface PersistedSubAgentTrace {
   error?: string;
 }
 
+/** Where one run began: `i` is the index of its user message in `messages` (turn boundaries for later phases). */
+export interface SessionRunMark {
+  id: string;
+  i: number;
+  at: number;
+}
+
+/** A prompt that was waiting when the process stopped (its options other than `additionalContext` are not saved). */
+export interface SessionPendingPrompt {
+  prompt: string | ContentPart[];
+  additionalContext?: string;
+}
+
+/** Steers not yet injected into the active run, and queued follow-ups, as last journaled. */
+export interface SessionPending {
+  steer: SessionPendingPrompt[];
+  queue: SessionPendingPrompt[];
+}
+
 /** Single-file session snapshot (v1). Written as one JSON object. */
 export interface PersistedAgentSession {
   version: 1;
@@ -82,6 +101,10 @@ export interface PersistedAgentSession {
   subagents?: Record<string, PersistedSubAgentTrace>;
   /** Written with a journal (dir mode): only a `journal.ndjson` whose header names this id belongs to this snapshot. */
   epoch?: string;
+  /** Where each run began, oldest first. */
+  runs?: SessionRunMark[];
+  /** Read from the journal only (never in `session.json`): prompts that were still waiting. */
+  pending?: SessionPending;
 }
 
 export function emptyTotals(): SessionTotals {
@@ -289,6 +312,10 @@ export interface SessionAgentLike {
   instructions?: string;
   parentSessionId?: unknown;
   subagentTraces?: Record<string, PersistedSubAgentTrace>;
+  /** Run boundaries (see {@link SessionRunMark}). */
+  runMarks?: SessionRunMark[];
+  /** Prompts waiting in the steer inbox / follow-up queue; called by the journal on every sync. */
+  pendingPrompts?: () => SessionPending;
   context: { systemPrompt?: string; messages: Message[] };
 }
 
@@ -435,6 +462,7 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
     messages,
     ...(parentSessionId ? { parentSessionId } : {}),
     ...(subagents ? { subagents } : {}),
+    ...(agent.runMarks && agent.runMarks.length > 0 ? { runs: agent.runMarks.map((r) => ({ ...r })) } : {}),
   };
 }
 
@@ -623,6 +651,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       parentSessionId: obj.parentSessionId,
       subagents: obj.subagents,
       ...(typeof obj.epoch === "string" ? { epoch: obj.epoch } : {}),
+      ...(Array.isArray(obj.runs) ? { runs: obj.runs as SessionRunMark[] } : {}),
     };
   } catch {
     return null;
@@ -937,7 +966,7 @@ export const JOURNAL_FILE = "journal.ndjson";
 // Snapshot fields a `meta` journal record replaces (everything except messages, identity and totals).
 const JOURNAL_META_KEYS = ["model", "subagentModel", "thinkingLevel", "cache", "systemPrompt", "parentSessionId", "subagents"] as const;
 
-// Applies a journal to its snapshot: records of the snapshot's own epoch only, `msg` by index (already-present ones skipped), `meta` replaces config fields, unknown record types ignored; a torn last line is dropped, damage earlier stops the replay with a bus warning; in: the parsed snapshot + journal text, out: loadSessionDir.
+// Applies a journal to its snapshot: records of the snapshot's own epoch only, `msg` by index (already-present ones skipped), `run` adds a run boundary, `pending` replaces the waiting prompts, `meta` replaces config fields, unknown record types ignored; a torn last line is dropped, damage earlier stops the replay with a bus warning; in: the parsed snapshot + journal text, out: loadSessionDir.
 function replayJournal(snapshot: PersistedAgentSession, text: string, file: string): PersistedAgentSession {
   if (!snapshot.epoch) return snapshot;
   const lines = text.split("\n");
@@ -949,7 +978,7 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k]!.trim();
     if (!line) continue;
-    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown };
+    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown; p?: unknown; id?: unknown; at?: unknown };
     try {
       rec = JSON.parse(line);
     } catch {
@@ -968,6 +997,14 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
         break;
       }
       session.messages.push(rec.m as Message);
+    } else if (rec.t === "run" && typeof rec.id === "string" && typeof rec.i === "number" && typeof rec.at === "number") {
+      if (!session.runs?.some((r) => r.id === rec.id)) session.runs = [...(session.runs ?? []), { id: rec.id, i: rec.i, at: rec.at }];
+    } else if (rec.t === "pending" && rec.p && typeof rec.p === "object") {
+      const p = rec.p as SessionPending; // latest record wins
+      if (Array.isArray(p.steer) && Array.isArray(p.queue)) {
+        if (p.steer.length + p.queue.length > 0) session.pending = p;
+        else delete session.pending;
+      }
     } else if (rec.t === "meta" && rec.m && typeof rec.m === "object") {
       const meta = rec.m as Record<string, unknown>;
       for (const key of JOURNAL_META_KEYS) {
