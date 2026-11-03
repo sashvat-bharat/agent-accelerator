@@ -20,6 +20,7 @@ import {
   type SessionAgentLike,
   type SessionPending,
   type SessionPendingPrompt,
+  type SessionToolRecord,
 } from "./store.ts";
 
 /** A journal past this many lines is folded into a fresh snapshot. */
@@ -28,6 +29,11 @@ const MAX_JOURNAL_LINES = 500;
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
 
 const EMPTY_PENDING = JSON.stringify({ steer: [], queue: [] });
+
+// One `tool` journal line; the result is saved as given (tool results are JSON-safe by the time the executor returns them); in: a finished tool call, out: the journal.
+function toolLine(t: SessionToolRecord): string {
+  return JSON.stringify({ t: "tool", call: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}) });
+}
 
 /** Persists one session folder (`sessions/<id>/`) step by step. */
 export class SessionJournal {
@@ -45,6 +51,11 @@ export class SessionJournal {
   private lastRun: unknown;
   /** JSON of the last journaled waiting prompts. */
   private pending = EMPTY_PENDING;
+  /** Run ids whose ending is on disk. */
+  private readonly endsOnDisk = new Set<string>();
+  /** How many of the current run's finished tool results are on disk, and the last one. */
+  private toolCount = 0;
+  private lastTool: unknown;
   /** Disk form of each message already prepared (media replaced by `media/` files, redundant raw arguments dropped). */
   private readonly onDisk = new WeakMap<Message, Message>();
   /** Same for waiting prompts made of content parts. */
@@ -68,7 +79,13 @@ export class SessionJournal {
     }
     const records: string[] = [];
     for (let i = this.count; i < messages.length; i++) records.push(JSON.stringify({ t: "msg", i, m: this.toDisk(messages[i]!) }));
-    for (let r = this.runCount; r < runs.length; r++) records.push(JSON.stringify({ t: "run", ...runs[r]! }));
+    for (let r = this.runCount; r < runs.length; r++) records.push(JSON.stringify({ t: "run", id: runs[r]!.id, i: runs[r]!.i, at: runs[r]!.at }));
+    for (const mark of runs) {
+      if (mark.end && !this.endsOnDisk.has(mark.id)) records.push(JSON.stringify({ t: "end", id: mark.id, status: mark.end }));
+    }
+    const tools = agent.toolRecords ?? [];
+    const firstNewTool = this.toolCount > 0 && tools[this.toolCount - 1] === this.lastTool ? this.toolCount : 0; // a new run starts the list over
+    for (let k = firstNewTool; k < tools.length; k++) records.push(toolLine(tools[k]!));
     const meta = this.metaOf(agent);
     if (meta !== this.meta) records.push(`{"t":"meta","m":${meta}}`);
     const pending = this.pendingOf(agent);
@@ -93,6 +110,9 @@ export class SessionJournal {
     this.runCount = runs.length;
     this.lastRun = runs[runs.length - 1];
     this.pending = pending;
+    this.toolCount = tools.length;
+    this.lastTool = tools[tools.length - 1];
+    for (const mark of runs) if (mark.end) this.endsOnDisk.add(mark.id);
     this.lines += records.length;
     this.bytes += text.length;
     if (this.lines >= MAX_JOURNAL_LINES || this.bytes >= MAX_JOURNAL_BYTES) this.snapshot(agent);
@@ -107,14 +127,21 @@ export class SessionJournal {
     const data = buildSessionData({ ...agent, context: { ...agent.context, messages: messages.map((m) => this.toDisk(m)) } }, null);
     writeFileDurable(target, serializeSession({ ...data, epoch }) + "\n");
     const pending = this.pendingOf(agent);
-    const header = JSON.stringify({ t: "base", e: epoch }) + "\n" + (pending === EMPTY_PENDING ? "" : `{"t":"pending","p":${pending}}\n`); // waiting prompts live only in the journal
+    const tools = agent.toolRecords ?? [];
+    // Waiting prompts and the current run's finished tool results live only in the journal, so a new journal starts with them.
+    const header =
+      JSON.stringify({ t: "base", e: epoch }) + "\n" + (pending === EMPTY_PENDING ? "" : `{"t":"pending","p":${pending}}\n`) + tools.map((t) => toolLine(t) + "\n").join("");
     writeFileDurable(path.join(this.dir, JOURNAL_FILE), header, { backup: false });
     this.epoch = epoch;
     this.pending = pending;
     this.runs(agent);
     this.count = messages.length;
     this.last = messages[messages.length - 1];
-    this.lines = pending === EMPTY_PENDING ? 0 : 1;
+    this.lines = (pending === EMPTY_PENDING ? 0 : 1) + tools.length;
+    this.toolCount = tools.length;
+    this.lastTool = tools[tools.length - 1];
+    this.endsOnDisk.clear();
+    for (const mark of agent.runMarks ?? []) if (mark.end) this.endsOnDisk.add(mark.id); // the snapshot holds them
     this.bytes = 0;
     this.meta = this.metaOf(agent);
   }

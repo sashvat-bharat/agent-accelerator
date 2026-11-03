@@ -317,7 +317,7 @@ export {
   formatSessionBanner,
   emptyTotals,
 } from "./session/store.ts";
-export type { SessionLimits, SessionPayloadStatus, PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir, PersistedSubAgentTrace } from "./session/store.ts";
+export type { SessionLimits, SessionPayloadStatus, PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir, PersistedSubAgentTrace, SessionRunMark, SessionRunEnd, SessionPending, SessionPendingPrompt, SessionToolRecord } from "./session/store.ts";
 
 // Utilities
 /**
@@ -414,6 +414,7 @@ export type {
   Budget,
   BudgetState,
   SubAgentRunIds,
+  InterruptedRun,
 } from "./types/agent.ts";
 
 // Minimalist core: harness modules (RLM/RSI, OTel, testing, CLI doctor, hooks,

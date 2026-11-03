@@ -1,8 +1,9 @@
-import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState } from "../types/agent.ts";
+import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState, InterruptedRun } from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
 import { normalizeThinkingV2, resolveWhenBusy, normalizeWorkerTimeout } from "../tools/tool.ts";
-import type { ToolDefinition } from "../types/tool.ts";
+import type { ToolDefinition, ToolResultRecord } from "../types/tool.ts";
+import { isSubagentResult } from "../tools/subagent-result.ts";
 import { CACHE_OPTIONS, type ThinkingLevel, type ThinkingConfig, type CacheOption, type ServiceTier } from "../types/core.ts";
 import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type StreamEvent } from "../types/response.ts";
@@ -22,7 +23,7 @@ import { persistTelemetry } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
-import { runAgentLoop, streamAgentLoop, type SteerEntry } from "./loop.ts";
+import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, type SteerEntry } from "./loop.ts";
 import { createSessionId, nowMs, newRunId } from "../utils/session.ts";
 import {
   chargeBudgetUsage,
@@ -32,7 +33,7 @@ import {
   listSubAgentTraceIdsForSessions,
   type SubAgentTrace,
 } from "./delegation.ts";
-import { saveSessionFile, sessionDirFor, findInvalidMessage, telemetryBus, type SessionRunMark, type SessionPending } from "../session/store.ts";
+import { saveSessionFile, sessionDirFor, loadSessionDir, findInvalidMessage, telemetryBus, type SessionRunMark, type SessionRunEnd, type SessionPending, type SessionToolRecord } from "../session/store.ts";
 import { SessionJournal } from "../session/journal.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
 import { clearSessionRouting, normalizeStructuredOutput, normalizeStop } from "../providers.ts";
@@ -55,7 +56,7 @@ export function resolveEffectiveThinking(
   return { enabled: true, level: overrideLevel as ThinkingConfig["level"] };
 }
 
-import { ConfigError, SessionLoadError } from "../types/errors.ts";
+import { ConfigError, SessionLoadError, isAbortError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (Q-21 fallback when
@@ -252,6 +253,14 @@ export class Agent {
   private journal?: SessionJournal;
   /** Where each run of the default session began (saved with the session). @internal */
   readonly runMarks: SessionRunMark[] = [];
+  /** Tool calls finished in the current run; saved the moment each finishes so a crash never repeats them. @internal */
+  readonly toolRecords: SessionToolRecord[] = [];
+  /** The run in flight (its mark has no ending yet, but it is not "interrupted"). */
+  private activeMark?: SessionRunMark;
+  /** What to do with a cut-off run at construction (see `AgentConfig.resume`). */
+  private readonly resumeMode: "automatic" | "explicit";
+  /** The resume in flight, so a second `resume()` returns the same promise. */
+  private resuming?: Promise<AgentResponse | undefined>;
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -358,6 +367,10 @@ export class Agent {
       );
     }
     this.cache = config.cache;
+    if (config.resume !== undefined && config.resume !== "automatic" && config.resume !== "explicit") {
+      throw new ConfigError(`[Agent Accelerator] Invalid resume ${JSON.stringify(config.resume)}: expected "automatic" (default) or "explicit".`);
+    }
+    this.resumeMode = config.resume ?? "automatic";
 
     this.serviceTier = config.serviceTier;
     this.onFailure =
@@ -426,6 +439,107 @@ export class Agent {
 
     this.context = new AgentContext(this.getFullInstructions());
     if (dyn?.allowScheduledActions) registerAgent(this);
+    if (this.recoverSession() && this.resumeMode === "automatic") {
+      // Synchronously, so a run() issued right after construction queues BEHIND the resumed run.
+      this.resume().catch((err) => this.reportResumeFailure(err));
+    }
+  }
+
+  // Loads a persisted session that a crash cut off (a run without an ending) or that still had waiting prompts, so it can be resumed; true when there is something to resume; in: the session folder of `persist.dir`, out: context, runMarks, toolRecords, pendingQueue.
+  private recoverSession(): boolean {
+    const root = this.persistConfig?.dir;
+    if (!root || this.stateless) return false;
+    let dir: string;
+    try {
+      dir = sessionDirFor(root, this.sessionId);
+    } catch {
+      return false; // not a usable session id for a folder name: nothing was ever saved under it
+    }
+    const session = loadSessionDir(dir)?.session; // a session over the load limits throws SessionLoadError: better than overwriting it
+    if (!session) return false;
+    const waiting = [...(session.pending?.steer ?? []), ...(session.pending?.queue ?? [])];
+    if (!(session.runs ?? []).some((r) => !r.end) && waiting.length === 0) return false;
+    this.context.messages = session.messages;
+    this.runMarks.splice(0, this.runMarks.length, ...(session.runs ?? []));
+    const open = new Set(unfinishedToolCalls(this.context.messages).map((c) => c.id));
+    this.toolRecords.splice(0, this.toolRecords.length, ...(session.tools ?? []).filter((t) => open.has(t.id)));
+    for (const w of waiting) {
+      this.pendingQueue.push({
+        prompt: w.prompt,
+        options: w.additionalContext ? { additionalContext: w.additionalContext } : undefined,
+        isStream: false,
+        resolve: () => {},
+        reject: (err) => this.reportResumeFailure(err),
+      });
+    }
+    return true;
+  }
+
+  // Says on the telemetry bus that resuming (or a prompt that was waiting) failed; in: a rejected resume, out: telemetryBus.
+  private reportResumeFailure(err: unknown): void {
+    telemetryBus.emitWarning("agent.resume_failed", `[Agent Accelerator] Resuming session ${this.sessionId} failed: ${err instanceof Error ? err.message : String(err)}`, { sessionId: this.sessionId });
+  }
+
+  /** Runs that a crash cut off (they began, never ended and are not running now), oldest first. Needs `persist: { dir }` and the same `sessionId` as before the restart. */
+  interrupted(): InterruptedRun[] {
+    const calls = unfinishedToolCalls(this.context.messages).map((c) => c.name);
+    return this.runMarks
+      .filter((m) => !m.end && m !== this.activeMark)
+      .map((m) => ({
+        runId: m.id,
+        startedAt: m.at,
+        prompt: this.previewPrompt((this.context.messages[m.i]?.content ?? "") as string | ContentPart[]),
+        pendingToolCalls: calls,
+      }));
+  }
+
+  /**
+   * Continues the run a crash cut off, without a new prompt: tool calls that already have a saved result are NOT run
+   * again (only calls with no result are), then the model carries on from the saved conversation, and prompts that
+   * were waiting run afterwards. Resolves to that run's response, or `undefined` when nothing was cut off. Returns the
+   * same promise while a resume is in flight. With `resume: "automatic"` (default) the constructor already did this.
+   */
+  resume(): Promise<AgentResponse | undefined> {
+    if (this.resuming) return this.resuming;
+    if (this.currentRun) throw new Error("[Agent Accelerator] resume() needs an idle agent: a run is already active.");
+    const mark = this.runMarks.filter((m) => !m.end && m !== this.activeMark).pop();
+    const last = this.context.messages[this.context.messages.length - 1];
+    if (!mark || last?.role === "assistant" && unfinishedToolCalls(this.context.messages).length === 0) {
+      if (mark) this.endRun(mark, "done"); // the answer was complete; only the note that it ended was lost
+      this.pumpQueue();
+      return Promise.resolve(undefined);
+    }
+    telemetryBus.emit({
+      code: "agent.resumed",
+      message: `[Agent Accelerator] resuming run ${mark.id} of session ${this.sessionId}`,
+      data: { sessionId: this.sessionId, runId: mark.id, pendingToolCalls: unfinishedToolCalls(this.context.messages).map((c) => c.name) },
+    });
+    const run = this.startNonStreamingRun("", undefined, mark);
+    const clear = (): void => {
+      if (this.resuming === run) this.resuming = undefined;
+    };
+    this.resuming = run;
+    run.then(clear, clear);
+    return run;
+  }
+
+  // Closes a run's mark with how it ended and saves that; in: the run's promise handlers, out: runMarks + journal.
+  private endRun(mark: SessionRunMark | undefined, status: SessionRunEnd): void {
+    if (!mark) return;
+    if (!mark.end) mark.end = status;
+    if (this.activeMark === mark) this.activeMark = undefined;
+    this.persistNow();
+  }
+
+  // Remembers a finished tool call and saves it at once (synchronously): the work is on disk before anything else can happen; in: the executor's per-call callback, out: toolRecords + journal.
+  private recordTool(result: ToolResultRecord): void {
+    this.toolRecords.push({
+      id: result.id,
+      name: result.name,
+      result: isSubagentResult(result.result) ? result.result.xml : result.result,
+      ...(result.isError ? { isError: true } : {}),
+    });
+    this.doPersist();
   }
 
   private getFullInstructions(): string | undefined {
@@ -981,9 +1095,11 @@ export class Agent {
 
   private startNonStreamingRun(
     prompt: string | ContentPart[],
-    options?: AgentRunOptions
+    options?: AgentRunOptions,
+    resumeMark?: SessionRunMark
   ): Promise<AgentResponse> {
     this.resetBudgetState();
+    let mark: SessionRunMark | undefined;
     const runController = new AbortController();
     const steerInbox: SteerEntry[] = [];
     const mergedSignal = this.mergeUserSignal(options?.signal, runController);
@@ -997,7 +1113,14 @@ export class Agent {
       if (effectiveLevel) {
         validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
       }
-      this.prepareTurn(prompt, runOptions, targetContext);
+      if (resumeMark) {
+        // Continuing a cut-off run: no new prompt, the saved conversation is the input.
+        mark = resumeMark;
+        this.activeMark = mark;
+        targetContext.systemPrompt = this.getFullInstructions();
+      } else {
+        mark = this.prepareTurn(prompt, runOptions, targetContext);
+      }
       this.persistNow();
 
       const providerOptions = this.buildProviderOptions(runOptions);
@@ -1016,6 +1139,10 @@ export class Agent {
         ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
         ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
+        onToolResult: (r: ToolResultRecord) => this.recordTool(r),
+        ...(resumeMark
+          ? { resume: { stored: new Map(this.toolRecords.map((t) => [t.id, { id: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}) } as ToolResultRecord])) } }
+          : {}),
         steerInbox,
         onSteerInjected: () => this.persistNow(),
         // Q-22: loop enforces these (plus local timeout races).
@@ -1034,6 +1161,10 @@ export class Agent {
     })();
 
     this.currentRun = { steerInbox, abortController: runController, runPromise: task };
+    task.then(
+      () => this.endRun(mark, "done"),
+      (err) => this.endRun(mark, isAbortError(err) ? "aborted" : "failed")
+    );
     const cleanup = () => {
       try { this.cleanupMerge(runController); } catch {}
       if (this.currentRun?.runPromise === task) this.finishCurrentRun();
@@ -1053,7 +1184,7 @@ export class Agent {
     }
     // Q-19a: named session routing (default session for compat).
     const targetContext = this.getSessionContext(options?.sessionId || this.sessionId);
-    this.prepareTurn(prompt, options, targetContext);
+    const mark = this.prepareTurn(prompt, options, targetContext);
     this.persistNow();
 
     this.resetBudgetState();
@@ -1078,6 +1209,7 @@ export class Agent {
       ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
       ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
       onProgress: () => this.persistNow(),
+      onToolResult: (r: ToolResultRecord) => this.recordTool(r),
       steerInbox,
       onSteerInjected: () => this.persistNow(),
       // Q-22: loop enforces these (plus local timeout races).
@@ -1089,6 +1221,7 @@ export class Agent {
     this.currentRun = { steerInbox, outerStream: s, abortController: runController };
     s.result().then(
       (res) => {
+        this.endRun(mark, "done");
         try {
           this.mergeSubagentTraces(res.subagents as any);
           this.persistNow();
@@ -1100,7 +1233,8 @@ export class Agent {
         }
         if (this.currentRun?.outerStream === s) this.finishCurrentRun();
       },
-      () => {
+      (err) => {
+        this.endRun(mark, isAbortError(err) ? "aborted" : "failed");
         try { this.cleanupMerge(runController); } catch {}
         if (this.currentRun?.outerStream === s) this.finishCurrentRun();
       }
@@ -1351,7 +1485,7 @@ export class Agent {
     } catch {}
   }
 
-  private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): void {
+  private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): SessionRunMark | undefined {
     // Q-20: prompt validation throws synchronously in both run() and
     // stream() (same timing; documented here).
     if (Array.isArray(prompt) && prompt.length === 0) {
@@ -1379,13 +1513,19 @@ export class Agent {
     } else if (ctx.systemPrompt !== fullInstructions) {
       ctx.systemPrompt = fullInstructions;
     }
-    if (ctx === this.context) this.markRunStart(ctx.messages.length);
+    const mark = ctx === this.context ? this.markRunStart(ctx.messages.length) : undefined;
     ctx.addUserMessage(prompt);
+    return mark;
   }
 
   // Records where a run of the default session begins; in: prepareTurn, out: runMarks, saved by the session journal.
-  private markRunStart(index: number): void {
-    this.runMarks.push({ id: newRunId(), i: index, at: Date.now() });
+  private markRunStart(index: number): SessionRunMark {
+    for (const old of this.runMarks) if (!old.end) old.end = "abandoned"; // a newer run replaces a cut-off one
+    this.toolRecords.length = 0;
+    const mark: SessionRunMark = { id: newRunId(), i: index, at: Date.now() };
+    this.runMarks.push(mark);
+    this.activeMark = mark;
+    return mark;
   }
 
   /** Prompts still waiting (steers not yet injected, queued follow-ups), as the session journal saves them. @internal */

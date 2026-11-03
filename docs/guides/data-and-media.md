@@ -34,6 +34,19 @@ Move it with `setHome(dir)` (call once, before creating Agents), the `AGENT_ACCE
 
 **What else is saved.** Each run's start is recorded (`runs`: run id, index of its user message, time) so turns can be counted later, and prompts still waiting in the steer inbox or follow-up queue are saved too (`pending`, in the journal only; media in them becomes a file under `media/`). `loadSessionDir(dir).session.pending` shows what was waiting when the process stopped.
 
+**Surviving a crash.** With `persist: { dir }` and the SAME `sessionId` after a restart, an Agent notices a run that was cut off (it began, never ended) or prompts that were still waiting, and continues on its own:
+
+```ts
+const agent = new Agent({ model, persist: { dir: "sessions" }, sessionId: "support-chat" }); // resume: "automatic" (default)
+// the cut-off run is already continuing; a run() you call now queues behind it
+```
+
+- The conversation is reloaded, and the model carries on from where it stopped. **A tool call that already finished is never run again**: its result was saved the moment it finished. Only calls with no saved result run now (for example the email that was still being sent). Sub-agent usage of a call finished before the crash is not re-counted.
+- Prompts that were waiting (steers, follow-ups) run afterwards: steers first, in order.
+- `resume: "explicit"` loads the state but runs nothing: `agent.interrupted()` lists the cut-off runs (`runId`, `startedAt`, `prompt`, `pendingToolCalls`) and `await agent.resume()` continues them (it resolves to the run's response, or `undefined` when nothing was cut off). A new `run()` instead closes the old one as `abandoned`.
+- A resume that fails is reported on the bus (`agent.resume_failed`) and does not throw from the constructor.
+- Needs `persist: { dir }` (not `{ file }`). A saved session over the load limits makes the constructor throw `SessionLoadError` rather than overwrite it. Media inside the session must still be allowed by `fileAccess.roots`, if you set it.
+
 **One process per folder.** An Agent that writes to a folder (`persist`, `telemetry.persist`, scheduled actions) takes `<folder>/.lock` (pid, host, start time; the home for `persist: {}`, else the folder you named). A second process on the same folder fails at once with a `ConfigError` naming the owner. The lock is shared by all Agents of one process, a lock left by a killed process is taken over automatically, and leftover temp files of unfinished writes are removed when the lock is taken. Local disks only. Other processes may read the files, but must not write them.
 
 | `persist` | Writes |
@@ -44,7 +57,7 @@ Move it with `setHome(dir)` (call once, before creating Agents), the `AGENT_ACCE
 
 Saves are durable (temp file, fsync of file and folder, the last good version kept as `session.json.bak`, atomic rename), so a crash or power cut never leaves a torn file; a damaged `session.json` loads from its `.bak`. Saves are coalesced and never fail a turn (`onPersistError` hook available). Also exported: `saveSessionFile`, `loadSessionFile`, `saveSessionDir`, `sessionDirFor`, `buildSessionData`, `serializeSession`, `deserializeSession`, `inspectSessionPayload`, `writeFileAtomic`, `extractMediaToDir`, `resolveMediaPaths`. Loading validates message shape; a **corrupt** file is renamed `*.corrupt-<ts>`, a valid file over the limits (50k messages / 100 MB) throws `SessionLoadError` and is never touched. Old pretty-printed and JSONL files still load. Sub-agent traces are saved too, and Google turns keep their raw output steps so a resumed session replays them exactly (thought signatures and cache prefix intact). Importing a session that points at local files warns (`session.local_media_paths`) unless `fileAccess.roots` is set.
 
-**Recommendations:** ✅ one `sessionId` per conversation; resume with `findLatestSessionDir`. ✅ Set `fileAccess.roots` before importing sessions you did not create. ⚠️ The whole snapshot is rewritten each step, which gets slow for very long sessions.
+**Recommendations:** ✅ one `sessionId` per conversation; resume with `findLatestSessionDir`. ✅ Set `fileAccess.roots` before importing sessions you did not create. ✅ With `persist: { dir }` each step costs one appended line, so long sessions stay fast.
 
 ## Images, audio, video and documents
 
@@ -115,7 +128,7 @@ Behavior: the default TTL is 12 h; an expired catalog is used **immediately** an
 
 ## For AI agents
 
-- Persist: `persist: { dir }`; resume: `findLatestSessionDir` → `loadSessionDir` → `agent.importSession(saved.session)`.
+- Crash recovery: `persist: { dir }` + the same `sessionId`; `resume: "automatic" | "explicit"`, `agent.interrupted()`, `agent.resume()`. Manual resume of a finished chat: `findLatestSessionDir` → `loadSessionDir` → `agent.importSession(saved.session)`.
 - Prompt is `string | ContentPart[]`; part keys: `image`, `audio`, `video`, `file` (+ `filename`, `mimeType`).
 - Cost may be `undefined`; handle it. Use `SessionTelemetry` for running totals.
 - Never edit `<home>/catalog/models.dev.json`; use `registerModel`.

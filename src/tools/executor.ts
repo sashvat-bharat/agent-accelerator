@@ -17,6 +17,8 @@ export interface ExecuteToolsOptions {
   parallel?: boolean;
   signal?: AbortSignal;
   sessionId?: string;
+  /** Called the moment EACH call finishes (before the whole batch does), so a caller can save a result before the next tool is done. Never throws into the run. */
+  onResult?: (result: ToolResultRecord) => void;
   /** Forwards live sub-agent deltas (realtime worker thinking/text) to the caller. */
   onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
 }
@@ -467,7 +469,7 @@ async function executeAttempt(
 export async function executeToolCalls(
   options: ExecuteToolsOptions
 ): Promise<ToolResultRecord[]> {
-  const { tools, toolCalls, agentName, parallel = true, signal, sessionId, onSubagentEvent } = options;
+  const { tools, toolCalls, agentName, parallel = true, signal, sessionId, onSubagentEvent, onResult } = options;
   assertNoToolCollisions(tools);
   const globalSemaphore = new Semaphore(DEFAULT_TOOL_CONCURRENCY);
   const perToolSemaphores = new Map<string, Semaphore>();
@@ -726,14 +728,23 @@ export async function executeToolCalls(
     }
   };
 
+  // Runs one call and reports its result at once; a throwing observer must not fail the run.
+  const runAndReport = async (call: ToolCallRecord): Promise<ToolResultRecord> => {
+    const result = await runSingle(call);
+    try {
+      onResult?.(result);
+    } catch {
+      // why: observers (persistence) are best-effort.
+    }
+    return result;
+  };
   if (parallel && toolCalls.length > 1) {
-    const results = await Promise.all(toolCalls.map((tc) => runSingle(tc)));
-    return results;
+    return Promise.all(toolCalls.map((tc) => runAndReport(tc)));
   }
 
   const results: ToolResultRecord[] = [];
   for (const tc of toolCalls) {
-    results.push(await runSingle(tc));
+    results.push(await runAndReport(tc));
   }
   return results;
 }

@@ -134,6 +134,13 @@ export interface AgentConfig {
    */
   persist?: { dir?: string; file?: string };
   /**
+   * What happens to a run a crash cut off (needs `persist: { dir }` and the SAME `sessionId` after the restart).
+   * `"automatic"` (default): the Agent continues it as soon as it is constructed (tool calls that already have a saved
+   * result are not run again), then runs any prompts that were waiting. `"explicit"`: nothing runs until you call
+   * `agent.resume()`; `agent.interrupted()` lists what was cut off.
+   */
+  resume?: "automatic" | "explicit";
+  /**
    * Folder for everything Agent Accelerator writes to disk (`sessions/`,
    * `scheduled_actions/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
    * An explicit `persist.dir` / `persist.file` still wins for sessions.
@@ -212,6 +219,17 @@ export interface AgentConfig {
   budget?: Budget;
   /** Run + network limits (Q-22). Turn/budget caps unlimited by default; network timeouts finite. */
   limits?: AgentRunLimits;
+}
+
+/** A run that a crash cut off (see {@link Agent.interrupted}). */
+export interface InterruptedRun {
+  runId: string;
+  /** Epoch ms when the run began. */
+  startedAt: number;
+  /** Preview of the prompt that started it. */
+  prompt: string;
+  /** Names of tool calls it had asked for that have no result yet. */
+  pendingToolCalls: string[];
 }
 
 /** Per-request + run limits (Q-22). */

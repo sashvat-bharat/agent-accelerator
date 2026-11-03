@@ -70,6 +70,13 @@ export interface AgentLoopConfig {
   enforceBudget?: (usage?: TokenUsage) => void;
   /** Called after every turn for durable persistence checkpoints (never fails a turn). */
   onProgress?: () => void;
+  /** Called the moment each tool call finishes, before the rest of its batch (the crash-proof record of finished work). */
+  onToolResult?: (result: ToolResultRecord) => void;
+  /**
+   * Continue a run that a crash cut off instead of starting from a new prompt: tool calls the last assistant turn made
+   * without a stored result are finished first (a result in `stored` is reused, anything else runs now), then the loop goes on.
+   */
+  resume?: { stored: Map<string, ToolResultRecord> };
   /**
    * Shared steer inbox for mid-session redirection. Entries are drained
    * between turns (after the current provider/tool work finishes) and
@@ -506,6 +513,7 @@ function sanitizeToolResult(r: ToolResultRecord): { sanitized: ToolResultRecord;
 async function executeToolCallsWithRepeatGuard(options: {
   tools: Record<string, ToolDefinition>;
   toolCalls: ToolCallRecord[];
+  onResult?: (result: ToolResultRecord) => void;
   previousFingerprints: Set<string>;
   repeatCounts: Map<string, number>;
   agentName?: string;
@@ -546,6 +554,7 @@ async function executeToolCallsWithRepeatGuard(options: {
         signal: options.signal,
         sessionId: options.sessionId,
         onSubagentEvent: options.onSubagentEvent,
+        onResult: options.onResult,
       })
     : [];
   const byId = new Map<string, ToolResultRecord[]>();
@@ -570,6 +579,63 @@ async function executeToolCallsWithRepeatGuard(options: {
       .filter((r): r is ToolResultRecord => Boolean(r)),
     fingerprints: currentFingerprints,
   };
+}
+
+/** Tool calls of the LAST assistant message that have no result in the conversation yet (a crash or interrupt cut them off). */
+export function unfinishedToolCalls(messages: AgentContext["messages"]): ToolCallRecord[] {
+  let lastAssistant = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "assistant") {
+      lastAssistant = i;
+      break;
+    }
+  }
+  const calls = lastAssistant < 0 ? [] : messages[lastAssistant]!.content;
+  if (!Array.isArray(calls)) return [];
+  const answered = new Set<string>();
+  for (const m of messages.slice(lastAssistant + 1)) {
+    if (m.role !== "tool" || !Array.isArray(m.content)) continue;
+    for (const p of m.content) if (p.type === "tool_result") answered.add(p.id);
+  }
+  const open: ToolCallRecord[] = [];
+  for (const p of calls) {
+    if (p.type === "tool_call" && !answered.has(p.id)) {
+      open.push({ id: p.id, name: p.name, arguments: p.arguments, ...(p.rawArguments ? { rawArguments: p.rawArguments } : {}), ...(p.callId ? { callId: p.callId } : {}) });
+    }
+  }
+  return open;
+}
+
+// Finishes the tool calls a crash left open (stored result reused, anything else executed now) and records the results in the conversation; in: a resumed run's config, out: tool results in context + what the response should report.
+async function finishInterruptedTools(
+  config: AgentLoopConfig
+): Promise<{ calls: ToolCallRecord[]; results: ToolResultRecord[]; subagents: SubAgentExecutionMetadata[] }> {
+  const open = unfinishedToolCalls(config.context.messages);
+  const none = { calls: [], results: [], subagents: [] };
+  if (open.length === 0 || !config.resume) return none;
+  const stored = config.resume.stored;
+  const toRun = open.filter((c) => !stored.has(c.id));
+  const executed = toRun.length
+    ? await executeToolCalls({
+        tools: config.tools,
+        toolCalls: toRun,
+        agentName: config.agentName,
+        parallel: true,
+        signal: config.runOptions?.signal,
+        sessionId: config.runOptions?.sessionId || config.options?.sessionId,
+        onResult: config.onToolResult,
+      })
+    : [];
+  const ran = new Map(executed.map((r) => [r.id, r]));
+  const subagents: SubAgentExecutionMetadata[] = [];
+  const results = open.map((call) => {
+    const { sanitized, metas } = sanitizeToolResult(ran.get(call.id) ?? stored.get(call.id)!);
+    subagents.push(...metas);
+    return sanitized;
+  });
+  config.context.addToolResults(results);
+  emitProgress(config);
+  return { calls: open, results, subagents };
 }
 
 /**
@@ -619,6 +685,19 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
   try {
   const standardTools = toStandardToolDeclarations(tools);
+
+  if (config.resume) {
+    const finished = await finishInterruptedTools(config);
+    if (finished.calls.length > 0) {
+      toolsExecuted = true;
+      allToolCalls.push(...finished.calls);
+      allToolResults.push(...finished.results);
+      for (const meta of finished.subagents) {
+        allSubagents.push(meta);
+        accumulateUsage(accumulatedUsage, meta.usage, getModelFromCatalog(meta.provider, meta.model));
+      }
+    }
+  }
 
   while (turns < maxTurns) {
     // Q-21: fail fast on abort (throws AbortError with partial).
@@ -758,6 +837,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     // Execute tool calls — always parallel (model-driven, bloatfree DX7)
     // Q-21: check abort before tools (throws AbortError with partial).
     throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: genResult.text });
+    emitProgress(config); // the calls are on record BEFORE they run, so a crash can finish them instead of forgetting them
     allToolCalls.push(...genResult.toolCalls);
     // Q-22: per-run tool-call budget.
     if (allToolCalls.length > limits.maxToolCallsPerRun) {
@@ -774,6 +854,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       agentName,
       signal: runOptions?.signal,
       sessionId: runOptions?.sessionId || options?.sessionId,
+      onResult: config.onToolResult,
     });
     const results = guarded.results;
     previousToolCallFingerprints = guarded.fingerprints;
@@ -1198,6 +1279,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         }
 
         throwIfCancelled({ usage: accumulatedUsage, turns, text: turnResponse.text });
+        emitProgress(config); // the calls are on record BEFORE they run, so a crash can finish them instead of forgetting them
         allToolCalls.push(...turnResponse.toolCalls);
         if (allToolCalls.length > streamLimits.maxToolCallsPerRun) {
           throw new Error(
@@ -1219,6 +1301,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           agentName,
           signal: linked.signal,
           sessionId: runOptions?.sessionId || options?.sessionId,
+          onResult: config.onToolResult,
           onSubagentEvent: (ev) => {
             try {
               outerStream.push({

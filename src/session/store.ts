@@ -62,11 +62,24 @@ export interface PersistedSubAgentTrace {
   error?: string;
 }
 
+/** How a run ended; a run with no ending was cut off (a crash). `abandoned` = a newer run started instead of resuming it. */
+export type SessionRunEnd = "done" | "failed" | "aborted" | "stopped" | "abandoned";
+
 /** Where one run began: `i` is the index of its user message in `messages` (turn boundaries for later phases). */
 export interface SessionRunMark {
   id: string;
   i: number;
   at: number;
+  /** Unset while the run is active or when it was cut off. */
+  end?: SessionRunEnd;
+}
+
+/** The result of a tool call that finished, saved the moment it finished so a crash never repeats it. */
+export interface SessionToolRecord {
+  id: string;
+  name: string;
+  result: unknown;
+  isError?: boolean;
 }
 
 /** A prompt that was waiting when the process stopped (its options other than `additionalContext` are not saved). */
@@ -105,6 +118,8 @@ export interface PersistedAgentSession {
   runs?: SessionRunMark[];
   /** Read from the journal only (never in `session.json`): prompts that were still waiting. */
   pending?: SessionPending;
+  /** Read from the journal only: results of tool calls finished in the current run (used to resume without repeating them). */
+  tools?: SessionToolRecord[];
 }
 
 export function emptyTotals(): SessionTotals {
@@ -316,6 +331,8 @@ export interface SessionAgentLike {
   runMarks?: SessionRunMark[];
   /** Prompts waiting in the steer inbox / follow-up queue; called by the journal on every sync. */
   pendingPrompts?: () => SessionPending;
+  /** Tool calls finished in the current run (cleared when the next run starts). */
+  toolRecords?: SessionToolRecord[];
   context: { systemPrompt?: string; messages: Message[] };
 }
 
@@ -966,7 +983,7 @@ export const JOURNAL_FILE = "journal.ndjson";
 // Snapshot fields a `meta` journal record replaces (everything except messages, identity and totals).
 const JOURNAL_META_KEYS = ["model", "subagentModel", "thinkingLevel", "cache", "systemPrompt", "parentSessionId", "subagents"] as const;
 
-// Applies a journal to its snapshot: records of the snapshot's own epoch only, `msg` by index (already-present ones skipped), `run` adds a run boundary, `pending` replaces the waiting prompts, `meta` replaces config fields, unknown record types ignored; a torn last line is dropped, damage earlier stops the replay with a bus warning; in: the parsed snapshot + journal text, out: loadSessionDir.
+// Applies a journal to its snapshot: records of the snapshot's own epoch only, `msg` by index (already-present ones skipped), `run` adds a run boundary, `end` closes one, `tool` keeps a finished tool result, `pending` replaces the waiting prompts, `meta` replaces config fields, unknown record types ignored; a torn last line is dropped, damage earlier stops the replay with a bus warning; in: the parsed snapshot + journal text, out: loadSessionDir.
 function replayJournal(snapshot: PersistedAgentSession, text: string, file: string): PersistedAgentSession {
   if (!snapshot.epoch) return snapshot;
   const lines = text.split("\n");
@@ -978,7 +995,7 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k]!.trim();
     if (!line) continue;
-    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown; p?: unknown; id?: unknown; at?: unknown };
+    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown; p?: unknown; id?: unknown; at?: unknown; status?: unknown; call?: unknown; name?: unknown; result?: unknown; isError?: unknown };
     try {
       rec = JSON.parse(line);
     } catch {
@@ -999,6 +1016,11 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
       session.messages.push(rec.m as Message);
     } else if (rec.t === "run" && typeof rec.id === "string" && typeof rec.i === "number" && typeof rec.at === "number") {
       if (!session.runs?.some((r) => r.id === rec.id)) session.runs = [...(session.runs ?? []), { id: rec.id, i: rec.i, at: rec.at }];
+    } else if (rec.t === "end" && typeof rec.id === "string" && typeof rec.status === "string") {
+      const mark = session.runs?.find((r) => r.id === rec.id);
+      if (mark) session.runs = session.runs!.map((r) => (r === mark ? { ...r, end: rec.status as SessionRunEnd } : r));
+    } else if (rec.t === "tool" && typeof rec.call === "string" && typeof rec.name === "string") {
+      session.tools = [...(session.tools ?? []).filter((x) => x.id !== rec.call), { id: rec.call, name: rec.name, result: rec.result, ...(rec.isError ? { isError: true } : {}) }];
     } else if (rec.t === "pending" && rec.p && typeof rec.p === "object") {
       const p = rec.p as SessionPending; // latest record wins
       if (Array.isArray(p.steer) && Array.isArray(p.queue)) {

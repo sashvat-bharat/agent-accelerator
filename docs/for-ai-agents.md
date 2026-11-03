@@ -22,7 +22,7 @@
 | Model-invented helpers | `dynamicSubagents: { model, tools }` | [Multi-agent](guides/multi-agent.md) |
 | Work later or on repeat | `dynamicSubagents.allowScheduledActions` + `createScheduledAction` | [Multi-agent](guides/multi-agent.md) |
 | Redirect a busy agent | `steer()`, `queue()`, `interrupt()` | [Tools and streaming](guides/tools-and-streaming.md) |
-| Save / resume | `persist: { dir }`, `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
+| Save / resume / survive a crash | `persist: { dir }` + same `sessionId` (cut-off runs resume by themselves), `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
 | Observe | `telemetryBus.onEvent` | [Safety](guides/safety-and-ops.md) |
