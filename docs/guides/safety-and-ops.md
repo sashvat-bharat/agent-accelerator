@@ -91,7 +91,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 | Sub-agent traces | Visible only to the agent that spawned them; results are Symbol-branded | automatic |
 | Sessions | Shape-validated on load; files `0600`, folders `0700` | `fileAccess` |
 
-**Hardening checklist:** finite `maxTurns` + `deadlineMs` + `budget`; `fileAccess.roots` set; `captureRaw` left at `"redacted"`; tools validate their own inputs and honor `ctx.signal`; no secrets in `instructions`; treat web content fetched by tools as untrusted (prompt injection); log with `telemetryBus`. `needsApproval` is **not** enforced: add your own approval step.
+**Hardening checklist:** finite `maxTurns` + `deadlineMs` + `budget`; `fileAccess.roots` set; `captureRaw` left at `"redacted"`; tools validate their own inputs and honor `ctx.signal`; no secrets in `instructions`; treat web content fetched by tools as untrusted (prompt injection); log with `telemetryBus`. To require approval for a tool, ask inside `execute` and refuse with `ctx.stop(reason)` (the run ends `stopped`).
 
 ## Known limitations
 
@@ -108,7 +108,7 @@ Be aware (pre-1.0):
 
 - Set `maxTurns`, `limits.deadlineMs` and `budget` for anything that runs unattended; pass `signal` per call.
 - Branch on error classes, not message text; `err.partial` holds progress; `err.retryable` tells you whether to retry.
-- Do not rely on `needsApproval`, `hooks` or `logger`; subscribe to `telemetryBus` instead.
+- Do not rely on `hooks` or `logger`; subscribe to `telemetryBus` instead. To require approval for a tool, ask inside `execute` and refuse with `ctx.stop(reason)`.
 - Keep `captureRaw` at `"redacted"` unless debugging locally.
 - Default to `fileAccess: { roots: [...] }` whenever file paths or sessions come from outside your program.
 - See also: [Tools and streaming](tools-and-streaming.md), [Multi-agent and scheduling](multi-agent.md), [Reference](../reference.md).

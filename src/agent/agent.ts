@@ -23,7 +23,7 @@ import { persistTelemetry } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
-import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, accumulateUsage, type SteerEntry } from "./loop.ts";
+import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, endsWithStop, accumulateUsage, type SteerEntry } from "./loop.ts";
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
 import { createSessionId, nowMs, newRunId } from "../utils/session.ts";
 import {
@@ -518,8 +518,10 @@ export class Agent {
     if (this.currentRun) throw new Error("[Agent Accelerator] resume() needs an idle agent: a run is already active.");
     const mark = this.runMarks.filter((m) => !m.end && m !== this.activeMark).pop();
     const last = this.context.messages[this.context.messages.length - 1];
-    if (!mark || last?.role === "assistant" && unfinishedToolCalls(this.context.messages).length === 0) {
-      if (mark) this.endRun(mark, "done"); // the answer was complete; only the note that it ended was lost
+    const nothingOpen = unfinishedToolCalls(this.context.messages).length === 0;
+    if (!mark || (nothingOpen && (last?.role === "assistant" || endsWithStop(this.context.messages)))) {
+      // The answer was complete (or a tool had ended the run); only the note that it ended was lost.
+      if (mark) this.endRun(mark, endsWithStop(this.context.messages) ? "stopped" : "done");
       this.pumpQueue();
       return Promise.resolve(undefined);
     }
@@ -539,7 +541,7 @@ export class Agent {
 
   // The finished tool calls of the current run as results the loop can reuse; in: toolRecords, out: loopConfig.resume.stored.
   private storedToolResults(): Map<string, ToolResultRecord> {
-    return new Map(this.toolRecords.map((t) => [t.id, { id: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}) } as ToolResultRecord]));
+    return new Map(this.toolRecords.map((t) => [t.id, { id: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}), ...(t.stopped ? { stopped: true } : {}) } as ToolResultRecord]));
   }
 
   // Closes a run's mark with how it ended and saves that; in: the run's promise handlers, out: runMarks + journal.
@@ -557,6 +559,7 @@ export class Agent {
       name: result.name,
       result: isSubagentResult(result.result) ? result.result.xml : result.result,
       ...(result.isError ? { isError: true } : {}),
+      ...(result.stopped ? { stopped: true } : {}),
     });
     this.doPersist();
   }
@@ -1201,7 +1204,7 @@ export class Agent {
 
     this.currentRun = { steerInbox, abortController: runController, runPromise: task };
     task.then(
-      () => this.endRun(mark, "done"),
+      (res) => this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done"),
       (err) => this.endRun(mark, isAbortError(err) ? "aborted" : "failed")
     );
     const cleanup = () => {
@@ -1261,7 +1264,7 @@ export class Agent {
     this.currentRun = { steerInbox, outerStream: s, abortController: runController };
     s.result().then(
       (res) => {
-        this.endRun(mark, "done");
+        this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done");
         try {
           this.mergeSubagentTraces(res.subagents as any);
           this.persistNow();

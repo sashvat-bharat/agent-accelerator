@@ -144,11 +144,6 @@ export interface CreateToolOptions<TInput = any, TOutput = any> {
   /** Free-form tags for grouping/filtering tools (e.g. `["web", "readonly"]`). */
   tags?: string[];
   /**
-   * When true, the host must approve this call before execution. Stored only;
-   * enforcement is wired by the host, default open.
-   */
-  needsApproval?: boolean;
-  /**
    * Optional output schema (Zod or JSON Schema, stored as `unknown` so `zod`
    * stays optional for type-only consumers).
    */
@@ -208,7 +203,6 @@ export function tool<TInput = any, TOutput = any>(
     ...(options.redact !== undefined ? { redact: options.redact } : {}),
     ...(options.retry !== undefined ? { retry: options.retry } : {}),
     ...(options.tags !== undefined ? { tags: options.tags } : {}),
-    ...(options.needsApproval !== undefined ? { needsApproval: options.needsApproval } : {}),
     ...(options.output !== undefined ? { output: options.output } : {}),
     ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
   } as ToolDefinition<TInput, TOutput>;

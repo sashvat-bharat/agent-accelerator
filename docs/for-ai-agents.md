@@ -25,7 +25,8 @@
 | Save / resume / survive a crash | `persist: { dir }` + same `sessionId` (cut-off runs resume by themselves), `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
-| Observe | `telemetryBus.onEvent` | [Safety](guides/safety-and-ops.md) |
+| Observe | `telemetryBus.onEvent` |
+| Ask permission before a tool acts | check inside `execute`, refuse with `ctx.stop(reason)` (run ends `stopped`) | [Tools and streaming](guides/tools-and-streaming.md) | [Safety](guides/safety-and-ops.md) |
 
 ## Template: a safe production agent
 
@@ -73,7 +74,8 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | Do not use | Why / instead |
 |---|---|
 | `hooks`, `contextManagement`, `logger` config | Placeholders that only warn. Use `telemetryBus` |
-| `needsApproval`, tool `retry` / `tags` / `output` | Stored but not enforced. Add your own approval step |
+| `needsApproval` | Removed. Ask inside `execute` and refuse with `ctx.stop(reason)` |
+| Tool `retry` / `tags` / `output` | Stored but not enforced |
 | `thinking.budgetTokens` | Not forwarded by any adapter |
 | `stop`, `seed` on Google or OpenAI | Warn and dropped |
 | `temperature` / `topP` / `sampling` | Removed on every provider; do not pass them |

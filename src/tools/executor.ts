@@ -57,6 +57,14 @@ export function normalizeToolName(name: string): string {
     .toLowerCase();
 }
 
+// Thrown by `ctx.stop(reason)` to unwind the tool's code at once; the executor turns it into a stopped result and never retries it.
+class ToolStopSignal extends Error {
+  constructor() {
+    super("The tool ended the run with ctx.stop()");
+    this.name = "ToolStopSignal";
+  }
+}
+
 /** Default cap for string tool results kept for model context. */
 export const DEFAULT_MAX_RESULT_CHARS = 20000;
 
@@ -538,6 +546,12 @@ export async function executeToolCalls(
     let releaseGlobal: (() => void) | undefined;
     let releaseTool: (() => void) | undefined;
     let executionStartTime = startTime;
+    // Set by `ctx.stop(reason)`: the call's result becomes the reason and the run ends after this batch.
+    let stopReason: string | undefined;
+    const stoppedResult = (): ToolResultRecord => {
+      trace("call_stopped", "warn", { reason: stopReason, attempts, durationMs: elapsedMs(executionStartTime) });
+      return { id: call.id, name: resolved.name, result: stopReason, isError: false, stopped: true, durationMs: elapsedMs(executionStartTime) };
+    };
 
     try {
       if (signal?.aborted) {
@@ -553,6 +567,10 @@ export async function executeToolCalls(
         signal,
         sessionId,
         onSubagentEvent,
+        stop: (reason: string): never => {
+          stopReason ??= String(reason);
+          throw new ToolStopSignal();
+        },
         log: (message, data) => log?.write({ phase: "log", message, ...(data !== undefined ? { data: toJsonSafe(data) } : {}) }),
         emit: (event) => {
           if (event?.type === "progress") progress = event;
@@ -619,6 +637,7 @@ export async function executeToolCalls(
           break;
         } catch (err: any) {
           if (signal?.aborted) throw new Error("Tool execution aborted");
+          if (stopReason !== undefined) throw err; // ctx.stop: not a failure, never retried
           timedOut = err?.toolTimeout === true;
           const willRetry =
             isTransientError(err) && attempt < maxAttempts && !(err?.code === "ETIMEDOUT" && (!configuredTries || configuredTries <= 0));
@@ -636,6 +655,8 @@ export async function executeToolCalls(
           await waitForRetry(delayMs, signal);
         }
       }
+
+      if (stopReason !== undefined) return stoppedResult(); // the tool caught the stop signal but the run still stops
 
       // Undefined means "no value", serialized null-safe as "null" (changed
       // from the legacy "Success" marker so model context stays valid JSON).
@@ -690,6 +711,7 @@ export async function executeToolCalls(
       // scrubbed message plus what the tool finished before failing, so it repairs
       // only the remainder instead of repeating completed side effects.
       const aborted = signal?.aborted === true;
+      if (stopReason !== undefined && !aborted) return stoppedResult();
       const done = err?.context?.progress ?? progress;
       trace(aborted ? "call_aborted" : timedOut ? "call_timed_out" : "call_failed", "error", {
         attempts,

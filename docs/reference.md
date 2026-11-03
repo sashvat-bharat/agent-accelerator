@@ -64,7 +64,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 
 `AgentResponse` fields: `text`, `parsed` (structured output), `thinking`, `thoughtSignature`, `toolCalls`, `toolResults`, `subagents`, `usage`, `responseId`, `model`, `provider`, `finishReason`, `rawFinishReason`, `durationMs`, `raw` (per `captureRaw`), `turns`. A failed run attaches the same shape as `err.partial`.
 
-`finishReason`: `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `error` (or a provider string; the original stays in `rawFinishReason`).
+`finishReason`: `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `stopped` (a tool called `ctx.stop`), `error` (or a provider string; the original stays in `rawFinishReason`).
 
 `usage`: `inputTokens`, `outputTokens`, `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`.
 
@@ -88,13 +88,13 @@ Every event has `type` and `schemaVersion`.
 
 ## Tool definition
 
-`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `retry`, `repeatable`, `maxResultChars`, `redactError`, `redact`, `tags`, `needsApproval`, `output`, `execute`. `__brand` is internal; never set it.
+`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `retry`, `repeatable`, `maxResultChars`, `redactError`, `redact`, `tags`, `output`, `execute`. `__brand` is internal; never set it.
 
 | Enforced by the executor | Stored only (no effect today) |
 |---|---|
-| `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`/`redact`; `strict` goes to the provider | `retry`, `tags`, `needsApproval`, `output` |
+| `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`/`redact`; `strict` goes to the provider | `retry`, `tags`, `output` |
 
-`execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `runId`, `emit`, `logger`, `log(message, data?)` (writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the Agent persists to a folder, else a no-op). A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
+`execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `runId`, `emit`, `logger`, `stop(reason)` (ends the run after this batch with `finishReason: "stopped"`; the reason is the call's result; throws, never retried), `log(message, data?)` (writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the Agent persists to a folder, else a no-op). A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
 
 ## Telemetry codes
 
@@ -111,7 +111,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `interaction_chain_evicted`, `interaction_chain_ttl_expired`, `interaction_history_shrink` | Google chaining: server chain dropped, expired, or input tokens fell |
 | `stream_buffer_overflow`, `stream_event_oversize` | Stream buffer limits hit |
 | `catalog_cache_write_failed` | Model catalog could not be saved |
-| `tool.call_started`, `tool.attempt_started`, `tool.progress`, `tool.attempt_failed`, `tool.retry_scheduled`, `tool.call_succeeded`, `tool.call_failed`, `tool.call_timed_out`, `tool.call_aborted`, `tool.call_blocked`, `tool.call_interrupted` | Tool call lifecycle. Each has `toolCallId`, `toolName`, `agentName`, `sessionId`; failures add the full error. A `call_started` with no ending event was in flight at a crash. Attach a sink to persist them |
+| `tool.call_stopped` (a tool called `ctx.stop`), `tool.call_started`, `tool.attempt_started`, `tool.progress`, `tool.attempt_failed`, `tool.retry_scheduled`, `tool.call_succeeded`, `tool.call_failed`, `tool.call_timed_out`, `tool.call_aborted`, `tool.call_blocked`, `tool.call_interrupted` | Tool call lifecycle. Each has `toolCallId`, `toolName`, `agentName`, `sessionId`; failures add the full error. A `call_started` with no ending event was in flight at a crash. Attach a sink to persist them |
 | `session.local_media_paths` | An imported session references local files without `fileAccess.roots` |
 | `agent.run_retry` | A failed run is being tried again (`attempt`, `of`, `delayMs`) |
 | `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed / resuming (or a prompt that was waiting) failed |

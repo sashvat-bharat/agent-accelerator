@@ -611,6 +611,15 @@ export function unfinishedToolCalls(messages: AgentContext["messages"]): ToolCal
   return open;
 }
 
+/** True when the conversation ends with tool results of a batch in which a tool called `ctx.stop` (the run was meant to end there). */
+export function endsWithStop(messages: AgentContext["messages"]): boolean {
+  for (let i = messages.length - 1; i >= 0 && messages[i]!.role === "tool"; i--) {
+    const content = messages[i]!.content;
+    if (Array.isArray(content) && content.some((p) => p.type === "tool_result" && p.stopped === true)) return true;
+  }
+  return false;
+}
+
 // Finishes the tool calls a crash left open (stored result reused, anything else executed now) and records the results in the conversation; in: a resumed run's config, out: tool results in context + what the response should report.
 async function finishInterruptedTools(
   config: AgentLoopConfig
@@ -686,6 +695,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   let finalResult: any = null;
   let turns = 0;
   let toolsExecuted = false;
+  let stoppedByTool = false;
   let previousToolCallFingerprints = new Set<string>();
   const repeatCounts = new Map<string, number>();
 
@@ -694,6 +704,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
   if (config.resume) {
     const finished = await finishInterruptedTools(config);
+    stoppedByTool = finished.results.some((r) => r.stopped) || endsWithStop(context.messages);
     if (finished.calls.length > 0) {
       toolsExecuted = true;
       allToolCalls.push(...finished.calls);
@@ -705,7 +716,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     }
   }
 
-  while (turns < maxTurns) {
+  while (!stoppedByTool && turns < maxTurns) {
     // Q-21: fail fast on abort (throws AbortError with partial).
     throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: finalResult?.text });
     checkDeadline(startTime, limits.deadlineMs);
@@ -899,6 +910,12 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       toolCalls: genResult.toolCalls,
       toolResults: sanitizedResults,
     });
+    // A tool ended the run (`ctx.stop`): the whole batch has finished, so stop here. Waiting steers become follow-ups.
+    if (sanitizedResults.some((r) => r.stopped)) {
+      stoppedByTool = true;
+      emitProgress(config);
+      break;
+    }
     // Steer drain AFTER tool results so call/result pairs stay adjacent.
     // The next loop iteration sends the injected user message to the model
     // within the same run (same usage/turn budget).
@@ -917,7 +934,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   // results above were never sent back, so the run is truncated — surface
   // it via finishReason + warning instead of silently returning.
   const truncatedByMaxTurns =
-    turns >= maxTurns && !!finalResult?.toolCalls && finalResult.toolCalls.length > 0;
+    !stoppedByTool && turns >= maxTurns && !!finalResult?.toolCalls && finalResult.toolCalls.length > 0;
   if (truncatedByMaxTurns) {
     warnMaxTurnsHit(
       agentName,
@@ -929,7 +946,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   // Structured outputs: validate final text only (tool turns skip this).
   // Strict-fail throws ValidationError with partial attached via catch below.
   let parsedOutput: unknown | undefined;
-  if (loopOutput.raw !== undefined && !truncatedByMaxTurns) {
+  if (loopOutput.raw !== undefined && !truncatedByMaxTurns && !stoppedByTool) {
     parsedOutput = parseFinalStructuredOutput(finalResult?.text || "", loopOutput.raw, loopOutput.spec);
   }
 
@@ -946,7 +963,9 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     model: modelId,
     provider: provider.id,
     // Q-04: canonical finish reason + raw vendor passthrough.
-    ...canonicalFinishReason(finalResult?.finishReason, truncatedByMaxTurns),
+    ...(stoppedByTool
+      ? { finishReason: "stopped" as const, ...(finalResult?.finishReason ? { rawFinishReason: finalResult.finishReason } : {}) }
+      : canonicalFinishReason(finalResult?.finishReason, truncatedByMaxTurns)),
     durationMs: Date.now() - startTime,
     raw: applyCaptureRaw(finalResult?.raw, config.captureRaw) as ProviderRawData,
     turns,
@@ -1104,6 +1123,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       turns = 0;
       let previousToolCallFingerprints = new Set<string>();
       const repeatCounts = new Map<string, number>();
+      let stoppedByTool = false;
 
       while (turns < maxTurns) {
         throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
@@ -1375,6 +1395,12 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           toolCalls: turnResponse.toolCalls,
           toolResults: sanitizedResults,
         });
+        // A tool ended the run (`ctx.stop`): the whole batch has finished, so stop here. Waiting steers become follow-ups.
+        if (sanitizedResults.some((r) => r.stopped)) {
+          stoppedByTool = true;
+          emitProgress(config);
+          break;
+        }
         const toolSteered = drainSteerInbox(context, config.steerInbox);
         if (toolSteered.length > 0) {
           for (const preview of toolSteered) {
@@ -1392,7 +1418,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       }
 
       const truncatedByMaxTurns =
-        turns >= maxTurns && !!lastResponse?.toolCalls && lastResponse.toolCalls.length > 0;
+        !stoppedByTool && turns >= maxTurns && !!lastResponse?.toolCalls && lastResponse.toolCalls.length > 0;
       if (truncatedByMaxTurns) {
         warnMaxTurnsHit(
           agentName,
@@ -1400,10 +1426,12 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           lastResponse!.toolCalls.map((c) => c.name)
         );
       }
-      const truncatedFinish = canonicalFinishReason(lastResponse?.finishReason, truncatedByMaxTurns);
+      const truncatedFinish = stoppedByTool
+        ? { finishReason: "stopped" as const, ...(lastResponse?.finishReason ? { rawFinishReason: lastResponse.finishReason } : {}) }
+        : canonicalFinishReason(lastResponse?.finishReason, truncatedByMaxTurns);
 
       let streamParsed: unknown | undefined;
-      if (streamOutputRaw !== undefined && !truncatedByMaxTurns) {
+      if (streamOutputRaw !== undefined && !truncatedByMaxTurns && !stoppedByTool) {
         try {
           streamParsed = parseFinalStructuredOutput(lastResponse?.text || "", streamOutputRaw, streamOutputSpec);
         } catch (err) {

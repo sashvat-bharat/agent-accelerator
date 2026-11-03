@@ -80,6 +80,8 @@ export interface SessionToolRecord {
   name: string;
   result: unknown;
   isError?: boolean;
+  /** The tool ended the run with `ctx.stop`. */
+  stopped?: boolean;
 }
 
 /** A prompt that was waiting when the process stopped (its options other than `additionalContext` are not saved). */
@@ -995,7 +997,7 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k]!.trim();
     if (!line) continue;
-    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown; p?: unknown; id?: unknown; at?: unknown; status?: unknown; call?: unknown; name?: unknown; result?: unknown; isError?: unknown };
+    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown; p?: unknown; id?: unknown; at?: unknown; status?: unknown; call?: unknown; name?: unknown; result?: unknown; isError?: unknown; stopped?: unknown };
     try {
       rec = JSON.parse(line);
     } catch {
@@ -1020,7 +1022,7 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
       const mark = session.runs?.find((r) => r.id === rec.id);
       if (mark) session.runs = session.runs!.map((r) => (r === mark ? { ...r, end: rec.status as SessionRunEnd } : r));
     } else if (rec.t === "tool" && typeof rec.call === "string" && typeof rec.name === "string") {
-      session.tools = [...(session.tools ?? []).filter((x) => x.id !== rec.call), { id: rec.call, name: rec.name, result: rec.result, ...(rec.isError ? { isError: true } : {}) }];
+      session.tools = [...(session.tools ?? []).filter((x) => x.id !== rec.call), { id: rec.call, name: rec.name, result: rec.result, ...(rec.isError ? { isError: true } : {}), ...(rec.stopped ? { stopped: true } : {}) }];
     } else if (rec.t === "pending" && rec.p && typeof rec.p === "object") {
       const p = rec.p as SessionPending; // latest record wins
       if (Array.isArray(p.steer) && Array.isArray(p.queue)) {

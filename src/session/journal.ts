@@ -32,7 +32,7 @@ const EMPTY_PENDING = JSON.stringify({ steer: [], queue: [] });
 
 // One `tool` journal line; the result is saved as given (tool results are JSON-safe by the time the executor returns them); in: a finished tool call, out: the journal.
 function toolLine(t: SessionToolRecord): string {
-  return JSON.stringify({ t: "tool", call: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}) });
+  return JSON.stringify({ t: "tool", call: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}), ...(t.stopped ? { stopped: true } : {}) });
 }
 
 /** Persists one session folder (`sessions/<id>/`) step by step. */

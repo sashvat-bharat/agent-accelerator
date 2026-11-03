@@ -408,6 +408,34 @@ const agent = new Agent({
 
 The agent loop answers the 3rd consecutive identical call (same name and arguments) with a `repeat_blocked` error, so the model can reuse the prior result or change its arguments. Tools marked `repeatable: true`, or `idempotent: true` unless `repeatable` is set, are exempt.
 
+
+### Asking permission: `ctx.stop`
+
+The SDK has no approval modes; you write the check inside `execute` (your own function that asks your user) and call `ctx.stop(reason)` when the answer is no:
+
+```ts
+const pay = tool({
+  description: "Pay an invoice.",
+  input: z.object({ invoiceId: z.string(), amount: z.number() }),
+  execute: async ({ invoiceId, amount }, ctx) => {
+    if (!(await getPermission(`Pay $${amount} for ${invoiceId}?`))) ctx.stop("user declined the payment");
+    return await payInvoice(invoiceId, amount);   // never reached after a stop
+  },
+});
+```
+
+`ctx.stop` throws, so the code after it never runs (even if you forget `return`). The reason is saved as that call's result, calls that were running in parallel in the same batch still run to completion (none is skipped or aborted), and then the run ends with `finishReason: "stopped"` and **no further model turn**. The agent waits for the next user message; the model then sees the reason as the tool's result. A steer typed while the batch ran becomes the next run. The stop is saved with the call, so a crash cannot turn a "no" into a "yes": after a restart the run is closed as stopped without calling the model. A tool's `timeoutMs` counts the time spent waiting for your check, so leave it off for tools that ask a person.
+
+To guard a built-in tool such as `spawn_subagents` or `scheduled_actions`, wrap it on the agent after construction:
+
+```ts
+const inner = agent.tools["spawn_subagents"]!;
+agent.tools["spawn_subagents"] = {
+  ...inner,
+  execute: async (input, ctx) => ((await getPermission("Spawn workers?")) ? inner.execute(input, ctx) : ctx.stop("spawning was not approved")),
+};
+```
+
 ### Tool Failures and Tracing
 
 When a tool throws, the model gets the error line plus a JSON block: error `name`/`code`/`status`, `attempts`, `timedOut`, the last progress the tool reported, and a hint not to repeat finished work. Report progress from inside a tool with `ctx.emit({ type: "progress", ... })`, or throw `new ToolError(msg, { context: { progress } })`.
@@ -943,7 +971,7 @@ SubAgentExecutionMetadata {
 }
 ```
 
-`finishReason` is `"max_turns"` when a finite `maxTurns` limit stopped the run with tool calls still pending (with an `agent.max_turns_truncated` warning on `telemetryBus` naming the dropped tools).
+`finishReason` is `"stopped"` when a tool ended the run with `ctx.stop(reason)` (see *Asking permission*). It is `"max_turns"` when a finite `maxTurns` limit stopped the run with tool calls still pending (with an `agent.max_turns_truncated` warning on `telemetryBus` naming the dropped tools).
 
 ### SubAgentStep
 

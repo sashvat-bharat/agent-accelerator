@@ -29,7 +29,7 @@ const res = await agent.run("Where is order A-1001?");
 console.log(res.text, res.toolCalls.length);
 ```
 
-`tool()` options (all in [Reference](../reference.md)): `name`, `description`, `input` (Zod or JSON Schema), `parameters`, `strict`, `timeoutMs`, `maxTries` / `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError` / `redact`, `retry`, `tags`, `needsApproval`, `output`, `execute`. The executor **enforces** `input`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`. `strict` is passed to providers. `retry`, `tags`, `needsApproval` and `output` are stored only (`needsApproval` is **not** enforced). `execute` also receives a context with `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `runId`, `emit` and `logger`.
+`tool()` options (all in [Reference](../reference.md)): `name`, `description`, `input` (Zod or JSON Schema), `parameters`, `strict`, `timeoutMs`, `maxTries` / `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError` / `redact`, `retry`, `tags`, `output`, `execute`. The executor **enforces** `input`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`. `strict` is passed to providers. `retry`, `tags` and `output` are stored only. `execute` also receives a context with `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `runId`, `emit`, `logger`, `log` and `stop` (see *Asking permission* below).
 
 How a call is executed, in order:
 1. **Name**: matched exactly, then case/format-insensitively; a near miss returns "Did you mean …?" to the model.
@@ -37,8 +37,9 @@ How a call is executed, in order:
 3. **Concurrency**: up to 8 tools at once, plus your per-tool `maxConcurrency`.
 4. **Run**: default **one attempt**; `idempotent: true` allows up to 3 on transient failures; an explicit `maxTries` wins. Timeouts are not retried unless you set `maxTries`.
 5. **Result**: made JSON-safe, secrets/paths scrubbed from errors, capped at `maxResultChars` (default 20000, with a `[Truncated…]` marker); `undefined` becomes `"null"`; failures become `Error executing <name>: …` plus a JSON block (error code/status, attempts, last `ctx.emit({ type: "progress", … })` snapshot, a do-not-repeat hint) so the model repairs only what remains; every call also emits `tool.*` events on `telemetryBus` (see [reference](../reference.md#telemetry-codes)). Every result has `durationMs`.
-6. **Tool log**: with `persist: { dir }` the call also gets `tool-logs/<n>-<tool>.ndjson` in the session folder (input, attempts, retries, full result or error, duration, plus your `ctx.log(message, data?)` lines, each flushed as written; never sent to the model; the result carries `logFile`). Without `persist: { dir }`, `ctx.log` is a no-op.
-7. **Repeat guard**: the 3rd identical call in a row is answered with `repeat_blocked`; `repeatable`/`idempotent` tools are exempt.
+6. **Stop**: `ctx.stop(reason)` ends the run after this batch (`finishReason: "stopped"`, no further model turn); the reason is the call's result; never retried.
+7. **Tool log**: with `persist: { dir }` the call also gets `tool-logs/<n>-<tool>.ndjson` in the session folder (input, attempts, retries, full result or error, duration, plus your `ctx.log(message, data?)` lines, each flushed as written; never sent to the model; the result carries `logFile`). Without `persist: { dir }`, `ctx.log` is a no-op.
+8. **Repeat guard**: the 3rd identical call in a row is answered with `repeat_blocked`; `repeatable`/`idempotent` tools are exempt.
 
 `toolChoice` (agent or per run): `"auto"`, `"none"` (whole run), `"required"` or `{ tool: "name" }` (these two apply to the **first turn only**, otherwise a run could never finish). Also exported: `executeToolCalls`, `toStandardToolDeclarations`, `zodToJsonSchema`, `cleanJsonSchema`, `stripSchemaForGoogle`, `assertValidToolName`. Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; ambiguous names fail at construction.
 
@@ -103,11 +104,43 @@ console.log((await next).text); // its own run and response
 
 `midSession: { mode \| whenBusy: "steer" \| "queue" \| "auto" }` can enforce one policy (the other verb then throws). `isBusy`, `pendingCount`, `steerPendingCount` expose state. A steer that arrives after the run ended becomes a queued follow-up (placed at the FRONT of the queue, in arrival order, since it was typed before anything queued later), and its promise resolves with *that* run's response. With `persist: { dir }` the prompts still waiting (steers not yet injected, queued follow-ups, with their `additionalContext`) are saved with the session, so a crash does not lose a message the user already typed.
 
+## Asking permission
+
+The SDK has no approval modes. Write the check inside `execute` and refuse with `ctx.stop(reason)`:
+
+```ts
+import { tool } from "agent-accelerator";
+import { z } from "zod";
+
+const pay = tool({
+  description: "Pay an invoice.",
+  input: z.object({ invoiceId: z.string(), amount: z.number() }),
+  // no timeoutMs: it would count the time a person takes to answer
+  execute: async ({ invoiceId, amount }, ctx) => {
+    if (!(await getPermission(`Pay $${amount} for ${invoiceId}?`))) ctx.stop("user declined the payment");
+    return payInvoice(invoiceId, amount); // never reached after a stop
+  },
+});
+```
+
+`ctx.stop` throws, so the code after it never runs. The reason becomes that call's result; calls that were running in parallel in the same batch still finish (none is skipped or aborted); then the run ends with `finishReason: "stopped"` and no further model turn, and the agent waits for the next user message (the model then sees the reason as the tool's result). A steer typed while the batch ran becomes the next run. The stop is saved with the call, so a crash cannot turn a "no" into a "yes": after a restart the run is closed as stopped without calling the model.
+
+To guard a built-in tool, replace it on the agent after construction:
+
+```ts
+const inner = agent.tools["spawn_subagents"]!;
+agent.tools["spawn_subagents"] = {
+  ...inner,
+  execute: async (input, ctx) => ((await getPermission("Spawn workers?")) ? inner.execute(input, ctx) : ctx.stop("not approved")),
+};
+```
+
 ## For AI agents
 
 - Define: `tool({ description, input: z.object({...}), execute })`; register: `tools: { name: def }` (record key becomes the name).
 - Defaults: 1 attempt (3 if `idempotent`), result cap 20000 chars, global concurrency 8, repeat guard at the 3rd identical consecutive call.
-- Do not assume `needsApproval`, `retry`, `tags` or `output` change behavior.
+- Do not assume `retry`, `tags` or `output` change behavior. There is no `needsApproval`: ask inside `execute` and call `ctx.stop(reason)` to refuse.
+- `ctx.stop(reason)` throws (never returns), saves `reason` as the call's result, lets the rest of the batch finish, and ends the run with `finishReason: "stopped"` and no more model turns.
 - Streaming: `agent.stream()` returns an `AssistantMessageEventStream`; always `await stream.result()` for the final `AgentResponse`.
 - `steer`/`queue`/`interrupt` only make sense while `agent.isBusy`.
 - See also: [Multi-agent and scheduling](multi-agent.md), [Safety and operations](safety-and-ops.md), [`examples/02-function_calling.ts`](../../examples/02-function_calling.ts), [`examples/12-mid-session.ts`](../../examples/12-mid-session.ts).
