@@ -94,7 +94,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 ## Known limitations
 
 Be aware (pre-1.0):
-- **One process per home folder.** There is no cross-process lock; concurrent writers can lose updates. No `fsync` yet (a process crash is safe; a power loss is not guaranteed).
+- **One process per home folder.** There is no cross-process lock yet; concurrent writers can lose updates. Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `tasks.json`, `deliveries.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
 - Scheduled actions: creating Agent held weakly; `run_now` flagged `late` and never retries; no spending guardrails; no timezone/DST logic; run only while the process lives.
 - Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding; `stop`/`seed` on Google/OpenAI.
 - Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.

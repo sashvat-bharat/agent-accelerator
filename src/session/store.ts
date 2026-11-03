@@ -32,6 +32,7 @@ import { getModelFromCatalog } from "../models/catalog.ts";
 import type { SubAgentStep } from "../types/response.ts";
 import { SessionLoadError } from "../types/errors.ts";
 import { createSessionId } from "../utils/session.ts";
+import { writeFileDurable, readWithBackup } from "../utils/durable.ts";
 
 /** Cumulative per-session token + cost totals (JSON-safe). */
 export interface SessionTotals {
@@ -654,14 +655,14 @@ export function inspectSessionPayload(
 /** Loads a session file (pretty `.json` or legacy `.jsonl`). Returns null when missing/corrupt. */
 export function loadSessionFile(filePath: string, limits?: SessionLimits): PersistedAgentSession | null {
   const resolved = path.resolve(filePath);
-  let raw: string;
-  try {
-    if (!fs.existsSync(resolved)) return null;
-    raw = fs.readFileSync(resolved, "utf8");
-  } catch {
-    return null;
-  }
-  return sessionFromPayload(raw, resolved, limits);
+  const read = readWithBackup(resolved, isLoadableSession);
+  return read ? sessionFromPayload(read.text, resolved, limits) : null;
+}
+
+// True when a stored payload is a usable snapshot (a valid one over the load limits counts); in: raw file text, out: readWithBackup's fallback decision.
+function isLoadableSession(raw: string): boolean {
+  const status = inspectSessionPayload(raw).status;
+  return status === "ok" || status === "over_limit";
 }
 
 /**
@@ -680,25 +681,8 @@ function sessionFromPayload(raw: string, file: string, limits?: SessionLimits): 
   return res.session ?? null;
 }
 
-/** Atomic file write (temp + rename) so a crash never leaves half-written JSON. */
-export function writeFileAtomic(filePath: string, content: string): void {
-  const dir = path.dirname(filePath);
-  try {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  } catch {}
-  let tag = "tmp";
-  try {
-    const pid = (globalThis as any)?.process?.pid;
-    const rand = (globalThis as any)?.crypto?.randomUUID?.().slice(0, 8) ?? Math.random().toString(36).slice(2, 8);
-    tag = `${typeof pid === "number" ? pid : "np"}-${rand}`;
-  } catch {
-    tag = Math.random().toString(36).slice(2, 8);
-  }
-  const tmp = `${filePath}.tmp-${tag}`;
-  fs.writeFileSync(tmp, content, { encoding: "utf8", mode: 0o600 });
-  try { fs.chmodSync(tmp, 0o600); } catch {}
-  fs.renameSync(tmp, filePath);
-}
+/** Public name of the durable writer (temp file, fsync, `.bak`, atomic rename): a crash or power cut never leaves half-written JSON. */
+export const writeFileAtomic = writeFileDurable;
 
 /** Session id grammar: no traversal, no slashes, no hidden files. */
 export function assertValidSessionId(sessionId: string): void {
@@ -985,8 +969,9 @@ export function loadSessionDir(sessionPath: string, limits?: SessionLimits): Loa
       // path does not exist yet — fall through to session.json lookup
     }
     const file = path.join(dir, "session.json");
-    if (!fs.existsSync(file)) return null;
-    const data = sessionFromPayload(fs.readFileSync(file, "utf8"), file, limits);
+    const read = readWithBackup(file, isLoadableSession);
+    if (!read) return null;
+    const data = sessionFromPayload(read.text, file, limits);
     if (!data) return null;
     data.messages = resolveMediaPaths(data.messages, dir);
     return { session: data, dir };

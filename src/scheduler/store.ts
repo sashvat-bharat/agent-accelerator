@@ -6,13 +6,13 @@
  *   <home>/scheduled_actions/<id>/<date>.md     one file per run
  *
  * The files are the source of truth: every write re-reads first (never writes
- * from a stale copy) and goes through `writeFileAtomic` (temp file + rename).
+ * from a stale copy) and goes through `writeFileDurable` (temp file, fsync, `.bak`, rename).
  * Sync `fs`, like the session store.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
-import { writeFileAtomic } from "../session/store.ts";
+import { readWithBackup, writeFileDurable } from "../utils/durable.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { resolveHome } from "../utils/home.ts";
 export { resolveHome };
@@ -73,36 +73,49 @@ export function migrateLegacyFolder(home: string): void {
 
 type Raw = Record<string, unknown>;
 
-/** Reads a `{ version, <key>: [...] }` file. Missing = empty; corrupt = quarantined (`*.corrupt-<ts>`) + empty. */
-function readList(file: string, key: "tasks" | "pending"): Raw[] {
-  let text: string;
-  try {
-    text = fs.readFileSync(file, "utf8");
-  } catch {
-    return [];
-  }
+// Parses a `{ version, <key>: [...] }` file into its object entries; undefined when the text is not that shape; in: raw file text, out: readList.
+function parseList(text: string, key: "tasks" | "pending"): Raw[] | undefined {
   try {
     const list = (JSON.parse(text) as Raw | null)?.[key];
-    if (!Array.isArray(list)) throw new Error(`"${key}" is not an array`);
+    if (!Array.isArray(list)) return undefined;
     return list.filter((x): x is Raw => !!x && typeof x === "object" && !Array.isArray(x));
   } catch {
-    const moved = `${file}.corrupt-${Date.now()}`;
-    try {
-      fs.renameSync(file, moved);
-    } catch {
-      // why: quarantine is best-effort; the file is ignored either way.
-    }
-    telemetryBus.emitWarning(
-      "scheduled_action.store_corrupt",
-      `[Agent Accelerator] ${path.basename(file)} is not valid; moved to ${path.basename(moved)} and starting empty.`,
-      { file: moved }
-    );
-    return [];
+    return undefined;
   }
 }
 
+/**
+ * Reads a `{ version, <key>: [...] }` file. Missing = empty. A damaged file is renamed `*.corrupt-<ts>`; if its `.bak`
+ * (the last good version) is valid it is restored, else the list starts empty.
+ */
+function readList(file: string, key: "tasks" | "pending"): Raw[] {
+  const read = readWithBackup(file, (t) => parseList(t, key) !== undefined);
+  if (!read) return [];
+  const list = parseList(read.text, key);
+  if (list && !read.fromBackup) return list;
+  const moved = `${file}.corrupt-${Date.now()}`;
+  try {
+    fs.renameSync(file, moved);
+  } catch {
+    // why: quarantine is best-effort; the file is ignored either way.
+  }
+  if (list) {
+    try {
+      writeFileDurable(file, read.text, { backup: false }); // keep the good .bak where it is
+    } catch {
+      // why: the backup content is still returned for this read.
+    }
+  }
+  telemetryBus.emitWarning(
+    "scheduled_action.store_corrupt",
+    `[Agent Accelerator] ${path.basename(file)} is not valid; moved to ${path.basename(moved)} and ${list ? "restored from its backup" : "starting empty"}.`,
+    { file: moved, restored: !!list }
+  );
+  return list ?? [];
+}
+
 function writeList(file: string, key: "tasks" | "pending", list: Raw[]): void {
-  writeFileAtomic(file, JSON.stringify({ version: 1, [key]: list }, null, 2) + "\n");
+  writeFileDurable(file, JSON.stringify({ version: 1, [key]: list }, null, 2) + "\n");
 }
 
 /** Every record as stored. Records may be invalid: check with {@link validateRecord} before acting on one. */
@@ -212,7 +225,7 @@ export function writeRunFile(home: string, id: string, deliverAt: Date, header: 
   const base = runFileName(deliverAt);
   let name = `${base}.md`;
   for (let n = 2; fs.existsSync(path.join(dir, name)); n++) name = `${base}-${n}.md`;
-  writeFileAtomic(path.join(dir, name), renderRun(header, body));
+  writeFileDurable(path.join(dir, name), renderRun(header, body), { backup: false }); // written once, never rewritten
   return `${id}/${name}`;
 }
 

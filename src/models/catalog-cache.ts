@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { getEnv } from "../utils/env.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { onHomeChange, resolveHome } from "../utils/home.ts";
+import { writeFileDurable } from "../utils/durable.ts";
 
 /** Default TTL: 12 Hours (in milliseconds). */
 export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
@@ -102,17 +103,9 @@ function readJsonFileSync(filePath: string): any {
   }
 }
 
+// Writes the catalog cache durably but without a `.bak` (it is re-downloadable); in: path + payload from refreshModelCatalog, out: the cache file.
 function writeJsonFileSync(filePath: string, data: any): void {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  // Atomic tmp+rename with 0600 so a crash never leaves half-written JSON (Q-16a).
-  const rand = Math.random().toString(36).slice(2, 10);
-  const tmp = `${filePath}.tmp-${process.pid}-${rand}`;
-  fs.writeFileSync(tmp, JSON.stringify(data), { encoding: "utf-8", mode: 0o600 });
-  try { fs.chmodSync(tmp, 0o600); } catch {}
-  fs.renameSync(tmp, filePath);
+  writeFileDurable(filePath, JSON.stringify(data), { backup: false });
 }
 
 /** Verifies optional sha256 pin from MODELS_DEV_SHA256 (Q-16a). Returns false on mismatch. */
