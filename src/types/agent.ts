@@ -293,6 +293,13 @@ export interface DynamicSubagentsConfig {
   /** Fixed reasoning level for all dynamic workers. The Main Agent cannot override it. Falls back to the parent level when omitted. */
   thinkingLevel?: ThinkingLevel;
   /**
+   * Spending cap of EACH worker (the `subagents` tool, `agent.workers` and scheduled actions), set as that worker's own
+   * per-run `budget`: a spawn, a message or a scheduled run is one run, and the usage of the worker's own workers counts
+   * toward it. Exceeding it fails that call with a budget error and leaves the worker open. Default: unlimited. Models
+   * with unknown pricing count $0 toward `maxCostUsd`. Passed down to the workers' own workers.
+   */
+  workerBudget?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
+  /**
    * How many levels of workers may exist below this agent (default 3). `1` = workers cannot start workers of their own;
    * `3` = a worker may start workers that start workers. A worker with levels left gets its own `subagents` tool, and
    * its children can only be granted the tools the worker itself was granted. Whole number >= 1.

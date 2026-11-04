@@ -172,6 +172,8 @@ export class Agent {
     allowScheduledActions: boolean;
     /** Levels of workers allowed below this agent. */
     maxDepth: number;
+    /** Per-run spending cap of each worker (unset = unlimited). */
+    workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
   };
   /** Home folder for everything written to disk (`sessions/`, `scheduled_actions/`, `telemetry/`). */
   readonly home: string;
@@ -317,6 +319,13 @@ export class Agent {
       if (rawDepth !== undefined && !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)) {
         throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1 (default ${DEFAULT_MAX_DEPTH}); set dynamicSubagents.enabled: false to turn workers off.`);
       }
+      const rawBudget = (dynRaw as { workerBudget?: { maxCostUsd?: unknown; maxTotalTokens?: unknown } }).workerBudget;
+      for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
+        const v = rawBudget?.[key];
+        if (v !== undefined && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
+          throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.workerBudget.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`);
+        }
+      }
       const rawMax = (dynRaw as any)?.maxSpawn;
       const maxSpawn = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax as number)) : 4;
       // `workerTimeoutMs ?? timeout`, or -1 when `modelMaySetTimeout` (see normalizeWorkerTimeout).
@@ -330,6 +339,7 @@ export class Agent {
         timeout,
         allowScheduledActions: dynRaw.allowScheduledActions === true,
         maxDepth: (rawDepth as number | undefined) ?? DEFAULT_MAX_DEPTH,
+        ...(rawBudget ? { workerBudget: { ...(rawBudget as { maxCostUsd?: number; maxTotalTokens?: number }) } } : {}),
       };
     }
     this.apiKey = (rawModel as any)?.apiKey || config.apiKey;

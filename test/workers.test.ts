@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { z } from "zod";
 import { Agent, tool, ValidationError } from "../src/index.ts";
 import { sessionDirFor } from "../src/session/store.ts";
+import { buildDynamicWorkerConfig } from "../src/agent/worker.ts";
 
 const roots: string[] = [];
 const tmp = (): string => {
@@ -399,5 +400,51 @@ describe("workers that start workers (maxDepth)", () => {
       expect(() => mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxDepth: bad } })).toThrow("dynamicSubagents.maxDepth");
     }
     expect(mk(undefined, echo).dynamicSubagents?.maxDepth).toBe(3);
+  });
+});
+
+describe("workerBudget: each worker's own spending cap", () => {
+  const capped = (workerBudget: Record<string, unknown>, handler: Handler = echo) => mk(tmp(), handler, { dynamicSubagents: { model: "groq/w", workerBudget } });
+
+  it("fails the call that goes over, keeps the worker open, and does not touch the parent", async () => {
+    const parent = capped({ maxTotalTokens: 3 }); // every model turn costs 4 tokens in these tests
+    const r = await parent.workers.spawn(spec);
+    expect(r.error).toContain("Token budget exceeded");
+    expect(r.text).toContain("Error in worker");
+    expect(r.metadata.isError).toBe(true);
+    expect(parent.workers.list()).toHaveLength(1);
+    expect((await parent.run("hello")).text).toBe("echo:hello"); // the parent has no budget of its own
+  });
+
+  it("counts per run: a spawn and every later message each get the full cap", async () => {
+    const parent = capped({ maxTotalTokens: 5 });
+    const first = await parent.workers.spawn(spec);
+    expect(first.error).toBeUndefined();
+    expect((await parent.workers.message(first.id, "one")).error).toBeUndefined();
+    expect((await parent.workers.message(first.id, "two")).error).toBeUndefined();
+  });
+
+  it("reaches the model as a failed header, and workers have no cap unless one is set", async () => {
+    const text = String(await capped({ maxTotalTokens: 3 }).tools["subagents"]!.execute({ command: "spawn", name: "r", task: "x" }, ctx));
+    expect(text).toMatch(/^\[worker r-[0-9a-f]{8}\] failed: Token budget exceeded/);
+    const open = mk(undefined, echo);
+    expect((await open.workers.spawn(spec)).error).toBeUndefined();
+  });
+
+  it("is each worker's own budget, passed down to its workers and to one-shot workers", () => {
+    const parent = capped({ maxTotalTokens: 7, maxCostUsd: 0.5 });
+    const common = { name: "w", instructions: "", sessionId: "p1-sub-w", tools: {} };
+    const persistent = buildDynamicWorkerConfig(parent, { ...common, persistent: {} });
+    expect(persistent.budget).toEqual({ maxTotalTokens: 7, maxCostUsd: 0.5 });
+    expect(persistent.dynamicSubagents?.workerBudget).toEqual({ maxTotalTokens: 7, maxCostUsd: 0.5 });
+    expect(buildDynamicWorkerConfig(parent, common).budget).toEqual({ maxTotalTokens: 7, maxCostUsd: 0.5 });
+    expect(buildDynamicWorkerConfig(mk(undefined, echo), common).budget).toBeUndefined();
+  });
+
+  it("rejects a cap that is not a number above 0", () => {
+    for (const bad of [0, -1, "5", Number.NaN]) {
+      expect(() => capped({ maxCostUsd: bad })).toThrow("dynamicSubagents.workerBudget.maxCostUsd");
+      expect(() => capped({ maxTotalTokens: bad })).toThrow("dynamicSubagents.workerBudget.maxTotalTokens");
+    }
   });
 });

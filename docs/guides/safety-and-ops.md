@@ -97,7 +97,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 
 Be aware (pre-1.0):
 - **One process per home folder.** A folder you persist to is locked (`<folder>/.lock`): a second process fails fast with a `ConfigError` instead of silently losing updates; a lock left by a killed process is taken over, and local disks only. Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `tasks.json`, `deliveries.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
-- Scheduled actions: creating Agent held weakly; `run_now` flagged `late` and never retries; no spending guardrails; no timezone/DST logic; run only while the process lives.
+- Scheduled actions: creating Agent held weakly; `run_now` flagged `late` and never retries; no spending guardrail except `dynamicSubagents.workerBudget`; no timezone/DST logic; run only while the process lives.
 - Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding; `stop`/`seed` on Google/OpenAI.
 - Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.
 - The model catalog uses about 18 MB of memory when loaded; the SDK as a whole is not yet tuned for tiny-memory hosts.
