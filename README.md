@@ -1027,6 +1027,29 @@ TokenUsage {
 Cost calculation prefers provider-reported totals. When unavailable, costs are computed using catalog pricing, per model turn: fresh input at the input price, cache reads at the cache-read price, cache writes at the cache-write price (both are part of `inputTokens`, so they are not billed twice), output at the output price (thinking tokens are part of output), scaled by `serviceTier` (`flex` x0.5, `priority` x2, estimates). A catalog entry without a cache price bills those tokens at the input rate (cache is never free); unknown pricing stays unknown.
 
 Subagent usage is rolled into the parent totals.
+
+### Usage report (`agent.usageReport()`)
+
+`res.usage` is the cost of one run, workers included. `agent.usageReport()` is the other view: what the agent and **each** worker spent over their lives, itemized, with nothing counted twice.
+
+```ts
+const report = agent.usageReport();
+report.agent;   // this agent's OWN model calls: id, name, model, turns, tokens, cacheHitRate, cost
+report.workers; // every worker below it (open, closed, nested in `workers`, and `status: "fixed"` for `subagents: [...]`)
+report.total;   // agent + all workers
+// each line, e.g. report.workers[0]:
+// { id: "researcher-1a2b3c4d", status: "open", model: "google/gemini-3.5-flash-lite", turns: 2,
+//   tokens: { input: 2000, freshInput: 600, cacheRead: 1200, cacheWrite: 200, output: 400, thinking: 100, total: 2400 },
+//   cacheHitRate: 0.6,
+//   cost: { source: "catalog", unpricedTurns: 0, totalUsd: 0.00891,
+//           parts: { inputUsd: 0.0018, outputUsd: 0.006, cacheReadUsd: 0.00036, cacheWriteUsd: 0.00075 } } }
+```
+
+- **Own turns only.** Every agent records the model calls it made itself, priced **per turn** in integer micro-USD, and saves them in its session (`usage`), so the numbers survive a restart (load the session and the totals carry on; workers are rebuilt from their folders). A parent's `res.usage` already contains its workers' usage, which is why the report never adds responses together: `report.total.tokens.total` equals what the responses show.
+- **Cache-aware.** `input` includes the cache reads and writes (`freshInput = input - cacheRead - cacheWrite`); `output` includes `thinking`. Fresh input, cache reads and cache writes are each priced at their own catalog price, and `serviceTier` is applied. `cacheHitRate` is `cacheRead / input` (0 to 1, `null` when nothing was sent).
+- **Honest costs.** `cost.source` is `provider` (the provider reported the cost, which is exact), `catalog` (estimated from the model catalog), `mixed`, or `unknown`. Unknown pricing is `totalUsd: null`, never 0; `unpricedTurns` above 0 means the total is a lower bound. For turns whose cost the provider reported only the total is exact, so `parts` can add up to less than `totalUsd`.
+- **Not in the report:** the one-shot workers of scheduled actions (their cost is in each run file), and workers started inside a fixed `subagents` worker's per-call copy (their cost is in the response usage). `reset()` does not clear the totals: they are spending, not conversation.
+
 ### ProviderRawData
 
 ```ts

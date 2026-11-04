@@ -37,7 +37,8 @@ import {
   listSubAgentTraceIdsForSessions,
   type SubAgentTrace,
 } from "./delegation.ts";
-import { saveSessionFile, sessionDirFor, loadSessionDir, findInvalidMessage, telemetryBus, type SessionRunMark, type SessionRunEnd, type SessionPending, type SessionToolRecord } from "../session/store.ts";
+import { addTurn, buildUsageReport, emptyUsage, mergeUsage, modelName, readUsage, type UsageNode, type UsageReport, type UsageTotals } from "../session/usage.ts";
+import { saveSessionFile, sessionDirFor, loadSessionDir, findInvalidMessage, priceUsage, telemetryBus, type SessionRunMark, type SessionRunEnd, type SessionPending, type SessionToolRecord } from "../session/store.ts";
 import { SessionJournal } from "../session/journal.ts";
 import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
@@ -270,6 +271,8 @@ export class Agent {
   readonly runMarks: SessionRunMark[] = [];
   /** Tool calls finished in the current run; saved the moment each finishes so a crash never repeats them. @internal */
   readonly toolRecords: SessionToolRecord[] = [];
+  /** What this agent spent on its OWN model calls (workers keep their own); saved with the session. @internal */
+  readonly usageTotals: UsageTotals = emptyUsage();
   /** The run in flight (its mark has no ending yet, but it is not "interrupted"). */
   private activeMark?: SessionRunMark;
   /** What to do with a cut-off run at construction (see `AgentConfig.resume`). */
@@ -501,6 +504,7 @@ export class Agent {
     if (!(session.runs ?? []).some((r) => !r.end) && waiting.length === 0) return false;
     this.context.messages = session.messages;
     this.runMarks.splice(0, this.runMarks.length, ...(session.runs ?? []));
+    this.restoreUsage(session.usage);
     const open = new Set(unfinishedToolCalls(this.context.messages).map((c) => c.id));
     this.toolRecords.splice(0, this.toolRecords.length, ...(session.tools ?? []).filter((t) => open.has(t.id)));
     for (const w of waiting) {
@@ -513,6 +517,42 @@ export class Agent {
       });
     }
     return true;
+  }
+
+  // Puts saved spending totals back after a restart or import (zeros when the file has none); in: a loaded session's `usage`, out: this.usageTotals.
+  private restoreUsage(saved: unknown): void {
+    Object.assign(this.usageTotals, readUsage(saved));
+  }
+
+  // Records one model call of THIS agent (priced per turn, with the service tier); in: the loop's onTurnUsage, out: this.usageTotals (saved by the next persist).
+  private recordTurnUsage(usage: TokenUsage, spec: Parameters<typeof priceUsage>[1]): void {
+    addTurn(this.usageTotals, usage, priceUsage(usage, spec, this.serviceTier ? { serviceTier: this.serviceTier } : undefined));
+  }
+
+  /** Adds another agent's spending to this one (a fixed worker's per-call copy into its template). @internal */
+  absorbUsage(other: UsageTotals): void {
+    mergeUsage(this.usageTotals, other);
+  }
+
+  /**
+   * What this agent and every worker below it spent: per agent and per worker (tokens, cache hits, thinking, exact
+   * cost per turn) plus a whole-session total, with nothing counted twice. `agent` is this agent's own model calls;
+   * workers (open, closed, nested, and rebuilt from disk after a restart) and fixed `subagents` workers are listed
+   * below it. Spending of one-shot scheduled-action workers is in their run files, not here.
+   */
+  usageReport(): UsageReport {
+    return buildUsageReport({ id: this.sessionId, name: this.name, model: modelName(this.modelStringOrSpec), totals: this.usageTotals }, [...this.workers.usageNodes(), ...this.fixedWorkerNodes()]);
+  }
+
+  // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is merged into them); in: the constructor config, out: usageReport.
+  private fixedWorkerNodes(): UsageNode[] {
+    const nodes: UsageNode[] = [];
+    for (const entry of this.forkConfig.subagents ?? []) {
+      const worker = "agent" in entry ? entry.agent : entry;
+      const name = "agent" in entry ? entry.name : worker.name;
+      nodes.push({ id: name, name, model: modelName(worker.modelStringOrSpec), status: "fixed", totals: worker.usageTotals, workers: [] });
+    }
+    return nodes;
   }
 
   // Says on the telemetry bus that resuming (or a prompt that was waiting) failed; in: a rejected resume, out: telemetryBus.
@@ -1167,6 +1207,7 @@ export class Agent {
         ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
         ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
+        onTurnUsage: (u: TokenUsage, spec: Parameters<typeof priceUsage>[1]) => this.recordTurnUsage(u, spec),
         onToolResult: (r: ToolResultRecord) => this.recordTool(r),
         openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
         ...(resumeMark ? { resume: { stored: this.storedToolResults() } } : {}),
@@ -1257,6 +1298,7 @@ export class Agent {
       ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
       ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
       onProgress: () => this.persistNow(),
+      onTurnUsage: (u: TokenUsage, spec: Parameters<typeof priceUsage>[1]) => this.recordTurnUsage(u, spec),
       onToolResult: (r: ToolResultRecord) => this.recordTool(r),
       openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
       steerInbox,
@@ -1507,6 +1549,7 @@ export class Agent {
     }
     this.context.thoughtSignatures = [];
     this.runMarks.splice(0, this.runMarks.length, ...(data.runs ?? []).filter((r) => r.i < this.context.messages.length));
+    this.restoreUsage(data.usage);
     if (data.systemPrompt) {
       this.context.systemPrompt = data.systemPrompt;
     } else {

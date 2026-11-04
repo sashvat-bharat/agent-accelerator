@@ -317,6 +317,7 @@ export {
   formatSessionBanner,
   emptyTotals,
 } from "./session/store.ts";
+export type { UsageReport, UsageLine, UsageTotals, AgentUsage, WorkerUsage, CostSource } from "./session/usage.ts";
 export type { SessionLimits, SessionPayloadStatus, PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir, PersistedSubAgentTrace, SessionRunMark, SessionRunEnd, SessionPending, SessionPendingPrompt, SessionToolRecord } from "./session/store.ts";
 
 // Utilities

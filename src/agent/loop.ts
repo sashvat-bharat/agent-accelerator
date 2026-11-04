@@ -71,6 +71,8 @@ export interface AgentLoopConfig {
   enforceBudget?: (usage?: TokenUsage) => void;
   /** Called after every turn for durable persistence checkpoints (never fails a turn). */
   onProgress?: () => void;
+  /** Called once per model call this agent made itself (never for its workers), with the provider's usage and the catalog spec: the source of `usageReport()`. */
+  onTurnUsage?: (usage: TokenUsage, spec: ModelSpec | undefined) => void;
   /** Called the moment each tool call finishes, before the rest of its batch (the crash-proof record of finished work). */
   onToolResult?: (result: ToolResultRecord) => void;
   /** Opens the log file of one tool call (see `ToolLogs`); unset when the Agent does not persist to a folder. */
@@ -798,6 +800,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     }
 
     accumulateUsage(accumulatedUsage, genResult.usage, spec, options?.serviceTier);
+    try { config.onTurnUsage?.(genResult.usage, spec); } catch {}
     config.enforceBudget?.({ ...genResult.usage, cost: computeCostFromPricing(genResult.usage, spec, options?.serviceTier) });
     checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
 
@@ -1251,6 +1254,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         }
 
         accumulateUsage(accumulatedUsage, turnResponse.usage, spec2, options?.serviceTier);
+        try { config.onTurnUsage?.(turnResponse.usage, spec2); } catch {}
         config.enforceBudget?.({ ...turnResponse.usage, cost: computeCostFromPricing(turnResponse.usage, spec2, options?.serviceTier) });
         checkTokenLimit(accumulatedUsage, streamLimits.maxTotalTokens);
 

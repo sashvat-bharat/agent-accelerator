@@ -17,6 +17,7 @@ import { hashSessionPart, newRunId, newTurnId, nowMs } from "../utils/session.ts
 import { buildDynamicWorkerConfig, grantWorkerTools, sanitizeToolName } from "./worker.ts";
 import { createFixedChildSessionId, openWorkerTrace, reserveSpawn, workerMetadata, type WorkerRunResult } from "./delegation.ts";
 import { finishedTurns, historyUpTo, type Turn } from "./turns.ts";
+import { modelName, readUsage, type UsageNode } from "../session/usage.ts";
 
 /** What `spawn` needs to start a worker. */
 export interface WorkerSpec {
@@ -81,6 +82,8 @@ interface Entry {
   /** The worker's session folder (unset when the parent does not persist). */
   dir?: string;
   agent?: Agent;
+  /** Its spending, kept when it is closed (so a worker that was never saved to disk still shows in the report). */
+  kept?: { model: string; totals: ReturnType<typeof readUsage>; workers: UsageNode[] };
   busy: boolean;
 }
 
@@ -98,6 +101,36 @@ function lastAssistantText(messages: Message[]): string | undefined {
   if (!last || last.role !== "assistant") return undefined;
   if (typeof last.content === "string") return last.content;
   return last.content.map((p) => (p.type === "text" ? p.text : "")).join("");
+}
+
+// Reads a worker that is not in memory from its folder: its saved spending, model, and the workers saved inside it; in: a worker's session folder, out: usageNodes.
+function readSavedWorker(dir: string | undefined): { model: string; totals: ReturnType<typeof readUsage>; workers: UsageNode[] } {
+  if (!dir) return { model: "unknown", totals: readUsage(undefined), workers: [] };
+  let session: ReturnType<typeof loadSessionDir>;
+  try {
+    session = loadSessionDir(dir);
+  } catch {
+    session = null; // a session over the load limits: its spending is unknown here
+  }
+  const workers: UsageNode[] = [];
+  const root = path.join(dir, "workers");
+  let names: fs.Dirent[] = [];
+  try {
+    names = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    // no workers saved inside this one
+  }
+  for (const d of names) {
+    if (!d.isDirectory()) continue;
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(root, d.name, META_FILE), "utf8")) as WorkerMeta;
+      const inner = readSavedWorker(path.join(root, d.name));
+      workers.push({ id: meta.id, name: meta.name, ...(meta.role ? { role: meta.role } : {}), model: inner.model, status: meta.status, totals: inner.totals, workers: inner.workers });
+    } catch {
+      // a damaged worker.json is skipped, as in load()
+    }
+  }
+  return { model: session?.session.model || "unknown", totals: readUsage(session?.session.usage), workers };
 }
 
 /** The workers of one parent `Agent` (`agent.workers`). */
@@ -190,6 +223,7 @@ export class WorkerRegistry {
     entry.meta.status = "closed";
     entry.meta.closedAt = Date.now();
     this.save(entry);
+    if (entry.agent) entry.kept = { model: modelName(entry.agent.modelStringOrSpec), totals: readUsage(entry.agent.usageTotals), workers: entry.agent.workers.usageNodes() };
     entry.agent?.disposeSession(entry.meta.sessionId); // frees its provider chain; never reset(): that could rewrite the saved history
     entry.agent = undefined;
     return this.info(entry);
@@ -203,6 +237,16 @@ export class WorkerRegistry {
   /** The parent's finished turns, the numbers `spawn` accepts for `history`. */
   turns(): Turn[] {
     return finishedTurns(this.parent.context.messages, this.parent.runMarks);
+  }
+
+  /** Every worker (open and closed) as a usage tree: live ones from memory, the rest from their saved sessions, nested workers included. */
+  usageNodes(): UsageNode[] {
+    return [...this.entries.values()].map((entry) => {
+      const { id, name, role, status } = entry.meta;
+      const base = { id, name, ...(role ? { role } : {}), status };
+      if (entry.agent) return { ...base, model: modelName(entry.agent.modelStringOrSpec), totals: entry.agent.usageTotals, workers: entry.agent.workers.usageNodes() };
+      return { ...base, ...(entry.kept ?? readSavedWorker(entry.dir)) };
+    });
   }
 
   // The open worker with this id, or a ValidationError that says what to do; in: message and close, out: the entry.

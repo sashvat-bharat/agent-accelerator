@@ -715,7 +715,10 @@ export function agentToTool(
         } finally {
           try { detachWorkerListeners(); } catch {}
           // The per-call session id is never reused: drop its provider chain/routing state.
-          if (worker !== agentInstance) { try { worker.reset(); } catch {} }
+          if (worker !== agentInstance) {
+            try { agentInstance.absorbUsage(worker.usageTotals); } catch {} // the template keeps what its copies spent
+            try { worker.reset(); } catch {}
+          }
         }
         live.finish(response);
         return makeSubagentResult(response.text, [

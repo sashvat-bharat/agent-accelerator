@@ -68,6 +68,10 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 
 `usage`: `inputTokens` (includes the cache reads and writes), `outputTokens` (includes `thinkingTokens`), `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`. Without a provider-reported cost, `cost` is estimated per turn from the catalog: fresh input, cache reads and cache writes each at their own price (a missing cache price bills at the input rate), scaled by `serviceTier`.
 
+### Usage report
+
+`agent.usageReport()` returns `{ agent, workers, total }` (types `UsageReport`, `AgentUsage`, `WorkerUsage`, `UsageLine`, `CostSource`). A line: `turns`; `tokens` (`input` incl. cache reads/writes, `freshInput`, `cacheRead`, `cacheWrite`, `output` incl. `thinking`, `thinking`, `total`); `cacheHitRate` (0-1 or `null`); `cost` (`source`: `provider | catalog | mixed | unknown`, `unpricedTurns`, `totalUsd` or `null`, `parts` in USD). `agent` is the agent's own calls, `workers` is a tree (`status`: `open | closed | fixed`, nested `workers`), `total` is everything. Each agent's totals are saved in its session as `usage` and kept current by `usage` journal records.
+
 ## Stream events
 
 Every event has `type` and `schemaVersion`.
