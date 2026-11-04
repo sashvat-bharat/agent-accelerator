@@ -236,12 +236,17 @@ export function resolveWorkerCredentials(
   return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
 }
 
+/** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise. */
+export const DEFAULT_MAX_DEPTH = 3;
+
 /**
  * Config of a dynamic worker (scheduled actions, the worker registry): the developer's fixed worker
  * model, level and limits, never the LLM's choice. Credentials carry over only when the providers match, and
  * `inheritableConfig()` keeps the worker no less constrained than its parent. Stateless one-shot by default;
  * `persistent` makes a multi-turn worker that keeps its history (saved under `persistent.dir` when given, and
- * continued by `resume()` after a crash, never automatically).
+ * continued by `resume()` after a crash, never automatically). A persistent worker with levels left below it
+ * (`maxDepth` of the parent, minus one for itself) gets its own `subagents` tool; its children can only be granted
+ * the tools it was granted. One-shot workers never spawn.
  */
 export function buildDynamicWorkerConfig(
   parent: Agent,
@@ -256,6 +261,8 @@ export function buildDynamicWorkerConfig(
 ): AgentConfig {
   const model = parent.subagentModel;
   const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
+  const dyn = parent.dynamicSubagents;
+  const levelsBelow = (dyn?.maxDepth ?? DEFAULT_MAX_DEPTH) - 1;
   return {
     name: worker.name,
     description: worker.role || `Sub-agent ${worker.name}`,
@@ -268,6 +275,18 @@ export function buildDynamicWorkerConfig(
     tools: worker.tools,
     stateless: !worker.persistent,
     ...(worker.persistent?.dir ? { persist: { dir: worker.persistent.dir }, resume: "explicit" as const } : {}),
+    ...(worker.persistent && levelsBelow >= 1
+      ? {
+          dynamicSubagents: {
+            enabled: true,
+            model,
+            ...(dyn?.maxSpawn !== undefined ? { maxSpawn: dyn.maxSpawn } : {}),
+            ...(dyn?.thinkingLevel ? { thinkingLevel: dyn.thinkingLevel } : {}),
+            tools: worker.tools,
+            maxDepth: levelsBelow,
+          },
+        }
+      : {}),
     serviceTier: parent.serviceTier,
     headers: parent.customHeaders,
     maxTurns: parent.maxTurns,

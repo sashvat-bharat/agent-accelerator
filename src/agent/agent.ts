@@ -14,6 +14,7 @@ import { buildAgentTools } from "./delegation.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry } from "./workers.ts";
 import {
+  DEFAULT_MAX_DEPTH,
   normalizeToolMap,
   resolveDynamicModelInput,
   resolveMainModel,
@@ -169,6 +170,8 @@ export class Agent {
     timeout: number;
     /** Scheduled actions (`scheduled_actions` + `get_datetime` tools) are on. */
     allowScheduledActions: boolean;
+    /** Levels of workers allowed below this agent. */
+    maxDepth: number;
   };
   /** Home folder for everything written to disk (`sessions/`, `scheduled_actions/`, `telemetry/`). */
   readonly home: string;
@@ -310,6 +313,10 @@ export class Agent {
     const dynEnabled = dynRaw ? (dynRaw.enabled ?? true) : false;
     if (dynRaw) {
       const dynTools = normalizeToolMap((dynRaw as { tools?: Record<string, ToolDefinition> | ToolDefinition[] }).tools);
+      const rawDepth = (dynRaw as { maxDepth?: unknown }).maxDepth;
+      if (rawDepth !== undefined && !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)) {
+        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1 (default ${DEFAULT_MAX_DEPTH}); set dynamicSubagents.enabled: false to turn workers off.`);
+      }
       const rawMax = (dynRaw as any)?.maxSpawn;
       const maxSpawn = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax as number)) : 4;
       // `workerTimeoutMs ?? timeout`, or -1 when `modelMaySetTimeout` (see normalizeWorkerTimeout).
@@ -322,6 +329,7 @@ export class Agent {
         tools: dynTools,
         timeout,
         allowScheduledActions: dynRaw.allowScheduledActions === true,
+        maxDepth: (rawDepth as number | undefined) ?? DEFAULT_MAX_DEPTH,
       };
     }
     this.apiKey = (rawModel as any)?.apiKey || config.apiKey;

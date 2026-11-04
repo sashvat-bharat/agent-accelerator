@@ -319,3 +319,85 @@ describe("the subagents tool", () => {
     expect(parent.workers.list()).toHaveLength(1);
   });
 });
+
+// A model turn that calls the `subagents` tool, as a stream or a plain reply, whichever the request asks for.
+const toolTurn = (body: any, args: Record<string, unknown>): Response =>
+  body.stream
+    ? new Response(
+        sseFrame({ id: "r", choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "subagents", arguments: JSON.stringify(args) } }] } }] }) +
+          sseFrame({ id: "r", choices: [{ delta: {}, finish_reason: "tool_calls" }], usage }) +
+          "data: [DONE]\n\n",
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      )
+    : toolCalls([{ id: "call_1", args }]);
+const toolNames = (body: any): string[] => (body.tools ?? []).map((t: any) => t.function.name);
+const systemText = (body: any): string => body.messages[0].content;
+const lastTool = (body: any): string | undefined => toolMessages(body).at(-1);
+
+describe("workers that start workers (maxDepth)", () => {
+  // Level markers L1, L2, L3 are in each worker's own instructions; L1 and L2 start the next level, L3 is the leaf.
+  const chain: Handler = (body) => {
+    const level = /L(\d)/.exec(systemText(body))?.[1];
+    if (!level) return reply("parent", body);
+    if (level === "3") return reply("leaf", body);
+    if (lastTool(body) !== undefined) return reply(`L${level} saw: ${lastTool(body)}`, body);
+    return toolTurn(body, { command: "spawn", name: `kid${level}`, instructions: `You are L${Number(level) + 1}.`, task: "go" });
+  };
+
+  it("lets a worker spawn workers down to maxDepth, and the last level has no subagents tool", async () => {
+    const root = tmp();
+    const byLevel: Record<string, string[]> = {};
+    const parent = mk(root, (body, init) => {
+      const level = /L(\d)/.exec(systemText(body))?.[1];
+      if (level) byLevel[level] ??= toolNames(body);
+      return chain(body, init);
+    });
+    const r = await parent.workers.spawn({ name: "top", instructions: "You are L1.", task: "start" });
+    expect(r.error).toBeUndefined();
+    expect(r.text).toContain("leaf"); // L1 saw L2 who saw L3: "leaf" travelled all the way up
+    expect(r.text.match(/\[worker kid2-/)).not.toBeNull();
+    expect(byLevel["1"]).toContain("subagents");
+    expect(byLevel["2"]).toContain("subagents");
+    expect(byLevel["3"] ?? []).not.toContain("subagents"); // depth 3 is the limit: this worker cannot start workers
+    // The levels are saved inside each other under the root agent's session folder.
+    const l1 = path.join(sessionDirFor(root, "p1"), "workers");
+    const dirs = (d: string) => fs.readdirSync(d).filter((f) => fs.statSync(path.join(d, f)).isDirectory());
+    const l2 = path.join(l1, dirs(l1)[0]!, "workers");
+    const l3 = path.join(l2, dirs(l2)[0]!, "workers");
+    expect(fs.existsSync(path.join(l3, dirs(l3)[0]!, "worker.json"))).toBe(true);
+  });
+
+  it("maxDepth 1 keeps workers flat: they get no subagents tool", async () => {
+    const tools: string[][] = [];
+    const parent = mk(
+      undefined,
+      (body) => (tools.push(toolNames(body)), reply("ok", body)),
+      { dynamicSubagents: { model: "groq/w", maxDepth: 1 } }
+    );
+    await parent.workers.spawn(spec);
+    expect(tools[0]).not.toContain("subagents");
+  });
+
+  it("a worker can only grant its children the tools it was granted itself", async () => {
+    const pool = { lookup: tool({ description: "d", input: z.object({}), execute: () => "x" }), other: tool({ description: "d", input: z.object({}), execute: () => "y" }) };
+    const parent = mk(
+      undefined,
+      (body) => {
+        if (!systemText(body).includes("L1")) return reply("child", body);
+        return lastTool(body) !== undefined
+          ? reply(`result: ${lastTool(body)}`, body)
+          : toolTurn(body, { command: "spawn", name: "kid", task: "go", tools: ["other"] });
+      },
+      { dynamicSubagents: { model: "groq/w", tools: pool } }
+    );
+    const r = await parent.workers.spawn({ name: "top", instructions: "You are L1.", task: "start", tools: ["lookup"] });
+    expect(r.text).toContain('Error: tools: unknown worker tool(s) "other"; the pool is [lookup]');
+  });
+
+  it("rejects a maxDepth that is not a whole number of at least 1", () => {
+    for (const bad of [0, -1, 1.5, "3"]) {
+      expect(() => mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxDepth: bad } })).toThrow("dynamicSubagents.maxDepth");
+    }
+    expect(mk(undefined, echo).dynamicSubagents?.maxDepth).toBe(3);
+  });
+});

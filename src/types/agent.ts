@@ -292,6 +292,12 @@ export interface DynamicSubagentsConfig {
   maxSpawn?: number;
   /** Fixed reasoning level for all dynamic workers. The Main Agent cannot override it. Falls back to the parent level when omitted. */
   thinkingLevel?: ThinkingLevel;
+  /**
+   * How many levels of workers may exist below this agent (default 3). `1` = workers cannot start workers of their own;
+   * `3` = a worker may start workers that start workers. A worker with levels left gets its own `subagents` tool, and
+   * its children can only be granted the tools the worker itself was granted. Whole number >= 1.
+   */
+  maxDepth?: number;
   /** Tool pool available to dynamic workers. Workers receive zero tools unless the Main Agent grants a per-task `tools` subset by name. */
   tools?: Record<string, ToolDefinition> | ToolDefinition[];
   /** Per-run timeout in ms of a SCHEDULED ACTION's worker (the `subagents` tool and `agent.workers` have no timeouts). `0` (default) = no limit. `-1` = the action sets its own `timeoutMs`. `>0` = fixed. */

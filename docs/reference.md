@@ -35,7 +35,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text) to `<home>/telemetry/<date>.ndjson`. Off by default | [Safety](guides/safety-and-ops.md) |
 | `logger`, `hooks`, `contextManagement` | **Not implemented**; emit `config.unsupported_option`. Use `telemetryBus` | |
 
-**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (4, open workers at once), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (canonical; `0` none, `-1` the action sets it, `>0` fixed), `timeout` (legacy), `modelMaySetTimeout`. The `subagents` tool and `agent.workers` have no timeouts.
+**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (4, open workers at once), `maxDepth` (3, levels of workers below the agent, whole number >= 1), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (canonical; `0` none, `-1` the action sets it, `>0` fixed), `timeout` (legacy), `modelMaySetTimeout`. The `subagents` tool and `agent.workers` have no timeouts.
 **`midSession`**: `mode`, `whenBusy`, `maxQueued` (20).
 **`budget`** (per run, includes workers): `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`.
 **`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). A long-running call (Google long decode, or any `Provider` whose `isLongRunning()` returns true) times each HTTP request only, never the whole call or stream.
