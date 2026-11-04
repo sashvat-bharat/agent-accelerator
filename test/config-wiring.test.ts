@@ -238,7 +238,7 @@ describe("budgets, limits and worker inheritance are enforced", () => {
       const { fn, calls } = recorder((n) => {
         if (n === 1) {
           return new Response(
-            JSON.stringify(callTurn("v1_p1", { tasks: [{ name: "WORKER", instructions: "Be brief.", task: "say hi" }] }, "spawn_subagents")),
+            JSON.stringify(callTurn("v1_p1", { command: "spawn", name: "worker", instructions: "Be brief.", task: "say hi" }, "subagents")),
             { status: 200 }
           );
         }

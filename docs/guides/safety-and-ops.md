@@ -43,6 +43,20 @@ Cancel anytime with `{ signal }` or `agent.interrupt()`; the error carries `err.
 - ✅ Production defaults: finite `maxTurns`, a `deadlineMs`, a `budget.maxCostUsd`, and an `AbortSignal.timeout(...)` per request.
 - ✅ Keep tool timeouts shorter than the run deadline. ❌ Don't retry side-effecting tools blindly.
 
+## Usage and cost report
+
+`res.usage` covers one run. `agent.usageReport()` returns what the agent and every worker below it spent so far, itemized: `{ agent, workers, total }`. Each line has `turns`, `tokens` (`input`, `freshInput`, `cacheRead`, `cacheWrite`, `output`, `thinking`, `total`), `cacheHitRate` and `cost` (`source`, `totalUsd`, `parts`, `unpricedTurns`).
+
+```ts
+const { agent: own, workers, total } = lead.usageReport();
+console.log(own.cost.totalUsd, total.cost.totalUsd, total.cacheHitRate);
+for (const w of workers) console.log(w.id, w.status, w.turns, w.tokens.thinking, w.cost.totalUsd);
+```
+
+- Each agent records only the calls it made itself, priced per turn (cache reads, cache writes, service tier), and saves them with its session, so the report works after a restart and nothing is counted twice. `total` matches the tokens in the responses.
+- Unknown pricing shows as `totalUsd: null` (never 0) and `unpricedTurns > 0` marks a lower bound; `source` says whether the cost came from the `provider`, the `catalog`, or `mixed`.
+- Not included: one-shot scheduled-action workers (see their run files) and workers started inside a fixed `subagents` worker's per-call copy.
+
 ## Errors
 
 ```ts
@@ -97,7 +111,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 
 Be aware (pre-1.0):
 - **One process per home folder.** A folder you persist to is locked (`<folder>/.lock`): a second process fails fast with a `ConfigError` instead of silently losing updates; a lock left by a killed process is taken over, and local disks only. Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `tasks.json`, `deliveries.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
-- Scheduled actions: creating Agent held weakly; `run_now` flagged `late` and never retries; no spending guardrails; no timezone/DST logic; run only while the process lives.
+- Scheduled actions: creating Agent held weakly; `run_now` flagged `late` and never retries; no spending guardrail except `dynamicSubagents.workerBudget`; no timezone/DST logic; run only while the process lives.
 - Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding; `stop`/`seed` on Google/OpenAI.
 - Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.
 - The model catalog uses about 18 MB of memory when loaded; the SDK as a whole is not yet tuned for tiny-memory hosts.

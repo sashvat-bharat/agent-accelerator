@@ -2,6 +2,7 @@
 memory/
 harness/
 AGENTS.md
+CLAUDE.md
 codebase.md
 references/
 .agent-accel/

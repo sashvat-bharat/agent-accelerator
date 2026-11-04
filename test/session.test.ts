@@ -14,6 +14,7 @@ import {
   inspectSessionPayload,
   findLatestSessionDir,
   computeSessionTurnCost,
+  priceUsage,
   getSessionContextWindow,
   formatSessionBanner,
   emptyTotals,
@@ -455,5 +456,48 @@ describe("untrusted session files", () => {
     } finally {
       off();
     }
+  });
+});
+
+describe("priceUsage: cache hits, cache writes, missing cache prices, service tier", () => {
+  const spec: any = {
+    id: "m",
+    pricing: { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3, cacheWritePerMillion: 3.75 },
+  };
+
+  it("bills cache reads at the read rate and only the fresh input at the input rate", () => {
+    const priced = priceUsage({ inputTokens: 100_000, outputTokens: 2_000, totalTokens: 102_000, cachedTokens: 80_000, cacheReadTokens: 80_000 }, spec)!;
+    expect(priced.breakdown.inputMicroUSD).toBe(60_000); // 20k fresh * $3/M
+    expect(priced.breakdown.cacheReadMicroUSD).toBe(24_000); // 80k * $0.3/M
+    expect(priced.breakdown.outputMicroUSD).toBe(30_000);
+    expect(priced.totalCost).toBeCloseTo(0.114, 9);
+  });
+
+  it("does not bill cache-write tokens twice (they are part of the input tokens)", () => {
+    const priced = priceUsage(
+      { inputTokens: 100_000, outputTokens: 0, totalTokens: 100_000, cachedTokens: 80_000, cacheReadTokens: 80_000, cacheWriteTokens: 10_000 },
+      spec
+    )!;
+    expect(priced.breakdown.inputMicroUSD).toBe(30_000); // 10k fresh, not 20k
+    expect(priced.breakdown.cacheWriteMicroUSD).toBe(37_500); // 10k * $3.75/M
+    expect(priced.breakdown.totalMicroUSD).toBe(30_000 + 24_000 + 37_500);
+  });
+
+  it("bills cache tokens at the input rate when the catalog has no cache price (never free)", () => {
+    const noCachePrices: any = { id: "m", pricing: { inputPerMillion: 2, outputPerMillion: 8 } };
+    const priced = priceUsage(
+      { inputTokens: 10_000, outputTokens: 0, totalTokens: 10_000, cachedTokens: 6_000, cacheReadTokens: 6_000, cacheWriteTokens: 1_000 },
+      noCachePrices
+    )!;
+    expect(priced.breakdown.cacheReadMicroUSD).toBe(12_000);
+    expect(priced.breakdown.cacheWriteMicroUSD).toBe(2_000);
+    expect(priced.breakdown.totalMicroUSD).toBe(10_000 * 2); // every input token costs the input rate
+  });
+
+  it("scales catalog prices by the service tier, but never a provider-reported cost", () => {
+    const usage = { inputTokens: 1_000_000, outputTokens: 0, totalTokens: 1_000_000 };
+    expect(priceUsage(usage, spec, { serviceTier: "flex" })!.totalCost).toBeCloseTo(1.5, 9);
+    expect(priceUsage(usage, spec, { serviceTier: "priority" })!.totalCost).toBeCloseTo(6, 9);
+    expect(priceUsage({ ...usage, cost: { totalCost: 0.7 } }, spec, { serviceTier: "priority" })!.totalCost).toBe(0.7);
   });
 });

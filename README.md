@@ -121,7 +121,7 @@ An `Agent` holds:
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Falls back to `SUB_AGENT_MODEL`. |
-| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }`. See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
+| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned workers: `{ enabled, model?, maxSpawn?, maxDepth?, workerBudget?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }` (`timeout` is for scheduled actions only). See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
@@ -269,35 +269,24 @@ const agent = new Agent({
   instructions: "You are the Main Agent",
   dynamicSubagents: {
     enabled: true,
-    maxSpawn: 4,
+    maxSpawn: 4, // open workers at once
     thinkingLevel: "low",
-    tools: { get_weather, recent_news },
-    timeout: 60000,
+    tools: { get_weather, recent_news }, // pool: the model grants a subset per worker
   },
 });
 ```
 
-A `spawn_subagents` tool is injected with the following task shape:
+One `subagents` tool is injected. It takes `{ command, id?, name?, role?, instructions?, task?, tools?, history? }` and its manual is the tool description (`src/agent/subagents.md`, with the worker pool and the open-worker limit filled in; the system prompt stays untouched):
 
-```ts
-{
-  tasks: {
-    name,
-    role?,
-    instructions,
-    task,
-    tools?: string[],
-    timeoutMs?: number
-  }[]
-}
-```
-
-- `maxSpawn` — max workers per call. Extras are trimmed safely, and the limit is stated in the tool description plus the Main Agent's system prompt so the model knows it.
-- `tools` — developer-owned pool. Workers get zero tools unless the Main Agent grants a per-task `tools` subset by name (unknown names are ignored), keeping worker context small.
-- `timeout` (ms) — `0` = no limit, `-1` = the Main Agent sets a per-task `timeoutMs`, `>0` = fixed limit for every worker. Timed-out workers report an error entry; the rest of the batch still completes.
-- Workers are stateless: one task in, one result out, then shut down. No history, no recursion. The Main Agent cannot choose worker models or reasoning levels.
-- Worker names use UPPER-KEBAB (`HBM-PRICING-ANALYST`). Each worker gets a system-generated 32-char TrackingID, displayed as `NAME-{TrackingID}` (e.g. `HBM-PRICING-ANALYST-9f2c…`).
-- Workers stream internally: thinking/text deltas update the worker trace live (`agent.track(id)`, `subscribeToSubAgent`) and surface on the parent stream as `subagent_delta` events.
+- `spawn` starts a worker (`name`, `task`; optional `instructions`, `role`, `tools`, `history`) and waits for its first reply. `message` sends `task` to an open worker `id`, which remembers the whole conversation. `close` frees the slot. `list` shows the open workers and the numbered finished turns that `history: N` can copy into a new worker.
+- Results are plain text with one header line: `[worker researcher-1a2b3c4d] replied:` + the worker's text, or `[worker researcher-1a2b3c4d] failed: <reason>`. Several `spawn` calls in one model turn run in parallel. A bad request comes back as an `Error: ...` line the model can fix.
+- `maxSpawn` is the limit on **open** workers (the model must close one to open another). `budget.maxTotalSubagents` still counts spawns per run.
+- `tools` is the developer-owned pool. Workers get zero tools unless the Main Agent grants a subset by name; unknown names are rejected with the pool listed.
+- The Main Agent cannot choose worker models, reasoning levels or timeouts. The `subagents` tool has no timeouts (`workerTimeoutMs`/`timeout` apply only to scheduled actions).
+- `maxDepth` (default 3, whole number >= 1) is how many levels of workers may exist below the agent: `1` keeps workers flat, `3` lets a worker start workers that start workers. A worker with levels left gets its own `subagents` tool, and its children can only be granted the tools **it** was granted. The levels are saved inside each other (`<session>/workers/<id>/workers/<id>/…`).
+- `workerBudget: { maxCostUsd?, maxTotalTokens? }` is each worker's own spending cap, applied as that worker's per-run `budget` (a spawn, a message or a scheduled run is one run; the usage of the worker's own workers counts toward it) and passed down to its workers. Going over fails that call with a budget error (`[worker <id>] failed: Token budget exceeded…`), leaves the worker open and does not affect the parent. Default: unlimited; models with unknown pricing count $0 toward `maxCostUsd`. Values must be numbers above 0.
+- Workers are real agents with their own session: see [Persistent workers](#persistent-workers-agentworkers) below (the same functions in code, saved on disk with `persist`, resumed after a restart). Each reply's usage is metered into the parent's usage and budget.
+- Each run of a worker gets a system-generated 32-char TrackingID, displayed as `NAME-{TrackingID}`. Thinking/text deltas update the worker trace live (`agent.track(id)`, `subscribeToSubAgent`) and surface on the parent stream as `subagent_delta` events.
 
 ```ts
 const res = await agent.run("Audit auth pipeline and write a threat model");
@@ -305,11 +294,35 @@ const res = await agent.run("Audit auth pipeline and write a threat model");
 console.log(res.subagents.map((s) => s.name));
 ```
 
+### Persistent workers (`agent.workers`)
+
+Besides one-shot delegation, an agent can run **workers that keep their conversation**: start one, message it again and again, close it. A worker is a plain `Agent` with its own instructions and tools, on the developer's worker model (`dynamicSubagents.model` or `SUB_AGENT_MODEL`). With `persist: { dir }` on the parent it is saved under `<parent session folder>/workers/<id>/` (own journal, tool logs and `worker.json`), so it is rebuilt with its history after a restart.
+
+```ts
+const reply = await lead.workers.spawn({
+  name: "Researcher",
+  instructions: "You research databases and cite sources.", // the worker's OWN prompt; the parent's is never copied
+  task: "Compare SQLite and Postgres for a small SaaS.",
+  tools: ["recent_news"], // subset of dynamicSubagents.tools; unknown names throw
+  history: 1, // optional: start from a copy of the parent's first 1 finished turns (see lead.workers.turns()); default "none"
+});
+console.log(reply.id, reply.text); // e.g. "researcher-1a2b3c4d"
+
+const next = await lead.workers.message(reply.id, "Now focus on write-heavy loads."); // same worker, same conversation
+lead.workers.list(); // open workers: { id, name, role?, tools, busy }
+lead.workers.close(reply.id); // can no longer be messaged; its session stays on disk
+```
+
+- A turn is one **finished** run (`done` or ended by `ctx.stop`); the running turn and failed or aborted runs are never copied, so a worker never gets a prompt without its answer.
+- `spawn` and `message` wait for the reply and never throw for a failing worker: the `WorkerReply` then carries `error` and a text that says so. They throw `ValidationError` for a bad request (unknown tool or id, closed or busy worker, too many open workers: `dynamicSubagents.maxSpawn` is the open-worker limit, `budget.maxTotalSubagents` still counts spawns per run).
+- A worker handles one call at a time. Pass `{ signal }` to abort its run; the worker stays open.
+- Exactly once across a crash: pass `{ callId }` (the calling tool call's id). A replayed `spawn` finds the worker it already started, a cut-off run is continued with `resume()` instead of sending the text twice, and a call that had already been answered returns that saved answer.
+- Without `persist` the workers live in memory only. A damaged `worker.json` is skipped with a `worker.invalid` event.
+- The reply's `metadata` (usage, steps, lineage) has the same shape as `AgentResponse.subagents`; `agent.track(metadata.trackingId)` shows the run live.
+
 ### Delegation Helpers
 
 * `buildAgentTools(list)` — wraps multiple agents and deduplicates names. Used internally by `subagents`.
-* `createSubagentSpawnTool(parentAgent)` — builds the dynamic subagent spawner. Rarely needed directly.
-* `DynamicSubagentTask` — `{ name, role?, instructions, task, tools?, timeoutMs? }`, the shape produced for dynamic delegation. No `model` — workers run on the developer-configured model.
 
 ---
 ## Scheduled actions
@@ -426,11 +439,11 @@ const pay = tool({
 
 `ctx.stop` throws, so the code after it never runs (even if you forget `return`). The reason is saved as that call's result, calls that were running in parallel in the same batch still run to completion (none is skipped or aborted), and then the run ends with `finishReason: "stopped"` and **no further model turn**. The agent waits for the next user message; the model then sees the reason as the tool's result. A steer typed while the batch ran becomes the next run. The stop is saved with the call, so a crash cannot turn a "no" into a "yes": after a restart the run is closed as stopped without calling the model. A tool's `timeoutMs` counts the time spent waiting for your check, so leave it off for tools that ask a person.
 
-To guard a built-in tool such as `spawn_subagents` or `scheduled_actions`, wrap it on the agent after construction:
+To guard a built-in tool such as `subagents` or `scheduled_actions`, wrap it on the agent after construction:
 
 ```ts
-const inner = agent.tools["spawn_subagents"]!;
-agent.tools["spawn_subagents"] = {
+const inner = agent.tools["subagents"]!;
+agent.tools["subagents"] = {
   ...inner,
   execute: async (input, ctx) => ((await getPermission("Spawn workers?")) ? inner.execute(input, ctx) : ctx.stop("spawning was not approved")),
 };
@@ -1011,9 +1024,32 @@ TokenUsage {
 }
 ```
 
-Cost calculation prefers provider-reported totals. When unavailable, costs are computed using catalog pricing.
+Cost calculation prefers provider-reported totals. When unavailable, costs are computed using catalog pricing, per model turn: fresh input at the input price, cache reads at the cache-read price, cache writes at the cache-write price (both are part of `inputTokens`, so they are not billed twice), output at the output price (thinking tokens are part of output), scaled by `serviceTier` (`flex` x0.5, `priority` x2, estimates). A catalog entry without a cache price bills those tokens at the input rate (cache is never free); unknown pricing stays unknown.
 
 Subagent usage is rolled into the parent totals.
+
+### Usage report (`agent.usageReport()`)
+
+`res.usage` is the cost of one run, workers included. `agent.usageReport()` is the other view: what the agent and **each** worker spent over their lives, itemized, with nothing counted twice.
+
+```ts
+const report = agent.usageReport();
+report.agent;   // this agent's OWN model calls: id, name, model, turns, tokens, cacheHitRate, cost
+report.workers; // every worker below it (open, closed, nested in `workers`, and `status: "fixed"` for `subagents: [...]`)
+report.total;   // agent + all workers
+// each line, e.g. report.workers[0]:
+// { id: "researcher-1a2b3c4d", status: "open", model: "google/gemini-3.5-flash-lite", turns: 2,
+//   tokens: { input: 2000, freshInput: 600, cacheRead: 1200, cacheWrite: 200, output: 400, thinking: 100, total: 2400 },
+//   cacheHitRate: 0.6,
+//   cost: { source: "catalog", unpricedTurns: 0, totalUsd: 0.00891,
+//           parts: { inputUsd: 0.0018, outputUsd: 0.006, cacheReadUsd: 0.00036, cacheWriteUsd: 0.00075 } } }
+```
+
+- **Own turns only.** Every agent records the model calls it made itself, priced **per turn** in integer micro-USD, and saves them in its session (`usage`), so the numbers survive a restart (load the session and the totals carry on; workers are rebuilt from their folders). A parent's `res.usage` already contains its workers' usage, which is why the report never adds responses together: `report.total.tokens.total` equals what the responses show.
+- **Cache-aware.** `input` includes the cache reads and writes (`freshInput = input - cacheRead - cacheWrite`); `output` includes `thinking`. Fresh input, cache reads and cache writes are each priced at their own catalog price, and `serviceTier` is applied. `cacheHitRate` is `cacheRead / input` (0 to 1, `null` when nothing was sent).
+- **Honest costs.** `cost.source` is `provider` (the provider reported the cost, which is exact), `catalog` (estimated from the model catalog), `mixed`, or `unknown`. Unknown pricing is `totalUsd: null`, never 0; `unpricedTurns` above 0 means the total is a lower bound. For turns whose cost the provider reported only the total is exact, so `parts` can add up to less than `totalUsd`.
+- **Not in the report:** the one-shot workers of scheduled actions (their cost is in each run file), and workers started inside a fixed `subagents` worker's per-call copy (their cost is in the response usage). `reset()` does not clear the totals: they are spending, not conversation.
+
 ### ProviderRawData
 
 ```ts
@@ -1288,7 +1324,7 @@ bun run examples/04-sub-agents.ts
 # fixed researcher + critic pipeline
 
 bun run examples/03-multi_agent.ts
-# dynamic spawn_subagents demo
+# dynamic subagents tool demo
 
 bun run examples/01-metadata.ts
 # usage + raw inspection

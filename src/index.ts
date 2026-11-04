@@ -61,7 +61,6 @@ export { assertPathAllowed, enforceFileAccess, fetchRemoteBytes, isPrivateAddres
 export {
   buildAgentTools,
   agentToTool,
-  createSubagentSpawnTool,
   createChildSessionId,
   createFixedChildSessionId,
   isSessionDescendant,
@@ -85,7 +84,8 @@ export {
   MAX_SUBAGENT_STEPS_PER_TRACE,
   SUBAGENT_SUBSCRIBE_TTL_MS,
 } from "./agent/delegation.ts";
-export type { DynamicSubagentTask, AgentAsToolTarget, SubAgentTrace, StreamingLoopHandle } from "./agent/delegation.ts";
+export type { AgentAsToolTarget, SubAgentTrace, StreamingLoopHandle } from "./agent/delegation.ts";
+export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOptions } from "./agent/workers.ts";
 
 // Scheduled actions: dynamic sub-agents that run later and save their answer to a file
 export {
@@ -317,6 +317,7 @@ export {
   formatSessionBanner,
   emptyTotals,
 } from "./session/store.ts";
+export type { UsageReport, UsageLine, UsageTotals, AgentUsage, WorkerUsage, CostSource } from "./session/usage.ts";
 export type { SessionLimits, SessionPayloadStatus, PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir, PersistedSubAgentTrace, SessionRunMark, SessionRunEnd, SessionPending, SessionPendingPrompt, SessionToolRecord } from "./session/store.ts";
 
 // Utilities

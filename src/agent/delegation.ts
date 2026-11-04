@@ -2,7 +2,10 @@ import { z } from "zod";
 import { tool } from "../tools/tool.ts";
 import { escapeXml } from "../utils/serialization.ts";
 import type { ToolDefinition } from "../types/tool.ts";
-import type { SubAgentExecutionMetadata, SubAgentStep } from "../types/response.ts";
+import type { AgentResponse, SubAgentExecutionMetadata, SubAgentStep } from "../types/response.ts";
+import type { TokenUsage } from "../types/core.ts";
+import type { ToolCallRecord } from "../types/tool.ts";
+import type { ProviderRawData } from "../types/model.ts";
 import type { Agent } from "./agent.ts";
 import type { Budget, BudgetState } from "../types/agent.ts";
 import { BudgetExceededError } from "../types/errors.ts";
@@ -12,37 +15,9 @@ import { createTrackingId } from "../utils/session.ts";
 import { nowMs } from "../utils/session.ts";
 import { newRunId } from "../utils/session.ts";
 import { newTurnId } from "../utils/session.ts";
-import {
-  sanitizeToolName,
-  sanitizeXmlTag,
-  buildDynamicWorkerConfig,
-  buildSubagentsXml,
-  createLiveWorker,
-  grantWorkerTools,
-  normalizeWorkerTimeoutValue,
-  providerOfWorkerModel,
-} from "./worker.ts";
+import { sanitizeToolName, createLiveWorker } from "./worker.ts";
 
 export { escapeXml };
-
-/** Task descriptor accepted by the automatic `spawn_subagents` tool.
- *
- * The Main Agent controls prompts (`name`/`role`/`instructions`/`task`), which
- * worker tools to grant (`tools`), and — only when the developer sets
- * `dynamicSubagents.timeout: -1` — each worker's `timeoutMs`. Model, reasoning
- * level, and history are never LLM-choosable: workers are stateless and run on
- * the developer-configured model.
- */
-export interface DynamicSubagentTask {
-  name: string;
-  role?: string;
-  instructions: string;
-  task: string;
-  /** Names of worker tools to grant this sub-agent. Must be a subset of the developer-configured `dynamicSubagents.tools` pool; unknown names are ignored. Omit for no tools. */
-  tools?: string[];
-  /** Per-worker timeout in ms. Honored ONLY when the developer sets `dynamicSubagents.timeout: -1`. Must be > 0, otherwise the worker runs with no limit. */
-  timeoutMs?: number;
-}
 
 export function createChildSessionId(parentId: string, tag: string): string {
   let rand: string;
@@ -367,9 +342,184 @@ export function appendSubAgentStep(trackingId: string, step: SubAgentStep): void
 }
 
 // ---------------------------------------------------------------------------
-// Budgets (Q-39): unenforced counters + guards. The loop owner wires
-// per-turn charging; the spawn tool below enforces `maxTotalSubagents` and
-// charges completed worker usage. Durations use the monotonic `nowMs()`
+// One worker run: live trace + execution metadata (shared by fixed workers and the worker registry)
+// ---------------------------------------------------------------------------
+
+/** What a worker run reports when it finished; an `AgentResponse` fits, so does a reply saved before a crash (only `text` is required). */
+export interface WorkerRunResult {
+  text: string;
+  model?: string;
+  provider?: string;
+  turns?: number;
+  usage?: TokenUsage;
+  finishReason?: string;
+  responseId?: string;
+  thinking?: string;
+  toolCalls?: ToolCallRecord[];
+  raw?: ProviderRawData;
+}
+
+/** Live handle of one worker run: its trace plus the hooks that feed it and the closers that finalize it. */
+export interface WorkerTraceHandle {
+  trackingId: string;
+  /** `NAME-{trackingId}`, the id shown in metadata and accepted by `agent.track`. */
+  displayId: string;
+  onWorkerTurn: ReturnType<typeof createLiveWorker>["onWorkerTurn"];
+  attachToStream: ReturnType<typeof createLiveWorker>["attachToStream"];
+  /** Marks the run done and copies its result into the trace. */
+  finish(result: WorkerRunResult): void;
+  /** Marks the run failed. */
+  fail(message: string): void;
+  /** Copy of the steps logged so far. */
+  steps(): SubAgentStep[] | undefined;
+}
+
+// Registers one worker run's live trace (visible to `agent.track`) and wires the shared live-worker state machine; in: a fixed-worker call or a registry spawn/message, out: the hooks that feed the trace and the closers that finalize it.
+export function openWorkerTrace(a: {
+  name: string;
+  sessionId: string;
+  parentSessionId: string;
+  task: string;
+  role?: string;
+  /** When given, the trace is also kept in this agent's own registry and saved with its session. */
+  parent?: Agent;
+  emit?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
+}): WorkerTraceHandle {
+  const trackingId = createTrackingId();
+  const displayId = `${a.name}-${trackingId}`;
+  const trace: SubAgentTrace = {
+    trackingId,
+    name: a.name,
+    sessionId: a.sessionId,
+    parentSessionId: a.parentSessionId,
+    status: "running",
+    task: a.task,
+    role: a.role,
+    turns: 0,
+    steps: [],
+  };
+  insertTrace(trace, displayId);
+  if (a.parent) {
+    try {
+      const registry = ((a.parent as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
+      registry[trackingId] = trace;
+    } catch {}
+  }
+  const live = createLiveWorker(trace, trackingId, displayId, {
+    trim: (t) => trimTraceSteps(t),
+    touch: (id) => touchTrace(id),
+    notify: (id) => notifyTrace(id),
+    ...(a.parent ? { persist: () => { try { a.parent!.persistNow(); } catch {} } } : {}),
+    emit: (ev) => {
+      try { a.emit?.(ev); } catch {}
+    },
+  });
+  const settle = (): void => {
+    const t = subagentTraces.get(trackingId);
+    if (!t) return;
+    trimTraceSteps(t);
+    touchTrace(t.trackingId);
+    notifyTrace(trackingId);
+  };
+  return {
+    trackingId,
+    displayId,
+    onWorkerTurn: live.onWorkerTurn,
+    attachToStream: live.attachToStream,
+    finish(result) {
+      const t = subagentTraces.get(trackingId);
+      if (t) {
+        t.status = "done";
+        t.model = result.model;
+        t.provider = result.provider;
+        t.turns = result.turns ?? t.turns;
+        t.text = result.text;
+        if (result.usage) {
+          t.usage = { inputTokens: result.usage.inputTokens ?? 0, outputTokens: result.usage.outputTokens ?? 0, totalTokens: result.usage.totalTokens ?? 0 };
+        }
+      }
+      settle();
+    },
+    fail(message) {
+      const t = subagentTraces.get(trackingId);
+      if (t) {
+        t.status = "error";
+        t.error = message;
+      }
+      settle();
+    },
+    steps() {
+      return subagentTraces.get(trackingId)?.steps.map((s) => ({ ...s }));
+    },
+  };
+}
+
+// Builds the metadata of one worker run, success or failure, so every delegation path reports the same fields and lineage ids; in: the run's result or error, out: the branded result envelope and `AgentResponse.subagents`.
+export function workerMetadata(a: {
+  name: string;
+  displayId: string;
+  sessionId?: string;
+  parentSessionId?: string;
+  role?: string;
+  task: string;
+  durationMs: number;
+  result?: WorkerRunResult;
+  error?: string;
+  /** Text reported for a failed run; default `Error in NAME: message`. */
+  errorText?: string;
+  steps?: SubAgentStep[];
+  runId: string;
+  turnId: string;
+}): SubAgentExecutionMetadata {
+  const r = a.result;
+  const base = {
+    name: a.name,
+    trackingId: a.displayId,
+    sessionId: a.sessionId,
+    parentSessionId: a.parentSessionId,
+    ...(a.role ? { role: a.role } : {}),
+    task: a.task,
+    durationMs: a.durationMs,
+    steps: a.steps,
+  };
+  const metadata: SubAgentExecutionMetadata = r
+    ? {
+        ...base,
+        model: r.model ?? "unknown",
+        provider: r.provider ?? "unknown",
+        usage: r.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        turns: r.turns ?? 0,
+        finishReason: r.finishReason,
+        responseId: r.responseId,
+        text: r.text,
+        thinking: r.thinking,
+        toolCalls: r.toolCalls,
+        raw: r.raw,
+        isError: false,
+      }
+    : {
+        ...base,
+        model: "unknown",
+        provider: "unknown",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        turns: 0,
+        text: a.errorText ?? `Error in ${a.name}: ${a.error}`,
+        isError: true,
+        error: a.error,
+      };
+  try {
+    const m = metadata as unknown as Record<string, unknown>;
+    m["runId"] = a.runId;
+    m["turnId"] = a.turnId;
+    const extra = (r as { meta?: unknown } | undefined)?.meta;
+    if (extra !== undefined) m["meta"] = extra;
+  } catch {}
+  return metadata;
+}
+
+// ---------------------------------------------------------------------------
+// Budgets (Q-39): counters + guards. The loop charges usage per turn; the
+// worker registry enforces `maxTotalSubagents` through `reserveSpawn`. Durations use the monotonic `nowMs()`
 // clock; TTL timestamps above use wall-clock `Date.now()`.
 // ---------------------------------------------------------------------------
 
@@ -505,401 +655,6 @@ export function isStreamingLoop(value: unknown): value is StreamingLoopHandle {
   return typeof r["on"] === "function" && typeof r["result"] === "function";
 }
 
-/**
- * Creates the built-in tool that spawns stateless dynamic sub-agents concurrently.
- *
- * Workers run on the developer-configured model with the developer-configured
- * reasoning level. The Main Agent controls prompts, per-worker tool grants, and
- * (when `dynamicSubagents.timeout: -1`) per-worker timeouts — nothing else.
- *
- * @example `new Agent({ model, dynamicSubagents: { enabled: true, maxSpawn: 4 } })`
- */
-export function createSubagentSpawnTool(parentAgent: Agent): ToolDefinition {
-  const dyn = (parentAgent as any).dynamicSubagents as
-    | { maxSpawn: number; tools: Record<string, unknown>; timeout: number }
-    | undefined;
-  const maxSpawn = dyn && Number.isFinite(dyn.maxSpawn) ? Math.max(1, Math.floor(dyn.maxSpawn)) : 4;
-  const poolNames = dyn ? Object.keys(dyn.tools ?? {}) : [];
-  const parentTimeout = dyn && Number.isFinite(dyn.timeout) ? Math.floor(dyn.timeout) : 0;
-  const timeoutNote =
-    parentTimeout === -1
-      ? "Set a per-task timeoutMs (ms, > 0) to time-limit a worker; omit it for no limit."
-      : parentTimeout === 0
-        ? "Workers run with no time limit; any per-task timeoutMs is ignored."
-        : `Every worker is limited to ${parentTimeout}ms; any per-task timeoutMs is ignored.`;
-  return tool({
-    name: "spawn_subagents",
-    description:
-      "Dynamically creates and runs specialized stateless sub-agents concurrently to handle sub-tasks. " +
-      "Use this whenever a query or task benefits from modular delegation, parallel research, multi-perspective analysis, or division of labor. " +
-      "All sub-agent outputs are aggregated and returned inside structured XML tags. " +
-      `You may spawn at most ${maxSpawn} sub-agent(s) per call — extra tasks beyond ${maxSpawn} are ignored. ` +
-      "Workers are stateless: each receives one task, returns its result, then shuts down; no conversation history is kept. " +
-      "You cannot choose worker models or reasoning levels. " +
-      (poolNames.length > 0
-        ? `Worker-available tools: ${poolNames.join(", ")}. Grant each worker ONLY the tools its task needs via the per-task tools list; omit it for no tools. `
-        : "No worker tools are available; omit the per-task tools list. ") +
-      timeoutNote + " " +
-      "Every entry in tasks MUST include all of: name (UPPER-KEBAB tag), instructions (system prompt for the worker), task (concrete assignment for the worker). " +
-      "Example: {\"tasks\": [{\"name\": \"RESEARCH-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst. Return sourced findings only.\", \"task\": \"Research market pricing and supply constraints.\", \"tools\": [\"recent_news\"]}]}",
-    input: z.object({
-      tasks: z
-        .array(
-          z.object({
-            name: z
-              .string()
-              .optional()
-              .describe("Unique UPPER-KEBAB role tag dynamically derived from task (e.g. RESEARCH-ANALYST, MARKET-ANALYST, CODE-REVIEWER). Auto-generated when omitted."),
-            role: z
-              .string()
-              .optional()
-              .describe("Short persona / domain expertise for this sub-agent"),
-            instructions: z
-              .string()
-              .optional()
-              .describe("Personalized system prompt crafted by Main Agent to increase instruction following. Falls back to task when omitted."),
-            task: z
-              .string()
-              .optional()
-              .describe("Specific research/task prompt for this sub-agent. REQUIRED — falls back to instructions when omitted."),
-            tools: z
-              .array(z.string())
-              .optional()
-              .describe(
-                poolNames.length > 0
-                  ? `Tool names to grant this worker (subset of: ${poolNames.join(", ")}). Unknown names are ignored. Omit for no tools.`
-                  : "No worker tools are available; omit this field."
-              ),
-            timeoutMs: z
-              .number()
-              .optional()
-              .describe(
-                parentTimeout === -1
-                  ? "Per-worker timeout in ms (> 0). Honored because the developer set timeout: -1. Omit for no limit."
-                  : "Per-worker timeout is developer-controlled; this field is ignored."
-              ),
-          })
-        )
-        .min(1)
-        .describe(`Array of sub-agents to spawn (max ${maxSpawn} per call) — each gets a personalized prompt and runs statelessly on the developer-configured model`),
-    }),
-    execute: async ({ tasks }, context) => {
-      if (!tasks || tasks.length === 0) {
-        return "Error: tasks array is empty. Provide at least one entry shaped like {\"name\": \"RESEARCH-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"<system prompt>\", \"task\": \"<concrete assignment>\"}. Fix the arguments and call spawn_subagents again.";
-      }
-      const repaired = tasks.map((entry: Record<string, unknown>, index: number) => {
-        const rec = (entry ?? {}) as Record<string, unknown>;
-        const taskText =
-          (typeof rec["task"] === "string" && rec["task"].trim()) ||
-          (typeof rec["instructions"] === "string" && (rec["instructions"] as string).trim()) ||
-          "";
-        const instructionsText =
-          (typeof rec["instructions"] === "string" && (rec["instructions"] as string).trim()) ||
-          (typeof rec["task"] === "string" && (rec["task"] as string).trim()) ||
-          (typeof rec["role"] === "string" && (rec["role"] as string).trim()) ||
-          "";
-        const nameText =
-          (typeof rec["name"] === "string" && (rec["name"] as string).trim()) ||
-          `SUBAGENT-${index + 1}`;
-        const roleText =
-          typeof rec["role"] === "string" ? ((rec["role"] as string).trim() || undefined) : undefined;
-        const toolsList = Array.isArray(rec["tools"])
-          ? (rec["tools"] as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim())
-          : undefined;
-        const timeoutRaw = rec["timeoutMs"];
-        const timeoutMs = typeof timeoutRaw === "number" && Number.isFinite(timeoutRaw) ? Math.floor(timeoutRaw) : undefined;
-        return { ...rec, name: nameText, role: roleText, instructions: instructionsText, task: taskText, tools: toolsList, timeoutMs };
-      });
-      const invalid = repaired.findIndex((r) => !r.task);
-      if (invalid >= 0) {
-        const keys = Object.keys((tasks[invalid] ?? {}) as object).join(", ") || "(none)";
-        return (
-          `Error: tasks[${invalid}].task is missing and could not be inferred. ` +
-          `Received keys: [${keys}]. ` +
-          `Each tasks[] entry MUST include task (concrete assignment) plus instructions (system prompt) and name (UPPER-KEBAB tag). ` +
-          `Example: {\"name\": \"RESEARCH-ANALYST\", \"role\": \"memory market analyst\", \"instructions\": \"You are a memory market analyst.\", \"task\": \"Research market pricing.\"}. ` +
-          `Fix the entry and call spawn_subagents again.`
-        );
-      }
-      if (context?.signal?.aborted) {
-        throw new Error("Sub-agent spawning aborted");
-      }
-
-      const dynCfg = (parentAgent as any).dynamicSubagents as
-        | { model?: unknown; maxSpawn: number; thinkingLevel?: string; tools: Record<string, ToolDefinition>; timeout: number }
-        | undefined;
-      const effectiveMax = dynCfg && Number.isFinite(dynCfg.maxSpawn) ? Math.max(1, Math.floor(dynCfg.maxSpawn)) : 4;
-      const toolPool: Record<string, ToolDefinition> = (dynCfg?.tools as any) ?? {};
-      const cfgTimeout = dynCfg && Number.isFinite(dynCfg.timeout) ? Math.floor(dynCfg.timeout) : 0;
-
-      if (!parentAgent.subagentModel) {
-        throw new Error(
-          "[Agent Accelerator] Cannot spawn sub-agents: no sub-agent model is configured. " +
-          "Set dynamicSubagents.model in Agent config or set the SUB_AGENT_MODEL environment variable."
-        );
-      }
-
-      const { Agent: AgentClass } = await import("./agent.ts");
-
-      const subagentMetadataList: SubAgentExecutionMetadata[] = [];
-      const seenNames = new Set<string>();
-
-      // maxSpawn: trim extras safely — only the first N tasks run.
-      const limitedTasks = repaired.slice(0, effectiveMax);
-      // Q-39: reserve spawns against maxTotalSubagents before running.
-      reserveSpawn(parentAgent, limitedTasks.length);
-      // Q-42: batch run id for lineage; per-worker ids attach to metadata.
-      const batchRunId = newRunId();
-      const parentRunId =
-        (parentAgent as unknown as { currentRunId?: unknown; runId?: unknown }).currentRunId ??
-        (parentAgent as unknown as { runId?: unknown }).runId;
-      const rootRunId =
-        (parentAgent as unknown as { rootRunId?: unknown }).rootRunId ?? parentRunId;
-      const executedResults = await Promise.all(
-        limitedTasks.map(async (t) => {
-          const startTime = nowMs();
-          const workerTurnId = newTurnId();
-          let sanitized = sanitizeXmlTag(t.name);
-          let deduped = sanitized;
-          let suffix = 1;
-          while (seenNames.has(deduped)) {
-            deduped = `${sanitized}-${suffix++}`;
-          }
-          seenNames.add(deduped);
-          const subagentName = deduped;
-          // Stable tracking id: `SUBAGENT-NAME-{32hex}` addresses one worker
-          // among many concurrent ones for `agent.track(id)` + session logs.
-          const trackingId = createTrackingId();
-          const displayId = `${subagentName}-${trackingId}`;
-          let workerSessionId: string | undefined;
-
-          // Fixed developer-configured worker model — never LLM-choosable.
-          const chosenModel: any = parentAgent.subagentModel;
-          const chosenModelStrForProvider = typeof chosenModel === "string" ? chosenModel : (chosenModel as any)?.model ?? (chosenModel as any)?.id ?? String(chosenModel);
-
-          const runWithModel = async () => {
-            if (context?.signal?.aborted) throw new Error("Aborted before spawn");
-            const childSessionId = createChildSessionId(parentAgent.sessionId, subagentName);
-            workerSessionId = childSessionId;
-            // Register the live trace BEFORE the run so `agent.track(id)`
-            // sees every step in realtime, even while the worker runs.
-            const trace: SubAgentTrace = {
-              trackingId,
-              name: subagentName,
-              sessionId: childSessionId,
-              parentSessionId: parentAgent.sessionId,
-              status: "running",
-              task: t.task,
-              role: t.role,
-              turns: 0,
-              steps: [],
-            };
-            insertTrace(trace, displayId);
-            try {
-              const parentTraces = ((parentAgent as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
-              parentTraces[trackingId] = trace;
-            } catch {}
-            const persistParent = () => {
-              try { (parentAgent as any).persistNow?.(); } catch {}
-            };
-            // Unified live worker state machine (shared with fixed workers).
-            const { onWorkerTurn, attachToStream } = createLiveWorker(trace, trackingId, displayId, {
-              trim: (t) => trimTraceSteps(t),
-              touch: (id) => touchTrace(id),
-              notify: (id) => notifyTrace(id),
-              persist: persistParent,
-              emit: (ev) => {
-                try { context?.onSubagentEvent?.(ev); } catch {}
-              },
-            });
-            // Grant ONLY the Main Agent-selected subset from the developer pool.
-            const grantedTools = grantWorkerTools(toolPool, (t as { tools?: unknown }).tools);
-            // Timeout: >0 fixed for every worker; 0 = no limit; -1 = per-task timeoutMs.
-            const workerTimeout = normalizeWorkerTimeoutValue(cfgTimeout, (t as { timeoutMs?: unknown }).timeoutMs);
-            const subAgent = new AgentClass(
-              buildDynamicWorkerConfig(parentAgent, {
-                name: t.name,
-                role: t.role,
-                instructions: t.instructions,
-                sessionId: childSessionId,
-                tools: grantedTools,
-              })
-            );
-            // Lineage binding: child records its parent session so persisted
-            // snapshots and routing can tell siblings apart even when ids
-            // are truncated to 64 chars.
-            try {
-              (subAgent as any).parentSessionId = parentAgent.sessionId;
-            } catch {}
-            let abortListener: (() => void) | null = null;
-            // Per-worker controller: the parent signal alone cannot stop a
-            // worker that hits its own timeout, so the timeout path aborts
-            // the worker explicitly instead of leaving it running unseen.
-            const workerController = new AbortController();
-            const parentSignal = context?.signal;
-            const forwardParentAbort = () => {
-              try {
-                workerController.abort((parentSignal as any)?.reason);
-              } catch {
-                try { workerController.abort(); } catch {}
-              }
-            };
-            if (parentSignal?.aborted) forwardParentAbort();
-            else parentSignal?.addEventListener("abort", forwardParentAbort, { once: true });
-            const abortPromise = parentSignal
-              ? new Promise<never>((_, reject) => {
-                  const onAbort = () => reject(new Error("Sub-agent aborted via parent signal"));
-                  abortListener = onAbort;
-                  if (parentSignal.aborted) reject(new Error("Sub-agent aborted via parent signal"));
-                  else parentSignal.addEventListener("abort", onAbort, { once: true });
-                })
-              : null;
-            let timeoutId: ReturnType<typeof setTimeout> | null = null;
-            const timeoutPromise = workerTimeout > 0
-              ? new Promise<never>((_, reject) => {
-                  timeoutId = setTimeout(() => {
-                    try {
-                      workerController.abort(new Error(`Sub-agent ${subagentName} timed out after ${workerTimeout}ms`));
-                    } catch {}
-                    reject(new Error(`Sub-agent ${subagentName} timed out after ${workerTimeout}ms`));
-                  }, workerTimeout);
-                })
-              : null;
-            // Streamed internally (consumed to completion): same final result
-            // as run(), but text/thinking deltas flow into the trace live.
-            const workerStream = subAgent.stream(t.task, { signal: workerController.signal, onTurn: onWorkerTurn } as any);
-            const detachWorkerListeners = attachToStream(workerStream as unknown as Parameters<typeof attachToStream>[0]);
-            const taskPromise = workerStream.result();
-            try {
-              const racers: Promise<unknown>[] = [taskPromise as unknown as Promise<unknown>];
-              if (abortPromise) racers.push(abortPromise);
-              if (timeoutPromise) racers.push(timeoutPromise);
-              const res = await Promise.race(racers);
-              return res;
-            } finally {
-              if (timeoutId) clearTimeout(timeoutId);
-              try { workerStream.cancel(); } catch {}
-              try { subAgent.reset(); } catch {} // one-shot worker: free its chain/routing state
-              try { detachWorkerListeners(); } catch {}
-              if (abortListener && parentSignal) {
-                try { parentSignal.removeEventListener("abort", abortListener as any); } catch {}
-              }
-              try { parentSignal?.removeEventListener("abort", forwardParentAbort); } catch {}
-            }
-          };
-
-          try {
-            const res: any = await runWithModel();
-
-            const durationMs = Math.max(0, nowMs() - startTime);
-            const rawText = (res as any).text;
-            const subagentText = typeof rawText === "string" && rawText.trim().length > 0
-              ? rawText
-              : `[Sub-agent ${subagentName} produced no output (empty response).]`;
-
-            const live = subagentTraces.get(trackingId);
-            if (live) {
-              live.status = "done";
-              live.model = (res as any).model;
-              live.provider = (res as any).provider;
-              live.turns = (res as any).turns ?? live.turns;
-              live.usage = (res as any).usage
-                ? { inputTokens: (res as any).usage.inputTokens ?? 0, outputTokens: (res as any).usage.outputTokens ?? 0, totalTokens: (res as any).usage.totalTokens ?? 0 }
-                : live.usage;
-              live.text = subagentText;
-              trimTraceSteps(live);
-              touchTrace(live.trackingId);
-              notifyTrace(trackingId);
-            }
-            try { (parentAgent as any).persistNow?.(); } catch {}
-            // Worker usage is charged against the parent's budget centrally by the
-            // loop (it sees every finished worker, fixed and dynamic, exactly once).
-            const metadata: SubAgentExecutionMetadata = {
-              name: subagentName,
-              trackingId: displayId,
-              sessionId: workerSessionId,
-              parentSessionId: parentAgent.sessionId,
-              role: t.role,
-              task: t.task,
-              model: (res as any).model,
-              provider: (res as any).provider,
-              durationMs,
-              usage: (res as any).usage,
-              turns: (res as any).turns,
-              finishReason: (res as any).finishReason,
-              responseId: (res as any).responseId,
-              text: subagentText,
-              thinking: (res as any).thinking,
-              toolCalls: (res as any).toolCalls,
-              raw: (res as any).raw,
-              steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
-              isError: false,
-            };
-            // Q-42 lineage (untyped: response.ts is owned elsewhere) + Q-43 provider meta passthrough.
-            try {
-              const m = metadata as unknown as Record<string, unknown>;
-              m["runId"] = newRunId();
-              m["turnId"] = workerTurnId;
-              if (parentRunId !== undefined) m["parentRunId"] = parentRunId;
-              if (rootRunId !== undefined) m["rootRunId"] = rootRunId;
-              else if (parentRunId !== undefined) m["rootRunId"] = parentRunId;
-              else m["rootRunId"] = batchRunId;
-              if ((res as any).meta !== undefined) m["meta"] = (res as any).meta;
-            } catch {}
-            return { name: subagentName, trackingId: displayId, text: subagentText, metadata };
-          } catch (err: any) {
-            if (err && (err as { code?: unknown }).code === "budget_exceeded") throw err;
-            const durationMs = Math.max(0, nowMs() - startTime);
-            const errorMessage = err?.message || String(err);
-            const prov = providerOfWorkerModel(chosenModelStrForProvider) || providerOfWorkerModel(chosenModel as unknown) || "unknown";
-            const live = subagentTraces.get(trackingId);
-            if (live) {
-              live.status = "error";
-              live.error = errorMessage;
-              notifyTrace(trackingId);
-            }
-            try { (parentAgent as any).persistNow?.(); } catch {}
-            const metadata: SubAgentExecutionMetadata = {
-              name: subagentName,
-              trackingId: displayId,
-              sessionId: workerSessionId,
-              parentSessionId: parentAgent.sessionId,
-              role: t.role,
-              task: t.task,
-              model: typeof chosenModel === "string" ? chosenModel : ((chosenModel as any)?.model ?? (chosenModel as any)?.id ?? "unknown"),
-              provider: prov,
-              durationMs,
-              usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-              turns: 0,
-              text: `Error executing sub-agent ${t.name}: ${errorMessage}`,
-              steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
-              isError: true,
-              error: errorMessage,
-            };
-            try {
-              const m = metadata as unknown as Record<string, unknown>;
-              m["runId"] = newRunId();
-              m["turnId"] = workerTurnId;
-              if (parentRunId !== undefined) m["parentRunId"] = parentRunId;
-              if (rootRunId !== undefined) m["rootRunId"] = rootRunId;
-              else if (parentRunId !== undefined) m["rootRunId"] = parentRunId;
-              else m["rootRunId"] = batchRunId;
-            } catch {}
-            return { name: subagentName, trackingId: displayId, text: `Error executing sub-agent ${t.name}: ${errorMessage}`, metadata };
-          }
-        })
-      );
-
-      const xmlOutput = buildSubagentsXml(executedResults.map((r) => {
-        subagentMetadataList.push(r.metadata);
-        return r;
-      }));
-
-      return makeSubagentResult(xmlOutput, subagentMetadataList);
-    },
-  });
-}
-
 /** Optional name/description wrapper for converting an Agent into a tool. */
 export interface AgentAsToolTarget {
   name?: string;
@@ -934,118 +689,47 @@ export function agentToTool(
     }),
     execute: async ({ task }, ctx) => {
       const startTime = nowMs();
-      const trackingId = createTrackingId();
-      const displayId = `${name}-${trackingId}`;
       // Q-42 lineage for fixed-delegation calls.
       const callRunId = newRunId();
       const callTurnId = newTurnId();
+      const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
+      const subSessionId = createFixedChildSessionId(parentSessionId, sanitizeToolName(name));
+      const live = openWorkerTrace({
+        name,
+        sessionId: subSessionId,
+        parentSessionId,
+        task,
+        emit: (ev) => ctx?.onSubagentEvent?.(ev),
+      });
+      const lineage = { name, displayId: live.displayId, sessionId: subSessionId, parentSessionId, task, runId: callRunId, turnId: callTurnId };
       try {
-        const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
-        const subSessionId = createFixedChildSessionId(parentSessionId, sanitizeToolName(name));
-        const trace: SubAgentTrace = {
-          trackingId,
-          name,
-          sessionId: subSessionId,
-          parentSessionId,
-          status: "running",
-          task,
-          turns: 0,
-          steps: [],
-        };
-        insertTrace(trace, displayId);
-        // Unified live worker state machine (shared with dynamic workers).
-        const { onWorkerTurn, attachToStream } = createLiveWorker(trace, trackingId, displayId, {
-          trim: (t) => trimTraceSteps(t),
-          touch: (id) => touchTrace(id),
-          notify: (id) => notifyTrace(id),
-          emit: (ev) => {
-            try { ctx?.onSubagentEvent?.(ev); } catch {}
-          },
-        });
         // One isolated copy per call: the shared instance is single-flight, so
         // calling it directly would serialize (or steer) parallel tool calls.
         const worker: Agent =
           typeof (agentInstance as Agent).fork === "function" ? agentInstance.fork(subSessionId, parentSessionId) : agentInstance;
-        const workerStream = worker.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: onWorkerTurn } as any);
-        const detachWorkerListeners = attachToStream(workerStream as unknown as Parameters<typeof attachToStream>[0]);
-        let response: any;
+        const workerStream = worker.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: live.onWorkerTurn } as any);
+        const detachWorkerListeners = live.attachToStream(workerStream as unknown as Parameters<typeof live.attachToStream>[0]);
+        let response: AgentResponse;
         try {
           response = await workerStream.result();
         } finally {
           try { detachWorkerListeners(); } catch {}
           // The per-call session id is never reused: drop its provider chain/routing state.
-          if (worker !== agentInstance) { try { worker.reset(); } catch {} }
+          if (worker !== agentInstance) {
+            try { agentInstance.absorbUsage(worker.usageTotals); } catch {} // the template keeps what its copies spent
+            try { worker.reset(); } catch {}
+          }
         }
-        const durationMs = Math.max(0, nowMs() - startTime);
-        const live = subagentTraces.get(trackingId);
-        if (live) {
-          live.status = "done";
-          live.model = response.model;
-          live.provider = response.provider;
-          live.turns = response.turns ?? live.turns;
-          live.text = response.text;
-          trimTraceSteps(live);
-          touchTrace(live.trackingId);
-          notifyTrace(trackingId);
-        }
-        const metadata: SubAgentExecutionMetadata = {
-          name,
-          trackingId: displayId,
-          sessionId: subSessionId,
-          parentSessionId,
-          task,
-          model: response.model,
-          provider: response.provider,
-          durationMs,
-          usage: response.usage,
-          turns: response.turns,
-          finishReason: response.finishReason,
-          responseId: response.responseId,
-          text: response.text,
-          thinking: response.thinking,
-          toolCalls: response.toolCalls,
-          raw: response.raw,
-          steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
-          isError: false,
-        };
-        try {
-          const m = metadata as unknown as Record<string, unknown>;
-          m["runId"] = callRunId;
-          m["turnId"] = callTurnId;
-          if (response.meta !== undefined) m["meta"] = response.meta;
-        } catch {}
-        return makeSubagentResult(response.text, [metadata]);
+        live.finish(response);
+        return makeSubagentResult(response.text, [
+          workerMetadata({ ...lineage, durationMs: Math.max(0, nowMs() - startTime), result: response, steps: live.steps() }),
+        ]);
       } catch (err: any) {
-        const durationMs = Math.max(0, nowMs() - startTime);
         const msg = err?.message || String(err);
-        const live = subagentTraces.get(trackingId);
-        if (live) {
-          live.status = "error";
-          live.error = msg;
-          trimTraceSteps(live);
-          touchTrace(live.trackingId);
-          notifyTrace(trackingId);
-        }
-        const metadata: SubAgentExecutionMetadata = {
-          name,
-          trackingId: displayId,
-          task,
-          model: "unknown",
-          provider: "unknown",
-          durationMs,
-          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-          turns: 0,
-          text: `Error in ${name}: ${msg}`,
-          steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
-          isError: true,
-          error: msg,
-        };
-        try {
-          const m = metadata as unknown as Record<string, unknown>;
-          m["runId"] = callRunId;
-          m["turnId"] = callTurnId;
-        } catch {}
-        return makeSubagentResult(`Error in ${name}: ${msg}`, [metadata]);
+        live.fail(msg);
+        return makeSubagentResult(`Error in ${name}: ${msg}`, [
+          workerMetadata({ ...lineage, durationMs: Math.max(0, nowMs() - startTime), error: msg, steps: live.steps() }),
+        ]);
       }
     },
   });

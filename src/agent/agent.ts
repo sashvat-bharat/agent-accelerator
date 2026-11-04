@@ -10,8 +10,11 @@ import { AgentResponse, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
-import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
+import { buildAgentTools } from "./delegation.ts";
+import { createSubagentsTool } from "./subagents-tool.ts";
+import { WorkerRegistry } from "./workers.ts";
 import {
+  DEFAULT_MAX_DEPTH,
   normalizeToolMap,
   resolveDynamicModelInput,
   resolveMainModel,
@@ -34,7 +37,8 @@ import {
   listSubAgentTraceIdsForSessions,
   type SubAgentTrace,
 } from "./delegation.ts";
-import { saveSessionFile, sessionDirFor, loadSessionDir, findInvalidMessage, telemetryBus, type SessionRunMark, type SessionRunEnd, type SessionPending, type SessionToolRecord } from "../session/store.ts";
+import { addTurn, buildUsageReport, emptyUsage, mergeUsage, modelName, readUsage, type UsageNode, type UsageReport, type UsageTotals } from "../session/usage.ts";
+import { saveSessionFile, sessionDirFor, loadSessionDir, findInvalidMessage, priceUsage, telemetryBus, type SessionRunMark, type SessionRunEnd, type SessionPending, type SessionToolRecord } from "../session/store.ts";
 import { SessionJournal } from "../session/journal.ts";
 import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
@@ -167,6 +171,10 @@ export class Agent {
     timeout: number;
     /** Scheduled actions (`scheduled_actions` + `get_datetime` tools) are on. */
     allowScheduledActions: boolean;
+    /** Levels of workers allowed below this agent. */
+    maxDepth: number;
+    /** Per-run spending cap of each worker (unset = unlimited). */
+    workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
   };
   /** Home folder for everything written to disk (`sessions/`, `scheduled_actions/`, `telemetry/`). */
   readonly home: string;
@@ -263,6 +271,8 @@ export class Agent {
   readonly runMarks: SessionRunMark[] = [];
   /** Tool calls finished in the current run; saved the moment each finishes so a crash never repeats them. @internal */
   readonly toolRecords: SessionToolRecord[] = [];
+  /** What this agent spent on its OWN model calls (workers keep their own); saved with the session. @internal */
+  readonly usageTotals: UsageTotals = emptyUsage();
   /** The run in flight (its mark has no ending yet, but it is not "interrupted"). */
   private activeMark?: SessionRunMark;
   /** What to do with a cut-off run at construction (see `AgentConfig.resume`). */
@@ -271,6 +281,7 @@ export class Agent {
   private readonly runRetries: number;
   /** The resume in flight, so a second `resume()` returns the same promise. */
   private resuming?: Promise<AgentResponse | undefined>;
+  private workerRegistry?: WorkerRegistry;
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -307,6 +318,17 @@ export class Agent {
     const dynEnabled = dynRaw ? (dynRaw.enabled ?? true) : false;
     if (dynRaw) {
       const dynTools = normalizeToolMap((dynRaw as { tools?: Record<string, ToolDefinition> | ToolDefinition[] }).tools);
+      const rawDepth = (dynRaw as { maxDepth?: unknown }).maxDepth;
+      if (rawDepth !== undefined && !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)) {
+        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1 (default ${DEFAULT_MAX_DEPTH}); set dynamicSubagents.enabled: false to turn workers off.`);
+      }
+      const rawBudget = (dynRaw as { workerBudget?: { maxCostUsd?: unknown; maxTotalTokens?: unknown } }).workerBudget;
+      for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
+        const v = rawBudget?.[key];
+        if (v !== undefined && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
+          throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.workerBudget.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`);
+        }
+      }
       const rawMax = (dynRaw as any)?.maxSpawn;
       const maxSpawn = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax as number)) : 4;
       // `workerTimeoutMs ?? timeout`, or -1 when `modelMaySetTimeout` (see normalizeWorkerTimeout).
@@ -319,6 +341,8 @@ export class Agent {
         tools: dynTools,
         timeout,
         allowScheduledActions: dynRaw.allowScheduledActions === true,
+        maxDepth: (rawDepth as number | undefined) ?? DEFAULT_MAX_DEPTH,
+        ...(rawBudget ? { workerBudget: { ...(rawBudget as { maxCostUsd?: number; maxTotalTokens?: number }) } } : {}),
       };
     }
     this.apiKey = (rawModel as any)?.apiKey || config.apiKey;
@@ -438,8 +462,8 @@ export class Agent {
       );
     }
     if (dyn?.enabled === true) {
-      const spawnTool = createSubagentSpawnTool(this);
-      this.tools[spawnTool.name || "spawn_subagents"] = spawnTool;
+      const subagentsTool = createSubagentsTool(this);
+      this.tools[subagentsTool.name || "subagents"] = subagentsTool;
     }
     if (dyn?.allowScheduledActions) {
       // Fixed by config, so the tool set (and the prompt cache) stays stable.
@@ -459,6 +483,11 @@ export class Agent {
     }
   }
 
+  /** The persistent sub-agent workers of this agent: `spawn`, `message`, `close`, `list`, `turns` (see `WorkerRegistry`). */
+  get workers(): WorkerRegistry {
+    return (this.workerRegistry ??= new WorkerRegistry(this));
+  }
+
   // Loads a persisted session that a crash cut off (a run without an ending) or that still had waiting prompts, so it can be resumed; true when there is something to resume; in: the session folder of `persist.dir`, out: context, runMarks, toolRecords, pendingQueue.
   private recoverSession(): boolean {
     const root = this.persistConfig?.dir;
@@ -475,6 +504,7 @@ export class Agent {
     if (!(session.runs ?? []).some((r) => !r.end) && waiting.length === 0) return false;
     this.context.messages = session.messages;
     this.runMarks.splice(0, this.runMarks.length, ...(session.runs ?? []));
+    this.restoreUsage(session.usage);
     const open = new Set(unfinishedToolCalls(this.context.messages).map((c) => c.id));
     this.toolRecords.splice(0, this.toolRecords.length, ...(session.tools ?? []).filter((t) => open.has(t.id)));
     for (const w of waiting) {
@@ -487,6 +517,42 @@ export class Agent {
       });
     }
     return true;
+  }
+
+  // Puts saved spending totals back after a restart or import (zeros when the file has none); in: a loaded session's `usage`, out: this.usageTotals.
+  private restoreUsage(saved: unknown): void {
+    Object.assign(this.usageTotals, readUsage(saved));
+  }
+
+  // Records one model call of THIS agent (priced per turn, with the service tier); in: the loop's onTurnUsage, out: this.usageTotals (saved by the next persist).
+  private recordTurnUsage(usage: TokenUsage, spec: Parameters<typeof priceUsage>[1]): void {
+    addTurn(this.usageTotals, usage, priceUsage(usage, spec, this.serviceTier ? { serviceTier: this.serviceTier } : undefined));
+  }
+
+  /** Adds another agent's spending to this one (a fixed worker's per-call copy into its template). @internal */
+  absorbUsage(other: UsageTotals): void {
+    mergeUsage(this.usageTotals, other);
+  }
+
+  /**
+   * What this agent and every worker below it spent: per agent and per worker (tokens, cache hits, thinking, exact
+   * cost per turn) plus a whole-session total, with nothing counted twice. `agent` is this agent's own model calls;
+   * workers (open, closed, nested, and rebuilt from disk after a restart) and fixed `subagents` workers are listed
+   * below it. Spending of one-shot scheduled-action workers is in their run files, not here.
+   */
+  usageReport(): UsageReport {
+    return buildUsageReport({ id: this.sessionId, name: this.name, model: modelName(this.modelStringOrSpec), totals: this.usageTotals }, [...this.workers.usageNodes(), ...this.fixedWorkerNodes()]);
+  }
+
+  // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is merged into them); in: the constructor config, out: usageReport.
+  private fixedWorkerNodes(): UsageNode[] {
+    const nodes: UsageNode[] = [];
+    for (const entry of this.forkConfig.subagents ?? []) {
+      const worker = "agent" in entry ? entry.agent : entry;
+      const name = "agent" in entry ? entry.name : worker.name;
+      nodes.push({ id: name, name, model: modelName(worker.modelStringOrSpec), status: "fixed", totals: worker.usageTotals, workers: [] });
+    }
+    return nodes;
   }
 
   // Says on the telemetry bus that resuming (or a prompt that was waiting) failed; in: a rejected resume, out: telemetryBus.
@@ -578,26 +644,6 @@ export class Agent {
         "2. Never attempt to execute tools or output final user deliverables inside reasoning.\n" +
         "3. Once your reasoning is complete, output your final response or function calls directly in the standard response output.";
       out = out ? `${out}\n\n${guidance}` : guidance;
-    }
-    if (this.dynamicSubagents?.enabled === true && !out.includes("[Dynamic Sub-Agents]")) {
-      const dyn = this.dynamicSubagents;
-      const toolNames = Object.keys(dyn.tools);
-      const timeoutNote =
-        dyn.timeout === -1
-          ? "Timeout policy: set a per-sub-agent timeoutMs (ms) for each task; omit it for no limit."
-          : dyn.timeout === 0
-            ? "Timeout policy: workers run with no time limit."
-            : `Timeout policy: every worker is limited to ${dyn.timeout}ms; per-task timeouts are ignored.`;
-      const policy =
-        "[Dynamic Sub-Agents]\n" +
-        `1. You may spawn at most ${dyn.maxSpawn} sub-agent(s) per spawn_subagents call. Extra tasks beyond ${dyn.maxSpawn} are ignored.\n` +
-        "2. Workers are stateless: each receives one task, returns its result, then shuts down. No conversation history is kept.\n" +
-        "3. You cannot choose worker models or reasoning levels — they are fixed by the developer.\n" +
-        (toolNames.length > 0
-          ? `4. Worker-available tools: ${toolNames.join(", ")}. Grant each worker ONLY the tools its task needs via the per-task tools list; omit it for no tools.\n`
-          : "4. No worker tools are available; omit the per-task tools list.\n") +
-        `5. ${timeoutNote}`;
-      out = out ? `${out}\n\n${policy}` : policy;
     }
     return out || undefined;
   }
@@ -1161,6 +1207,7 @@ export class Agent {
         ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
         ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
+        onTurnUsage: (u: TokenUsage, spec: Parameters<typeof priceUsage>[1]) => this.recordTurnUsage(u, spec),
         onToolResult: (r: ToolResultRecord) => this.recordTool(r),
         openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
         ...(resumeMark ? { resume: { stored: this.storedToolResults() } } : {}),
@@ -1251,6 +1298,7 @@ export class Agent {
       ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
       ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
       onProgress: () => this.persistNow(),
+      onTurnUsage: (u: TokenUsage, spec: Parameters<typeof priceUsage>[1]) => this.recordTurnUsage(u, spec),
       onToolResult: (r: ToolResultRecord) => this.recordTool(r),
       openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
       steerInbox,
@@ -1501,6 +1549,7 @@ export class Agent {
     }
     this.context.thoughtSignatures = [];
     this.runMarks.splice(0, this.runMarks.length, ...(data.runs ?? []).filter((r) => r.i < this.context.messages.length));
+    this.restoreUsage(data.usage);
     if (data.systemPrompt) {
       this.context.systemPrompt = data.systemPrompt;
     } else {

@@ -42,11 +42,6 @@ export function sanitizeToolName(raw: string): string {
   return tag.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-{2,}/g, "-").slice(0, 64) || "sub-agent";
 }
 
-/** Stable worker ids: `{sanitizedName}-{32hex}` display id + raw tracking id. */
-export function makeWorkerIds(sanitizedName: string, trackingId: string): { trackingId: string; displayId: string } {
-  return { trackingId, displayId: `${sanitizedName}-${trackingId}` };
-}
-
 // ---------------------------------------------------------------------------
 // Shared Agent / SubAgent config normalization (behavior-preserving)
 // ---------------------------------------------------------------------------
@@ -203,11 +198,6 @@ export function grantWorkerTools(
   return grantedTools;
 }
 
-/** Resolves a provider id for credential reuse / error metadata (shared). */
-export function providerOfWorkerModel(modelStr: string | unknown | undefined): string | undefined {
-  return providerOf(modelStr);
-}
-
 function providerOf(modelStr: string | unknown | undefined): string | undefined {
   if (!modelStr) return undefined;
   try {
@@ -246,18 +236,34 @@ export function resolveWorkerCredentials(
   return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
 }
 
+/** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise. */
+export const DEFAULT_MAX_DEPTH = 3;
+
 /**
- * Config of a stateless dynamic worker (`spawn_subagents` and scheduled
- * actions): the developer's fixed worker model, level and limits, never the
- * LLM's choice. Credentials carry over only when the providers match, and
- * `inheritableConfig()` keeps the worker no less constrained than its parent.
+ * Config of a dynamic worker (scheduled actions, the worker registry): the developer's fixed worker
+ * model, level and limits, never the LLM's choice. Credentials carry over only when the providers match, and
+ * `inheritableConfig()` keeps the worker no less constrained than its parent. Stateless one-shot by default;
+ * `persistent` makes a multi-turn worker that keeps its history (saved under `persistent.dir` when given, and
+ * continued by `resume()` after a crash, never automatically). A persistent worker with levels left below it
+ * (`maxDepth` of the parent, minus one for itself) gets its own `subagents` tool; its children can only be granted
+ * the tools it was granted. One-shot workers never spawn. `dynamicSubagents.workerBudget` becomes each worker's own
+ * per-run `budget` (and is passed to its children).
  */
 export function buildDynamicWorkerConfig(
   parent: Agent,
-  worker: { name: string; role?: string; instructions: string; sessionId: string; tools: Record<string, ToolDefinition> }
+  worker: {
+    name: string;
+    role?: string;
+    instructions: string;
+    sessionId: string;
+    tools: Record<string, ToolDefinition>;
+    persistent?: { dir?: string };
+  }
 ): AgentConfig {
   const model = parent.subagentModel;
   const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
+  const dyn = parent.dynamicSubagents;
+  const levelsBelow = (dyn?.maxDepth ?? DEFAULT_MAX_DEPTH) - 1;
   return {
     name: worker.name,
     description: worker.role || `Sub-agent ${worker.name}`,
@@ -268,25 +274,27 @@ export function buildDynamicWorkerConfig(
     thinkingLevel: parent.dynamicSubagents?.thinkingLevel ?? parent.thinkingConfig?.level,
     sessionId: worker.sessionId,
     tools: worker.tools,
-    // Stateless by design: one task in, one result out, then shut down. No history, no recursion.
-    stateless: true,
+    ...(dyn?.workerBudget ? { budget: { ...dyn.workerBudget } } : {}),
+    stateless: !worker.persistent,
+    ...(worker.persistent?.dir ? { persist: { dir: worker.persistent.dir }, resume: "explicit" as const } : {}),
+    ...(worker.persistent && levelsBelow >= 1
+      ? {
+          dynamicSubagents: {
+            enabled: true,
+            model,
+            ...(dyn?.maxSpawn !== undefined ? { maxSpawn: dyn.maxSpawn } : {}),
+            ...(dyn?.thinkingLevel ? { thinkingLevel: dyn.thinkingLevel } : {}),
+            tools: worker.tools,
+            ...(dyn?.workerBudget ? { workerBudget: dyn.workerBudget } : {}),
+            maxDepth: levelsBelow,
+          },
+        }
+      : {}),
     serviceTier: parent.serviceTier,
     headers: parent.customHeaders,
     maxTurns: parent.maxTurns,
     ...parent.inheritableConfig(),
   };
-}
-
-/** Builds one `<NAME>...text...</NAME>` block inside `<SUB-AGENTS-RESPONSE>`. */
-export function buildWorkerXmlBlock(name: string, text: string): string {
-  const escaped = escapeXml(text);
-  const indentedText = escaped.split("\n").map((line) => `        ${line}`).join("\n");
-  return `    <${name}>\n${indentedText}\n    </${name}>`;
-}
-
-/** Builds the `<SUB-AGENTS-RESPONSE>` envelope for dynamic workers. */
-export function buildSubagentsXml(results: Array<{ name: string; text: string }>): string {
-  return `<SUB-AGENTS-RESPONSE>\n${results.map((r) => buildWorkerXmlBlock(r.name, r.text)).join("\n")}\n</SUB-AGENTS-RESPONSE>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +330,7 @@ export interface LiveWorkerHooks {
 
 /**
  * Single live worker state machine shared by fixed (`agentToTool`) and
- * dynamic (`spawn_subagents`) workers. Owns `liveTurn` / `partialText` /
+ * registry workers. Owns `liveTurn` / `partialText` /
  * `partialThinking`, finalizes partial streaming entries on `onTurn`, and
  * forwards deltas to the parent stream. The trace object is mutated in place;
  * trimming / touching / notifying / persisting are delegated to hooks so this

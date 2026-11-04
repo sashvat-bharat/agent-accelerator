@@ -103,4 +103,16 @@ describe("Complete JSON Data Exposure", () => {
     // Total = 0.002 + 0.0008 + 0.002 = $0.0048
     expect(cost?.totalCost).toBeCloseTo(0.0048, 6);
   });
+  it("applies the service tier when the loop prices a turn", async () => {
+    const { accumulateUsage } = await import("../src/agent/loop.ts");
+    const spec: any = { id: "m", pricing: { inputPerMillion: 1, outputPerMillion: 0 } };
+    const standard: any = { inputTokens: 1_000_000, outputTokens: 0, totalTokens: 1_000_000 };
+    const flex: any = { ...standard };
+    const a: any = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    const b: any = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    accumulateUsage(a, standard, spec);
+    accumulateUsage(b, flex, spec, "flex");
+    expect(a.cost.totalCost).toBeCloseTo(1, 9);
+    expect(b.cost.totalCost).toBeCloseTo(0.5, 9);
+  });
 });

@@ -16,7 +16,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `apiKey`, `baseUrl`, `headers` | Per-agent connection overrides | [Agents](guides/agents-and-models.md) |
 | `tools` | Record `{ name: tool }` or array of tools | [Tools](guides/tools-and-streaming.md) |
 | `subagents` | Fixed sub-agents (`Agent`s or `{ name, description, agent }`) | [Multi-agent](guides/multi-agent.md) |
-| `dynamicSubagents` | Runtime-spawned workers and scheduled actions (keys below) | [Multi-agent](guides/multi-agent.md) |
+| `dynamicSubagents` | The `subagents` tool, persistent workers and scheduled actions (keys below) | [Multi-agent](guides/multi-agent.md) |
 | `thinking`, `thinkingLevel` | Reasoning level (`thinking` wins; `thinkingLevel` is legacy) | [Agents](guides/agents-and-models.md) |
 | `cache`, `serviceTier`, `googleTier` | `"implicit"\|"5m"\|"30m"\|"1h"\|"12h"` cache lifetime, `flex`/`priority`, Google chain TTL (`free` 23 h, `paid` 54 d) | [Agents](guides/agents-and-models.md) |
 | `sessionId` | Default session key (clamped to 64 chars) | [Data](guides/data-and-media.md) |
@@ -35,7 +35,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text) to `<home>/telemetry/<date>.ndjson`. Off by default | [Safety](guides/safety-and-ops.md) |
 | `logger`, `hooks`, `contextManagement` | **Not implemented**; emit `config.unsupported_option`. Use `telemetryBus` | |
 
-**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (4), `thinkingLevel`, `tools` (pool), `workerTimeoutMs` (canonical; `0` none, `-1` model sets per task, `>0` fixed), `timeout` (legacy), `modelMaySetTimeout`.
+**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (4, open workers at once), `maxDepth` (3, levels of workers below the agent, whole number >= 1), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each worker's own per-run cap, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (canonical; `0` none, `-1` the action sets it, `>0` fixed), `timeout` (legacy), `modelMaySetTimeout`. The `subagents` tool and `agent.workers` have no timeouts.
 **`midSession`**: `mode`, `whenBusy`, `maxQueued` (20).
 **`budget`** (per run, includes workers): `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`.
 **`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). A long-running call (Google long decode, or any `Provider` whose `isLongRunning()` returns true) times each HTTP request only, never the whole call or stream.
@@ -66,7 +66,11 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 
 `finishReason`: `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `stopped` (a tool called `ctx.stop`), `error` (or a provider string; the original stays in `rawFinishReason`).
 
-`usage`: `inputTokens`, `outputTokens`, `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`.
+`usage`: `inputTokens` (includes the cache reads and writes), `outputTokens` (includes `thinkingTokens`), `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`. Without a provider-reported cost, `cost` is estimated per turn from the catalog: fresh input, cache reads and cache writes each at their own price (a missing cache price bills at the input rate), scaled by `serviceTier`.
+
+### Usage report
+
+`agent.usageReport()` returns `{ agent, workers, total }` (types `UsageReport`, `AgentUsage`, `WorkerUsage`, `UsageLine`, `CostSource`). A line: `turns`; `tokens` (`input` incl. cache reads/writes, `freshInput`, `cacheRead`, `cacheWrite`, `output` incl. `thinking`, `thinking`, `total`); `cacheHitRate` (0-1 or `null`); `cost` (`source`: `provider | catalog | mixed | unknown`, `unpricedTurns`, `totalUsd` or `null`, `parts` in USD). `agent` is the agent's own calls, `workers` is a tree (`status`: `open | closed | fixed`, nested `workers`), `total` is everything. Each agent's totals are saved in its session as `usage` and kept current by `usage` journal records.
 
 ## Stream events
 
@@ -115,6 +119,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `session.local_media_paths` | An imported session references local files without `fileAccess.roots` |
 | `agent.run_retry` | A failed run is being tried again (`attempt`, `of`, `delayMs`) |
 | `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed / resuming (or a prompt that was waiting) failed |
+| `worker.invalid` | A saved `worker.json` is damaged and that worker is skipped |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
 | `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.killed`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle |
 

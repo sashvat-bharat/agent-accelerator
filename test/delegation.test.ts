@@ -3,7 +3,6 @@ import {
   Agent,
   SubAgent,
   buildAgentTools,
-  createSubagentSpawnTool,
   AgentResponse,
 } from "../src/index.ts";
 
@@ -31,7 +30,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(toolsRecord["domain-specialist"]).toBeDefined();
   });
 
-  it("should create a generic domain-agnostic subagent spawn tool", () => {
+  it("adds one `subagents` tool to a dynamic parent, with no way for the model to pick a model or a timeout", () => {
     const parentAgent = new Agent({
       name: "Root_Agent",
       model: "google/gemini-3.5-flash-lite",
@@ -44,15 +43,14 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
       },
     });
 
-    expect(parentAgent.tools["spawn_subagents"]).toBeDefined();
-    const toolDef = createSubagentSpawnTool(parentAgent);
-    expect(toolDef.name).toBe("spawn_subagents");
-    // Ensure LLM cannot choose model (model property removed from schema)
-    const taskShape = (toolDef.input as any)?.shape?.tasks?.element?.shape ?? {};
-    expect(taskShape.model).toBeUndefined();
-    expect(taskShape.name).toBeDefined();
-    expect(taskShape.task).toBeDefined();
-    expect(taskShape.instructions).toBeDefined();
+    const toolDef = parentAgent.tools["subagents"]!;
+    expect(toolDef).toBeDefined();
+    expect(parentAgent.tools["spawn_subagents"]).toBeUndefined();
+    expect(toolDef.name).toBe("subagents");
+    const shape = (toolDef.input as any).shape;
+    expect(Object.keys(shape).sort()).toEqual(["command", "history", "id", "instructions", "name", "role", "task", "tools"]);
+    expect(shape.model).toBeUndefined();
+    expect(shape.timeoutMs).toBeUndefined();
   });
 
   it("should strictly throw SubAgentModelError when dynamicSubagents is enabled but no model is configured", () => {
@@ -74,12 +72,10 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     }
   });
 
-  it("should enforce maxSpawn, grant only requested pool tools, and keep workers stateless", async () => {
+  it("writes the worker pool and the open-worker limit into the tool manual", () => {
     const { tool } = require("../src/index.ts");
     const { z } = require("zod");
-    const calls: string[] = [];
-    const mkTool = (name: string) =>
-      tool({ name, description: `${name} tool`, input: z.object({}), execute: async () => { calls.push(name); return `${name}-ok`; } });
+    const mkTool = (name: string) => tool({ name, description: `${name} tool`, input: z.object({}), execute: async () => `${name}-ok` });
     const parentAgent = new Agent({
       name: "Root_Agent",
       model: "google/gemini-3.5-flash-lite",
@@ -89,21 +85,16 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
         model: "google/gemini-3.5-flash-lite",
         maxSpawn: 2,
         tools: { recent_news: mkTool("recent_news"), get_weather: mkTool("get_weather") },
-        timeout: 0,
       },
     });
     expect(parentAgent.dynamicSubagents?.maxSpawn).toBe(2);
     expect(Object.keys(parentAgent.dynamicSubagents?.tools ?? {}).sort()).toEqual(["get_weather", "recent_news"]);
-    const spawn = parentAgent.tools["spawn_subagents"] as any;
-    expect(spawn).toBeDefined();
-    expect(JSON.stringify(spawn.description)).toContain("at most 2 sub-agent(s)");
-    const taskShape = (spawn.input as any)?.shape?.tasks?.element?.shape ?? {};
-    expect(taskShape.model).toBeUndefined();
-    expect(taskShape.tools).toBeDefined();
-    expect(taskShape.timeoutMs).toBeDefined();
-    // Q-34: maxSpawn enforced at execution (extras trimmed), schema allows oversize for forward-compat
-    const parsed = (spawn.input as any).parse({ tasks: [{ task: "a" }, { task: "b" }, { task: "c" }] });
-    expect(parsed.tasks.length).toBe(3);
+    const description = parentAgent.tools["subagents"]!.description;
+    expect(description).toContain("at most 2 open workers");
+    expect(description).toContain("recent_news, get_weather");
+    expect(description).not.toContain("{{");
+    // The manual is the tool description: the system prompt stays free of delegation text.
+    expect(parentAgent.context.systemPrompt ?? "").not.toContain("sub-agent");
   });
 
   it("should expose detailed sub-agent metadata breakdown in AgentResponse JSON", () => {

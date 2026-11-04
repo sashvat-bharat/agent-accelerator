@@ -20,7 +20,7 @@ export interface ToolExecutionContext {
   signal?: AbortSignal;
   /** Session identifier associated with this invocation. */
   sessionId?: string;
-  /** Forwards live sub-agent deltas (used by `spawn_subagents` for realtime tracking). */
+  /** Forwards live sub-agent deltas (used by the `subagents` tool for realtime tracking). */
   onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
   // Q-55 Tool API v2 context additions (all optional, additive).
   /** Stable id for this run (`newRunId`). Mirrors SubAgentRunIds.runId. */

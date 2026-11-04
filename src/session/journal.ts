@@ -51,6 +51,8 @@ export class SessionJournal {
   private lastRun: unknown;
   /** JSON of the last journaled waiting prompts. */
   private pending = EMPTY_PENDING;
+  /** JSON of the last journaled spending totals. */
+  private usage = "";
   /** Run ids whose ending is on disk. */
   private readonly endsOnDisk = new Set<string>();
   /** How many of the current run's finished tool results are on disk, and the last one. */
@@ -90,6 +92,8 @@ export class SessionJournal {
     if (meta !== this.meta) records.push(`{"t":"meta","m":${meta}}`);
     const pending = this.pendingOf(agent);
     if (pending !== this.pending) records.push(`{"t":"pending","p":${pending}}`);
+    const usage = this.usageOf(agent);
+    if (usage !== this.usage) records.push(`{"t":"usage","u":${usage}}`);
     if (records.length === 0) return;
     const text = records.join("\n") + "\n";
     try {
@@ -110,6 +114,7 @@ export class SessionJournal {
     this.runCount = runs.length;
     this.lastRun = runs[runs.length - 1];
     this.pending = pending;
+    this.usage = usage;
     this.toolCount = tools.length;
     this.lastTool = tools[tools.length - 1];
     for (const mark of runs) if (mark.end) this.endsOnDisk.add(mark.id);
@@ -134,6 +139,7 @@ export class SessionJournal {
     writeFileDurable(path.join(this.dir, JOURNAL_FILE), header, { backup: false });
     this.epoch = epoch;
     this.pending = pending;
+    this.usage = this.usageOf(agent); // the snapshot holds it
     this.runs(agent);
     this.count = messages.length;
     this.last = messages[messages.length - 1];
@@ -167,9 +173,14 @@ export class SessionJournal {
     return JSON.stringify({ steer: slim(waiting.steer), queue: slim(waiting.queue) } satisfies SessionPending);
   }
 
+  // JSON of the agent's spending totals (`null` before its first model call); in: the live agent, out: change detection + the `usage` record.
+  private usageOf(agent: SessionAgentLike): string {
+    return agent.usageTotals && agent.usageTotals.turns > 0 ? JSON.stringify(agent.usageTotals) : "null";
+  }
+
   // JSON of everything in the snapshot that is not a message, identity or totals; in: the live agent, out: change detection + the `meta` record.
   private metaOf(agent: SessionAgentLike): string {
-    const { version: _v, sessionId: _s, messages: _m, totals: _t, runs: _r, ...rest } = buildSessionData(
+    const { version: _v, sessionId: _s, messages: _m, totals: _t, runs: _r, usage: _u, ...rest } = buildSessionData(
       { ...agent, context: { ...agent.context, messages: [] } },
       null
     );

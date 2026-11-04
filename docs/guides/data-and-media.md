@@ -53,7 +53,7 @@ const agent = new Agent({ model, persist: { dir: "sessions" }, sessionId: "suppo
 
 | `persist` | Writes |
 |---|---|
-| `{ dir }` | `<dir>/<sessionId>/session.json` (snapshot) + `journal.ndjson` (one appended line per step, folded into the snapshot after 500 lines / 4 MB or when history changes another way) + `media/` files (written once, named by content hash) |
+| `{ dir }` | `<dir>/<sessionId>/session.json` (snapshot; includes the agent's own spending as `usage`, see `agent.usageReport()`) + `journal.ndjson` (one appended line per step, folded into the snapshot after 500 lines / 4 MB or when history changes another way) + `media/` files (written once, named by content hash) |
 | `{ file }` | one JSON file, rewritten each step (binary media inlined as data URLs; no journal) |
 | `{}` | `<home>/sessions` (`home` defaults to `setHome(dir)`, then `AGENT_ACCEL_HOME`, then `.agent-accel/` in the working directory) |
 

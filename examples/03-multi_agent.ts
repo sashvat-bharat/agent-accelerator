@@ -15,7 +15,6 @@ try {
       model: process.env.SUB_AGENT_MODEL,
       maxSpawn: 3,
       thinkingLevel: (process.env.SUB_AGENT_THINKING_LEVEL as any) ?? "low",
-      workerTimeoutMs: 60000,
     },
     thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
     cache: (process.env.CACHE as any) ?? "implicit",

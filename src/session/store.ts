@@ -33,6 +33,7 @@ import type { SubAgentStep } from "../types/response.ts";
 import { SessionLoadError } from "../types/errors.ts";
 import { createSessionId } from "../utils/session.ts";
 import { writeFileDurable, readWithBackup } from "../utils/durable.ts";
+import type { UsageTotals } from "./usage.ts";
 
 /** Cumulative per-session token + cost totals (JSON-safe). */
 export interface SessionTotals {
@@ -118,6 +119,8 @@ export interface PersistedAgentSession {
   epoch?: string;
   /** Where each run began, oldest first. */
   runs?: SessionRunMark[];
+  /** What this agent spent on its own model calls (see `usage.ts`); the journal keeps it current with `usage` records. */
+  usage?: UsageTotals;
   /** Read from the journal only (never in `session.json`): prompts that were still waiting. */
   pending?: SessionPending;
   /** Read from the journal only: results of tool calls finished in the current run (used to resume without repeating them). */
@@ -335,6 +338,8 @@ export interface SessionAgentLike {
   pendingPrompts?: () => SessionPending;
   /** Tool calls finished in the current run (cleared when the next run starts). */
   toolRecords?: SessionToolRecord[];
+  /** What this agent spent on its own model calls. */
+  usageTotals?: UsageTotals;
   context: { systemPrompt?: string; messages: Message[] };
 }
 
@@ -482,6 +487,7 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
     ...(parentSessionId ? { parentSessionId } : {}),
     ...(subagents ? { subagents } : {}),
     ...(agent.runMarks && agent.runMarks.length > 0 ? { runs: agent.runMarks.map((r) => ({ ...r })) } : {}),
+    ...(agent.usageTotals && agent.usageTotals.turns > 0 ? { usage: JSON.parse(JSON.stringify(agent.usageTotals)) as UsageTotals } : {}),
   };
 }
 
@@ -671,6 +677,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       subagents: obj.subagents,
       ...(typeof obj.epoch === "string" ? { epoch: obj.epoch } : {}),
       ...(Array.isArray(obj.runs) ? { runs: obj.runs as SessionRunMark[] } : {}),
+      ...(obj.usage && typeof obj.usage === "object" ? { usage: obj.usage as UsageTotals } : {}),
     };
   } catch {
     return null;
@@ -985,7 +992,7 @@ export const JOURNAL_FILE = "journal.ndjson";
 // Snapshot fields a `meta` journal record replaces (everything except messages, identity and totals).
 const JOURNAL_META_KEYS = ["model", "subagentModel", "thinkingLevel", "cache", "systemPrompt", "parentSessionId", "subagents"] as const;
 
-// Applies a journal to its snapshot: records of the snapshot's own epoch only, `msg` by index (already-present ones skipped), `run` adds a run boundary, `end` closes one, `tool` keeps a finished tool result, `pending` replaces the waiting prompts, `meta` replaces config fields, unknown record types ignored; a torn last line is dropped, damage earlier stops the replay with a bus warning; in: the parsed snapshot + journal text, out: loadSessionDir.
+// Applies a journal to its snapshot: records of the snapshot's own epoch only, `msg` by index (already-present ones skipped), `run` adds a run boundary, `end` closes one, `usage` replaces the agent's spending totals, `tool` keeps a finished tool result, `pending` replaces the waiting prompts, `meta` replaces config fields, unknown record types ignored; a torn last line is dropped, damage earlier stops the replay with a bus warning; in: the parsed snapshot + journal text, out: loadSessionDir.
 function replayJournal(snapshot: PersistedAgentSession, text: string, file: string): PersistedAgentSession {
   if (!snapshot.epoch) return snapshot;
   const lines = text.split("\n");
@@ -997,7 +1004,7 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k]!.trim();
     if (!line) continue;
-    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown; p?: unknown; id?: unknown; at?: unknown; status?: unknown; call?: unknown; name?: unknown; result?: unknown; isError?: unknown; stopped?: unknown };
+    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown; p?: unknown; id?: unknown; at?: unknown; u?: unknown; status?: unknown; call?: unknown; name?: unknown; result?: unknown; isError?: unknown; stopped?: unknown };
     try {
       rec = JSON.parse(line);
     } catch {
@@ -1023,6 +1030,8 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
       if (mark) session.runs = session.runs!.map((r) => (r === mark ? { ...r, end: rec.status as SessionRunEnd } : r));
     } else if (rec.t === "tool" && typeof rec.call === "string" && typeof rec.name === "string") {
       session.tools = [...(session.tools ?? []).filter((x) => x.id !== rec.call), { id: rec.call, name: rec.name, result: rec.result, ...(rec.isError ? { isError: true } : {}), ...(rec.stopped ? { stopped: true } : {}) }];
+    } else if (rec.t === "usage" && rec.u && typeof rec.u === "object") {
+      session.usage = rec.u as UsageTotals; // latest record wins
     } else if (rec.t === "pending" && rec.p && typeof rec.p === "object") {
       const p = rec.p as SessionPending; // latest record wins
       if (Array.isArray(p.steer) && Array.isArray(p.queue)) {
@@ -1328,15 +1337,16 @@ function toDollars(microUSD: number): number {
  * `cost.context_over_200k`, the over-200k tier prices apply; otherwise base
  * `pricing.*` (falling back to legacy `cost.*`) applies.
  */
+// Cache prices stay undefined when the catalog has none: priceUsage then bills those tokens at the input rate (never free).
 function resolveEffectivePricing(
   spec: ModelSpec | undefined,
   inputTokens: number
-): { input: number; output: number; cacheRead: number; cacheWrite: number; audio: number; tier: string } {
+): { input: number; output: number; cacheRead: number | undefined; cacheWrite: number | undefined; audio: number; tier: string } {
   const base = {
     input: spec?.pricing?.inputPerMillion ?? (spec?.cost?.input as number | undefined) ?? 0,
     output: spec?.pricing?.outputPerMillion ?? (spec?.cost?.output as number | undefined) ?? 0,
-    cacheRead: spec?.pricing?.cacheReadPerMillion ?? (spec?.cost?.cache_read as number | undefined) ?? 0,
-    cacheWrite: spec?.pricing?.cacheWritePerMillion ?? (spec?.cost?.cache_write as number | undefined) ?? 0,
+    cacheRead: spec?.pricing?.cacheReadPerMillion ?? (spec?.cost?.cache_read as number | undefined),
+    cacheWrite: spec?.pricing?.cacheWritePerMillion ?? (spec?.cost?.cache_write as number | undefined),
     audio:
       spec?.pricing?.inputAudioPerMillion ?? (spec?.cost as { input_audio?: number } | undefined)?.input_audio ?? 0,
   };
@@ -1388,8 +1398,9 @@ function resolveEffectivePricing(
  * - Audio tokens (`usage.audioTokens` / `usage.inputAudioTokens` when present)
  *   price at `pricing.inputAudioPerMillion` / `cost.input_audio` and fold into
  *   the total (separately itemized in `breakdown.audioMicroUSD`).
- * - `opts.serviceTier` (`flex` ~0.5x, `priority` ~1.5x, estimates) scales the
+ * - `opts.serviceTier` (`flex` 0.5x, `priority` 2x, estimates) scales the
  *   catalog total; provider-reported costs are never rescaled.
+ * - Cache reads and writes are subsets of the input tokens; a missing cache price bills at the input rate.
  */
 export function priceUsage(
   usage: TokenUsage,
@@ -1438,12 +1449,15 @@ export function priceUsage(
     return undefined;
   }
   const { multiplier, tier: serviceTier } = serviceTierMultiplier(opts?.serviceTier, opts?.modelId ?? spec?.id);
-  const nonCachedInput = Math.max(0, inputTokens - cachedTokens);
+  // Cache reads and writes are both a SUBSET of the input tokens (OpenRouter `prompt_tokens` includes them), so the
+  // plain input rate applies only to what is neither read from nor written to the cache.
+  const freshInput = Math.max(0, inputTokens - cachedTokens - cacheWriteTokens);
   // Integer micro-USD accumulation: microUSD = tokens * pricePerMillion
   // ($P per 1M tokens == $P/1e6 per token == P micro-USD per token).
-  const inputMicroUSD = Math.round(nonCachedInput * pricing.input * multiplier);
-  const cacheReadMicroUSD = Math.round(cachedTokens * pricing.cacheRead * multiplier);
-  const cacheWriteMicroUSD = Math.round(cacheWriteTokens * pricing.cacheWrite * multiplier);
+  // A catalog entry without a cache price bills those tokens at the input rate: cache reads/writes are never free.
+  const inputMicroUSD = Math.round(freshInput * pricing.input * multiplier);
+  const cacheReadMicroUSD = Math.round(cachedTokens * (pricing.cacheRead ?? pricing.input) * multiplier);
+  const cacheWriteMicroUSD = Math.round(cacheWriteTokens * (pricing.cacheWrite ?? pricing.input) * multiplier);
   const outputMicroUSD = Math.round(outputTokens * pricing.output * multiplier);
   const audioMicroUSD = Math.round(audioCount * pricing.audio * multiplier);
   const totalMicroUSD = inputMicroUSD + cacheReadMicroUSD + cacheWriteMicroUSD + outputMicroUSD + audioMicroUSD;

@@ -83,7 +83,6 @@ const agent = new Agent({
     enabled: true,
     model: saved?.subagentModel ?? process.env.SUB_AGENT_MODEL,
     maxSpawn: 4,
-    workerTimeoutMs: 60000,
   },
   thinking: THINKING_LEVEL,
   cache: saved?.cache ?? "implicit",

@@ -63,7 +63,6 @@ try {
       enabled: true,
       model: process.env.SUB_AGENT_MODEL || "google/gemini-3.5-flash-lite",
       maxSpawn: 4,
-      workerTimeoutMs: 0,
     },
     thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
     cache: "implicit",
