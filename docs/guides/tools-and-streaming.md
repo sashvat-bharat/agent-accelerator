@@ -47,7 +47,7 @@ How a call is executed, in order:
 - ✅ Write descriptions like instructions to a colleague; `.describe()` every field.
 - ✅ Mark read-only tools `idempotent`; leave side-effecting tools at one attempt and make them idempotent with an id.
 - ✅ Always pass `ctx.signal` to `fetch`/DB calls. ❌ Don't return huge payloads; return what the model needs.
-- 💡 Built-in tools: `spawn_subagents`, `scheduled_actions`, `get_datetime`.
+- 💡 Built-in tools: `subagents`, `scheduled_actions`, `get_datetime`.
 
 ## Streaming
 
@@ -128,8 +128,8 @@ const pay = tool({
 To guard a built-in tool, replace it on the agent after construction:
 
 ```ts
-const inner = agent.tools["spawn_subagents"]!;
-agent.tools["spawn_subagents"] = {
+const inner = agent.tools["subagents"]!;
+agent.tools["subagents"] = {
   ...inner,
   execute: async (input, ctx) => ((await getPermission("Spawn workers?")) ? inner.execute(input, ctx) : ctx.stop("not approved")),
 };

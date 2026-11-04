@@ -61,7 +61,6 @@ export { assertPathAllowed, enforceFileAccess, fetchRemoteBytes, isPrivateAddres
 export {
   buildAgentTools,
   agentToTool,
-  createSubagentSpawnTool,
   createChildSessionId,
   createFixedChildSessionId,
   isSessionDescendant,
@@ -85,7 +84,7 @@ export {
   MAX_SUBAGENT_STEPS_PER_TRACE,
   SUBAGENT_SUBSCRIBE_TTL_MS,
 } from "./agent/delegation.ts";
-export type { DynamicSubagentTask, AgentAsToolTarget, SubAgentTrace, StreamingLoopHandle } from "./agent/delegation.ts";
+export type { AgentAsToolTarget, SubAgentTrace, StreamingLoopHandle } from "./agent/delegation.ts";
 export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOptions } from "./agent/workers.ts";
 
 // Scheduled actions: dynamic sub-agents that run later and save their answer to a file

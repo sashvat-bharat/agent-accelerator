@@ -146,7 +146,7 @@ async function main(): Promise<void> {
     home: HOME,
     telemetry: { persist: true }, // opt in: every event is also appended to <home>/telemetry/<date>.ndjson
     dynamicSubagents: {
-      enabled: false, // we only want scheduling, not on-the-spot spawn_subagents
+      enabled: false, // we only want scheduling, no on-the-spot subagents tool
       model: WORKER_MODEL, // the fixed worker model: the Main Agent can never choose it
       tools: { recent_news }, // the pool scheduled workers can be granted from
       allowScheduledActions: true, // default false

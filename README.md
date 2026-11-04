@@ -121,7 +121,7 @@ An `Agent` holds:
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Falls back to `SUB_AGENT_MODEL`. |
-| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned stateless workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }`. See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
+| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned workers: `{ enabled, model?, maxSpawn?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }` (`timeout` is for scheduled actions only). See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
@@ -269,35 +269,22 @@ const agent = new Agent({
   instructions: "You are the Main Agent",
   dynamicSubagents: {
     enabled: true,
-    maxSpawn: 4,
+    maxSpawn: 4, // open workers at once
     thinkingLevel: "low",
-    tools: { get_weather, recent_news },
-    timeout: 60000,
+    tools: { get_weather, recent_news }, // pool: the model grants a subset per worker
   },
 });
 ```
 
-A `spawn_subagents` tool is injected with the following task shape:
+One `subagents` tool is injected. It takes `{ command, id?, name?, role?, instructions?, task?, tools?, history? }` and its manual is the tool description (`src/agent/subagents.md`, with the worker pool and the open-worker limit filled in; the system prompt stays untouched):
 
-```ts
-{
-  tasks: {
-    name,
-    role?,
-    instructions,
-    task,
-    tools?: string[],
-    timeoutMs?: number
-  }[]
-}
-```
-
-- `maxSpawn` — max workers per call. Extras are trimmed safely, and the limit is stated in the tool description plus the Main Agent's system prompt so the model knows it.
-- `tools` — developer-owned pool. Workers get zero tools unless the Main Agent grants a per-task `tools` subset by name (unknown names are ignored), keeping worker context small.
-- `timeout` (ms) — `0` = no limit, `-1` = the Main Agent sets a per-task `timeoutMs`, `>0` = fixed limit for every worker. Timed-out workers report an error entry; the rest of the batch still completes.
-- Workers are stateless: one task in, one result out, then shut down. No history, no recursion. The Main Agent cannot choose worker models or reasoning levels.
-- Worker names use UPPER-KEBAB (`HBM-PRICING-ANALYST`). Each worker gets a system-generated 32-char TrackingID, displayed as `NAME-{TrackingID}` (e.g. `HBM-PRICING-ANALYST-9f2c…`).
-- Workers stream internally: thinking/text deltas update the worker trace live (`agent.track(id)`, `subscribeToSubAgent`) and surface on the parent stream as `subagent_delta` events.
+- `spawn` starts a worker (`name`, `task`; optional `instructions`, `role`, `tools`, `history`) and waits for its first reply. `message` sends `task` to an open worker `id`, which remembers the whole conversation. `close` frees the slot. `list` shows the open workers and the numbered finished turns that `history: N` can copy into a new worker.
+- Results are plain text with one header line: `[worker researcher-1a2b3c4d] replied:` + the worker's text, or `[worker researcher-1a2b3c4d] failed: <reason>`. Several `spawn` calls in one model turn run in parallel. A bad request comes back as an `Error: ...` line the model can fix.
+- `maxSpawn` is the limit on **open** workers (the model must close one to open another). `budget.maxTotalSubagents` still counts spawns per run.
+- `tools` is the developer-owned pool. Workers get zero tools unless the Main Agent grants a subset by name; unknown names are rejected with the pool listed.
+- The Main Agent cannot choose worker models, reasoning levels or timeouts. The `subagents` tool has no timeouts (`workerTimeoutMs`/`timeout` apply only to scheduled actions).
+- Workers are real agents with their own session: see [Persistent workers](#persistent-workers-agentworkers) below (the same functions in code, saved on disk with `persist`, resumed after a restart). Each reply's usage is metered into the parent's usage and budget.
+- Each run of a worker gets a system-generated 32-char TrackingID, displayed as `NAME-{TrackingID}`. Thinking/text deltas update the worker trace live (`agent.track(id)`, `subscribeToSubAgent`) and surface on the parent stream as `subagent_delta` events.
 
 ```ts
 const res = await agent.run("Audit auth pipeline and write a threat model");
@@ -334,8 +321,6 @@ lead.workers.close(reply.id); // can no longer be messaged; its session stays on
 ### Delegation Helpers
 
 * `buildAgentTools(list)` — wraps multiple agents and deduplicates names. Used internally by `subagents`.
-* `createSubagentSpawnTool(parentAgent)` — builds the dynamic subagent spawner. Rarely needed directly.
-* `DynamicSubagentTask` — `{ name, role?, instructions, task, tools?, timeoutMs? }`, the shape produced for dynamic delegation. No `model` — workers run on the developer-configured model.
 
 ---
 ## Scheduled actions
@@ -452,11 +437,11 @@ const pay = tool({
 
 `ctx.stop` throws, so the code after it never runs (even if you forget `return`). The reason is saved as that call's result, calls that were running in parallel in the same batch still run to completion (none is skipped or aborted), and then the run ends with `finishReason: "stopped"` and **no further model turn**. The agent waits for the next user message; the model then sees the reason as the tool's result. A steer typed while the batch ran becomes the next run. The stop is saved with the call, so a crash cannot turn a "no" into a "yes": after a restart the run is closed as stopped without calling the model. A tool's `timeoutMs` counts the time spent waiting for your check, so leave it off for tools that ask a person.
 
-To guard a built-in tool such as `spawn_subagents` or `scheduled_actions`, wrap it on the agent after construction:
+To guard a built-in tool such as `subagents` or `scheduled_actions`, wrap it on the agent after construction:
 
 ```ts
-const inner = agent.tools["spawn_subagents"]!;
-agent.tools["spawn_subagents"] = {
+const inner = agent.tools["subagents"]!;
+agent.tools["subagents"] = {
   ...inner,
   execute: async (input, ctx) => ((await getPermission("Spawn workers?")) ? inner.execute(input, ctx) : ctx.stop("spawning was not approved")),
 };
@@ -1314,7 +1299,7 @@ bun run examples/04-sub-agents.ts
 # fixed researcher + critic pipeline
 
 bun run examples/03-multi_agent.ts
-# dynamic spawn_subagents demo
+# dynamic subagents tool demo
 
 bun run examples/01-metadata.ts
 # usage + raw inspection

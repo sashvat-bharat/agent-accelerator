@@ -173,13 +173,13 @@ describe("ctx.stop", () => {
   });
 
   it("can guard a built-in tool by wrapping it on the agent", async () => {
-    const { agent, bodies } = mk({}, [() => callsWith({ tasks: [{ task: "look it up" }] }, "spawn_subagents"), () => text("never")], {
+    const { agent, bodies } = mk({}, [() => callsWith({ command: "spawn", name: "w", task: "look it up" }, "subagents"), () => text("never")], {
       subagentModel: "groq/worker-model",
       dynamicSubagents: { enabled: true },
     });
-    const original = agent.tools["spawn_subagents"]!;
+    const original = agent.tools["subagents"]!;
     let workersStarted = 0;
-    agent.tools["spawn_subagents"] = {
+    agent.tools["subagents"] = {
       ...original,
       execute: async (input: any, ctx: any) => {
         ctx.stop("spawning needs approval");

@@ -278,7 +278,7 @@ export interface MidSessionConfig {
 
 /** Developer-configured policy for LLM-spawned dynamic sub-agents. */
 export interface DynamicSubagentsConfig {
-  /** Enables the automatic `spawn_subagents` tool. Defaults to true when the object is present. */
+  /** Adds the `subagents` tool (spawn, message, close, list persistent workers). Defaults to true when the object is present; `agent.workers` works either way. */
   enabled?: boolean;
   /**
    * Lets the Main Agent schedule dynamic sub-agents to run later (once or on
@@ -288,22 +288,22 @@ export interface DynamicSubagentsConfig {
   allowScheduledActions?: boolean;
   /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then `SUB_AGENT_MODEL` env, then the parent model. */
   model?: string | ModelSpec | ModelProviderInstance;
-  /** Max workers the Main Agent may spawn in a single `spawn_subagents` call. Extras are trimmed safely. Defaults to 4. */
+  /** Max workers that may be open at once on this agent (the model must close one before spawning another). Defaults to 4. */
   maxSpawn?: number;
   /** Fixed reasoning level for all dynamic workers. The Main Agent cannot override it. Falls back to the parent level when omitted. */
   thinkingLevel?: ThinkingLevel;
   /** Tool pool available to dynamic workers. Workers receive zero tools unless the Main Agent grants a per-task `tools` subset by name. */
   tools?: Record<string, ToolDefinition> | ToolDefinition[];
-  /** Per-worker timeout in ms. `0` (default) = no limit. `-1` = the Main Agent sets a per-task `timeoutMs`. `>0` = fixed timeout for every worker. */
+  /** Per-run timeout in ms of a SCHEDULED ACTION's worker (the `subagents` tool and `agent.workers` have no timeouts). `0` (default) = no limit. `-1` = the action sets its own `timeoutMs`. `>0` = fixed. */
   timeout?: number;
   /**
-   * Canonical per-worker timeout in ms (Q-52, preferred over `timeout`).
+   * Canonical timeout in ms for scheduled-action workers (Q-52, preferred over `timeout`).
    * Maps to `timeout`: `workerTimeoutMs ?? timeout ?? 0`. See
    * `normalizeWorkerTimeout` (re-exported from the root entry).
    */
   workerTimeoutMs?: number;
   /**
-   * When true, the Main Agent sets a per-task `timeoutMs` (maps to
+   * Scheduled actions only: when true, each action sets its own `timeoutMs` (maps to
    * `timeout: -1`). When both are set, an explicit `timeout`/`workerTimeoutMs`
    * wins over `modelMaySetTimeout`.
    */
@@ -389,7 +389,7 @@ export interface Budget {
   maxTotalTokens?: number;
   /** Maximum wall/monotonic duration in ms since budget tracking started. */
   maxDurationMs?: number;
-  /** Maximum total dynamic sub-agents spawned via `spawn_subagents`. */
+  /** Maximum total dynamic sub-agents spawned in one run (`subagents` tool or `agent.workers.spawn`). */
   maxTotalSubagents?: number;
 }
 

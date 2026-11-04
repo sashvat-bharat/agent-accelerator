@@ -42,11 +42,6 @@ export function sanitizeToolName(raw: string): string {
   return tag.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-{2,}/g, "-").slice(0, 64) || "sub-agent";
 }
 
-/** Stable worker ids: `{sanitizedName}-{32hex}` display id + raw tracking id. */
-export function makeWorkerIds(sanitizedName: string, trackingId: string): { trackingId: string; displayId: string } {
-  return { trackingId, displayId: `${sanitizedName}-${trackingId}` };
-}
-
 // ---------------------------------------------------------------------------
 // Shared Agent / SubAgent config normalization (behavior-preserving)
 // ---------------------------------------------------------------------------
@@ -203,11 +198,6 @@ export function grantWorkerTools(
   return grantedTools;
 }
 
-/** Resolves a provider id for credential reuse / error metadata (shared). */
-export function providerOfWorkerModel(modelStr: string | unknown | undefined): string | undefined {
-  return providerOf(modelStr);
-}
-
 function providerOf(modelStr: string | unknown | undefined): string | undefined {
   if (!modelStr) return undefined;
   try {
@@ -247,7 +237,7 @@ export function resolveWorkerCredentials(
 }
 
 /**
- * Config of a dynamic worker (`spawn_subagents`, scheduled actions, the worker registry): the developer's fixed worker
+ * Config of a dynamic worker (scheduled actions, the worker registry): the developer's fixed worker
  * model, level and limits, never the LLM's choice. Credentials carry over only when the providers match, and
  * `inheritableConfig()` keeps the worker no less constrained than its parent. Stateless one-shot by default;
  * `persistent` makes a multi-turn worker that keeps its history (saved under `persistent.dir` when given, and
@@ -285,18 +275,6 @@ export function buildDynamicWorkerConfig(
   };
 }
 
-/** Builds one `<NAME>...text...</NAME>` block inside `<SUB-AGENTS-RESPONSE>`. */
-export function buildWorkerXmlBlock(name: string, text: string): string {
-  const escaped = escapeXml(text);
-  const indentedText = escaped.split("\n").map((line) => `        ${line}`).join("\n");
-  return `    <${name}>\n${indentedText}\n    </${name}>`;
-}
-
-/** Builds the `<SUB-AGENTS-RESPONSE>` envelope for dynamic workers. */
-export function buildSubagentsXml(results: Array<{ name: string; text: string }>): string {
-  return `<SUB-AGENTS-RESPONSE>\n${results.map((r) => buildWorkerXmlBlock(r.name, r.text)).join("\n")}\n</SUB-AGENTS-RESPONSE>`;
-}
-
 // ---------------------------------------------------------------------------
 // Shared live worker state machine (single home for fixed + dynamic workers)
 // ---------------------------------------------------------------------------
@@ -330,7 +308,7 @@ export interface LiveWorkerHooks {
 
 /**
  * Single live worker state machine shared by fixed (`agentToTool`) and
- * dynamic (`spawn_subagents`) workers. Owns `liveTurn` / `partialText` /
+ * registry workers. Owns `liveTurn` / `partialText` /
  * `partialThinking`, finalizes partial streaming entries on `onTurn`, and
  * forwards deltas to the parent stream. The trace object is mutated in place;
  * trimming / touching / notifying / persisting are delegated to hooks so this

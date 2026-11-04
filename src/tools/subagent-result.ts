@@ -2,7 +2,7 @@ import type { SubAgentExecutionMetadata } from "../types/response.ts";
 
 /**
  * Module-private brand proving a tool result was produced by the SDK's own
- * delegation tools (`agentToTool` / `spawn_subagents`). Symbols cannot be
+ * delegation tools (`agentToTool` / the `subagents` tool). Symbols cannot be
  * forged by JSON a tool fetched from the web, so only branded results get
  * their `_subagentMetadata` trusted (usage/cost rolled up, XML shown to the
  * model).

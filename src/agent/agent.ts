@@ -10,7 +10,8 @@ import { AgentResponse, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
-import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
+import { buildAgentTools } from "./delegation.ts";
+import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry } from "./workers.ts";
 import {
   normalizeToolMap,
@@ -440,8 +441,8 @@ export class Agent {
       );
     }
     if (dyn?.enabled === true) {
-      const spawnTool = createSubagentSpawnTool(this);
-      this.tools[spawnTool.name || "spawn_subagents"] = spawnTool;
+      const subagentsTool = createSubagentsTool(this);
+      this.tools[subagentsTool.name || "subagents"] = subagentsTool;
     }
     if (dyn?.allowScheduledActions) {
       // Fixed by config, so the tool set (and the prompt cache) stays stable.
@@ -585,26 +586,6 @@ export class Agent {
         "2. Never attempt to execute tools or output final user deliverables inside reasoning.\n" +
         "3. Once your reasoning is complete, output your final response or function calls directly in the standard response output.";
       out = out ? `${out}\n\n${guidance}` : guidance;
-    }
-    if (this.dynamicSubagents?.enabled === true && !out.includes("[Dynamic Sub-Agents]")) {
-      const dyn = this.dynamicSubagents;
-      const toolNames = Object.keys(dyn.tools);
-      const timeoutNote =
-        dyn.timeout === -1
-          ? "Timeout policy: set a per-sub-agent timeoutMs (ms) for each task; omit it for no limit."
-          : dyn.timeout === 0
-            ? "Timeout policy: workers run with no time limit."
-            : `Timeout policy: every worker is limited to ${dyn.timeout}ms; per-task timeouts are ignored.`;
-      const policy =
-        "[Dynamic Sub-Agents]\n" +
-        `1. You may spawn at most ${dyn.maxSpawn} sub-agent(s) per spawn_subagents call. Extra tasks beyond ${dyn.maxSpawn} are ignored.\n` +
-        "2. Workers are stateless: each receives one task, returns its result, then shuts down. No conversation history is kept.\n" +
-        "3. You cannot choose worker models or reasoning levels — they are fixed by the developer.\n" +
-        (toolNames.length > 0
-          ? `4. Worker-available tools: ${toolNames.join(", ")}. Grant each worker ONLY the tools its task needs via the per-task tools list; omit it for no tools.\n`
-          : "4. No worker tools are available; omit the per-task tools list.\n") +
-        `5. ${timeoutNote}`;
-      out = out ? `${out}\n\n${policy}` : policy;
     }
     return out || undefined;
   }

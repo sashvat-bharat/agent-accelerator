@@ -258,10 +258,16 @@ export class WorkerRegistry {
       ...(key ? { last: { key, text: hashSessionPart(task), marks: 0 } } : {}),
     };
     const entry: Entry = { meta, ...(root ? { dir: path.join(root, sessionId) } : {}), busy: false };
-    entry.agent = await this.build(entry);
-    if (messages.length > 0) entry.agent.context.messages = messages;
-    this.save(entry);
+    // Registered before the first await: parallel spawns of one model turn must see each other for the open-worker limit.
     this.entries.set(id, entry);
+    try {
+      entry.agent = await this.build(entry);
+      if (messages.length > 0) entry.agent.context.messages = messages;
+      this.save(entry);
+    } catch (err) {
+      this.entries.delete(id);
+      throw err;
+    }
     return entry;
   }
 

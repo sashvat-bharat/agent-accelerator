@@ -30,7 +30,7 @@ Each call runs on its own isolated copy (`fork`), so parallel calls to one worke
 
 ## Dynamic sub-agents
 
-The main agent invents workers at runtime with the `spawn_subagents` tool. **You** fix the worker model, reasoning level, tool pool and limits; the model never picks them.
+The main agent starts workers at runtime with the one `subagents` tool (`spawn`, `message`, `close`, `list`). **You** fix the worker model, reasoning level, tool pool and limits; the model never picks them.
 
 ```ts
 import { Agent, tool } from "agent-accelerator";
@@ -43,10 +43,9 @@ const lead = new Agent({
   budget: { maxTotalSubagents: 8, maxCostUsd: 0.5 }, // per run, includes workers
   dynamicSubagents: {
     model: process.env.SUB_AGENT_MODEL ?? "google/gemini-3.5-flash-lite",
-    maxSpawn: 3, // workers per call (default 4); extras are trimmed
+    maxSpawn: 3, // open workers at once (default 4)
     thinkingLevel: "low",
-    tools: { recent_news }, // pool: the model grants a subset by name per task
-    workerTimeoutMs: 60_000, // 0 = none, -1 = model sets timeoutMs per task, >0 = fixed
+    tools: { recent_news }, // pool: the model grants a subset by name per worker
   },
 });
 
@@ -54,12 +53,15 @@ const res = await lead.run("Compare three database engines using parallel resear
 for (const id of lead.listTrackedSubAgents()) console.log(id, lead.track(id)?.status);
 ```
 
-Workers are **stateless** (one task in, one result out), reuse the parent's key only when providers match, and inherit limits, retry, env, fetch, `googleTier`, `fileAccess` and `captureRaw`. Missing worker model throws `SubAgentModelError` (set `dynamicSubagents.model` or `SUB_AGENT_MODEL`). Results arrive wrapped in `<SUB-AGENTS-RESPONSE>` XML and are metered into the parent's usage and budget. Sub-agent results are Symbol-branded, so a tool cannot forge them.
+- **The tool.** `spawn` (`name`, `task`; optional `instructions`, `role`, `tools`, `history`), `message` (`id`, `task`), `close` (`id`), `list`. The manual is the tool description (`src/agent/subagents.md`) and the system prompt is not touched, so the prompt cache stays stable. Several `spawn` calls in one turn run in parallel.
+- **Results** are plain text with one header line: `[worker researcher-1a2b3c4d] replied:` then the worker's text, or `[worker ...] failed: <reason>` (the worker stays open). A bad request returns an `Error: ...` line. Usage and cost are metered into the parent's usage and budget, and never shown to the model. Results are Symbol-branded, so a tool cannot forge them.
+- **Workers keep their conversation** and have their own instructions and session; `history: N` starts one from a copy of the first N finished turns of the main conversation (`list` shows them; the running turn is never copied, so restate the request in `task`). With `persist: { dir }` they survive a restart. Details below under *Persistent workers*.
+- **Limits.** `maxSpawn` is the number of **open** workers (close one to open another); `budget.maxTotalSubagents` counts spawns per run. Workers reuse the parent's key only when providers match, and inherit limits, retry, env, fetch, `googleTier`, `fileAccess` and `captureRaw`. There are no worker timeouts (`workerTimeoutMs` is for scheduled actions). A missing worker model throws `SubAgentModelError` (set `dynamicSubagents.model` or `SUB_AGENT_MODEL`).
 
-Tracking: `agent.track(id)` (live snapshot with `status` and `steps`), `agent.listTrackedSubAgents()`, `agent.subscribeToSubAgent(id, fn)`; stream events `subagent_delta` and `subagent_complete`. Display ids look like `NAME-{32hex}`; traces are kept up to 500 / 1 h / 100 steps and are visible only to the agent that spawned them.
+Tracking: `agent.track(id)` (live snapshot with `status` and `steps`), `agent.listTrackedSubAgents()`, `agent.subscribeToSubAgent(id, fn)`; stream events `subagent_delta` and `subagent_complete`. Display ids look like `NAME-{32hex}` (one per run); traces are kept up to 500 / 1 h / 100 steps and are visible only to the agent that started them.
 
 **Recommendations**
-- ✅ Give each worker a distinct `description`; keep tool pools small (workers only receive what is granted).
+- ✅ Give each worker a distinct `name`; keep tool pools small (workers only receive what is granted).
 - ✅ Use a cheaper `dynamicSubagents.model` and `thinkingLevel: "low"`; cap with `maxSpawn` and `budget`.
 - ❌ Don't delegate trivial single-step tasks; each worker is a full model run.
 
@@ -145,7 +147,7 @@ How it works:
 
 ## For AI agents
 
-- Fixed: `new Agent({ subagents: [a, b] })`. Dynamic: `dynamicSubagents: { model, tools, maxSpawn }`. Scheduling: `dynamicSubagents.allowScheduledActions: true` + a worker model, else `SubAgentModelError`.
+- Fixed: `new Agent({ subagents: [a, b] })`. Dynamic: `dynamicSubagents: { model, tools, maxSpawn }` (the model gets the `subagents` tool). Scheduling: `dynamicSubagents.allowScheduledActions: true` + a worker model, else `SubAgentModelError`.
 - `createScheduledAction(agent, input)` throws one `ValidationError` listing every problem; `scheduled_action.id` must be lowercase kebab-case (≤48 chars); `timeToDeliver` HH is 01–12.
 - Never expose model/level choice to the LLM for workers; they are developer settings.
 - Workers that keep a conversation: `agent.workers.spawn / message / close / list` (pass `callId` for exactly-once after a crash); they need a worker model, and `persist: { dir }` on the parent to survive a restart.

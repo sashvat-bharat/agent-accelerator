@@ -25,7 +25,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
                   {
                     id: "call_1",
                     type: "function",
-                    function: { name: "spawn_subagents", arguments: '{"tasks":[]}' },
+                    function: { name: "lookup_docs", arguments: '{"tasks":[]}' },
                     extra_content: { google: { thought_signature: SIG } },
                   },
                 ],
@@ -75,7 +75,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
               {
                 type: "tool_call",
                 id: "call_1",
-                name: "spawn_subagents",
+                name: "lookup_docs",
                 arguments: { tasks: [] },
                 thoughtSignature: SIG,
               } as any,
@@ -83,7 +83,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
           },
           {
             role: "tool",
-            content: [{ type: "tool_result", id: "call_1", name: "spawn_subagents", result: "ok" } as any],
+            content: [{ type: "tool_result", id: "call_1", name: "lookup_docs", result: "ok" } as any],
           },
         ],
       },
@@ -99,7 +99,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
   test("stream() captures signature from delta.tool_calls", async () => {
     const provider = new OpenAICompatibleChatProvider("compat", { baseUrl: "https://compat.example/v1" });
     const chunks = [
-      `data: {"id":"c1","choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"spawn_subagents","arguments":"{\\"tasks\\":[]}"},"extra_content":{"google":{"thought_signature":"${SIG}"}}}]}}]}\n\n`,
+      `data: {"id":"c1","choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup_docs","arguments":"{\\"tasks\\":[]}"},"extra_content":{"google":{"thought_signature":"${SIG}"}}}]}}]}\n\n`,
       `data: {"id":"c1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n`,
       "data: [DONE]\n\n",
     ];

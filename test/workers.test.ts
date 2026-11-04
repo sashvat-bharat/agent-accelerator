@@ -232,3 +232,90 @@ describe("worker registry: exactly once across a crash", () => {
     expect((await parent.workers.message(id, "go")).text).toBe("r4");
   });
 });
+
+const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+const toolCalls = (calls: Array<{ id: string; args: Record<string, unknown> }>) =>
+  json({
+    id: "r",
+    choices: [
+      {
+        finish_reason: "tool_calls",
+        message: { role: "assistant", content: null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: "subagents", arguments: JSON.stringify(c.args) } })) },
+      },
+    ],
+    usage,
+  });
+const toolMessages = (body: any): string[] => body.messages.filter((m: any) => m.role === "tool").map((m: any) => m.content);
+const ctx = { toolCallId: "call_x", log: () => {}, stop: () => { throw new Error("stop"); } } as any;
+
+describe("the subagents tool", () => {
+  it("lets the model spawn a worker: plain header + text back, usage rolled into the run", async () => {
+    const seen: any[] = [];
+    const parent = mk(tmp(), (body) => {
+      seen.push(body);
+      if (body.model === "w") return reply("worker says hi", body);
+      return body.messages.some((m: any) => m.role === "tool") ? reply("all done", body) : toolCalls([{ id: "call_1", args: { command: "spawn", name: "researcher", instructions: "Be brief.", task: "say hi" } }]);
+    });
+    const res = await parent.run("delegate");
+    expect(res.text).toBe("all done");
+    const parentSecond = seen.filter((b) => b.model === "p")[1];
+    const [result] = toolMessages(parentSecond);
+    expect(result).toMatch(/^\[worker researcher-[0-9a-f]{8}\] replied:\nworker says hi$/);
+    expect(res.subagents).toHaveLength(1);
+    expect(res.subagents[0]!.text).toContain("worker says hi");
+    expect(res.usage.totalTokens).toBe(12); // parent turn + worker turn + parent turn
+    expect(parent.workers.list()).toHaveLength(1);
+  });
+
+  it("answers list, message and close, and turns a bad request into an error line for the model", async () => {
+    const parent = mk(tmp(), (body) => reply(body.model === "p" ? "parent answer" : `w:${lastUser(body)}`, body));
+    const run = (args: Record<string, unknown>) => parent.tools["subagents"]!.execute(args, ctx) as Promise<unknown>;
+
+    expect(await run({ command: "list" })).toBe("Open workers:\nnone\n\nFinished turns of this conversation (history: N copies turns 1 to N):\nnone yet");
+    expect(await run({ command: "spawn", task: "x" })).toContain('Error: spawn needs "name"');
+    expect(await run({ command: "message", id: "ghost-1", task: "x" })).toContain('Error: No worker with id "ghost-1"');
+
+    await parent.run("first question");
+    const spawned = String(await run({ command: "spawn", name: "r", task: "hello", tools: ["lookup"], history: 1 }));
+    const id = /^\[worker (\S+)\] replied:/.exec(spawned)![1]!;
+    expect(spawned).toContain("replied:\nw:hello");
+    expect(String(await run({ command: "message", id, task: "again" }))).toBe(`[worker ${id}] replied:\nw:again`);
+    expect(String(await run({ command: "spawn", name: "bad", task: "x", history: 9 }))).toContain("from 1 to 1");
+
+    const listing = String(await run({ command: "list" }));
+    expect(listing).toContain(`- ${id} (r) tools: lookup`);
+    expect(listing).toContain("1. first question");
+    expect(await run({ command: "close", id })).toBe(`Worker ${id} closed.`);
+    expect(String(await run({ command: "message", id, task: "x" }))).toContain("is closed");
+  });
+
+  it("says a failed worker failed, and keeps it open", async () => {
+    const parent = mk(undefined, () => new Response('{"error":{"message":"overloaded"}}', { status: 401 }));
+    const text = String(await parent.tools["subagents"]!.execute({ command: "spawn", name: "r", task: "x" }, ctx));
+    expect(text).toMatch(/^\[worker r-[0-9a-f]{8}\] failed: .*overloaded/);
+    expect(parent.workers.list()).toHaveLength(1);
+  });
+
+  it("enforces the open-worker limit even when the model spawns several workers in one turn", async () => {
+    const seen: any[] = [];
+    const parent = mk(
+      undefined,
+      (body) => {
+        seen.push(body);
+        if (body.model === "w") return reply("ok", body);
+        return body.messages.some((m: any) => m.role === "tool")
+          ? reply("done", body)
+          : toolCalls([
+              { id: "call_a", args: { command: "spawn", name: "a", task: "x" } },
+              { id: "call_b", args: { command: "spawn", name: "b", task: "x" } },
+            ]);
+      },
+      { dynamicSubagents: { model: "groq/w", maxSpawn: 1 } }
+    );
+    await parent.run("two helpers please");
+    const results = toolMessages(seen.filter((b) => b.model === "p")[1]);
+    expect(results.filter((r) => r.startsWith("[worker ") && r.includes("replied:"))).toHaveLength(1);
+    expect(results.filter((r) => r.startsWith("Error: Too many open workers (1"))).toHaveLength(1);
+    expect(parent.workers.list()).toHaveLength(1);
+  });
+});

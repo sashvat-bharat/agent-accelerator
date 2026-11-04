@@ -95,7 +95,6 @@ When answering research questions:
     thinkingLevel: "medium",
     // Workers get zero tools unless granted here — research workers need search.
     tools: { web_search },
-    workerTimeoutMs: 0,
   },
 });
 
