@@ -63,6 +63,32 @@ Tracking: `agent.track(id)` (live snapshot with `status` and `steps`), `agent.li
 - ✅ Use a cheaper `dynamicSubagents.model` and `thinkingLevel: "low"`; cap with `maxSpawn` and `budget`.
 - ❌ Don't delegate trivial single-step tasks; each worker is a full model run.
 
+## Persistent workers (`agent.workers`)
+
+Besides one-shot delegation, an agent can run **workers that keep their conversation**: start one, message it again and again, close it. A worker is a plain `Agent` with its own instructions and tools, on the developer's worker model (`dynamicSubagents.model` or `SUB_AGENT_MODEL`). With `persist: { dir }` on the parent it is saved under `<parent session folder>/workers/<id>/` (own journal, tool logs and `worker.json`), so it is rebuilt with its history after a restart.
+
+```ts
+const reply = await lead.workers.spawn({
+  name: "Researcher",
+  instructions: "You research databases and cite sources.", // the worker's OWN prompt; the parent's is never copied
+  task: "Compare SQLite and Postgres for a small SaaS.",
+  tools: ["recent_news"], // subset of dynamicSubagents.tools; unknown names throw
+  history: 1, // optional: start from a copy of the parent's first 1 finished turns (see lead.workers.turns()); default "none"
+});
+console.log(reply.id, reply.text); // e.g. "researcher-1a2b3c4d"
+
+const next = await lead.workers.message(reply.id, "Now focus on write-heavy loads."); // same worker, same conversation
+lead.workers.list(); // open workers: { id, name, role?, tools, busy }
+lead.workers.close(reply.id); // can no longer be messaged; its session stays on disk
+```
+
+- A turn is one **finished** run (`done` or ended by `ctx.stop`); the running turn and failed or aborted runs are never copied, so a worker never gets a prompt without its answer.
+- `spawn` and `message` wait for the reply and never throw for a failing worker: the `WorkerReply` then carries `error` and a text that says so. They throw `ValidationError` for a bad request (unknown tool or id, closed or busy worker, too many open workers: `dynamicSubagents.maxSpawn` is the open-worker limit, `budget.maxTotalSubagents` still counts spawns per run).
+- A worker handles one call at a time. Pass `{ signal }` to abort its run; the worker stays open.
+- Exactly once across a crash: pass `{ callId }` (the calling tool call's id). A replayed `spawn` finds the worker it already started, a cut-off run is continued with `resume()` instead of sending the text twice, and a call that had already been answered returns that saved answer.
+- Without `persist` the workers live in memory only. A damaged `worker.json` is skipped with a `worker.invalid` event.
+- The reply's `metadata` (usage, steps, lineage) has the same shape as `AgentResponse.subagents`; `agent.track(metadata.trackingId)` shows the run live.
+
 ## Scheduled actions
 
 A scheduled action is a dynamic sub-agent that runs **later** (once or on repeat) and saves its answer to a file instead of replying in chat. It is off by default.
@@ -122,5 +148,6 @@ How it works:
 - Fixed: `new Agent({ subagents: [a, b] })`. Dynamic: `dynamicSubagents: { model, tools, maxSpawn }`. Scheduling: `dynamicSubagents.allowScheduledActions: true` + a worker model, else `SubAgentModelError`.
 - `createScheduledAction(agent, input)` throws one `ValidationError` listing every problem; `scheduled_action.id` must be lowercase kebab-case (≤48 chars); `timeToDeliver` HH is 01–12.
 - Never expose model/level choice to the LLM for workers; they are developer settings.
+- Workers that keep a conversation: `agent.workers.spawn / message / close / list` (pass `callId` for exactly-once after a crash); they need a worker model, and `persist: { dir }` on the parent to survive a restart.
 - Track workers with `track`/`listTrackedSubAgents`/`subscribeToSubAgent`; do not poll files.
 - See also: [Safety and operations](safety-and-ops.md), [`examples/03-multi_agent.ts`](../../examples/03-multi_agent.ts), [`examples/04-sub-agents.ts`](../../examples/04-sub-agents.ts), [`examples/14-scheduled-actions.ts`](../../examples/14-scheduled-actions.ts).

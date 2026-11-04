@@ -305,6 +305,32 @@ const res = await agent.run("Audit auth pipeline and write a threat model");
 console.log(res.subagents.map((s) => s.name));
 ```
 
+### Persistent workers (`agent.workers`)
+
+Besides one-shot delegation, an agent can run **workers that keep their conversation**: start one, message it again and again, close it. A worker is a plain `Agent` with its own instructions and tools, on the developer's worker model (`dynamicSubagents.model` or `SUB_AGENT_MODEL`). With `persist: { dir }` on the parent it is saved under `<parent session folder>/workers/<id>/` (own journal, tool logs and `worker.json`), so it is rebuilt with its history after a restart.
+
+```ts
+const reply = await lead.workers.spawn({
+  name: "Researcher",
+  instructions: "You research databases and cite sources.", // the worker's OWN prompt; the parent's is never copied
+  task: "Compare SQLite and Postgres for a small SaaS.",
+  tools: ["recent_news"], // subset of dynamicSubagents.tools; unknown names throw
+  history: 1, // optional: start from a copy of the parent's first 1 finished turns (see lead.workers.turns()); default "none"
+});
+console.log(reply.id, reply.text); // e.g. "researcher-1a2b3c4d"
+
+const next = await lead.workers.message(reply.id, "Now focus on write-heavy loads."); // same worker, same conversation
+lead.workers.list(); // open workers: { id, name, role?, tools, busy }
+lead.workers.close(reply.id); // can no longer be messaged; its session stays on disk
+```
+
+- A turn is one **finished** run (`done` or ended by `ctx.stop`); the running turn and failed or aborted runs are never copied, so a worker never gets a prompt without its answer.
+- `spawn` and `message` wait for the reply and never throw for a failing worker: the `WorkerReply` then carries `error` and a text that says so. They throw `ValidationError` for a bad request (unknown tool or id, closed or busy worker, too many open workers: `dynamicSubagents.maxSpawn` is the open-worker limit, `budget.maxTotalSubagents` still counts spawns per run).
+- A worker handles one call at a time. Pass `{ signal }` to abort its run; the worker stays open.
+- Exactly once across a crash: pass `{ callId }` (the calling tool call's id). A replayed `spawn` finds the worker it already started, a cut-off run is continued with `resume()` instead of sending the text twice, and a call that had already been answered returns that saved answer.
+- Without `persist` the workers live in memory only. A damaged `worker.json` is skipped with a `worker.invalid` event.
+- The reply's `metadata` (usage, steps, lineage) has the same shape as `AgentResponse.subagents`; `agent.track(metadata.trackingId)` shows the run live.
+
 ### Delegation Helpers
 
 * `buildAgentTools(list)` — wraps multiple agents and deduplicates names. Used internally by `subagents`.

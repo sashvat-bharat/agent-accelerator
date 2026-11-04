@@ -2,7 +2,10 @@ import { z } from "zod";
 import { tool } from "../tools/tool.ts";
 import { escapeXml } from "../utils/serialization.ts";
 import type { ToolDefinition } from "../types/tool.ts";
-import type { SubAgentExecutionMetadata, SubAgentStep } from "../types/response.ts";
+import type { AgentResponse, SubAgentExecutionMetadata, SubAgentStep } from "../types/response.ts";
+import type { TokenUsage } from "../types/core.ts";
+import type { ToolCallRecord } from "../types/tool.ts";
+import type { ProviderRawData } from "../types/model.ts";
 import type { Agent } from "./agent.ts";
 import type { Budget, BudgetState } from "../types/agent.ts";
 import { BudgetExceededError } from "../types/errors.ts";
@@ -364,6 +367,182 @@ export function appendSubAgentStep(trackingId: string, step: SubAgentStep): void
   t.turns = Math.max(t.turns, step.turn);
   touchTrace(t.trackingId);
   notifyTrace(trackingId);
+}
+
+// ---------------------------------------------------------------------------
+// One worker run: live trace + execution metadata (shared by fixed workers and the worker registry)
+// ---------------------------------------------------------------------------
+
+/** What a worker run reports when it finished; an `AgentResponse` fits, so does a reply saved before a crash (only `text` is required). */
+export interface WorkerRunResult {
+  text: string;
+  model?: string;
+  provider?: string;
+  turns?: number;
+  usage?: TokenUsage;
+  finishReason?: string;
+  responseId?: string;
+  thinking?: string;
+  toolCalls?: ToolCallRecord[];
+  raw?: ProviderRawData;
+}
+
+/** Live handle of one worker run: its trace plus the hooks that feed it and the closers that finalize it. */
+export interface WorkerTraceHandle {
+  trackingId: string;
+  /** `NAME-{trackingId}`, the id shown in metadata and accepted by `agent.track`. */
+  displayId: string;
+  onWorkerTurn: ReturnType<typeof createLiveWorker>["onWorkerTurn"];
+  attachToStream: ReturnType<typeof createLiveWorker>["attachToStream"];
+  /** Marks the run done and copies its result into the trace. */
+  finish(result: WorkerRunResult): void;
+  /** Marks the run failed. */
+  fail(message: string): void;
+  /** Copy of the steps logged so far. */
+  steps(): SubAgentStep[] | undefined;
+}
+
+// Registers one worker run's live trace (visible to `agent.track`) and wires the shared live-worker state machine; in: a fixed-worker call or a registry spawn/message, out: the hooks that feed the trace and the closers that finalize it.
+export function openWorkerTrace(a: {
+  name: string;
+  sessionId: string;
+  parentSessionId: string;
+  task: string;
+  role?: string;
+  /** When given, the trace is also kept in this agent's own registry and saved with its session. */
+  parent?: Agent;
+  emit?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
+}): WorkerTraceHandle {
+  const trackingId = createTrackingId();
+  const displayId = `${a.name}-${trackingId}`;
+  const trace: SubAgentTrace = {
+    trackingId,
+    name: a.name,
+    sessionId: a.sessionId,
+    parentSessionId: a.parentSessionId,
+    status: "running",
+    task: a.task,
+    role: a.role,
+    turns: 0,
+    steps: [],
+  };
+  insertTrace(trace, displayId);
+  if (a.parent) {
+    try {
+      const registry = ((a.parent as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
+      registry[trackingId] = trace;
+    } catch {}
+  }
+  const live = createLiveWorker(trace, trackingId, displayId, {
+    trim: (t) => trimTraceSteps(t),
+    touch: (id) => touchTrace(id),
+    notify: (id) => notifyTrace(id),
+    ...(a.parent ? { persist: () => { try { a.parent!.persistNow(); } catch {} } } : {}),
+    emit: (ev) => {
+      try { a.emit?.(ev); } catch {}
+    },
+  });
+  const settle = (): void => {
+    const t = subagentTraces.get(trackingId);
+    if (!t) return;
+    trimTraceSteps(t);
+    touchTrace(t.trackingId);
+    notifyTrace(trackingId);
+  };
+  return {
+    trackingId,
+    displayId,
+    onWorkerTurn: live.onWorkerTurn,
+    attachToStream: live.attachToStream,
+    finish(result) {
+      const t = subagentTraces.get(trackingId);
+      if (t) {
+        t.status = "done";
+        t.model = result.model;
+        t.provider = result.provider;
+        t.turns = result.turns ?? t.turns;
+        t.text = result.text;
+        if (result.usage) {
+          t.usage = { inputTokens: result.usage.inputTokens ?? 0, outputTokens: result.usage.outputTokens ?? 0, totalTokens: result.usage.totalTokens ?? 0 };
+        }
+      }
+      settle();
+    },
+    fail(message) {
+      const t = subagentTraces.get(trackingId);
+      if (t) {
+        t.status = "error";
+        t.error = message;
+      }
+      settle();
+    },
+    steps() {
+      return subagentTraces.get(trackingId)?.steps.map((s) => ({ ...s }));
+    },
+  };
+}
+
+// Builds the metadata of one worker run, success or failure, so every delegation path reports the same fields and lineage ids; in: the run's result or error, out: the branded result envelope and `AgentResponse.subagents`.
+export function workerMetadata(a: {
+  name: string;
+  displayId: string;
+  sessionId?: string;
+  parentSessionId?: string;
+  role?: string;
+  task: string;
+  durationMs: number;
+  result?: WorkerRunResult;
+  error?: string;
+  /** Text reported for a failed run; default `Error in NAME: message`. */
+  errorText?: string;
+  steps?: SubAgentStep[];
+  runId: string;
+  turnId: string;
+}): SubAgentExecutionMetadata {
+  const r = a.result;
+  const base = {
+    name: a.name,
+    trackingId: a.displayId,
+    sessionId: a.sessionId,
+    parentSessionId: a.parentSessionId,
+    ...(a.role ? { role: a.role } : {}),
+    task: a.task,
+    durationMs: a.durationMs,
+    steps: a.steps,
+  };
+  const metadata: SubAgentExecutionMetadata = r
+    ? {
+        ...base,
+        model: r.model ?? "unknown",
+        provider: r.provider ?? "unknown",
+        usage: r.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        turns: r.turns ?? 0,
+        finishReason: r.finishReason,
+        responseId: r.responseId,
+        text: r.text,
+        thinking: r.thinking,
+        toolCalls: r.toolCalls,
+        raw: r.raw,
+        isError: false,
+      }
+    : {
+        ...base,
+        model: "unknown",
+        provider: "unknown",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        turns: 0,
+        text: a.errorText ?? `Error in ${a.name}: ${a.error}`,
+        isError: true,
+        error: a.error,
+      };
+  try {
+    const m = metadata as unknown as Record<string, unknown>;
+    m["runId"] = a.runId;
+    m["turnId"] = a.turnId;
+    const extra = (r as { meta?: unknown } | undefined)?.meta;
+    if (extra !== undefined) m["meta"] = extra;
+  } catch {}
+  return metadata;
 }
 
 // ---------------------------------------------------------------------------
@@ -934,41 +1113,27 @@ export function agentToTool(
     }),
     execute: async ({ task }, ctx) => {
       const startTime = nowMs();
-      const trackingId = createTrackingId();
-      const displayId = `${name}-${trackingId}`;
       // Q-42 lineage for fixed-delegation calls.
       const callRunId = newRunId();
       const callTurnId = newTurnId();
+      const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
+      const subSessionId = createFixedChildSessionId(parentSessionId, sanitizeToolName(name));
+      const live = openWorkerTrace({
+        name,
+        sessionId: subSessionId,
+        parentSessionId,
+        task,
+        emit: (ev) => ctx?.onSubagentEvent?.(ev),
+      });
+      const lineage = { name, displayId: live.displayId, sessionId: subSessionId, parentSessionId, task, runId: callRunId, turnId: callTurnId };
       try {
-        const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
-        const subSessionId = createFixedChildSessionId(parentSessionId, sanitizeToolName(name));
-        const trace: SubAgentTrace = {
-          trackingId,
-          name,
-          sessionId: subSessionId,
-          parentSessionId,
-          status: "running",
-          task,
-          turns: 0,
-          steps: [],
-        };
-        insertTrace(trace, displayId);
-        // Unified live worker state machine (shared with dynamic workers).
-        const { onWorkerTurn, attachToStream } = createLiveWorker(trace, trackingId, displayId, {
-          trim: (t) => trimTraceSteps(t),
-          touch: (id) => touchTrace(id),
-          notify: (id) => notifyTrace(id),
-          emit: (ev) => {
-            try { ctx?.onSubagentEvent?.(ev); } catch {}
-          },
-        });
         // One isolated copy per call: the shared instance is single-flight, so
         // calling it directly would serialize (or steer) parallel tool calls.
         const worker: Agent =
           typeof (agentInstance as Agent).fork === "function" ? agentInstance.fork(subSessionId, parentSessionId) : agentInstance;
-        const workerStream = worker.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: onWorkerTurn } as any);
-        const detachWorkerListeners = attachToStream(workerStream as unknown as Parameters<typeof attachToStream>[0]);
-        let response: any;
+        const workerStream = worker.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: live.onWorkerTurn } as any);
+        const detachWorkerListeners = live.attachToStream(workerStream as unknown as Parameters<typeof live.attachToStream>[0]);
+        let response: AgentResponse;
         try {
           response = await workerStream.result();
         } finally {
@@ -976,76 +1141,16 @@ export function agentToTool(
           // The per-call session id is never reused: drop its provider chain/routing state.
           if (worker !== agentInstance) { try { worker.reset(); } catch {} }
         }
-        const durationMs = Math.max(0, nowMs() - startTime);
-        const live = subagentTraces.get(trackingId);
-        if (live) {
-          live.status = "done";
-          live.model = response.model;
-          live.provider = response.provider;
-          live.turns = response.turns ?? live.turns;
-          live.text = response.text;
-          trimTraceSteps(live);
-          touchTrace(live.trackingId);
-          notifyTrace(trackingId);
-        }
-        const metadata: SubAgentExecutionMetadata = {
-          name,
-          trackingId: displayId,
-          sessionId: subSessionId,
-          parentSessionId,
-          task,
-          model: response.model,
-          provider: response.provider,
-          durationMs,
-          usage: response.usage,
-          turns: response.turns,
-          finishReason: response.finishReason,
-          responseId: response.responseId,
-          text: response.text,
-          thinking: response.thinking,
-          toolCalls: response.toolCalls,
-          raw: response.raw,
-          steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
-          isError: false,
-        };
-        try {
-          const m = metadata as unknown as Record<string, unknown>;
-          m["runId"] = callRunId;
-          m["turnId"] = callTurnId;
-          if (response.meta !== undefined) m["meta"] = response.meta;
-        } catch {}
-        return makeSubagentResult(response.text, [metadata]);
+        live.finish(response);
+        return makeSubagentResult(response.text, [
+          workerMetadata({ ...lineage, durationMs: Math.max(0, nowMs() - startTime), result: response, steps: live.steps() }),
+        ]);
       } catch (err: any) {
-        const durationMs = Math.max(0, nowMs() - startTime);
         const msg = err?.message || String(err);
-        const live = subagentTraces.get(trackingId);
-        if (live) {
-          live.status = "error";
-          live.error = msg;
-          trimTraceSteps(live);
-          touchTrace(live.trackingId);
-          notifyTrace(trackingId);
-        }
-        const metadata: SubAgentExecutionMetadata = {
-          name,
-          trackingId: displayId,
-          task,
-          model: "unknown",
-          provider: "unknown",
-          durationMs,
-          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-          turns: 0,
-          text: `Error in ${name}: ${msg}`,
-          steps: live ? live.steps.map((s) => ({ ...s })) : undefined,
-          isError: true,
-          error: msg,
-        };
-        try {
-          const m = metadata as unknown as Record<string, unknown>;
-          m["runId"] = callRunId;
-          m["turnId"] = callTurnId;
-        } catch {}
-        return makeSubagentResult(`Error in ${name}: ${msg}`, [metadata]);
+        live.fail(msg);
+        return makeSubagentResult(`Error in ${name}: ${msg}`, [
+          workerMetadata({ ...lineage, durationMs: Math.max(0, nowMs() - startTime), error: msg, steps: live.steps() }),
+        ]);
       }
     },
   });

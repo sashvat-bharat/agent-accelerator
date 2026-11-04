@@ -115,6 +115,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `session.local_media_paths` | An imported session references local files without `fileAccess.roots` |
 | `agent.run_retry` | A failed run is being tried again (`attempt`, `of`, `delayMs`) |
 | `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed / resuming (or a prompt that was waiting) failed |
+| `worker.invalid` | A saved `worker.json` is damaged and that worker is skipped |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
 | `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.killed`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle |
 

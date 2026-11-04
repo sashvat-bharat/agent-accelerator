@@ -247,14 +247,22 @@ export function resolveWorkerCredentials(
 }
 
 /**
- * Config of a stateless dynamic worker (`spawn_subagents` and scheduled
- * actions): the developer's fixed worker model, level and limits, never the
- * LLM's choice. Credentials carry over only when the providers match, and
- * `inheritableConfig()` keeps the worker no less constrained than its parent.
+ * Config of a dynamic worker (`spawn_subagents`, scheduled actions, the worker registry): the developer's fixed worker
+ * model, level and limits, never the LLM's choice. Credentials carry over only when the providers match, and
+ * `inheritableConfig()` keeps the worker no less constrained than its parent. Stateless one-shot by default;
+ * `persistent` makes a multi-turn worker that keeps its history (saved under `persistent.dir` when given, and
+ * continued by `resume()` after a crash, never automatically).
  */
 export function buildDynamicWorkerConfig(
   parent: Agent,
-  worker: { name: string; role?: string; instructions: string; sessionId: string; tools: Record<string, ToolDefinition> }
+  worker: {
+    name: string;
+    role?: string;
+    instructions: string;
+    sessionId: string;
+    tools: Record<string, ToolDefinition>;
+    persistent?: { dir?: string };
+  }
 ): AgentConfig {
   const model = parent.subagentModel;
   const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
@@ -268,8 +276,8 @@ export function buildDynamicWorkerConfig(
     thinkingLevel: parent.dynamicSubagents?.thinkingLevel ?? parent.thinkingConfig?.level,
     sessionId: worker.sessionId,
     tools: worker.tools,
-    // Stateless by design: one task in, one result out, then shut down. No history, no recursion.
-    stateless: true,
+    stateless: !worker.persistent,
+    ...(worker.persistent?.dir ? { persist: { dir: worker.persistent.dir }, resume: "explicit" as const } : {}),
     serviceTier: parent.serviceTier,
     headers: parent.customHeaders,
     maxTurns: parent.maxTurns,

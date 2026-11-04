@@ -11,6 +11,7 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools, createSubagentSpawnTool } from "./delegation.ts";
+import { WorkerRegistry } from "./workers.ts";
 import {
   normalizeToolMap,
   resolveDynamicModelInput,
@@ -271,6 +272,7 @@ export class Agent {
   private readonly runRetries: number;
   /** The resume in flight, so a second `resume()` returns the same promise. */
   private resuming?: Promise<AgentResponse | undefined>;
+  private workerRegistry?: WorkerRegistry;
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -457,6 +459,11 @@ export class Agent {
       // Synchronously, so a run() issued right after construction queues BEHIND the resumed run.
       this.resume().catch((err) => this.reportResumeFailure(err));
     }
+  }
+
+  /** The persistent sub-agent workers of this agent: `spawn`, `message`, `close`, `list`, `turns` (see `WorkerRegistry`). */
+  get workers(): WorkerRegistry {
+    return (this.workerRegistry ??= new WorkerRegistry(this));
   }
 
   // Loads a persisted session that a crash cut off (a run without an ending) or that still had waiting prompts, so it can be resumed; true when there is something to resume; in: the session folder of `persist.dir`, out: context, runMarks, toolRecords, pendingQueue.

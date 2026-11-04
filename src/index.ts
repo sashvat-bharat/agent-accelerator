@@ -86,6 +86,7 @@ export {
   SUBAGENT_SUBSCRIBE_TTL_MS,
 } from "./agent/delegation.ts";
 export type { DynamicSubagentTask, AgentAsToolTarget, SubAgentTrace, StreamingLoopHandle } from "./agent/delegation.ts";
+export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOptions } from "./agent/workers.ts";
 
 // Scheduled actions: dynamic sub-agents that run later and save their answer to a file
 export {
