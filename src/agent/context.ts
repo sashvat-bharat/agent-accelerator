@@ -11,7 +11,7 @@ function fail(message: string): never {
 }
 
 /** Deep clone that preserves Uint8Array/ArrayBuffer media (structuredClone may be absent). */
-function deepCloneValue<T>(value: T): T {
+export function deepCloneValue<T>(value: T): T {
   if (value instanceof Uint8Array) return new Uint8Array(value) as T;
   if (value instanceof ArrayBuffer) return value.slice(0) as T;
   if (Array.isArray(value)) return value.map((v) => deepCloneValue(v)) as T;
