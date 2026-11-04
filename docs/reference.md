@@ -66,7 +66,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 
 `finishReason`: `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `stopped` (a tool called `ctx.stop`), `error` (or a provider string; the original stays in `rawFinishReason`).
 
-`usage`: `inputTokens`, `outputTokens`, `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`.
+`usage`: `inputTokens` (includes the cache reads and writes), `outputTokens` (includes `thinkingTokens`), `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`. Without a provider-reported cost, `cost` is estimated per turn from the catalog: fresh input, cache reads and cache writes each at their own price (a missing cache price bills at the input rate), scaled by `serviceTier`.
 
 ## Stream events
 

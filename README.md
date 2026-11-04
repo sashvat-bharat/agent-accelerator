@@ -1011,7 +1011,7 @@ TokenUsage {
 }
 ```
 
-Cost calculation prefers provider-reported totals. When unavailable, costs are computed using catalog pricing.
+Cost calculation prefers provider-reported totals. When unavailable, costs are computed using catalog pricing, per model turn: fresh input at the input price, cache reads at the cache-read price, cache writes at the cache-write price (both are part of `inputTokens`, so they are not billed twice), output at the output price (thinking tokens are part of output), scaled by `serviceTier` (`flex` x0.5, `priority` x2, estimates). A catalog entry without a cache price bills those tokens at the input rate (cache is never free); unknown pricing stays unknown.
 
 Subagent usage is rolled into the parent totals.
 ### ProviderRawData

@@ -411,16 +411,14 @@ async function generateWithTimeout<T>(task: () => Promise<T>, timeoutMs: number)
   }
 }
 
-/** Compat wrapper around the one cost model (`priceUsage` in session/store.ts, Q-36).
- * Prefers provider-reported totals, else catalog pricing with integer
- * micro-USD accumulation. Returns undefined when unknown (never a 0 object). */
-export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec): TokenUsage["cost"] {
+/** Prices one usage snapshot with the one cost model (`priceUsage`): provider-reported total first, else catalog pricing scaled by `serviceTier`; undefined when unknown. In: loop turns and `accumulateUsage`, out: `usage.cost`. */
+export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec, serviceTier?: string): TokenUsage["cost"] {
   try {
     if (usage.cost && usage.cost.totalCost !== undefined && usage.cost.totalCost > 0) {
       return usage.cost;
     }
     if (!spec) return usage.cost;
-    const priced = priceUsage(usage, spec);
+    const priced = priceUsage(usage, spec, serviceTier ? { serviceTier } : undefined);
     return priced
       ? {
           inputCost: priced.inputCost,
@@ -448,7 +446,7 @@ export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec): Tok
 // This function never mutates `source` (Q-35): the priced cost is cloned
 // into a local before folding into the target.
 // ---------------------------------------------------------------------------
-export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpec): void {
+export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpec, serviceTier?: string): void {
   target.inputTokens += source.inputTokens || 0;
   target.outputTokens += source.outputTokens || 0;
   target.totalTokens += source.totalTokens || 0;
@@ -475,7 +473,7 @@ export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: M
     });
   }
 
-  const priced = computeCostFromPricing(source, spec);
+  const priced = computeCostFromPricing(source, spec, serviceTier);
   // Q-35: pure — read `source` only; never assign back to `source.cost`.
   // Clone the priced cost so later target folds cannot alias source state.
   const sourceCost = priced ? { ...priced } : undefined;
@@ -799,8 +797,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       }
     }
 
-    accumulateUsage(accumulatedUsage, genResult.usage, spec);
-    config.enforceBudget?.({ ...genResult.usage, cost: computeCostFromPricing(genResult.usage, spec) });
+    accumulateUsage(accumulatedUsage, genResult.usage, spec, options?.serviceTier);
+    config.enforceBudget?.({ ...genResult.usage, cost: computeCostFromPricing(genResult.usage, spec, options?.serviceTier) });
     checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
 
     // Record assistant turn in context
@@ -1252,8 +1250,8 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           }
         }
 
-        accumulateUsage(accumulatedUsage, turnResponse.usage, spec2);
-        config.enforceBudget?.({ ...turnResponse.usage, cost: computeCostFromPricing(turnResponse.usage, spec2) });
+        accumulateUsage(accumulatedUsage, turnResponse.usage, spec2, options?.serviceTier);
+        config.enforceBudget?.({ ...turnResponse.usage, cost: computeCostFromPricing(turnResponse.usage, spec2, options?.serviceTier) });
         checkTokenLimit(accumulatedUsage, streamLimits.maxTotalTokens);
 
         context.addAssistantMessage(

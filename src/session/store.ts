@@ -1328,15 +1328,16 @@ function toDollars(microUSD: number): number {
  * `cost.context_over_200k`, the over-200k tier prices apply; otherwise base
  * `pricing.*` (falling back to legacy `cost.*`) applies.
  */
+// Cache prices stay undefined when the catalog has none: priceUsage then bills those tokens at the input rate (never free).
 function resolveEffectivePricing(
   spec: ModelSpec | undefined,
   inputTokens: number
-): { input: number; output: number; cacheRead: number; cacheWrite: number; audio: number; tier: string } {
+): { input: number; output: number; cacheRead: number | undefined; cacheWrite: number | undefined; audio: number; tier: string } {
   const base = {
     input: spec?.pricing?.inputPerMillion ?? (spec?.cost?.input as number | undefined) ?? 0,
     output: spec?.pricing?.outputPerMillion ?? (spec?.cost?.output as number | undefined) ?? 0,
-    cacheRead: spec?.pricing?.cacheReadPerMillion ?? (spec?.cost?.cache_read as number | undefined) ?? 0,
-    cacheWrite: spec?.pricing?.cacheWritePerMillion ?? (spec?.cost?.cache_write as number | undefined) ?? 0,
+    cacheRead: spec?.pricing?.cacheReadPerMillion ?? (spec?.cost?.cache_read as number | undefined),
+    cacheWrite: spec?.pricing?.cacheWritePerMillion ?? (spec?.cost?.cache_write as number | undefined),
     audio:
       spec?.pricing?.inputAudioPerMillion ?? (spec?.cost as { input_audio?: number } | undefined)?.input_audio ?? 0,
   };
@@ -1388,8 +1389,9 @@ function resolveEffectivePricing(
  * - Audio tokens (`usage.audioTokens` / `usage.inputAudioTokens` when present)
  *   price at `pricing.inputAudioPerMillion` / `cost.input_audio` and fold into
  *   the total (separately itemized in `breakdown.audioMicroUSD`).
- * - `opts.serviceTier` (`flex` ~0.5x, `priority` ~1.5x, estimates) scales the
+ * - `opts.serviceTier` (`flex` 0.5x, `priority` 2x, estimates) scales the
  *   catalog total; provider-reported costs are never rescaled.
+ * - Cache reads and writes are subsets of the input tokens; a missing cache price bills at the input rate.
  */
 export function priceUsage(
   usage: TokenUsage,
@@ -1438,12 +1440,15 @@ export function priceUsage(
     return undefined;
   }
   const { multiplier, tier: serviceTier } = serviceTierMultiplier(opts?.serviceTier, opts?.modelId ?? spec?.id);
-  const nonCachedInput = Math.max(0, inputTokens - cachedTokens);
+  // Cache reads and writes are both a SUBSET of the input tokens (OpenRouter `prompt_tokens` includes them), so the
+  // plain input rate applies only to what is neither read from nor written to the cache.
+  const freshInput = Math.max(0, inputTokens - cachedTokens - cacheWriteTokens);
   // Integer micro-USD accumulation: microUSD = tokens * pricePerMillion
   // ($P per 1M tokens == $P/1e6 per token == P micro-USD per token).
-  const inputMicroUSD = Math.round(nonCachedInput * pricing.input * multiplier);
-  const cacheReadMicroUSD = Math.round(cachedTokens * pricing.cacheRead * multiplier);
-  const cacheWriteMicroUSD = Math.round(cacheWriteTokens * pricing.cacheWrite * multiplier);
+  // A catalog entry without a cache price bills those tokens at the input rate: cache reads/writes are never free.
+  const inputMicroUSD = Math.round(freshInput * pricing.input * multiplier);
+  const cacheReadMicroUSD = Math.round(cachedTokens * (pricing.cacheRead ?? pricing.input) * multiplier);
+  const cacheWriteMicroUSD = Math.round(cacheWriteTokens * (pricing.cacheWrite ?? pricing.input) * multiplier);
   const outputMicroUSD = Math.round(outputTokens * pricing.output * multiplier);
   const audioMicroUSD = Math.round(audioCount * pricing.audio * multiplier);
   const totalMicroUSD = inputMicroUSD + cacheReadMicroUSD + cacheWriteMicroUSD + outputMicroUSD + audioMicroUSD;
