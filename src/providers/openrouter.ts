@@ -14,6 +14,8 @@
  * lossy error codes, beta event-vocabulary drift.
  *
  * Notes:
+ * - EVERY request streams, `generate()` included (it collects its own `stream()`): OpenRouter only cancels a request that
+ *   streams ("Stream cancellation" in its docs), so a plain non-streaming request could not be stopped by an interrupt.
  * - STATELESS per request: every turn sends the full canonical `messages`
  *   array explicitly. Completions defines no `store`/`previous_response_id`/
  *   `conversation`/`prompt_cache_key`/`session_id` body primitives, so none
@@ -44,10 +46,8 @@ import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.
 import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
-import { withRetries } from "../utils/retry.ts";
+import { isAbortError } from "../types/errors.ts";
 import {
-  parseArguments,
-  normalizeThinkingParts,
   newToolCallId,
   redactedHeaders,
   readErrorPayload,
@@ -122,61 +122,14 @@ interface ChatRequestBody {
   [k: string]: unknown;
 }
 
-interface ChatChoice {
-  index?: number;
-  message?: {
-    role?: string;
-    content?: string | null;
-    tool_calls?: Array<{
-      id?: string;
-      type?: string;
-      index?: number;
-      function?: { name?: string; arguments?: string };
-    }>;
-    reasoning?: string | null;
-    reasoning_details?: Array<{ type?: string; text?: string }>;
-    refusal?: string | null;
-  };
-  delta?: {
-    role?: string;
-    content?: string | null;
-    tool_calls?: Array<{
-      index?: number;
-      id?: string;
-      type?: string;
-      function?: { name?: string; arguments?: string };
-    }>;
-    reasoning_content?: string;
-    reasoning?: string;
-    reasoning_details?: Array<{ type?: string; text?: string }>;
-    refusal?: string | null;
-  };
-  finish_reason?: string | null;
-  native_finish_reason?: string | null;
-  error?: { message?: string; code?: string | number };
-}
-
-interface ChatResponse {
-  id?: string;
-  object?: string;
-  created?: number;
-  model?: string;
-  provider?: string;
-  choices?: ChatChoice[];
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
-    completion_tokens_details?: { reasoning_tokens?: number };
-    cost?: number;
-    [k: string]: unknown;
-  };
-  error?: {
-    message?: string;
-    code?: string | number;
-    metadata?: { error_type?: string; provider_code?: string | number; [k: string]: unknown };
-  };
+/** The usage block of a Chat Completions chunk (the last chunk of a stream carries it, with OpenRouter's `cost`). */
+interface ChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+  completion_tokens_details?: { reasoning_tokens?: number };
+  cost?: number;
   [k: string]: unknown;
 }
 
@@ -442,7 +395,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
 // Response mapping (Chat Completions -> canonical)
 // ---------------------------------------------------------------------------
 
-function mapUsage(raw?: ChatResponse["usage"]): TokenUsage {
+function mapUsage(raw?: ChatUsage): TokenUsage {
   const input = raw?.prompt_tokens ?? 0;
   const output = raw?.completion_tokens ?? 0;
   // Canonical invariant: cache hits are a SUBSET of input (no turn may
@@ -461,81 +414,6 @@ function mapUsage(raw?: ChatResponse["usage"]): TokenUsage {
     usage.cost = { totalCost: raw.cost };
   }
   return usage;
-}
-
-function throwResponseError(response: ChatResponse, modelId: string): void {
-  const message =
-    response.error && typeof response.error.message === "string" && response.error.message
-      ? response.error.message
-      : "OpenRouter response failed";
-  const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
-  if (response.error?.code !== undefined) failure["code"] = response.error.code;
-  // Chat skin keeps the stable typed code INSIDE metadata (unlike Responses'
-  // top-level `error_type`).
-  const errorType = (response.error?.metadata as { error_type?: string } | undefined)?.error_type;
-  if (typeof errorType === "string") failure["errorType"] = errorType;
-  throw toConciseProviderError(failure, "openrouter", modelId);
-}
-
-function parseResponse(
-  response: ChatResponse,
-  modelId: string,
-  durationMs: number,
-  raw: ProviderRawData
-): ProviderGenerateResult {
-  // Provider-interrupted generations arrive as HTTP 200 carrying ONLY `error`
-  // (no `choices`) — must check the body, not just the status.
-  if (response.error) throwResponseError(response, modelId);
-
-  const choice = response.choices?.[0];
-  const message = choice?.message;
-  // Q-23: refusal content surfaces as text with a `refusal` finish reason.
-  const refusal = typeof message?.refusal === "string" && message.refusal ? message.refusal : "";
-  const text = typeof message?.content === "string" && message.content ? message.content : refusal;
-  // Thinking: `reasoning_details[].text` duplicates `message.reasoning` when
-  // both ride along (observed live) — prefer details, else the plain field.
-  const thinkingParts: string[] = [];
-  const detailTexts: string[] = [];
-  for (const block of message?.reasoning_details ?? []) {
-    if (block?.type === "reasoning.text" && block.text) detailTexts.push(block.text);
-  }
-  if (detailTexts.length > 0) {
-    thinkingParts.push(...detailTexts);
-  } else if (typeof message?.reasoning === "string" && message.reasoning) {
-    thinkingParts.push(message.reasoning);
-  }
-  const toolCalls: ToolCallRecord[] = [];
-  for (const tc of message?.tool_calls ?? []) {
-    const args = parseArguments(tc.function?.arguments);
-    toolCalls.push({
-      id: tc.id && !tc.id.includes("|") && tc.id.length <= 40 ? tc.id : clampToolCallId(tc.id || newToolCallId()),
-      name: tc.function?.name || "unknown",
-      arguments: args,
-      rawArguments:
-        typeof tc.function?.arguments === "string"
-          ? tc.function.arguments
-          : JSON.stringify(tc.function?.arguments ?? {}),
-    });
-  }
-
-  // Normalized finish reasons: tool_calls|stop|length|content_filter|error.
-  // Q-23: refusal content forces `refusal` (even when the wire says stop).
-  const wireReason = choice?.finish_reason ?? undefined;
-  const finishReason =
-    toolCalls.length > 0 ? "tool_calls" : refusal ? "refusal" : wireReason || "stop";
-  return {
-    text,
-    thinking: normalizeThinkingParts(thinkingParts),
-    thoughtSignature: undefined,
-    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-    usage: mapUsage(response.usage),
-    finishReason,
-    responseId: response.id,
-    model: modelId,
-    provider: "openrouter",
-    raw,
-    durationMs,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -665,28 +543,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
-  private async doFetch(
-    url: string,
-    body: ChatRequestBody,
-    options: ProviderRequestOptions | undefined,
-    apiKey: string,
-    sessionId: string | undefined,
-    signal?: AbortSignal
-  ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
-    try {
-      const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
-      const text = await res.text();
-      const headers: Record<string, string> = {};
-      res.headers.forEach((v, k) => {
-        headers[k] = v;
-      });
-      return { status: res.status, statusText: res.statusText, headers, text };
-    } finally {
-      cleanup();
-    }
-  }
-
   private throwIfError(
     status: number,
     url: string,
@@ -715,81 +571,40 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     throw toConciseProviderError(err, "openrouter", modelId);
   }
 
+  // OpenRouter can only cancel a request that streams ("Stream cancellation": for a non-streaming request the model keeps processing and you are billed in full), so even a plain generate is sent as a stream and collected here: an interrupt then closes the connection and stops processing and billing at the providers OpenRouter can cancel; in: the loop's non-streaming turn, out: the same ProviderGenerateResult a JSON reply gave.
   async generate(
     model: string | ModelSpec,
     context: ProviderContext,
     options?: ProviderRequestOptions
   ): Promise<ProviderGenerateResult> {
-    const startTime = Date.now();
-    const clean = cleanModelId(model);
-    const apiKey = resolveApiKey(options);
-    if (!apiKey) {
-      throw new Error(
-        "[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey."
-      );
-    }
-    // Fail fast before any network call when the catalog knows the model
-    // lacks the requested modality (clear one-liner instead of a confusing
-    // router 404/400). Unknown models skip the guard; the router verdict
-    // surfaces concisely.
-    assertModalitiesSupported(context, "openrouter", clean);
-    const baseUrl = resolveBaseUrl(options);
-    const url = `${baseUrl}/chat/completions`;
-    const sessionId = options?.sessionId;
-    const tools = options?.tools as StandardToolDeclaration[] | undefined;
-    const body = await this.buildBody(clean, context, options, sessionId, tools, false);
-
-    // Audit trail: record the actual wire headers (attribution + session
-    // affinity included), redacted.
-    const auditRaw: Record<string, string> = {
-      ...buildSessionHeaders("openrouter", options?.headers, sessionId),
-      "Content-Type": "application/json",
-      Authorization: "[REDACTED]",
-    };
-    const rawRequest = {
-      url,
-      method: "POST",
-      headers: redactedHeaders(auditRaw),
-      body,
-    };
-
-    const doCall = async (): Promise<ProviderGenerateResult> => {
-      const res = await this.doFetch(url, body, options, apiKey, sessionId, options?.signal);
-      this.throwIfError(res.status, url, res.text, clean, res.headers);
-      let response: ChatResponse;
-      try {
-        response = JSON.parse(res.text) as ChatResponse;
-      } catch {
-        throw toConciseProviderError(
-          Object.assign(new Error("Invalid JSON response from OpenRouter Chat Completions API"), {
-            statusCode: res.status,
-            responseBody: res.text.slice(0, 500),
-            url,
-          }),
-          "openrouter",
-          clean
-        );
-      }
-      // Stateless turns never establish chains, but the session store still
-      // records the turn so other providers' switch detection keeps working.
-      noteProviderTurn(sessionId, "openrouter");
-      return parseResponse(
-        response,
-        clean,
-        Date.now() - startTime,
-        { request: rawRequest, response: { status: res.status, statusText: res.statusText, headers: res.headers, body: response } }
-      );
-    };
-
+    // The whole call stays bounded by `timeoutMs`; the stream's own timer only covers the wait for its first byte.
+    const { signal, cleanup } = combinedSignal(options?.signal, timeoutFor(options as { timeoutMs?: number } | undefined));
     try {
-      return await withRetries(doCall, {
-        ...retryOptionsFrom(options),
-        signal: options?.signal,
-        label: { providerId: "openrouter", modelId: clean },
-      });
+      // Nobody reads the deltas here, so the stream keeps none (a burst of frames would overflow its buffer for nothing).
+      const events = this.streamInto(new AssistantMessageEventStream({ buffer: false }), model, context, { ...options, signal });
+      const res = await events.result();
+      return {
+        text: res.text,
+        thinking: res.thinking,
+        thoughtSignature: undefined,
+        toolCalls: res.toolCalls.length > 0 ? res.toolCalls : undefined,
+        usage: res.usage,
+        finishReason: res.finishReason,
+        responseId: res.responseId,
+        model: res.model,
+        provider: "openrouter",
+        raw: res.raw,
+        durationMs: res.durationMs,
+      };
     } catch (err) {
-      if (err instanceof Error && (err as { name?: string }).name === "AbortError") throw err;
+      // A stream reports its own generic abort; the caller's reason (`interrupt(new Error("..."))`) is what the run should carry.
+      const reason = options?.signal?.reason;
+      if (options?.signal?.aborted && reason instanceof Error && isAbortError(err)) {
+        throw Object.assign(new Error(reason.message), { name: "AbortError" });
+      }
       throw err;
+    } finally {
+      cleanup();
     }
   }
 
@@ -798,7 +613,16 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     context: ProviderContext,
     options?: ProviderRequestOptions
   ): AssistantMessageEventStream {
-    const eventStream = new AssistantMessageEventStream();
+    return this.streamInto(new AssistantMessageEventStream(), model, context, options);
+  }
+
+  // Runs one streamed request, pushing its events into `eventStream`; in: stream() (a normal stream) and generate() (one that keeps no events), out: that same stream, finished with the AgentResponse.
+  private streamInto(
+    eventStream: AssistantMessageEventStream,
+    model: string | ModelSpec,
+    context: ProviderContext,
+    options?: ProviderRequestOptions
+  ): AssistantMessageEventStream {
     const startTime = Date.now();
     const clean = cleanModelId(model);
 
@@ -1022,7 +846,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             finishReason = fr;
             sawFinishReason = true;
           }
-          const chunkUsage = msg["usage"] as ChatResponse["usage"] | undefined;
+          const chunkUsage = msg["usage"] as ChatUsage | undefined;
           if (chunkUsage) {
             usage = mapUsage(chunkUsage);
             sawUsage = true;

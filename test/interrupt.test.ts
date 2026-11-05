@@ -104,6 +104,22 @@ describe("interrupt() reaches the provider: the HTTP request is really cancelled
     expect(f.signals[0]!.aborted).toBe(true);
   });
 
+  it("OpenRouter: even run() is sent as a stream, so interrupting it closes the connection", async () => {
+    const e = endless();
+    const f = fake(() => e.response);
+    const agent = new Agent({ model: "openrouter/z-ai/glm-5.3-flash", apiKey: "k", baseUrl: "https://example.test/v1", fetch: f.fn, runRetries: 0, retry: { maxRetries: 0 } });
+    const run = agent.run("write a novel"); // run(), not stream()
+    await until(() => e.state.sent >= 3);
+    expect(f.calls[0].stream).toBe(true); // OpenRouter only cancels requests that stream
+    agent.interrupt();
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    const at = e.state.sent;
+    await sleep(60);
+    expect(e.state.cancelled).toBe(true);
+    expect(e.state.sent).toBe(at);
+    expect(f.signals[0]!.aborted).toBe(true);
+  });
+
   it("an AbortSignal passed to run() cancels the provider request the same way", async () => {
     const f = fake((_n, _b, signal) => hang(signal));
     const ctl = new AbortController();
