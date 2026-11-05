@@ -37,6 +37,7 @@ export { Agent, SubAgentModelError } from "./agent/agent.ts";
  */
 export { SubAgent, agentFromEnv } from "./agent/subagent.ts";
 export type { SubAgentConfig } from "./agent/subagent.ts";
+export type { EditableAgentConfig } from "./types/agent.ts";
 export {
   tool,
   toStandardToolDeclarations,

@@ -149,6 +149,8 @@ agent.stream(prompt, opts?) // AssistantMessageEventStream
 agent.steer(prompt) / agent.queue(prompt) // while busy: join the active run / start after it
 agent.interrupt() // stop the active run now (provider request aborted, stream cancelled, tools get ctx.signal)
 await agent.interrupt(message) // stop it AND run `message` next, ahead of queued follow-ups (stream: opts.enqueue = "interrupt")
+agent.toConfig() // { model, instructions, tools }: the part an agent may edit, plain JSON (no keys)
+Agent.fromConfig(editable, base) // new Agent: your full `base` config + an agent's edits of model/instructions/tools only
 agent.reset() // clears messages + signatures, keeps config
 agent.exportSession(telemetry?) // storable snapshot for saveSessionFile
 agent.importSession(saved) // restores messages + config from loadSessionFile

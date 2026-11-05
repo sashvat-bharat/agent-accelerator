@@ -26,6 +26,7 @@
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
 | What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
+| Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, `allowedModels` | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | Observe | `telemetryBus.onEvent` |
 | Ask permission before a tool acts | check inside `execute`, refuse with `ctx.stop(reason)` (run ends `stopped`) | [Tools and streaming](guides/tools-and-streaming.md) | [Safety](guides/safety-and-ops.md) |
 

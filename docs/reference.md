@@ -32,6 +32,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `runRetries` | Times a whole run that failed for a transient reason is tried again from where it stopped (default 3, `0` = off) | [Safety](guides/safety-and-ops.md) |
 | `fileAccess`, `captureRaw`, `onFailure` | `{ roots }`, `"redacted"`/`true`/`false`, `"auto"`/`"rollback"`/`"keep"` | [Safety](guides/safety-and-ops.md) |
 | `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
+| `allowedModels` | `string[]` of `provider/model`, compared as written. Unset = any model. A model outside the list throws `ConfigError` when the Agent is built (also through `Agent.fromConfig`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text) to `<home>/telemetry/<date>.ndjson`. Off by default | [Safety](guides/safety-and-ops.md) |
 | `logger`, `hooks`, `contextManagement` | **Not implemented**; emit `config.unsupported_option`. Use `telemetryBus` | |
 
@@ -108,6 +109,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 |---|---|
 | `config.unsupported_option` | A placeholder or unsupported option was given and dropped |
 | `config.thinking_budget_ignored` | `thinking.budgetTokens` is not forwarded |
+| `config.not_editable` | `Agent.fromConfig` got keys other than `model`, `instructions`, `tools`; they were ignored (`data.fields`) |
 | `provider_warning` | A provider-specific option was dropped (e.g. `stop` on Google) |
 | `agent.max_turns_truncated` | Run stopped at `maxTurns` with tool work pending |
 | `turn.thinking` | Full reasoning text of a turn (bus only) |

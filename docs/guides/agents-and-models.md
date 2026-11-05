@@ -151,6 +151,37 @@ try {
 
 `output` accepts a Zod schema, a JSON Schema object, or `{ name, description, schema, strict }`. The final answer is constrained on every provider and validated into `res.parsed` (tool turns are skipped). If the catalog says a model lacks native support, the SDK **emulates** it with an instruction plus client-side validation and warns. Keep schemas small and describe fields.
 
+## Self-improving agents
+
+The SDK gives you the building blocks for an agent that improves itself; the loop that decides *what* to change (evals, scoring, rollback) is yours. An agent may edit **only three things**: its `model`, its `instructions` and its `tools`. Limits, budgets, cache, thinking, keys and everything else stay with you.
+
+```ts
+import { Agent, tool } from "agent-accelerator";
+
+// 1. Your full config. `tools` is the pool the agent may pick from; `allowedModels` is where it may go.
+const base = {
+  model: "openai/gpt-5.5",
+  instructions: "You answer support questions.",
+  tools: { search, readFile, writeFile }, // each tool in its own file, so an agent (or you) can edit it
+  allowedModels: ["openai/gpt-5.5", "openai/gpt-5.5-mini"],
+  budget: { maxCostUsd: 2 },
+  maxTurns: 20,
+};
+const agent = new Agent(base);
+
+// 2. What an agent can edit, as plain JSON: show it to a model, store it, diff it.
+agent.toConfig(); // { model: "openai/gpt-5.5", instructions: "...", tools: ["search", "readFile", "writeFile"] }
+
+// 3. Rebuild with the edits. Anything other than model/instructions/tools is ignored with a `config.not_editable` warning.
+const next = Agent.fromConfig({ ...agent.toConfig(), instructions: "Be brief. Cite the source.", tools: ["search"] }, base);
+```
+
+- **`tools` are names**, picked from `base.tools`. A name that is not in the pool throws a `ConfigError` that lists the names that are, so a harness can hand the message straight back to the model. Leave `tools` out to keep all of them. The built-in delegation and scheduler tools come from `base` and never appear in `toConfig()`.
+- **`allowedModels`** is checked whenever an Agent is built, so it covers `new Agent(base)` and `Agent.fromConfig`. Entries are compared as written (`"provider/model"`). A model outside the list, or a bad list (empty, not strings), throws a `ConfigError`. Workers and `subagentModel` are not affected.
+- **Keys never travel.** `toConfig()` has no keys. If `base.model` is a model helper holding an `apiKey`/`baseUrl`, the new agent keeps them only for the **same provider**; a model on another provider gets no key from it (a top-level `base.apiKey` applies to every model, as always, so combine it with `allowedModels`).
+- **A new Agent, not a patch.** `fromConfig` returns a fresh Agent and never changes the old one. Give `base` the same `sessionId` and `persist` to continue the saved conversation with the new settings.
+- **Tool files.** To let an agent edit a tool's name, description or code, write each tool in its own file and give the agent access to it. That is a convention, not an SDK feature: loading the edited file back (with a fresh import) is the harness's job.
+
 ## For AI agents
 
 - Constructor: `new Agent(config: AgentConfig)`; run: `await agent.run(prompt: string | ContentPart[], opts?: AgentRunOptions): Promise<AgentResponse>`.

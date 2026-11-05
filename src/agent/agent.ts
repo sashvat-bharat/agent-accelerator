@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState, InterruptedRun } from "../types/agent.ts";
+import type { AgentConfig, EditableAgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState, InterruptedRun } from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
 import { normalizeThinkingV2, resolveWhenBusy } from "../tools/tool.ts";
@@ -25,6 +25,7 @@ import { resolveHome } from "../scheduler/store.ts";
 import { persistTelemetry } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
+import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, endsWithStop, accumulateUsage, type SteerEntry } from "./loop.ts";
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
@@ -317,6 +318,7 @@ export class Agent {
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
     this.modelStringOrSpec = modelStringOrSpec as string | any;
+    assertModelAllowed(config.allowedModels, modelKey(modelStringOrSpec));
     const dynRaw = config.dynamicSubagents;
     // Unified worker-model chain: dynamicSubagents.model > subagentModel > SUB_AGENT_MODEL.
     const dynModel = resolveDynamicModelInput(dynRaw, config.subagentModel);
@@ -1149,6 +1151,24 @@ export class Agent {
     });
     if (parentSessionId) (copy as unknown as { parentSessionId?: string }).parentSessionId = parentSessionId;
     return copy;
+  }
+
+  /**
+   * The part of this agent that an agent may edit, as plain JSON: `{ model, instructions, tools }` (`model` is the
+   * `provider/model` string, never a key; `tools` are the names of the tools you passed in `tools`). Store it, show it
+   * to the model, and rebuild with {@link Agent.fromConfig}.
+   */
+  toConfig(): Required<EditableAgentConfig> {
+    return toEditableConfig(this.modelStringOrSpec, this.instructions, this.forkConfig.tools);
+  }
+
+  /**
+   * Builds an Agent from your full `base` config with an agent's edits applied. Only `model`, `instructions` and
+   * `tools` of `editable` count (other keys are ignored with a `config.not_editable` warning); `tools` are names picked
+   * from `base.tools`, an unknown name throws; `base.allowedModels` is enforced. Keys and limits always come from `base`.
+   */
+  static fromConfig(editable: EditableAgentConfig, base: AgentConfig): Agent {
+    return new Agent(applyEditable(editable, base));
   }
 
   /** Budgets are per run: counters restart whenever a new run begins. */

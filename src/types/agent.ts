@@ -228,6 +228,25 @@ export interface AgentConfig {
   budget?: Budget;
   /** Run + network limits (Q-22). Turn/budget caps unlimited by default; network timeouts finite. */
   limits?: AgentRunLimits;
+  /**
+   * The only models this agent may use, as `provider/model` strings compared as written. Unset (default) = any model.
+   * Checked when the Agent is built (also for a config an agent edited through {@link Agent.fromConfig}); a model
+   * outside the list throws a `ConfigError`. Workers and `subagentModel` are not affected.
+   */
+  allowedModels?: string[];
+}
+
+/**
+ * The part of an agent that an agent may edit (self-improvement): see {@link Agent.toConfig} and {@link Agent.fromConfig}.
+ * Plain JSON. Every other setting (limits, budget, cache, thinking, keys, ...) stays with the developer.
+ */
+export interface EditableAgentConfig {
+  /** `provider/model`; must be in `allowedModels` when the developer set it. */
+  model?: string;
+  /** System instructions. */
+  instructions?: string;
+  /** Names of tools, picked from the developer's tool pool (`base.tools` of `fromConfig`). */
+  tools?: string[];
 }
 
 /** A run that a crash cut off (see {@link Agent.interrupted}). */
