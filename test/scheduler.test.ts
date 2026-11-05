@@ -673,6 +673,86 @@ describe("scheduler startup sweep", () => {
     expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "interrupted" });
   });
 
+  it("onMissed skip: a missed repeating run moves on to the next time without running", () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "skip" }));
+    h.boot();
+    h.set(20, 0);
+    const { codes, of } = capture();
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "waiting", nextDeliverAt: iso(19, 0, 0, 27), nextCookAt: iso(18, 50, 0, 27) });
+    expect(codes().filter((c) => c === "scheduled_action.missed" || c === "scheduled_action.skipped")).toEqual(["scheduled_action.missed", "scheduled_action.skipped"]);
+    expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "process_down", onMissed: "skip" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("onMissed skip: a missed one-shot is done", () => {
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    createScheduledAction(h.agent(fn), input({ onMissed: "skip" }));
+    h.boot();
+    h.set(20, 0);
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "done", nextCookAt: null, nextDeliverAt: null });
+  });
+
+  it("onMissed run: a missed run starts at once and the schedule moves to the next time", async () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply("late brief"));
+    const rec = createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "run" }));
+    h.boot();
+    h.set(20, 0);
+    const { codes, of } = capture();
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "cooking", nextDeliverAt: iso(19, 0, 0, 27) });
+    await h.settle();
+    h.s.tick();
+    expect(calls).toHaveLength(1);
+    expect(codes()).toEqual(expect.arrayContaining(["scheduled_action.missed", "scheduled_action.started", "scheduled_action.ready", "scheduled_action.delivered"]));
+    expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ onMissed: "run" });
+    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "waiting", nextDeliverAt: iso(19, 0, 0, 27), lastRun: { status: "ok" } });
+    h.s.tick();
+    expect(calls).toHaveLength(1); // the missed occurrence ran once, not again
+  });
+
+  it("onMissed applies to a run a crash cut off (stale cooking, no run file)", () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "skip" }));
+    updateTasks(h.home, (tasks) => {
+      tasks[0]!.state = "cooking";
+      tasks[0]!.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+      tasks[0]!.nextCookAt = iso(18, 50, 0, 27); // advanced before the run, as the scheduler does
+      tasks[0]!.nextDeliverAt = iso(19, 0, 0, 27);
+    });
+    h.boot();
+    h.set(18, 55);
+    const { of } = capture();
+    h.agent(fn);
+    h.s.tick();
+    expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "interrupted", onMissed: "skip" });
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "waiting", nextDeliverAt: iso(19, 0, 0, 27) });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("without onMissed a missed run still waits for run_now or skip", () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00" }));
+    h.boot();
+    h.set(20, 0);
+    const { codes } = capture();
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "missed" });
+    expect(codes()).not.toContain("scheduled_action.skipped");
+    expect(calls).toHaveLength(0);
+  });
+
   it("rebuilds the delivery when a crash left the run file but no entry", async () => {
     const h = harness();
     const fn = mockFetch(() => chatReply()).fn;
@@ -752,6 +832,18 @@ describe("list / update / run_now / skip / delete", () => {
     expect(updateScheduledAction(rec.id, { task: "Allowed while cooking." }, { home: h.home }).task).toBe("Allowed while cooking.");
     g.release();
     await h.settle();
+  });
+
+  it("onMissed is validated, stored, and changeable with update", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    expect(() => createScheduledAction(agent, input({ onMissed: "later" as never }))).toThrow(/onMissed.*"skip" or "run"/);
+    expect(readTasks(h.home)).toEqual([]);
+    const rec = createScheduledAction(agent, input({ onMissed: "run" }));
+    expect(readTasks(h.home)[0]!.schedule.onMissed).toBe("run");
+    expect(updateScheduledAction(rec.id, { scheduled_action: { onMissed: "skip" } }, { home: h.home }).schedule.onMissed).toBe("skip");
+    expect(() => updateScheduledAction(rec.id, { scheduled_action: { onMissed: "never" as never } }, { home: h.home })).toThrow(/onMissed/);
+    expect(readTasks(h.home)[0]!.schedule.onMissed).toBe("skip");
   });
 
   it("run_now runs immediately without shifting the schedule, and is delivered on the next tick", async () => {
@@ -884,6 +976,18 @@ describe("scheduled_actions and get_datetime tools", () => {
     const [r] = await executeToolCalls({ tools: agent.tools, toolCalls: [{ id: "t1", name: "scheduled_actions", arguments: args }] });
     return r!;
   };
+
+  it("create accepts onMissed and the manual explains it", async () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    expect(agent.tools["scheduled_actions"]!.description).toContain("onMissed");
+    const ok = await call(agent, { command: "create", instructions: "i", task: "t", scheduled_action: { name: "N", id: "n-job", timeToDeliver: "00:07:00", meridiem: "PM", startCookingInAdvance: "00:00:10", onMissed: "run" } });
+    expect(ok.isError).toBe(false);
+    expect(readTasks(h.home)[0]!.schedule.onMissed).toBe("run");
+    const bad = await call(agent, { command: "create", instructions: "i", task: "t", scheduled_action: { name: "N", id: "n-two", timeToDeliver: "00:07:00", meridiem: "PM", startCookingInAdvance: "00:00:10", onMissed: "maybe" } });
+    expect(bad.isError).toBe(true);
+    expect(readTasks(h.home)).toHaveLength(1);
+  });
 
   it("the description is the manual with the worker pool filled in", () => {
     const h = harness();

@@ -50,6 +50,7 @@ const scheduledActionSchema = z.object({
   startCookingInAdvance: z.string().optional().describe('Duration "DD:HH:MM" before delivery when the run starts.'),
   repeatEvery: z.string().optional().describe('Duration "DD:HH:MM" between deliveries. Omit to run once.'),
   retries: z.number().optional().describe("Extra attempts if a run fails."),
+  onMissed: z.enum(["skip", "run"]).optional().describe('If the host program was not running at delivery time: "skip" = move on to the next time, "run" = run when it is back. Omit to decide later.'),
 });
 
 const describedId = "Full action id including its 6-character suffix (get, update, delete, run_now, skip).";

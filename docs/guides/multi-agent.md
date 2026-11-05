@@ -126,6 +126,7 @@ const action = createScheduledAction(agent, {
     startCookingInAdvance: "00:00:30", // duration: start 30 minutes early
     repeatEvery: "01:00:00", // duration: every day; omit to run once
     retries: 1,
+    onMissed: "run", // optional: "skip" | "run" if your program was down at delivery time
   },
 });
 console.log(action.id, action.nextCookAt, action.nextDeliverAt);
@@ -142,7 +143,7 @@ How it works:
 - **Lifecycle.** `waiting` → `cooking` → result saved (`ready`) → `delivered` at the delivery time → `waiting` again or `done`. A failed run still writes a file saying why. A run still cooking when the next is due is skipped (`skipped`), never stacked.
 - **Files** under `<home>/scheduled_actions/` (`home` defaults to `setHome(dir)`, `AGENT_ACCEL_HOME`, then `.agent-accel/`): `tasks.json`, `deliveries.json`, and one `.md` result file per run. Files are re-read and validated before each run, so editing `instructions`/`task` takes effect next run. No keys or tool code are stored.
 - **Events** on `telemetryBus` (`scheduled_action.*`): `created`, `updated`, `started`, `ready`, `failed`, `delivered`, `missed`, `skipped`, `deleted`, `invalid`, `store_corrupt`, `error`.
-- **Missed runs.** If the process was down at the moment, the SDK emits `missed` once and runs nothing by itself: call `runScheduledAction` or `skipScheduledAction`. `deleteScheduledAction` refuses while an action is cooking unless `force: true`.
+- **Missed runs.** If the process was down at the moment, the SDK emits `missed` once. By default nothing runs by itself: call `runScheduledAction` or `skipScheduledAction`. Set `onMissed` per action to decide in advance: `"skip"` moves to the next time (a one-shot is `done`), `"run"` runs it when the program is back. It also covers a run a crash cut off; an action whose creating Agent is gone stays `missed`. `deleteScheduledAction` refuses while an action is cooking unless `force: true`.
 - **Honest limits.** Actions run only while your process is alive, and only if the creating Agent is still referenced (held weakly). Use **one process per home folder** (a second process fails at once: the home is locked). `run_now` never retries (it is delivered when it finishes, never `late`); `update` cannot remove `repeatEvery`; the only spending guardrail is `dynamicSubagents.workerBudget` (each run's own cap); the parent's `budget` is not inherited; no timezone/DST logic (the machine clock rules).
 
 **Recommendations:** ✅ cheap worker model, small tool pool, lead time sized to the job, a notifier on `scheduled_action.delivered`. ✅ Keep the `Agent` variable alive. ❌ No secrets in `instructions` (stored as plain text).

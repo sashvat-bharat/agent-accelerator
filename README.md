@@ -360,6 +360,7 @@ createScheduledAction(agent, {
     startCookingInAdvance: "00:00:30", // optional, a "DD:HH:MM" duration (default 10 minutes)
     repeatEvery: "01:00:00", // optional; omit to run once
     retries: 1, // optional; used only while time remains before delivery
+    onMissed: "run", // optional: "skip" | "run" if your program was down at delivery time (omit to decide later)
   },
 });
 
@@ -385,7 +386,7 @@ telemetryBus.onEvent((e) => {
 * **Files are the truth.** Everything lives in `<home>/scheduled_actions/`: `tasks.json` (every action), `deliveries.json` (saved results waiting for their delivery time) and one folder per action with one `.md` file per run (a small header, then the result). The file is re-read and validated before each run, so editing `instructions` or `task` there takes effect on the next run. API keys, the model and tool code are never stored. Don't put secrets in `instructions`.
 * **Ready, then delivered.** A finished run is saved immediately (`scheduled_action.ready`); at `timeToDeliver` the SDK emits `scheduled_action.delivered` on `telemetryBus` with `{ id, name, status, file, readyAt, deliverAt, late }`. There is no notification system: what happens next is your code. Other events: `.created`, `.updated`, `.started`, `.failed`, `.missed`, `.skipped`, `.deleted`, plus the warnings `.invalid` and `.store_corrupt`.
 * **Overlap and failure.** A run still cooking when the next one is due is skipped, never stacked. A failed run still writes a file saying why and is delivered like any result (`status: "failed"`).
-* **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once and runs nothing by itself: pick `run_now` or `skip`. A result saved before the process exited is simply delivered (marked `late`) on the first tick after start. `late` means the result was delivered more than two ticks after its time or finished after its delivery second; a `run_now` result is delivered when it finishes and is never `late`.
+* **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once. By default it runs nothing by itself and the action waits as `missed`: pick `run_now` or `skip`. Set `scheduled_action.onMissed` per action to decide in advance: `"skip"` moves on to the next time (a one-shot is `done`; a `skipped` event follows), `"run"` runs it as soon as the program is back (delivered when it finishes). The same applies to a run a crash cut off. An action whose creating Agent is gone stays `missed` whatever `onMissed` says (nothing can run it). A result saved before the process exited is simply delivered (marked `late`) on the first tick after start. `late` means the result was delivered more than two ticks after its time or finished after its delivery second; a `run_now` result is delivered when it finishes and is never `late`.
 
 ---
 ## Tools

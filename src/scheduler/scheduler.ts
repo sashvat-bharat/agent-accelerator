@@ -146,6 +146,9 @@ function checkSchedule(
   if (sa.retries !== undefined && !(Number.isInteger(sa.retries) && sa.retries >= 0)) {
     problems.push("scheduled_action.retries: must be a whole number >= 0.");
   }
+  if (sa.onMissed !== undefined && sa.onMissed !== "skip" && sa.onMissed !== "run") {
+    problems.push(`scheduled_action.onMissed: must be "skip" or "run" (omit it to decide later with run_now or skip); got ${JSON.stringify(sa.onMissed)}.`);
+  }
 }
 
 function checkOptionalFields(input: Pick<ScheduledActionPatch, "role" | "tools" | "timeoutMs">, pool: PoolTools | undefined, problems: string[]): void {
@@ -282,7 +285,7 @@ export class Scheduler {
     for (const t of this.snapshot().live) {
       if (t.state === "cooking") this.recoverCooking(t);
       else if (t.state === "waiting" && t.nextDeliverAt && parseLocalIso(t.nextDeliverAt).getTime() <= now.getTime()) {
-        this.markMissed(t.id, "process_down");
+        this.markMissed(t.id, "process_down", t.schedule.onMissed);
       }
     }
   }
@@ -293,7 +296,7 @@ export class Scheduler {
     const file = findRunFile(this.home, t.id, parseLocalIso(current.deliverAt), current.cookStartedAt);
     const run = file ? readRun(this.home, file) : undefined;
     if (!file || !run) {
-      this.markMissed(t.id, "interrupted");
+      this.markMissed(t.id, "interrupted", t.schedule.onMissed);
       return;
     }
     updateDeliveries(this.home, (pending) => {
@@ -314,7 +317,8 @@ export class Scheduler {
     });
   }
 
-  private markMissed(id: string, reason: string): void {
+  // Marks a run whose moment passed as missed, then applies the action's onMissed policy: `skip` moves on to the next time, `run` runs it now, unset waits for run_now / skip; in: the startup sweep, out: tasks.json + the missed (and skipped / started) events.
+  private markMissed(id: string, reason: string, policy?: "skip" | "run"): void {
     let name = id;
     updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === id);
@@ -323,7 +327,10 @@ export class Scheduler {
       t.state = "missed";
       delete t.current;
     });
-    emit("missed", `"${name}" (${id}) missed its run (${reason}). Use run_now or skip.`, { id, name, reason }, "warn");
+    const next = policy === "skip" ? "Skipping it (onMissed: skip)." : policy === "run" ? "Running it now (onMissed: run)." : "Use run_now or skip.";
+    emit("missed", `"${name}" (${id}) missed its run (${reason}). ${next}`, { id, name, reason, ...(policy ? { onMissed: policy } : {}) }, "warn");
+    if (policy === "skip") this.skip(id);
+    else if (policy === "run") this.startCook(id, true);
   }
 
   // ----- delivery ----------------------------------------------------------
@@ -719,6 +726,7 @@ export function createScheduledAction(agent: Agent, input: ScheduledActionInput)
         startCookingInAdvance: lead,
         ...(sa.repeatEvery !== undefined ? { repeatEvery: sa.repeatEvery } : {}),
         ...(sa.retries !== undefined ? { retries: sa.retries } : {}),
+        ...(sa.onMissed !== undefined ? { onMissed: sa.onMissed } : {}),
       },
       state: "waiting",
       nextCookAt: toLocalIso(cookTime(deliverAt, durationMs(lead, "scheduled_action.startCookingInAdvance"))),

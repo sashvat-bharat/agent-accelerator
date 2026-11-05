@@ -163,6 +163,7 @@ const recordSchema = z
       startCookingInAdvance: z.string(),
       repeatEvery: z.string().optional(),
       retries: z.number().int().min(0).optional(),
+      onMissed: z.enum(["skip", "run"]).optional(),
     }),
     state: z.enum(["waiting", "cooking", "missed", "done"]),
     nextCookAt: iso.nullable(),

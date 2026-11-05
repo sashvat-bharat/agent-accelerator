@@ -15,6 +15,12 @@ export interface ScheduleSpec {
   repeatEvery?: string;
   /** Extra attempts if a run fails, only while time remains before delivery. Default 0. */
   retries?: number;
+  /**
+   * What happens when the host program was not running at a delivery time. `"skip"`: move on to the next time (a one-shot
+   * is done). `"run"`: run it as soon as the program is back. Omitted: the action is marked `missed` and waits for
+   * `runScheduledAction` or `skipScheduledAction`.
+   */
+  onMissed?: "skip" | "run";
 }
 
 /** What `createScheduledAction` receives: dynamic sub-agent fields plus the schedule. */

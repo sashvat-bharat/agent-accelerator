@@ -3,7 +3,7 @@ Schedules a sub-agent (a "scheduled action") to run LATER, once or on repeat, on
 Call get_datetime first whenever you create or reschedule, then pick DD from today's date.
 
 COMMANDS (one tool, the `command` field)
-- create: schedule a new action. Needs instructions, task and scheduled_action.{name, id, timeToDeliver, meridiem, startCookingInAdvance}. Optional: role, tools, timeoutMs, scheduled_action.repeatEvery, scheduled_action.retries.
+- create: schedule a new action. Needs instructions, task and scheduled_action.{name, id, timeToDeliver, meridiem, startCookingInAdvance}. Optional: role, tools, timeoutMs, scheduled_action.repeatEvery, scheduled_action.retries, scheduled_action.onMissed.
 - list: every action with its metadata and state (waiting, cooking, missed, done).
 - get: one action by `id`, with its latest run result.
 - update: change instructions, task, tools, timeoutMs, role or any scheduled_action field of the action `id`.
@@ -19,6 +19,7 @@ SCHEDULED_ACTION FIELDS
 - startCookingInAdvance: "DD:HH:MM" as a duration (HH 00-23): how long before delivery the run starts. "00:00:10" = 10 minutes, "00:01:00" = 1 hour.
 - repeatEvery (optional): "DD:HH:MM" gap between deliveries. "01:00:00" = every day, "07:00:00" = every week. Omit to run once.
 - retries (optional): extra attempts if a run fails, used only while there is still time before delivery. Default 0.
+- onMissed (optional): what to do when the host program was not running at delivery time. "skip" = move on to the next time. "run" = run it when the program is back. Omit it to be told (state missed) and decide with run_now or skip.
 
 EXAMPLES
 Daily brief, first delivery tomorrow at 7:00 AM, starting 30 minutes ahead:
