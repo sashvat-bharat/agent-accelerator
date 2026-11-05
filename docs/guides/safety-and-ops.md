@@ -52,6 +52,7 @@ Cancel anytime with `{ signal }` or `agent.interrupt()`; the error carries `err.
 | `budget` (`maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`) | unlimited | one run of this agent, workers included |
 | `dynamicSubagents.workerBudget` | unlimited | the run of each worker (and of each scheduled-action run) |
 | `dynamicSubagents.maxSpawn` | unlimited | workers open at the same time (`maxSpawn: 3` caps it) |
+| `dynamicSubagents.workerTimeoutMs` | unlimited | how long one scheduled-action run may take (an action's own `timeoutMs` can only be shorter) |
 | `dynamicSubagents.maxDepth` | unlimited | levels of workers below the agent (`maxDepth: 2` lets a worker start workers, and no deeper) |
 
 A scheduled-action run is capped by `workerBudget` only. It never borrows the agent's own `budget`, which is for the agent's own runs; with no `workerBudget` a scheduled run has no cap.

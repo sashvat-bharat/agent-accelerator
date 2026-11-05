@@ -14,7 +14,7 @@
  */
 import type { Agent } from "../agent/agent.ts";
 import { createChildSessionId } from "../agent/delegation.ts";
-import { buildDynamicWorkerConfig, grantWorkerTools, normalizeWorkerTimeoutValue } from "../agent/worker.ts";
+import { buildDynamicWorkerConfig, grantWorkerTools, scheduledRunTimeoutMs } from "../agent/worker.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { readUsage, usageLine, type UsageTotals } from "../session/usage.ts";
 import { lockFolder } from "../utils/durable.ts";
@@ -557,7 +557,7 @@ export class Scheduler {
   }
 
   private async attempt(worker: Agent, task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<AgentResponse> {
-    const ms = normalizeWorkerTimeoutValue(agent.dynamicSubagents?.timeout ?? 0, task.timeoutMs);
+    const ms = scheduledRunTimeoutMs(agent.dynamicSubagents?.workerTimeoutMs ?? Infinity, task.timeoutMs);
     // One controller per attempt (the timeout is per attempt), fed by the entry's delete controller.
     const controller = new AbortController();
     const onDelete = () => controller.abort(entry.controller.signal.reason ?? new Error("deleted"));

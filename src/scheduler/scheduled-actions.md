@@ -18,6 +18,7 @@ SCHEDULED_ACTION FIELDS
 - meridiem: "AM" or "PM" for timeToDeliver.
 - startCookingInAdvance: "DD:HH:MM" as a duration (HH 00-23): how long before delivery the run starts. "00:00:10" = 10 minutes, "00:01:00" = 1 hour.
 - repeatEvery (optional): "DD:HH:MM" gap between deliveries. "01:00:00" = every day, "07:00:00" = every week. Omit to run once.
+- timeoutMs (optional, a top-level field of create and update, not inside scheduled_action): stop a run that takes longer than this many milliseconds. Omit it for no limit of your own; the host program may set a maximum that this cannot exceed.
 - retries (optional): extra attempts if a run fails, used only while there is still time before delivery. Default 0.
 - onMissed (optional): what to do when the host program was not running at delivery time. "skip" = move on to the next time. "run" = run it when the program is back. Omit it to be told (state missed) and decide with run_now or skip.
 

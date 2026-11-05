@@ -1,7 +1,7 @@
 import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState, InterruptedRun } from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
-import { normalizeThinkingV2, resolveWhenBusy, normalizeWorkerTimeout } from "../tools/tool.ts";
+import { normalizeThinkingV2, resolveWhenBusy } from "../tools/tool.ts";
 import type { ToolDefinition, ToolResultRecord } from "../types/tool.ts";
 import { isSubagentResult } from "../tools/subagent-result.ts";
 import { CACHE_OPTIONS, type ThinkingLevel, type ThinkingConfig, type CacheOption, type ServiceTier } from "../types/core.ts";
@@ -171,7 +171,8 @@ export class Agent {
     maxSpawn: number;
     thinkingLevel?: ThinkingLevel;
     tools: Record<string, ToolDefinition>;
-    timeout: number;
+    /** Longest a scheduled run may take, in ms; `Infinity` (the default) = no limit. */
+    workerTimeoutMs: number;
     /** Scheduled actions (`scheduled_actions` + `get_datetime` tools) are on. */
     allowScheduledActions: boolean;
     /** Levels of workers allowed below this agent; `Infinity` (the default) = no limit. */
@@ -339,15 +340,24 @@ export class Agent {
         throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxSpawn ${JSON.stringify(rawMax)}: expected a whole number >= 1, or omit it for no limit.`);
       }
       const maxSpawn = rawMax === undefined || rawMax === Infinity ? Infinity : Math.max(1, Math.floor(rawMax));
-      // `workerTimeoutMs ?? timeout`, or -1 when `modelMaySetTimeout` (see normalizeWorkerTimeout).
-      const timeout = normalizeWorkerTimeout(dynRaw as { timeout?: number; workerTimeoutMs?: number; modelMaySetTimeout?: boolean });
+      // Only scheduled actions are timed: no limit unless the developer sets one (0 and Infinity mean none).
+      for (const removed of ["timeout", "modelMaySetTimeout"]) {
+        if ((dynRaw as Record<string, unknown>)[removed] !== undefined) {
+          throw new ConfigError(`[Agent Accelerator] dynamicSubagents.${removed} was removed: set dynamicSubagents.workerTimeoutMs (the longest a scheduled run may take, optional) and let each scheduled action carry its own timeoutMs.`);
+        }
+      }
+      const rawTimeout = (dynRaw as { workerTimeoutMs?: unknown }).workerTimeoutMs;
+      if (rawTimeout !== undefined && (typeof rawTimeout !== "number" || Number.isNaN(rawTimeout) || rawTimeout < 0)) {
+        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.workerTimeoutMs ${JSON.stringify(rawTimeout)}: expected a number of milliseconds > 0, or omit it (0 and Infinity mean no limit).`);
+      }
+      const workerTimeoutMs = !rawTimeout ? Infinity : Math.max(1, Math.floor(rawTimeout));
       this.dynamicSubagents = {
         enabled: dynEnabled,
         model: dynModel as string | any | undefined,
         maxSpawn,
         thinkingLevel: (dynRaw as any)?.thinkingLevel,
         tools: dynTools,
-        timeout,
+        workerTimeoutMs,
         allowScheduledActions: dynRaw.allowScheduledActions === true,
         maxDepth: (rawDepth as number | undefined) ?? DEFAULT_MAX_DEPTH,
         ...(rawBudget ? { workerBudget: { ...(rawBudget as { maxCostUsd?: number; maxTotalTokens?: number }) } } : {}),

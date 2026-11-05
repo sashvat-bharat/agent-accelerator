@@ -24,6 +24,7 @@ import {
 import { z } from "zod";
 import { getScheduler, resetSchedulers, type Scheduler } from "../src/scheduler/scheduler.ts";
 import { createScheduledActionsTool } from "../src/scheduler/tool.ts";
+import { scheduledRunTimeoutMs } from "../src/agent/worker.ts";
 import {
   readDeliveries,
   readRun,
@@ -621,6 +622,51 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(text).toContain("The run failed:");
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ status: "failed", late: true });
+  });
+
+  it("scheduledRunTimeoutMs: the action's timeoutMs, never above the developer's ceiling, which is also the default", () => {
+    expect(scheduledRunTimeoutMs(Infinity, undefined)).toBe(0); // nothing set anywhere: no timeout
+    expect(scheduledRunTimeoutMs(Infinity, 5000)).toBe(5000); // the action's own limit is honored without a ceiling
+    expect(scheduledRunTimeoutMs(1000, undefined)).toBe(1000); // the ceiling is the default
+    expect(scheduledRunTimeoutMs(1000, 5000)).toBe(1000); // ...and a cap
+    expect(scheduledRunTimeoutMs(1000, 300)).toBe(300); // a shorter action limit stays
+    expect(scheduledRunTimeoutMs(Infinity, 0)).toBe(0);
+  });
+
+  it("an action's own timeoutMs times its run out even when the developer set no worker timeout", async () => {
+    const h = harness();
+    const g = gate();
+    const { fn } = mockFetch(async () => {
+      await g.open;
+      return chatReply();
+    });
+    createScheduledAction(h.agent(fn), input({}, { timeoutMs: 20 })); // the harness agent has no workerTimeoutMs
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const [pending] = readDeliveries(h.home);
+    expect(pending!.status).toBe("failed");
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    g.release();
+  });
+
+  it("the developer's workerTimeoutMs caps an action that asks for longer", async () => {
+    const h = harness();
+    const g = gate();
+    const { fn } = mockFetch(async () => {
+      await g.open;
+      return chatReply();
+    });
+    createScheduledAction(
+      h.agent(fn, { dynamicSubagents: { enabled: false, model: "groq/test-model", allowScheduledActions: true, tools: {}, workerTimeoutMs: 20 } }),
+      input({}, { tools: [], timeoutMs: 600_000 })
+    );
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const [pending] = readDeliveries(h.home);
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    g.release();
   });
 
   it("times a run out with the developer's worker timeout and records the failure", async () => {

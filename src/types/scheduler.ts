@@ -30,6 +30,7 @@ export interface ScheduledActionInput {
   task: string;
   /** Names from the developer's `dynamicSubagents.tools` pool. */
   tools?: string[];
+  /** Longest one run may take, in ms. Never above `dynamicSubagents.workerTimeoutMs` when the developer set one. */
   timeoutMs?: number;
   scheduled_action: ScheduleSpec & {
     /** Human label. */

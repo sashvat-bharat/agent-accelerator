@@ -39,7 +39,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
         enabled: true,
         model: "google/gemini-3.5-flash-lite",
         maxSpawn: 4,
-        timeout: 60000,
+        workerTimeoutMs: 60000,
       },
     });
 

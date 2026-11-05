@@ -54,13 +54,20 @@ describe("canonical option names are honored", () => {
     expect(new Agent({ model: GOOGLE_MODEL, apiKey: "k" }).midSessionMode).toBe("auto");
   });
 
-  it("`workerTimeoutMs` / `modelMaySetTimeout` map to the worker timeout", () => {
+  it("`workerTimeoutMs` is the ceiling of a scheduled run: unset, 0 and Infinity mean no limit", () => {
     const dyn = (d: object) =>
-      new Agent({ model: GOOGLE_MODEL, apiKey: "k", dynamicSubagents: { model: GOOGLE_MODEL, ...d } }).dynamicSubagents!.timeout;
+      new Agent({ model: GOOGLE_MODEL, apiKey: "k", dynamicSubagents: { model: GOOGLE_MODEL, ...d } }).dynamicSubagents!.workerTimeoutMs;
     expect(dyn({ workerTimeoutMs: 1234 })).toBe(1234);
-    expect(dyn({ timeout: 99 })).toBe(99);
-    expect(dyn({ modelMaySetTimeout: true })).toBe(-1);
-    expect(dyn({})).toBe(0);
+    expect(dyn({ workerTimeoutMs: 1234.9 })).toBe(1234);
+    for (const none of [undefined, 0, Infinity]) expect(dyn(none === undefined ? {} : { workerTimeoutMs: none })).toBe(Infinity);
+  });
+
+  it("the removed `timeout` / `modelMaySetTimeout` and a bad `workerTimeoutMs` fail at construction with a fix", async () => {
+    expect(((await import("../src/index.ts")) as Record<string, unknown>).normalizeWorkerTimeout).toBeUndefined(); // the helper of the old options is gone
+    const make = (d: object) => () => new Agent({ model: GOOGLE_MODEL, apiKey: "k", dynamicSubagents: { model: GOOGLE_MODEL, ...d } });
+    expect(make({ timeout: 99 })).toThrow(/dynamicSubagents\.timeout was removed.*workerTimeoutMs/);
+    expect(make({ modelMaySetTimeout: true })).toThrow(/modelMaySetTimeout was removed/);
+    for (const bad of [-1, Number.NaN, "5s", null]) expect(make({ workerTimeoutMs: bad })).toThrow(/Invalid dynamicSubagents\.workerTimeoutMs/);
   });
 
   it("`googleTier: paid` keeps a chained interaction alive past the free 23h gate", async () => {

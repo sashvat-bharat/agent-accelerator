@@ -308,20 +308,12 @@ export interface DynamicSubagentsConfig {
   maxDepth?: number;
   /** Tool pool available to dynamic workers. Workers receive zero tools unless the Main Agent grants a per-task `tools` subset by name. */
   tools?: Record<string, ToolDefinition> | ToolDefinition[];
-  /** Per-run timeout in ms of a SCHEDULED ACTION's worker (the `subagents` tool and `agent.workers` have no timeouts). `0` (default) = no limit. `-1` = the action sets its own `timeoutMs`. `>0` = fixed. */
-  timeout?: number;
   /**
-   * Canonical timeout in ms for scheduled-action workers (Q-52, preferred over `timeout`).
-   * Maps to `timeout`: `workerTimeoutMs ?? timeout ?? 0`. See
-   * `normalizeWorkerTimeout` (re-exported from the root entry).
+   * Longest a SCHEDULED ACTION's run may take, in ms (the `subagents` tool and `agent.workers` have no timeouts). An
+   * action can set its own shorter `timeoutMs`; this is the ceiling for it, and the limit for actions that set none.
+   * Default: no limit (`0` and `Infinity` mean the same).
    */
   workerTimeoutMs?: number;
-  /**
-   * Scheduled actions only: when true, each action sets its own `timeoutMs` (maps to
-   * `timeout: -1`). When both are set, an explicit `timeout`/`workerTimeoutMs`
-   * wins over `modelMaySetTimeout`.
-   */
-  modelMaySetTimeout?: boolean;
 }
 
 /** Per-run overrides for {@link Agent.run}, {@link Agent.ask}, and {@link Agent.stream}. */

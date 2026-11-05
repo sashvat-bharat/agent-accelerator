@@ -62,22 +62,6 @@ export function resolveWhenBusy(
 }
 
 /**
- * Maps the Q-52 canonical worker-timeout knobs to the legacy `timeout` value
- * (`0` = no limit, `-1` = model sets per-task `timeoutMs`, `>0` = fixed ms).
- * An explicit `timeout`/`workerTimeoutMs` wins over `modelMaySetTimeout`.
- *
- * @example `normalizeWorkerTimeout({ modelMaySetTimeout: true }); // -1`
- */
-export function normalizeWorkerTimeout(
-  config?: { timeout?: number; workerTimeoutMs?: number; modelMaySetTimeout?: boolean }
-): number {
-  const explicit = config?.workerTimeoutMs ?? config?.timeout;
-  if (Number.isFinite(explicit as number)) return Math.floor(explicit as number);
-  if (config?.modelMaySetTimeout === true) return -1;
-  return 0;
-}
-
-/**
  * Normalizes the Q-52 `maxAttempts` alias to a `maxTries` value.
  * `maxTries` wins when both are set.
  *

@@ -44,7 +44,6 @@ export {
   TOOL_NAME_PATTERN,
   normalizeThinkingV2,
   resolveWhenBusy,
-  normalizeWorkerTimeout,
   normalizeMaxAttempts,
 } from "./tools/tool.ts";
 export type { CreateToolOptions } from "./tools/tool.ts";
