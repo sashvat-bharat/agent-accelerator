@@ -341,7 +341,7 @@ const agent = new Agent({
 });
 ```
 
-The Main Agent then gets two tools, fixed by config so the prompt cache stays stable: `scheduled_actions` (one tool, `command` = `create | list | get | update | kill | run_now | skip`) and `get_datetime` (the machine's local date and time, also exported as `getDatetimeTool`). The tool description is exactly [`src/scheduler/scheduled-actions.md`](src/scheduler/scheduled-actions.md) (the worker pool names are filled in), so you can read what the model is told.
+The Main Agent then gets two tools, fixed by config so the prompt cache stays stable: `scheduled_actions` (one tool, `command` = `create | list | get | update | delete | run_now | skip`) and `get_datetime` (the machine's local date and time, also exported as `getDatetimeTool`). The tool description is exactly [`src/scheduler/scheduled-actions.md`](src/scheduler/scheduled-actions.md) (the worker pool names are filled in), so you can read what the model is told.
 
 The same code is available to your program:
 
@@ -375,7 +375,7 @@ telemetryBus.onEvent((e) => {
 | `updateScheduledAction(id, patch, { home? })` | Change instructions, task, tools, timeout, role or any schedule field. Schedule changes are refused while it is cooking. |
 | `runScheduledAction(id, { home? })` | Run now, outside the schedule (also resolves a missed run). Needs the creating `Agent` alive. |
 | `skipScheduledAction(id, { home? })` | Ignore a missed run and wait for the next scheduled time. |
-| `killScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
+| `deleteScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
 
 **How it behaves**
 
@@ -383,7 +383,7 @@ telemetryBus.onEvent((e) => {
 * **The creating `Agent` runs it.** The task stores the Agent's `name`; each run goes to the live Agent with that name (latest wins), using its worker model and tool pool. The scheduler holds only a weak reference, so keep your `Agent` referenced; if none is alive, the run counts as missed.
 * **Each run is fresh.** A new stateless dynamic sub-agent built from the saved fields, on your fixed worker model and tool pool, never touching the Main Agent's session. It inherits the parent's limits, retry policy, `fileAccess` and `captureRaw`.
 * **Files are the truth.** Everything lives in `<home>/scheduled_actions/`: `tasks.json` (every action), `deliveries.json` (saved results waiting for their delivery time) and one folder per action with one `.md` file per run (a small header, then the result). The file is re-read and validated before each run, so editing `instructions` or `task` there takes effect on the next run. API keys, the model and tool code are never stored. Don't put secrets in `instructions`.
-* **Ready, then delivered.** A finished run is saved immediately (`scheduled_action.ready`); at `timeToDeliver` the SDK emits `scheduled_action.delivered` on `telemetryBus` with `{ id, name, status, file, readyAt, deliverAt, late }`. There is no notification system: what happens next is your code. Other events: `.created`, `.updated`, `.started`, `.failed`, `.missed`, `.skipped`, `.killed`, plus the warnings `.invalid` and `.store_corrupt`.
+* **Ready, then delivered.** A finished run is saved immediately (`scheduled_action.ready`); at `timeToDeliver` the SDK emits `scheduled_action.delivered` on `telemetryBus` with `{ id, name, status, file, readyAt, deliverAt, late }`. There is no notification system: what happens next is your code. Other events: `.created`, `.updated`, `.started`, `.failed`, `.missed`, `.skipped`, `.deleted`, plus the warnings `.invalid` and `.store_corrupt`.
 * **Overlap and failure.** A run still cooking when the next one is due is skipped, never stacked. A failed run still writes a file saying why and is delivered like any result (`status: "failed"`).
 * **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once and runs nothing by itself: pick `run_now` or `skip`. A result saved before the process exited is simply delivered (marked `late`) on the first tick after start. `late` means the result was delivered more than two ticks after its time or finished after its delivery second; a `run_now` result is delivered when it finishes and is never `late`.
 

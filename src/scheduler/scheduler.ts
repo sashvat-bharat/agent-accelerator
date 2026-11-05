@@ -21,7 +21,7 @@ import { ConfigError, ValidationError } from "../types/errors.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { AgentResponse } from "../types/response.ts";
 import type {
-  KillResult,
+  DeleteResult,
   ScheduledActionInput,
   ScheduledActionPatch,
   ScheduledActionRecord,
@@ -70,10 +70,10 @@ export interface HomeOptions {
 type PoolTools = Record<string, ToolDefinition>;
 type Outcome = { res: AgentResponse } | { error: string };
 interface RunningEntry {
-  /** Aborted by `kill`; every attempt of the run listens to it. */
+  /** Aborted by `delete`; every attempt of the run listens to it. */
   controller: AbortController;
   done: Promise<void>;
-  killed: boolean;
+  deleted: boolean;
   /** Started by `run_now`: delivered when it finishes, never late. */
   manual: boolean;
 }
@@ -465,7 +465,7 @@ export class Scheduler {
 
   // Starts one run without awaiting it and tracks it until it ends; in: startCook, out: this.running + the run's files.
   private launch(task: ScheduledActionRecord, agent: Agent, manual: boolean): void {
-    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), killed: false, manual };
+    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), deleted: false, manual };
     this.running.set(task.id, entry);
     entry.done = this.runWorker(task, agent, entry)
       .catch((err) => {
@@ -482,7 +482,7 @@ export class Scheduler {
   private async runWorker(task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<void> {
     const deliverAt = parseLocalIso(task.current!.deliverAt);
     const outcome = await this.execute(task, agent, entry, deliverAt);
-    if (entry.killed) return; // killed: no run file, nothing delivered
+    if (entry.deleted) return; // deleted: no run file, nothing delivered
     this.finish(task, outcome, task.current!.cookStartedAt, deliverAt, entry.manual);
   }
 
@@ -510,7 +510,7 @@ export class Scheduler {
         try {
           return { res: await this.attempt(worker, task, agent, entry) };
         } catch (err) {
-          if (entry.killed || attempt >= attempts || this.now().getTime() >= deliverAt.getTime()) throw err;
+          if (entry.deleted || attempt >= attempts || this.now().getTime() >= deliverAt.getTime()) throw err;
         }
       }
     } catch (err) {
@@ -526,13 +526,13 @@ export class Scheduler {
 
   private async attempt(worker: Agent, task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<AgentResponse> {
     const ms = normalizeWorkerTimeoutValue(agent.dynamicSubagents?.timeout ?? 0, task.timeoutMs);
-    // One controller per attempt (the timeout is per attempt), fed by the entry's kill controller.
+    // One controller per attempt (the timeout is per attempt), fed by the entry's delete controller.
     const controller = new AbortController();
-    const kill = () => controller.abort(entry.controller.signal.reason ?? new Error("killed"));
-    if (entry.controller.signal.aborted) kill();
-    else entry.controller.signal.addEventListener("abort", kill, { once: true });
+    const onDelete = () => controller.abort(entry.controller.signal.reason ?? new Error("deleted"));
+    if (entry.controller.signal.aborted) onDelete();
+    else entry.controller.signal.addEventListener("abort", onDelete, { once: true });
     const timer = ms > 0 ? setTimeout(() => controller.abort(new Error(`timed out after ${ms}ms`)), ms) : undefined;
-    // Raced so a timeout or kill ends the attempt even if the provider ignores the signal.
+    // Raced so a timeout or delete ends the attempt even if the provider ignores the signal.
     const aborted = new Promise<never>((_, reject) => {
       controller.signal.addEventListener("abort", () => reject(controller.signal.reason ?? new Error("aborted")), { once: true });
     });
@@ -540,7 +540,7 @@ export class Scheduler {
       return await Promise.race([worker.run(task.task, { signal: controller.signal }), aborted]);
     } finally {
       clearTimeout(timer);
-      entry.controller.signal.removeEventListener("abort", kill);
+      entry.controller.signal.removeEventListener("abort", onDelete);
     }
   }
 
@@ -618,7 +618,7 @@ export class Scheduler {
     return rec;
   }
 
-  async kill(id: string, opts: { force?: boolean; purge?: boolean }): Promise<KillResult> {
+  async delete(id: string, opts: { force?: boolean; purge?: boolean }): Promise<DeleteResult> {
     const rec = readTasks(this.home).find((t) => t.id === id);
     if (!rec) return { ok: false, reason: "not_found" };
     const run = this.running.get(id);
@@ -626,12 +626,12 @@ export class Scheduler {
       return {
         ok: false,
         reason: "running",
-        message: `"${id}" is cooking right now, so nothing was changed. Ask the user whether to abort it; if they agree, call kill again with force: true.`,
+        message: `"${id}" is cooking right now, so nothing was changed. Ask the user whether to abort it; if they agree, call delete again with force: true.`,
       };
     }
     if (run) {
-      run.killed = true;
-      run.controller.abort(new Error("killed"));
+      run.deleted = true;
+      run.controller.abort(new Error("deleted"));
       await run.done;
     }
     updateTasks(this.home, (tasks) => {
@@ -642,7 +642,7 @@ export class Scheduler {
       for (let i = pending.length - 1; i >= 0; i--) if (pending[i]!.id === id) pending.splice(i, 1);
     });
     if (opts.purge) removeTaskFolder(this.home, id);
-    emit("killed", `"${rec.name}" (${id}) was killed.`, { id, name: rec.name, forced: !!run, purged: !!opts.purge });
+    emit("deleted", `"${rec.name}" (${id}) was deleted.`, { id, name: rec.name, forced: !!run, purged: !!opts.purge });
     return { ok: true };
   }
 }
@@ -818,6 +818,6 @@ export function skipScheduledAction(id: string, opts?: HomeOptions): ScheduledAc
  * `force: true` (the run is aborted, then deleted). Past run files are kept
  * unless `purge: true`.
  */
-export function killScheduledAction(id: string, opts?: HomeOptions & { force?: boolean; purge?: boolean }): Promise<KillResult> {
-  return schedulerFor(opts).kill(id, { force: opts?.force, purge: opts?.purge });
+export function deleteScheduledAction(id: string, opts?: HomeOptions & { force?: boolean; purge?: boolean }): Promise<DeleteResult> {
+  return schedulerFor(opts).delete(id, { force: opts?.force, purge: opts?.purge });
 }

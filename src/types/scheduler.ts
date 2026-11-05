@@ -74,8 +74,8 @@ export interface ScheduledDelivery {
   late: boolean;
 }
 
-/** Result of `killScheduledAction`. */
-export type KillResult =
+/** Result of `deleteScheduledAction`. */
+export type DeleteResult =
   | { ok: true }
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "running"; message: string };

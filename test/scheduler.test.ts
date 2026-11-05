@@ -15,7 +15,7 @@ import {
   updateScheduledAction,
   runScheduledAction,
   skipScheduledAction,
-  killScheduledAction,
+  deleteScheduledAction,
   getDatetimeTool,
   type AgentConfig,
   type ScheduledActionInput,
@@ -716,7 +716,7 @@ describe("scheduler startup sweep", () => {
 // ---------------------------------------------------------------------------
 // Public functions
 // ---------------------------------------------------------------------------
-describe("list / update / run_now / skip / kill", () => {
+describe("list / update / run_now / skip / delete", () => {
   it("lists every action with a running flag", async () => {
     const h = harness();
     const g = gate();
@@ -790,14 +790,14 @@ describe("list / update / run_now / skip / kill", () => {
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false });
   });
 
-  it("run_now needs a live agent; list/get/kill/skip do not", async () => {
+  it("run_now needs a live agent; list/get/delete/skip do not", async () => {
     const h = harness();
     const rec = createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
     h.boot(); // restarted, Agent not constructed yet
     expect(() => runScheduledAction(rec.id, { home: h.home })).toThrow(ConfigError);
     expect(listScheduledActions({ home: h.home })).toHaveLength(1);
     expect(() => skipScheduledAction(rec.id, { home: h.home })).toThrow(/nothing to skip/);
-    expect(await killScheduledAction(rec.id, { home: h.home })).toEqual({ ok: true });
+    expect(await deleteScheduledAction(rec.id, { home: h.home })).toEqual({ ok: true });
   });
 
   it("run_now resolves a missed repeating action by moving to the next occurrence after now", async () => {
@@ -827,30 +827,36 @@ describe("list / update / run_now / skip / kill", () => {
     expect(skipScheduledAction(once.id, { home: h.home })).toMatchObject({ state: "done", nextDeliverAt: null, nextCookAt: null });
   });
 
-  it("kill: not found, idle, running (needs force), force aborts without a run file, purge removes the folder", async () => {
+  it("the old kill names are gone from the public API (no alias)", async () => {
+    const mod = (await import("../src/index.ts")) as Record<string, unknown>;
+    expect(typeof mod.deleteScheduledAction).toBe("function");
+    expect(mod.killScheduledAction).toBeUndefined();
+  });
+
+  it("delete: not found, idle, running (needs force), force aborts without a run file, purge removes the folder", async () => {
     const h = harness();
     const { of } = capture();
     const g = gate();
     const { fn } = mockFetch(async () => (await g.open, chatReply()));
-    expect(await killScheduledAction("nope-abc123", { home: h.home })).toEqual({ ok: false, reason: "not_found" });
+    expect(await deleteScheduledAction("nope-abc123", { home: h.home })).toEqual({ ok: false, reason: "not_found" });
 
     const idle = createScheduledAction(h.agent(fn), input({ id: "idle-one" }));
-    expect(await killScheduledAction(idle.id, { home: h.home })).toEqual({ ok: true });
+    expect(await deleteScheduledAction(idle.id, { home: h.home })).toEqual({ ok: true });
     expect(readTasks(h.home)).toEqual([]);
 
     const rec = createScheduledAction(h.agent(fn), input());
     h.set(18, 50);
     h.s.tick();
-    const refused = await killScheduledAction(rec.id, { home: h.home });
+    const refused = await deleteScheduledAction(rec.id, { home: h.home });
     expect(refused).toMatchObject({ ok: false, reason: "running" });
     expect((refused as { message: string }).message).toContain("force: true");
     expect(readTasks(h.home)).toHaveLength(1);
 
-    expect(await killScheduledAction(rec.id, { home: h.home, force: true })).toEqual({ ok: true });
+    expect(await deleteScheduledAction(rec.id, { home: h.home, force: true })).toEqual({ ok: true });
     expect(readTasks(h.home)).toEqual([]);
     expect(readDeliveries(h.home)).toEqual([]);
     expect(fs.existsSync(runDir(h, rec.id))).toBe(false); // an aborted run writes no file
-    expect(of("scheduled_action.killed").map((e) => (e.data as any).forced)).toEqual([false, true]);
+    expect(of("scheduled_action.deleted").map((e) => (e.data as any).forced)).toEqual([false, true]);
     g.release();
 
     // purge: a finished action's run files are kept unless asked.
@@ -859,13 +865,13 @@ describe("list / update / run_now / skip / kill", () => {
     h.s.tick();
     await h.settle();
     expect(fs.existsSync(runDir(h, kept.id))).toBe(true);
-    await killScheduledAction(kept.id, { home: h.home });
+    await deleteScheduledAction(kept.id, { home: h.home });
     expect(fs.existsSync(runDir(h, kept.id))).toBe(true);
     const purged = createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input({ id: "purged-one" }));
     h.set(18, 50);
     h.s.tick();
     await h.settle();
-    await killScheduledAction(purged.id, { home: h.home, purge: true });
+    await deleteScheduledAction(purged.id, { home: h.home, purge: true });
     expect(fs.existsSync(runDir(h, purged.id))).toBe(false);
   });
 });
@@ -922,10 +928,10 @@ describe("scheduled_actions and get_datetime tools", () => {
     await expect(scheduledActions.execute({ command: "frobnicate" }, { toolCallId: "t" })).rejects.toThrow(/Unknown command "frobnicate"/);
   });
 
-  it("get/update/kill/run_now/skip need an id; get returns the latest result text", async () => {
+  it("get/update/delete/run_now/skip need an id; get returns the latest result text", async () => {
     const h = harness();
     const agent = h.agent(mockFetch(() => chatReply("Latest brief text.")).fn);
-    for (const command of ["get", "update", "kill", "run_now", "skip"]) {
+    for (const command of ["get", "update", "delete", "run_now", "skip"]) {
       const r = await call(agent, { command });
       expect(r.isError).toBe(true);
       expect(String(r.result)).toContain('needs "id"');
@@ -939,8 +945,8 @@ describe("scheduled_actions and get_datetime tools", () => {
     h.s.tick();
     const got = (await call(agent, { command: "get", id: made.id })).result as any;
     expect(got).toMatchObject({ id: made.id, lastRun: { status: "ok" }, latestResult: "Latest brief text." });
-    const killed = await call(agent, { command: "kill", id: made.id, purge: true });
-    expect(killed.result).toEqual({ ok: true });
+    const removed = await call(agent, { command: "delete", id: made.id, purge: true });
+    expect(removed.result).toEqual({ ok: true });
     expect(String((await call(agent, { command: "get", id: made.id })).result)).toContain("No scheduled action");
   });
 

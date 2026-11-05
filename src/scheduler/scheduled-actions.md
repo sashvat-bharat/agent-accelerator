@@ -7,7 +7,7 @@ COMMANDS (one tool, the `command` field)
 - list: every action with its metadata and state (waiting, cooking, missed, done).
 - get: one action by `id`, with its latest run result.
 - update: change instructions, task, tools, timeoutMs, role or any scheduled_action field of the action `id`.
-- kill: delete the action `id` for good. If the answer says it is running, ask the user before retrying with force: true. purge: true also deletes its past run files.
+- delete: delete the action `id` for good. If the answer says it is running, ask the user before retrying with force: true. purge: true also deletes its past run files.
 - run_now: run the action `id` immediately, outside its schedule. Also fixes a missed run.
 - skip: ignore a missed run of `id` and wait for the next scheduled time.
 

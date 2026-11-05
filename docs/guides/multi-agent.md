@@ -135,14 +135,14 @@ telemetryBus.onEvent((e) => {
 });
 ```
 
-Also exported: `listScheduledActions`, `updateScheduledAction`, `runScheduledAction` (run now), `skipScheduledAction`, `killScheduledAction(id, { force, purge })`, `getDatetimeTool`. The model gets the same power through the `scheduled_actions` tool (`create | list | get | update | kill | run_now | skip`) and reads the machine clock with `get_datetime`.
+Also exported: `listScheduledActions`, `updateScheduledAction`, `runScheduledAction` (run now), `skipScheduledAction`, `deleteScheduledAction(id, { force, purge })`, `getDatetimeTool`. The model gets the same power through the `scheduled_actions` tool (`create | list | get | update | delete | run_now | skip`) and reads the machine clock with `get_datetime`.
 
 How it works:
 - **Time format.** `timeToDeliver` is `DD:HH:MM`: `DD` days from today (`00` today, `01` tomorrow, no upper limit), `HH:MM` on a 12-hour clock with `meridiem`. `startCookingInAdvance` and `repeatEvery` are durations (`HH` 00–23). Delivery has **one-minute resolution**. Repeats use calendar days, so 7:00 AM stays 7:00 AM. The lead time must be shorter than the repeat gap.
 - **Lifecycle.** `waiting` → `cooking` → result saved (`ready`) → `delivered` at the delivery time → `waiting` again or `done`. A failed run still writes a file saying why. A run still cooking when the next is due is skipped (`skipped`), never stacked.
 - **Files** under `<home>/scheduled_actions/` (`home` defaults to `setHome(dir)`, `AGENT_ACCEL_HOME`, then `.agent-accel/`): `tasks.json`, `deliveries.json`, and one `.md` result file per run. Files are re-read and validated before each run, so editing `instructions`/`task` takes effect next run. No keys or tool code are stored.
-- **Events** on `telemetryBus` (`scheduled_action.*`): `created`, `updated`, `started`, `ready`, `failed`, `delivered`, `missed`, `skipped`, `killed`, `invalid`, `store_corrupt`, `error`.
-- **Missed runs.** If the process was down at the moment, the SDK emits `missed` once and runs nothing by itself: call `runScheduledAction` or `skipScheduledAction`. `killScheduledAction` refuses while an action is cooking unless `force: true`.
+- **Events** on `telemetryBus` (`scheduled_action.*`): `created`, `updated`, `started`, `ready`, `failed`, `delivered`, `missed`, `skipped`, `deleted`, `invalid`, `store_corrupt`, `error`.
+- **Missed runs.** If the process was down at the moment, the SDK emits `missed` once and runs nothing by itself: call `runScheduledAction` or `skipScheduledAction`. `deleteScheduledAction` refuses while an action is cooking unless `force: true`.
 - **Honest limits.** Actions run only while your process is alive, and only if the creating Agent is still referenced (held weakly). Use **one process per home folder** (a second process fails at once: the home is locked). `run_now` never retries (it is delivered when it finishes, never `late`); `update` cannot remove `repeatEvery`; the only spending guardrail is `dynamicSubagents.workerBudget` (each run's own cap); the parent's `budget` is not inherited; no timezone/DST logic (the machine clock rules).
 
 **Recommendations:** ✅ cheap worker model, small tool pool, lead time sized to the job, a notifier on `scheduled_action.delivered`. ✅ Keep the `Agent` variable alive. ❌ No secrets in `instructions` (stored as plain text).

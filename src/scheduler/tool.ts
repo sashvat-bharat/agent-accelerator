@@ -14,7 +14,7 @@ import type { ScheduledActionInput, ScheduledActionPatch } from "../types/schedu
 import {
   createScheduledAction,
   getScheduler,
-  killScheduledAction,
+  deleteScheduledAction,
   listScheduledActions,
   runScheduledAction,
   skipScheduledAction,
@@ -24,7 +24,7 @@ import {
 import { readRun } from "./store.ts";
 import { formatDatetime } from "./time.ts";
 
-const COMMANDS = ["create", "list", "get", "update", "kill", "run_now", "skip"] as const;
+const COMMANDS = ["create", "list", "get", "update", "delete", "run_now", "skip"] as const;
 
 let manual: string | undefined;
 /** Read on first use (not at import), so a program that never enables scheduling never touches the file. */
@@ -52,7 +52,7 @@ const scheduledActionSchema = z.object({
   retries: z.number().optional().describe("Extra attempts if a run fails."),
 });
 
-const describedId = "Full action id including its 6-character suffix (get, update, kill, run_now, skip).";
+const describedId = "Full action id including its 6-character suffix (get, update, delete, run_now, skip).";
 
 /** Builds the `scheduled_actions` tool for `agent`; its description is the manual with the worker pool filled in. */
 export function createScheduledActionsTool(agent: Agent): ToolDefinition {
@@ -87,8 +87,8 @@ export function createScheduledActionsTool(agent: Agent): ToolDefinition {
       tools: z.array(z.string()).optional().describe(`Worker tools to grant, from: ${poolNames.join(", ") || "none"}.`),
       timeoutMs: z.number().optional().describe("Per-run time limit in ms (> 0)."),
       scheduled_action: scheduledActionSchema.optional(),
-      force: z.boolean().optional().describe("kill: abort a run that is cooking. Ask the user first."),
-      purge: z.boolean().optional().describe("kill: also delete past run files."),
+      force: z.boolean().optional().describe("delete: abort a run that is cooking. Ask the user first."),
+      purge: z.boolean().optional().describe("delete: also delete past run files."),
     }),
     execute: async (a) => {
       const sa = a.scheduled_action ?? {};
@@ -137,8 +137,8 @@ export function createScheduledActionsTool(agent: Agent): ToolDefinition {
           }
           return updateScheduledAction(id, patch, { home });
         }
-        case "kill":
-          return killScheduledAction(needId(), { home, force: a.force, purge: a.purge });
+        case "delete":
+          return deleteScheduledAction(needId(), { home, force: a.force, purge: a.purge });
         case "run_now":
           return runScheduledAction(needId(), { home });
         case "skip":

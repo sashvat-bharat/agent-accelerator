@@ -94,7 +94,7 @@ export {
   updateScheduledAction,
   runScheduledAction,
   skipScheduledAction,
-  killScheduledAction,
+  deleteScheduledAction,
 } from "./scheduler/scheduler.ts";
 export { getDatetimeTool } from "./scheduler/tool.ts";
 export { setHome, resolveHome } from "./utils/home.ts";
@@ -106,7 +106,7 @@ export type {
   ScheduledState,
   ScheduledRunStatus,
   ScheduleSpec,
-  KillResult,
+  DeleteResult,
 } from "./types/scheduler.ts";
 
 // Providers & Registry — unified multi-provider layer, all native REST
