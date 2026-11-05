@@ -26,6 +26,7 @@ import { getScheduler, resetSchedulers, type Scheduler } from "../src/scheduler/
 import { createScheduledActionsTool } from "../src/scheduler/tool.ts";
 import {
   readDeliveries,
+  readRun,
   readTasks,
   removeTaskFolder,
   resolveHome,
@@ -523,6 +524,82 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     await h.settle();
     expect(calls).toHaveLength(2);
     expect(readDeliveries(h.home)[0]!.status).toBe("ok");
+  });
+
+  it("the run header records the run's exact spending, like usageReport does for workers", async () => {
+    const h = harness();
+    createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input()); // 10 in + 5 out, no known price for the test model
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const header = readRun(h.home, readDeliveries(h.home)[0]!.file)!.header;
+    expect(header).toMatchObject({
+      status: "ok",
+      model: "groq/test-model",
+      turns: "1",
+      tokens: "15",
+      inputTokens: "10",
+      freshInputTokens: "10",
+      cacheReadTokens: "0",
+      cacheWriteTokens: "0",
+      outputTokens: "5",
+      thinkingTokens: "0",
+      cacheHitRate: "0",
+      costUsd: "unknown",
+      costSource: "unknown",
+      unpricedTurns: "1",
+    });
+  });
+
+  it("the run header splits cache reads from fresh input and uses the provider's reported cost", async () => {
+    const h = harness();
+    const cached = () =>
+      new Response(
+        JSON.stringify({
+          id: "c",
+          choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, prompt_tokens_details: { cached_tokens: 80 }, completion_tokens_details: { reasoning_tokens: 7 }, cost: 0.0005 },
+        }),
+        { status: 200 }
+      );
+    createScheduledAction(h.agent(mockFetch(cached).fn), input());
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const header = readRun(h.home, readDeliveries(h.home)[0]!.file)!.header;
+    expect(header).toMatchObject({ tokens: "120", inputTokens: "100", freshInputTokens: "20", cacheReadTokens: "80", outputTokens: "20", thinkingTokens: "7", cacheHitRate: "0.8", costUsd: "0.0005", costSource: "provider" });
+    expect(header["unpricedTurns"]).toBeUndefined(); // every turn had a price
+  });
+
+  it("a failed run still records what it spent, over all attempts", async () => {
+    const h = harness();
+    const toolTurn = () =>
+      new Response(
+        JSON.stringify({
+          id: "c",
+          choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "recent_news", arguments: "{}" } }] }, finish_reason: "tool_calls" }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+        { status: 200 }
+      );
+    // Attempt 1: a tool turn (15 tokens), then the provider rejects the next call. Attempt 2: a plain answer (15 tokens).
+    const { fn } = mockFetch((n) => (n === 1 ? toolTurn() : n === 2 ? badReply() : chatReply()));
+    createScheduledAction(h.agent(fn), input({ retries: 1 }));
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const ok = readRun(h.home, readDeliveries(h.home)[0]!.file)!.header;
+    expect(ok).toMatchObject({ status: "ok", turns: "2", tokens: "30" }); // the response alone would say 15
+
+    const h2 = harness();
+    createScheduledAction(h2.agent(mockFetch((n) => (n === 1 ? toolTurn() : badReply())).fn), input());
+    h2.set(18, 50);
+    h2.s.tick();
+    await h2.settle();
+    const failed = readRun(h2.home, readDeliveries(h2.home)[0]!.file)!.header;
+    expect(failed).toMatchObject({ status: "failed", turns: "1", tokens: "15", inputTokens: "10", outputTokens: "5" });
+    expect(failed["error"]).toBeTruthy();
+    expect(failed["model"]).toBeUndefined();
   });
 
   it("records a failed run (file + delivery) when no time is left to retry", async () => {

@@ -101,7 +101,7 @@ for (const w of workers) console.log(w.id, w.status, w.turns, w.tokens.thinking,
 
 - Each agent records only the calls it made itself, priced per turn (cache reads, cache writes, service tier), and saves them with its session, so the report works after a restart and nothing is counted twice. `total` matches the tokens in the responses.
 - Unknown pricing shows as `totalUsd: null` (never 0) and `unpricedTurns > 0` marks a lower bound; `source` says whether the cost came from the `provider`, the `catalog`, or `mixed`.
-- Not included: one-shot scheduled-action workers (see their run files) and workers started inside a fixed `subagents` worker's per-call copy.
+- Not included: one-shot scheduled-action workers (their exact spending is in each run file's header) and workers started inside a fixed `subagents` worker's per-call copy.
 
 ## Errors
 

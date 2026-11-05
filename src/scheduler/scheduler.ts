@@ -16,6 +16,7 @@ import type { Agent } from "../agent/agent.ts";
 import { createChildSessionId } from "../agent/delegation.ts";
 import { buildDynamicWorkerConfig, grantWorkerTools, normalizeWorkerTimeoutValue } from "../agent/worker.ts";
 import { telemetryBus } from "../telemetry.ts";
+import { readUsage, usageLine, type UsageTotals } from "../session/usage.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
 import type { ToolDefinition } from "../types/tool.ts";
@@ -68,7 +69,7 @@ export interface HomeOptions {
 }
 
 type PoolTools = Record<string, ToolDefinition>;
-type Outcome = { res: AgentResponse } | { error: string };
+type Outcome = ({ res: AgentResponse } | { error: string }) & { usage?: UsageTotals };
 interface RunningEntry {
   /** Aborted by `delete`; every attempt of the run listens to it. */
   controller: AbortController;
@@ -81,6 +82,26 @@ interface RunningEntry {
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+// A run's exact spending as run-header fields, the numbers `usageReport()` keeps for workers (tokens split, cache hit rate, cost and where the price came from); in: the one-shot worker's totals over all attempts, out: finish's RunHeader.
+function usageFields(totals: UsageTotals | undefined): Partial<RunHeader> {
+  if (!totals || totals.turns === 0) return {};
+  const u = usageLine(totals);
+  return {
+    turns: u.turns,
+    tokens: u.tokens.total,
+    inputTokens: u.tokens.input,
+    freshInputTokens: u.tokens.freshInput,
+    cacheReadTokens: u.tokens.cacheRead,
+    cacheWriteTokens: u.tokens.cacheWrite,
+    outputTokens: u.tokens.output,
+    thinkingTokens: u.tokens.thinking,
+    ...(u.cacheHitRate !== null ? { cacheHitRate: Math.round(u.cacheHitRate * 10_000) / 10_000 } : {}),
+    costUsd: u.cost.totalUsd === null ? "unknown" : Number(u.cost.totalUsd.toFixed(6)),
+    costSource: u.cost.source,
+    ...(u.cost.unpricedTurns > 0 ? { unpricedTurns: u.cost.unpricedTurns } : {}),
+  };
+}
 
 // Whole seconds since the epoch: stored times have no milliseconds, so lateness is compared at this precision; in: a clock reading or stored time, out: finish and deliver.
 const secondOf = (d: Date): number => Math.floor(d.getTime() / 1000);
@@ -519,13 +540,13 @@ export class Scheduler {
       const attempts = 1 + (task.schedule.retries ?? 0);
       for (let attempt = 1; ; attempt++) {
         try {
-          return { res: await this.attempt(worker, task, agent, entry) };
+          return { res: await this.attempt(worker, task, agent, entry), usage: readUsage(worker.usageTotals) };
         } catch (err) {
           if (entry.deleted || attempt >= attempts || this.now().getTime() >= deliverAt.getTime()) throw err;
         }
       }
     } catch (err) {
-      return { error: errText(err) };
+      return { error: errText(err), ...(worker ? { usage: readUsage(worker.usageTotals) } : {}) };
     } finally {
       try {
         worker?.reset();
@@ -570,13 +591,9 @@ export class Scheduler {
       finishedAt,
       deliverAt: toLocalIso(due),
       late,
-      ...(ok
-        ? {
-            model: `${outcome.res.provider}/${outcome.res.model}`,
-            tokens: outcome.res.usage.totalTokens,
-            costUsd: outcome.res.usage.cost?.totalCost ?? "unknown",
-          }
-        : { error: outcome.error }),
+      ...(ok ? { model: `${outcome.res.provider}/${outcome.res.model}` } : {}),
+      ...usageFields(outcome.usage),
+      ...(ok ? {} : { error: outcome.error }),
     };
     const body = ok ? outcome.res.text.trim() || "[The worker returned no text.]" : `The run failed: ${outcome.error}`;
     const file = writeRunFile(this.home, task.id, deliverAt, header, body);

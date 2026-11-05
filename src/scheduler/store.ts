@@ -17,6 +17,7 @@ import { telemetryBus } from "../telemetry.ts";
 import { resolveHome } from "../utils/home.ts";
 export { resolveHome };
 import { ValidationError } from "../types/errors.ts";
+import type { CostSource } from "../session/usage.ts";
 import type { ScheduledActionRecord, ScheduledRunStatus } from "../types/scheduler.ts";
 import { durationMs, runFileName } from "./time.ts";
 
@@ -48,9 +49,26 @@ export interface RunHeader {
   /** The run finished after its delivery time. */
   late: boolean;
   model?: string;
+  /** Model calls the run made (all attempts), and what they spent: the same numbers `usageReport()` keeps for workers. */
+  turns?: number;
+  /** Input + output tokens. */
   tokens?: number;
-  /** `unknown` when the model has no known pricing (never a made-up 0). */
+  /** Everything sent; `freshInputTokens + cacheReadTokens + cacheWriteTokens`. */
+  inputTokens?: number;
+  freshInputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** Everything generated, thinking included. */
+  outputTokens?: number;
+  thinkingTokens?: number;
+  /** `cacheReadTokens / inputTokens`, 0 to 1; absent when nothing was sent. */
+  cacheHitRate?: number;
+  /** `unknown` when no turn had a known price (never a made-up 0). */
   costUsd?: number | "unknown";
+  /** Where the price came from: the `provider`'s reported cost, the `catalog`, `mixed`, or `unknown`. */
+  costSource?: CostSource;
+  /** Turns with no known price; when present, `costUsd` is a lower bound. */
+  unpricedTurns?: number;
   error?: string;
 }
 
