@@ -146,6 +146,9 @@ When `dynamicSubagents.enabled` is set without a resolvable worker model, constr
 await agent.run(prompt, opts?) // non-streaming, or streaming when opts.stream is true
 agent.ask(prompt, optsOrBool?) // deprecated (use run): string deltas when streaming, otherwise same as run
 agent.stream(prompt, opts?) // AssistantMessageEventStream
+agent.steer(prompt) / agent.queue(prompt) // while busy: join the active run / start after it
+agent.interrupt() // stop the active run now (provider request aborted, stream cancelled, tools get ctx.signal)
+await agent.interrupt(message) // stop it AND run `message` next, ahead of queued follow-ups (stream: opts.enqueue = "interrupt")
 agent.reset() // clears messages + signatures, keeps config
 agent.exportSession(telemetry?) // storable snapshot for saveSessionFile
 agent.importSession(saved) // restores messages + config from loadSessionFile
@@ -172,7 +175,8 @@ Use `ContentPart[]` when sending images, audio, or video alongside text.
 | `additionalContext`             | Added only to the current user turn. Keeps the system prompt stable for better caching.                                                         |
 | `sessionId`                     | Per-run session override.                                                                                                                       |
 | `headers`                       | Per-run header merge.                                                                                                                           |
-| `signal`                        | `AbortSignal` used to cancel generation, tools, and subagents.                                                                                  |
+| `signal`                        | `AbortSignal` used to cancel generation, tools, and subagents. The provider request is aborted and a stream's body is cancelled; see [what interrupting stops at the provider](docs/guides/safety-and-ops.md#what-interrupting-stops-at-the-provider). |
+| `enqueue`                       | When the agent is busy: `"steer"` (join the active run), `"queue"` (run after it) or `"interrupt"` (stop it and run this prompt next, in every `midSession` mode). |
 
 ### Streaming
 
@@ -1353,7 +1357,7 @@ bun run examples/11-session-identity.ts
 # sub-agent TrackingIDs, live worker boxes, lineage, track(), durable sessions
 
 bun run examples/12-mid-session.ts
-# steer, queue and stream while a turn is running
+# steer, queue and stream while a turn is running (interrupt() stops it; interrupt(message) stops it and runs the message)
 
 bun run examples/13-structured-output.ts
 # JSON Schema structured outputs on every provider

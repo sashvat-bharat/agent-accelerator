@@ -121,7 +121,8 @@ export interface AgentConfig {
    * - `{ mode: "steer" }`: only steer (inject into current turn) is allowed.
    * - `{ mode: "queue" }`: only queue (next-turn follow-up) is allowed.
    * - `{ mode: "auto" }` (default): caller picks per message via `enqueue` or `steer()`/`queue()`.
-   * `interrupt` (cancel stream now) is always available via `interrupt()`/`cancel()`/`AbortSignal`.
+   * `interrupt` (stop the active run now, optionally start a new message) is always available, whatever the mode:
+   * `interrupt()`, `interrupt(message)`, `enqueue: "interrupt"`, `cancel()` and `AbortSignal`.
    */
   midSession?: MidSessionConfig;
   /**
@@ -339,8 +340,10 @@ export interface AgentRunOptions {
    * enforces `"steer"` or `"queue"`, that policy wins and this field is ignored.
    * When idle, this field is ignored and the call runs immediately.
    * Defaults to `"queue"` (finish current turn, run as next turn).
+   * `"interrupt"` is honored in every mode: it stops the active run (provider request, tools, workers) and starts this
+   * prompt as the next run, ahead of queued follow-ups.
    */
-  enqueue?: "steer" | "queue";
+  enqueue?: "steer" | "queue" | "interrupt";
   /** Headers merged for this run only. */
   headers?: Record<string, string>;
   /** Called for each text delta as it streams (only when stream:true). */

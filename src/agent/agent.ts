@@ -261,6 +261,8 @@ export class Agent {
     deferredStream?: AssistantMessageEventStream;
     resolve: (res: AgentResponse) => void;
     reject: (err: unknown) => void;
+    /** Put here by `interrupt(message)`: runs before every other waiting prompt. */
+    urgent?: boolean;
   }> = [];
   /** Named session contexts for `sessionId` runs (Q-19a, LRU 100 + TTL). */
   private sessions = new Map<string, { context: AgentContext; lastAccess: number }>();
@@ -823,20 +825,44 @@ export class Agent {
   }
 
   /**
-   * Interrupts the active run immediately (STOP. Do this instead).
-   * Cancels the active stream and aborts provider/tool/sub-agent work via
-   * the run's internal `AbortController`. No-op when idle. The interrupted
-   * run rejects with `AbortError`; queued follow-ups still run afterwards.
+   * Stops the active run now (STOP.) and, given a message, starts it next (STOP. Do this instead). The provider
+   * request is aborted (connection closed, so the provider stops generating where it can), the stream is cancelled, and
+   * running tools and workers get the abort signal; the interrupted run rejects with `AbortError` and keeps its partial
+   * history. `interrupt()` and `interrupt(error)` only stop (no-op when idle) and return nothing. `interrupt(message)`
+   * also runs `message` as the next run, ahead of queued follow-ups, in every `midSession` mode, and resolves with that
+   * run's response; when idle it simply runs the message. For a stream use `stream(message, { enqueue: "interrupt" })`.
    */
-  interrupt(reason?: unknown): void {
+  interrupt(reason?: Error): void;
+  interrupt(message: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse>;
+  interrupt(arg?: Error | string | ContentPart[], options?: AgentRunOptions): void | Promise<AgentResponse> {
+    if (typeof arg === "string" || Array.isArray(arg)) {
+      if (options?.stream === true) {
+        throw new Error('[Agent Accelerator] interrupt(message) is non-streaming. Use stream(prompt, { enqueue: "interrupt" }) for a streaming interrupt.');
+      }
+      return this.run(arg, { ...options, enqueue: "interrupt" });
+    }
+    this.abortActive(arg instanceof Error ? arg : undefined);
+  }
+
+  // Aborts the active run (provider request, tools, workers, stream) through its own controller; no-op when idle; in: interrupt and queueUrgent, out: the run settles as AbortError.
+  private abortActive(reason?: Error): void {
     const active = this.currentRun;
     if (!active) return;
     try {
-      active.abortController.abort(reason instanceof Error ? reason : new Error("Agent interrupted"));
+      active.abortController.abort(reason ?? new Error("Agent interrupted"));
     } catch {}
     try {
       active.outerStream?.cancel(reason);
     } catch {}
+  }
+
+  // Puts a prompt ahead of everything waiting (behind earlier interrupts) and aborts the active run, so it starts as soon as that run has settled; ignores midSession mode and maxQueued; in: run()/stream() with enqueue "interrupt", out: pendingQueue + the abort.
+  private queueUrgent(entry: Agent["pendingQueue"][number]): void {
+    entry.urgent = true;
+    const firstOrdinary = this.pendingQueue.findIndex((e) => !e.urgent);
+    this.pendingQueue.splice(firstOrdinary < 0 ? this.pendingQueue.length : firstOrdinary, 0, entry);
+    this.persistNow();
+    this.abortActive();
   }
 
   /**
@@ -1027,7 +1053,9 @@ export class Agent {
             reject: entry.settle?.reject ?? (() => {}),
           });
         }
-        this.pendingQueue.unshift(...lateSteers);
+        // ...but behind an interrupt(message), which is the newest and most urgent instruction.
+        const firstOrdinary = this.pendingQueue.findIndex((e) => !e.urgent);
+        this.pendingQueue.splice(firstOrdinary < 0 ? this.pendingQueue.length : firstOrdinary, 0, ...lateSteers);
       } catch {}
     }
     this.persistNow();
@@ -1708,8 +1736,11 @@ export class Agent {
       return s;
     }
 
-    // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
+    // Mid-session: busy agent serializes via steer (same turn) or queue (next turn), or stops the active run and starts this prompt (interrupt).
     if (this.currentRun) {
+      if (options?.enqueue === "interrupt") {
+        return new Promise<AgentResponse>((resolve, reject) => this.queueUrgent({ prompt, options, isStream: false, resolve, reject }));
+      }
       const enforced = this.midSessionConfig.mode;
       const requested = options?.enqueue;
       if (requested && (enforced === "steer" || enforced === "queue") && requested !== enforced) {
@@ -1823,13 +1854,14 @@ export class Agent {
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
     if (this.currentRun) {
       const enforcedStream = this.midSessionConfig.mode;
-      const requestedStream = options?.enqueue;
+      const urgent = options?.enqueue === "interrupt"; // stops the active run and goes first, in every mode and whatever the queue holds
+      const requestedStream = options?.enqueue === "interrupt" ? undefined : options?.enqueue;
       if (requestedStream && (enforcedStream === "steer" || enforcedStream === "queue") && requestedStream !== enforcedStream) {
         throw new Error(
           `[Agent Accelerator] enqueue "${requestedStream}" is disabled by midSession.mode "${enforcedStream}". Use ${enforcedStream}() or set mode to "auto"/"${requestedStream}".`
         );
       }
-      const mode = this.resolveEnqueueMode(requestedStream);
+      const mode = urgent ? "queue" : this.resolveEnqueueMode(requestedStream);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
         this.assertSteerRoom(this.currentRun.steerInbox);
@@ -1862,14 +1894,14 @@ export class Agent {
         }
         return stub;
       }
-      if (this.midSessionConfig.mode === "steer") {
+      if (!urgent && this.midSessionConfig.mode === "steer") {
         throw new Error(
           '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
         );
       }
       this.assertPromptValid(prompt);
       const max = this.midSessionConfig.maxQueued ?? 20;
-      if (this.pendingQueue.length >= max) {
+      if (!urgent && this.pendingQueue.length >= max) {
         throw new Error(
           `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
         );
@@ -1877,13 +1909,15 @@ export class Agent {
       const deferred = new AssistantMessageEventStream();
       this.wireStreamCallbacks(deferred, options);
       // Notify the active stream (if any) that a follow-up was queued.
-      try {
-        this.currentRun.outerStream?.push({
-          type: "queued",
-          queuedPrompt: this.previewPrompt(prompt),
-          queueLength: this.pendingQueue.length + 1,
-        } as any);
-      } catch {}
+      if (!urgent) {
+        try {
+          this.currentRun.outerStream?.push({
+            type: "queued",
+            queuedPrompt: this.previewPrompt(prompt),
+            queueLength: this.pendingQueue.length + 1,
+          } as any);
+        } catch {}
+      }
       const queuedEntry: {
         prompt: string | ContentPart[];
         options?: AgentRunOptions;
@@ -1919,8 +1953,12 @@ export class Agent {
           }
         } catch {}
       });
-      this.pendingQueue.push(queuedEntry as any);
-      this.persistNow();
+      if (urgent) {
+        this.queueUrgent(queuedEntry as Agent["pendingQueue"][number]);
+      } else {
+        this.pendingQueue.push(queuedEntry as any);
+        this.persistNow();
+      }
       // Attach deferred completion to queued promise without exposing it.
       // Real events are piped in pumpQueue() when the turn starts.
       void done.then(

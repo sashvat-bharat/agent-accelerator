@@ -92,17 +92,30 @@ console.log((await long).text);
 console.log((await steered).text); // same response as the run it joined
 console.log((await next).text); // its own run and response
 // agent.interrupt() cancels the active run; queued follow-ups still run.
+// agent.interrupt("Stop. Summarize what you have.") cancels it AND runs that message next, ahead of the queue.
 ```
 
 | Call | Effect |
 |---|---|
 | `steer(prompt)` | Joins the active run after the current model/tool step; one response, same turn budget. Idle agent: behaves like `run`. |
 | `queue(prompt)` | Starts a new run when the current one ends. Throws when `maxQueued` (default 20) is full. |
-| `interrupt()` | Aborts the active run (rejects with `AbortError`, partial result kept). |
+| `interrupt()` | Aborts the active run now (rejects with `AbortError`, partial result kept). Idle agent: nothing happens. `interrupt(error)` aborts with that error as the reason. |
+| `interrupt(message)` | Aborts the active run **and** starts `message` as the next run, ahead of every queued follow-up and of a steer that missed the aborted run; resolves with that run's response. Works in every `midSession` mode and even when the queue is full. Idle agent: behaves like `run`. |
 | `clearQueue()` | Rejects all queued follow-ups. |
-| `stream(prompt, { enqueue: "steer" \| "queue" })` | Streaming variants. |
+| `stream(prompt, { enqueue: "steer" \| "queue" \| "interrupt" })` | Streaming variants (`run(prompt, { enqueue })` takes the same values). |
 
 `midSession: { mode \| whenBusy: "steer" \| "queue" \| "auto" }` can enforce one policy (the other verb then throws). `isBusy`, `pendingCount`, `steerPendingCount` expose state. A steer that arrives after the run ended becomes a queued follow-up (placed at the FRONT of the queue, in arrival order, since it was typed before anything queued later), and its promise resolves with *that* run's response. With `persist: { dir }` the prompts still waiting (steers not yet injected, queued follow-ups, with their `additionalContext`) are saved with the session, so a crash does not lose a message the user already typed.
+
+### What an interrupt really stops
+
+`interrupt()` is immediate, and it cancels the work, not just your wait for it:
+
+- **The model call.** The provider request is aborted, which closes the connection. A streaming response body is cancelled too, so the SDK stops reading and the tokens stop flowing. The provider stops generating **where it honors a closed connection**: see [what each provider does](safety-and-ops.md#what-interrupting-stops-at-the-provider).
+- **Tools.** A running tool gets `ctx.signal` aborted (use it to stop real work). The run does not wait for a tool that ignores its signal: it continues at once and that tool finishes in the background with its result dropped. A call that never got a result is repaired in the history (an error result saying it was interrupted), so the next message starts from a valid conversation.
+- **Workers.** A running `subagents` call or `agent.workers` call is aborted with the run; the worker's own provider request is cancelled the same way and the worker stays open.
+- **History.** The prompt of the interrupted run and any finished tool work are kept; the unfinished answer is not stored.
+- **Order with `interrupt(message)`.** The message runs first; a steer typed before the interrupt that missed the aborted run and queued follow-ups run after it, in their order. If the model or a tool is slow to give up, the message starts the moment the aborted run has settled.
+- **Streaming.** `interrupt(message)` is non-streaming; for a stream use `stream(message, { enqueue: "interrupt" })`. The stream being interrupted fails with `AbortError`.
 
 ## Asking permission
 

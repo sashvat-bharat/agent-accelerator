@@ -53,7 +53,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `signal` | Cancels provider, tools and sub-agents |
 | `sessionId` | Which in-memory session to use |
 | `additionalContext` | Per-turn context added to the user turn (not to `instructions`) |
-| `enqueue` | `"steer"` or `"queue"` when the agent is busy |
+| `enqueue` | `"steer"`, `"queue"` or `"interrupt"` when the agent is busy. `"interrupt"` works in every `midSession` mode: it aborts the active run and starts this prompt next, ahead of queued follow-ups |
 | `headers` | Extra request headers |
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
 | `wrapThinking` | Display reasoning inside `<think>…</think>` |

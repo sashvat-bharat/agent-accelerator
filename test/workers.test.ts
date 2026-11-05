@@ -132,6 +132,26 @@ describe("worker registry: spawn, message, close, list", () => {
     await expect(after.workers.message(b.id, "x")).rejects.toThrow("is closed");
   });
 
+  it("aborting a worker call closes the worker's own provider request and leaves the worker open", async () => {
+    const seen: AbortSignal[] = [];
+    const parent = mk(undefined, (_body, init) => {
+      const signal = init.signal as AbortSignal;
+      seen.push(signal);
+      return new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true })); // the model never answers
+    });
+    const ctl = new AbortController();
+    const pending = parent.workers.spawn(spec, { signal: ctl.signal });
+    await settle(30);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.aborted).toBe(false);
+    ctl.abort();
+    const r = await pending;
+    expect(r.error).toBeTruthy(); // reported as a failed reply, never thrown
+    expect(seen[0]!.aborted).toBe(true); // the worker's request to the provider was cancelled, not just ignored
+    expect(parent.workers.list()).toHaveLength(1);
+    expect(parent.workers.list()[0]!.busy).toBe(false);
+  });
+
   it("checks a request before it spends anything: tools, open-worker limit, busy worker", async () => {
     const parent = mk(tmp(), echo, { dynamicSubagents: { model: "groq/w", maxSpawn: 1, tools: { lookup: tool({ description: "d", input: z.object({}), execute: () => "x" }) } } });
     await expect(parent.workers.spawn({ ...spec, tools: ["nope"] })).rejects.toThrow('unknown worker tool(s) "nope"; the pool is [lookup]');

@@ -135,11 +135,11 @@ export function combinedSignal(signal?: AbortSignal, timeoutMs?: number): { sign
   if (signal) {
     if (signal.aborted) {
       cleanup();
-      ctrl.abort();
+      ctrl.abort(signal.reason); // the caller's reason survives (`interrupt(new Error("..."))`)
     } else {
       signal.addEventListener("abort", () => {
         cleanup();
-        try { ctrl.abort(); } catch {}
+        try { ctrl.abort(signal.reason); } catch {}
       }, { once: true });
     }
   }

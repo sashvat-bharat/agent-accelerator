@@ -361,7 +361,7 @@ export class WorkerRegistry {
         else delete meta.last;
         this.save(entry);
       }
-      const onAbort = (): void => agent.interrupt(opts.signal?.reason);
+      const onAbort = (): void => agent.interrupt(opts.signal?.reason instanceof Error ? opts.signal.reason : undefined);
       try {
         if (opts.signal?.aborted) throw new Error("aborted before the worker started");
         opts.signal?.addEventListener("abort", onAbort, { once: true });
