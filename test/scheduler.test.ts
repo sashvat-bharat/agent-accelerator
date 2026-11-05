@@ -31,6 +31,7 @@ import {
   resolveHome,
   updateDeliveries,
   updateTasks,
+  validateDelivery,
   validateRecord,
   writeRunFile,
   type RunHeader,
@@ -639,6 +640,13 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("a delivery entry's late flag must be a boolean when present", () => {
+    const entry = { id: "a-b12345", file: "a-b12345/26-october-2026.md", status: "ok", readyAt: iso(19, 0), deliverAt: iso(19, 0) };
+    expect(validateDelivery(entry)).toBeUndefined();
+    expect(validateDelivery({ ...entry, late: true })).toBeUndefined();
+    expect(validateDelivery({ ...entry, late: "yes" })).toMatch(/late/);
+  });
+
   it("skips a damaged deliveries.json entry (warns once) instead of stalling the scheduler", async () => {
     const h = harness();
     const { of } = capture();
@@ -749,7 +757,8 @@ describe("scheduler startup sweep", () => {
     expect(calls).toHaveLength(1);
     expect(codes()).toEqual(expect.arrayContaining(["scheduled_action.missed", "scheduled_action.started", "scheduled_action.ready", "scheduled_action.delivered"]));
     expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ onMissed: "run" });
-    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "waiting", nextDeliverAt: iso(19, 0, 0, 27), lastRun: { status: "ok" } });
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true }); // it ran after its time
+    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "waiting", nextDeliverAt: iso(19, 0, 0, 27), lastRun: { status: "ok", late: true } });
     h.s.tick();
     expect(calls).toHaveLength(1); // the missed occurrence ran once, not again
   });
@@ -808,6 +817,28 @@ describe("scheduler startup sweep", () => {
     expect(readDeliveries(h.home)).toEqual([{ id: rec.id, file: `${rec.id}/26-october-2026.md`, status: "ok", readyAt: iso(18, 50), deliverAt: iso(19, 0) }]);
     expect(readTasks(h.home)[0]).toMatchObject({ state: "done" });
     expect(readTasks(h.home)[0]!.current).toBeUndefined();
+  });
+
+  it("a crash after the run file was written keeps the late flag of a replaced missed run", async () => {
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "run" }));
+    h.boot();
+    h.set(20, 0);
+    h.agent(fn);
+    h.s.tick();
+    await h.settle(); // the missed run ran and wrote its file with `late: true`
+    updateDeliveries(h.home, (p) => void p.splice(0)); // crash: the delivery entry and the task update are lost
+    updateTasks(h.home, (tasks) => {
+      tasks[0]!.state = "cooking";
+      tasks[0]!.current = { cookStartedAt: iso(20, 0), deliverAt: iso(20, 0) };
+    });
+    h.boot();
+    h.set(20, 0, 30); // 30 s later: on time by the clock, so only the saved flag can make it late
+    const { of } = capture();
+    h.agent(fn);
+    h.s.tick(); // the startup sweep rebuilds the entry, and the same tick delivers it
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true });
   });
 
   it("delivers a saved result that is past due on the first tick, marked late", async () => {
@@ -939,6 +970,31 @@ describe("list / update / run_now / skip / delete", () => {
     expect(runScheduledAction(rec.id, { home: h.home })).toMatchObject({ state: "cooking", nextDeliverAt: iso(19, 0, 0, 27), nextCookAt: iso(18, 50, 0, 27) });
     await h.settle();
     expect(readTasks(h.home)[0]!.state).toBe("waiting");
+  });
+
+  it("a run_now that replaces a missed occurrence is late; a plain run_now is not", async () => {
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    const missedRec = createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00" }));
+    h.boot();
+    h.set(20, 0);
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("missed");
+    runScheduledAction(missedRec.id, { home: h.home });
+    await h.settle();
+    expect(readDeliveries(h.home)[0]).toMatchObject({ id: missedRec.id, late: true }); // the flag is on the saved entry
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", readDeliveries(h.home)[0]!.file), "utf8")).toContain("late: true");
+    const { of } = capture();
+    h.s.tick();
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true });
+    expect(readTasks(h.home)[0]!.lastRun).toMatchObject({ late: true });
+
+    // The same action run early (it is waiting again) is a plain run_now: on time.
+    runScheduledAction(missedRec.id, { home: h.home });
+    await h.settle();
+    h.s.tick();
+    expect(of("scheduled_action.delivered")[1]!.data).toMatchObject({ late: false });
   });
 
   it("skip ignores a missed run: next occurrence for a repeat, done for a one-shot", () => {

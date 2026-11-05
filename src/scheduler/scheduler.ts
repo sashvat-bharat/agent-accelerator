@@ -74,8 +74,10 @@ interface RunningEntry {
   controller: AbortController;
   done: Promise<void>;
   deleted: boolean;
-  /** Started by `run_now`: delivered when it finishes, never late. */
+  /** Started by `run_now` or `onMissed: "run"`: due when it finishes. */
   manual: boolean;
+  /** A manual run that replaces a missed occurrence: always `late`. A plain `run_now` is never late. */
+  missed: boolean;
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -307,6 +309,7 @@ export class Scheduler {
         status: run.header["status"] === "failed" ? "failed" : "ok",
         readyAt: run.header["finishedAt"] ?? current.deliverAt,
         deliverAt: current.deliverAt,
+        ...(run.header["late"] === "true" ? { late: true } : {}),
       });
     });
     updateTasks(this.home, (tasks) => {
@@ -341,14 +344,14 @@ export class Scheduler {
     }
   }
 
-  // Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens); late = delivered over two ticks after its time or finished after it; in: deliverDue, out: tasks.json + the delivered event.
+  // Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens); late = it replaced a missed occurrence, was delivered over two ticks after its time, or finished after it; in: deliverDue, out: tasks.json + the delivered event.
   private deliver(entry: PendingDelivery, now: Date): void {
     updateDeliveries(this.home, (pending) => {
       const i = pending.findIndex((p) => p.id === entry.id && p.file === entry.file);
       if (i >= 0) pending.splice(i, 1);
     });
     const deliverAt = parseLocalIso(entry.deliverAt).getTime();
-    const late = now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
+    const late = entry.late === true || now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
     let name = entry.id;
     updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === entry.id);
@@ -394,7 +397,7 @@ export class Scheduler {
    */
   private startCook(id: string, manual: boolean): ScheduledActionRecord | undefined {
     const now = this.now();
-    const ctx: { agent?: Agent; noAgent?: boolean } = {};
+    const ctx: { agent?: Agent; noAgent?: boolean; replacesMissed?: boolean } = {};
     const started = updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === id);
       if (!t) return undefined;
@@ -404,6 +407,7 @@ export class Scheduler {
         return undefined;
       }
       if (t.state === "cooking") return undefined;
+      ctx.replacesMissed = manual && t.state === "missed";
       ctx.agent = this.agents.get(t.agent)?.deref();
       if (!ctx.agent) {
         t.state = "missed";
@@ -439,7 +443,7 @@ export class Scheduler {
       cookStartedAt: started.current!.cookStartedAt,
       deliverAt: started.current!.deliverAt,
     });
-    this.launch(started, ctx.agent, manual);
+    this.launch(started, ctx.agent, manual, ctx.replacesMissed === true);
     return started;
   }
 
@@ -471,8 +475,8 @@ export class Scheduler {
   }
 
   // Starts one run without awaiting it and tracks it until it ends; in: startCook, out: this.running + the run's files.
-  private launch(task: ScheduledActionRecord, agent: Agent, manual: boolean): void {
-    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), deleted: false, manual };
+  private launch(task: ScheduledActionRecord, agent: Agent, manual: boolean, missed: boolean): void {
+    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), deleted: false, manual, missed };
     this.running.set(task.id, entry);
     entry.done = this.runWorker(task, agent, entry)
       .catch((err) => {
@@ -490,7 +494,7 @@ export class Scheduler {
     const deliverAt = parseLocalIso(task.current!.deliverAt);
     const outcome = await this.execute(task, agent, entry, deliverAt);
     if (entry.deleted) return; // deleted: no run file, nothing delivered
-    this.finish(task, outcome, task.current!.cookStartedAt, deliverAt, entry.manual);
+    this.finish(task, outcome, task.current!.cookStartedAt, deliverAt, entry);
   }
 
   /** A fresh stateless worker built from the saved fields; retries only while there is time before delivery. */
@@ -551,12 +555,13 @@ export class Scheduler {
     }
   }
 
-  // Writes a finished run: run file, then the `deliveries.json` entry, then `tasks.json` (a crash in between is repaired on start); a manual run is due when it finishes, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
-  private finish(task: ScheduledActionRecord, outcome: Outcome, startedAt: string, deliverAt: Date, manual: boolean): void {
+  // Writes a finished run: run file, then the `deliveries.json` entry, then `tasks.json` (a crash in between is repaired on start); a manual run is due when it finishes and is late only if it replaced a missed occurrence, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
+  private finish(task: ScheduledActionRecord, outcome: Outcome, startedAt: string, deliverAt: Date, run: Pick<RunningEntry, "manual" | "missed">): void {
     const now = this.now();
     const ok = "res" in outcome;
     const finishedAt = toLocalIso(now);
-    const due = manual ? now : deliverAt;
+    const due = run.manual ? now : deliverAt;
+    const late = run.missed || secondOf(now) > secondOf(due);
     const header: RunHeader = {
       id: task.id,
       name: task.name,
@@ -564,7 +569,7 @@ export class Scheduler {
       startedAt,
       finishedAt,
       deliverAt: toLocalIso(due),
-      late: secondOf(now) > secondOf(due),
+      late,
       ...(ok
         ? {
             model: `${outcome.res.provider}/${outcome.res.model}`,
@@ -576,7 +581,7 @@ export class Scheduler {
     const body = ok ? outcome.res.text.trim() || "[The worker returned no text.]" : `The run failed: ${outcome.error}`;
     const file = writeRunFile(this.home, task.id, deliverAt, header, body);
     updateDeliveries(this.home, (pending) => {
-      pending.push({ id: task.id, file, status: header.status, readyAt: finishedAt, deliverAt: header.deliverAt });
+      pending.push({ id: task.id, file, status: header.status, readyAt: finishedAt, deliverAt: header.deliverAt, ...(run.missed ? { late: true } : {}) });
     });
     updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === task.id);
