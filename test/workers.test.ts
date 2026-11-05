@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
-import { Agent, tool, ValidationError } from "../src/index.ts";
+import { Agent, tool, ValidationError, ConfigError } from "../src/index.ts";
 import { sessionDirFor } from "../src/session/store.ts";
 import { buildDynamicWorkerConfig } from "../src/agent/worker.ts";
 
@@ -335,6 +335,35 @@ const toolNames = (body: any): string[] => (body.tools ?? []).map((t: any) => t.
 const systemText = (body: any): string => body.messages[0].content;
 const lastTool = (body: any): string | undefined => toolMessages(body).at(-1);
 
+describe("maxSpawn: open workers are unlimited unless a cap is set", () => {
+  it("has no limit by default, and Infinity means the same", async () => {
+    const parent = mk(undefined, echo, { dynamicSubagents: { model: "groq/w" } });
+    expect(parent.dynamicSubagents?.maxSpawn).toBe(Infinity);
+    for (let i = 0; i < 6; i++) expect((await parent.workers.spawn({ ...spec, name: `w${i}` })).error).toBeUndefined();
+    expect(parent.workers.list()).toHaveLength(6);
+    expect(mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxSpawn: Infinity } }).dynamicSubagents?.maxSpawn).toBe(Infinity);
+  });
+
+  it("a number caps the open workers (below 1 counts as 1), and a non-number is a ConfigError", async () => {
+    expect(mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxSpawn: 3.9 } }).dynamicSubagents?.maxSpawn).toBe(3);
+    expect(mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxSpawn: 0 } }).dynamicSubagents?.maxSpawn).toBe(1);
+    for (const bad of ["many", Number.NaN, null]) {
+      expect(() => mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxSpawn: bad } })).toThrow(ConfigError);
+    }
+    expect(() => mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxSpawn: "many" } })).toThrow("dynamicSubagents.maxSpawn");
+  });
+
+  it("the manual tells the model the truth about the limit", () => {
+    const open = mk(undefined, echo, { dynamicSubagents: { model: "groq/w" } }).tools["subagents"]!.description;
+    expect(open).toContain("There is no limit on open workers");
+    expect(open).not.toContain("at most");
+    const capped = mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxSpawn: 2 } }).tools["subagents"]!.description;
+    expect(capped).toContain("at most 2 open workers");
+    expect(capped).not.toContain("no limit");
+    for (const text of [open, capped]) expect(text).not.toContain("{{");
+  });
+});
+
 describe("workers that start workers (maxDepth)", () => {
   // Level markers L1, L2, L3 are in each worker's own instructions; L1 and L2 start the next level, L3 is the leaf.
   const chain: Handler = (body) => {
@@ -348,11 +377,15 @@ describe("workers that start workers (maxDepth)", () => {
   it("lets a worker spawn workers down to maxDepth, and the last level has no subagents tool", async () => {
     const root = tmp();
     const byLevel: Record<string, string[]> = {};
-    const parent = mk(root, (body, init) => {
-      const level = /L(\d)/.exec(systemText(body))?.[1];
-      if (level) byLevel[level] ??= toolNames(body);
-      return chain(body, init);
-    });
+    const parent = mk(
+      root,
+      (body, init) => {
+        const level = /L(\d)/.exec(systemText(body))?.[1];
+        if (level) byLevel[level] ??= toolNames(body);
+        return chain(body, init);
+      },
+      { dynamicSubagents: { model: "groq/w", maxDepth: 3 } }
+    );
     const r = await parent.workers.spawn({ name: "top", instructions: "You are L1.", task: "start" });
     expect(r.error).toBeUndefined();
     expect(r.text).toContain("leaf"); // L1 saw L2 who saw L3: "leaf" travelled all the way up
@@ -395,11 +428,41 @@ describe("workers that start workers (maxDepth)", () => {
     expect(r.text).toContain('Error: tools: unknown worker tool(s) "other"; the pool is [lookup]');
   });
 
-  it("rejects a maxDepth that is not a whole number of at least 1", () => {
-    for (const bad of [0, -1, 1.5, "3"]) {
+  it("rejects a maxDepth that is not a whole number of at least 1 (Infinity and unset mean no limit)", () => {
+    for (const bad of [0, -1, 1.5, "3", Number.NaN]) {
       expect(() => mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxDepth: bad } })).toThrow("dynamicSubagents.maxDepth");
     }
-    expect(mk(undefined, echo).dynamicSubagents?.maxDepth).toBe(3);
+    expect(mk(undefined, echo).dynamicSubagents?.maxDepth).toBe(Infinity);
+    expect(mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxDepth: Infinity } }).dynamicSubagents?.maxDepth).toBe(Infinity);
+    expect(mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxDepth: 5 } }).dynamicSubagents?.maxDepth).toBe(5);
+  });
+
+  it("by default depth is unlimited: every level keeps its subagents tool and the setting reaches the children", () => {
+    const parent = mk(undefined, echo, { dynamicSubagents: { model: "groq/w" } });
+    const common = { name: "w", instructions: "", sessionId: "p1-sub-w", tools: {}, persistent: {} };
+    const child = buildDynamicWorkerConfig(parent, common);
+    expect(child.dynamicSubagents?.enabled).toBe(true);
+    expect(child.dynamicSubagents?.maxDepth).toBe(Infinity);
+    expect(() => new Agent({ ...child, baseUrl: "https://example.test/v1", apiKey: "k" })).not.toThrow(); // the child accepts it
+    // A cap still counts down: 2 levels below the parent leaves 1 below its worker, and 1 leaves none.
+    expect(buildDynamicWorkerConfig(mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxDepth: 2 } }), common).dynamicSubagents?.maxDepth).toBe(1);
+    expect(buildDynamicWorkerConfig(mk(undefined, echo, { dynamicSubagents: { model: "groq/w", maxDepth: 1 } }), common).dynamicSubagents).toBeUndefined();
+  });
+
+  it("with no maxDepth a chain goes deeper than 3 levels", async () => {
+    const byLevel: Record<string, string[]> = {};
+    const deep: Handler = (body) => {
+      const level = /L(\d)/.exec(systemText(body))?.[1];
+      if (!level) return reply("parent", body);
+      byLevel[level] ??= toolNames(body);
+      if (level === "4") return reply("leaf", body);
+      if (lastTool(body) !== undefined) return reply(`L${level} saw: ${lastTool(body)}`, body);
+      return toolTurn(body, { command: "spawn", name: `kid${level}`, instructions: `You are L${Number(level) + 1}.`, task: "go" });
+    };
+    const parent = mk(undefined, deep, { dynamicSubagents: { model: "groq/w" } });
+    const r = await parent.workers.spawn({ name: "top", instructions: "You are L1.", task: "start" });
+    expect(r.text).toContain("leaf");
+    expect(byLevel["4"]).toContain("subagents"); // a 4th level exists and could still start workers
   });
 });
 
@@ -429,6 +492,15 @@ describe("workerBudget: each worker's own spending cap", () => {
     expect(text).toMatch(/^\[worker r-[0-9a-f]{8}\] failed: Token budget exceeded/);
     const open = mk(undefined, echo);
     expect((await open.workers.spawn(spec)).error).toBeUndefined();
+  });
+
+  it("a worker never borrows the agent's own budget: no workerBudget means no cap at all", async () => {
+    const parent = mk(undefined, echo, { budget: { maxTotalTokens: 1, maxCostUsd: 0.0000001 }, dynamicSubagents: { model: "groq/w" } });
+    const common = { name: "w", instructions: "", sessionId: "p1-sub-w", tools: {} };
+    expect(buildDynamicWorkerConfig(parent, common).budget).toBeUndefined();
+    expect(buildDynamicWorkerConfig(parent, { ...common, persistent: {} }).budget).toBeUndefined();
+    expect(buildDynamicWorkerConfig(mk(undefined, echo), common).budget).toBeUndefined(); // nothing set anywhere
+    expect((await parent.workers.spawn(spec)).error).toBeUndefined(); // 4 tokens per turn would break the agent's own cap of 1
   });
 
   it("is each worker's own budget, passed down to its workers and to one-shot workers", () => {

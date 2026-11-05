@@ -591,6 +591,41 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toMatch(/no longer in the pool: gone_tool/);
   });
 
+  // A parent whose scheduled runs use `extra` (budget / workerBudget); the pool and worker model are the harness defaults.
+  const withBudgets = (h: Harness, fn: typeof fetch, extra: { budget?: AgentConfig["budget"]; workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number } }) =>
+    h.agent(fn, {
+      ...(extra.budget ? { budget: extra.budget } : {}),
+      dynamicSubagents: {
+        enabled: false,
+        model: "groq/test-model",
+        allowScheduledActions: true,
+        ...(extra.workerBudget ? { workerBudget: extra.workerBudget } : {}),
+        tools: { recent_news: tool({ description: "news", input: z.object({}), execute: () => "n" }) },
+      },
+    });
+  const runText = async (h: Harness): Promise<string> => {
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    return fs.readFileSync(path.join(h.home, "scheduled_actions", readDeliveries(h.home)[0]!.file), "utf8");
+  };
+
+  it("a scheduled run is capped by workerBudget: going over records a failed run", async () => {
+    const h = harness();
+    createScheduledAction(withBudgets(h, mockFetch(() => chatReply()).fn, { workerBudget: { maxTotalTokens: 3 } }), input()); // one model turn = 15 tokens
+    const text = await runText(h);
+    expect(text).toContain("status: failed");
+    expect(text).toContain("Token budget exceeded");
+  });
+
+  it("without workerBudget a scheduled run has no cap, and the agent's own budget is not borrowed", async () => {
+    const h = harness();
+    createScheduledAction(withBudgets(h, mockFetch(() => chatReply("fine")).fn, { budget: { maxTotalTokens: 1, maxCostUsd: 0.0000001 } }), input());
+    const text = await runText(h);
+    expect(text).toContain("status: ok");
+    expect(text).toContain("fine");
+  });
+
   it("counts a run as missed (never runs it) when the creating Agent is no longer alive", () => {
     const h = harness();
     const { fn, calls } = mockFetch(() => chatReply());

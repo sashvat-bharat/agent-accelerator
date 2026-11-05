@@ -95,6 +95,8 @@ function resolveAgentLimits(config: { limits?: Record<string, unknown> }): Agent
   const raw = (config as { limits?: Record<string, unknown> }).limits ?? {};
   const num = (v: unknown): number | undefined =>
     typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
+  const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
   return {
     ...(num(raw.maxTurns) !== undefined ? { maxTurns: Math.max(1, Math.floor(num(raw.maxTurns)!)) } : {}),
     ...(num(raw.deadlineMs) !== undefined ? { deadlineMs: num(raw.deadlineMs)! } : {}),
@@ -102,9 +104,9 @@ function resolveAgentLimits(config: { limits?: Record<string, unknown> }): Agent
       ? { maxToolCallsPerRun: Math.max(1, Math.floor(num(raw.maxToolCallsPerRun)!)) }
       : {}),
     ...(num(raw.maxTotalTokens) !== undefined ? { maxTotalTokens: Math.max(1, Math.floor(num(raw.maxTotalTokens)!)) } : {}),
-    requestTimeoutMs: num(raw.requestTimeoutMs) ?? 300_000,
-    firstByteTimeoutMs: num(raw.firstByteTimeoutMs) ?? 120_000,
-    streamIdleTimeoutMs: num(raw.streamIdleTimeoutMs) ?? 300_000,
+    requestTimeoutMs: timeout(raw.requestTimeoutMs) ?? 300_000,
+    firstByteTimeoutMs: timeout(raw.firstByteTimeoutMs) ?? 120_000,
+    streamIdleTimeoutMs: timeout(raw.streamIdleTimeoutMs) ?? 300_000,
   };
 }
 
@@ -165,13 +167,14 @@ export class Agent {
   readonly dynamicSubagents?: {
     enabled: boolean;
     model?: string | any;
+    /** Open workers at once; `Infinity` (the default) = no limit. */
     maxSpawn: number;
     thinkingLevel?: ThinkingLevel;
     tools: Record<string, ToolDefinition>;
     timeout: number;
     /** Scheduled actions (`scheduled_actions` + `get_datetime` tools) are on. */
     allowScheduledActions: boolean;
-    /** Levels of workers allowed below this agent. */
+    /** Levels of workers allowed below this agent; `Infinity` (the default) = no limit. */
     maxDepth: number;
     /** Per-run spending cap of each worker (unset = unlimited). */
     workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
@@ -319,8 +322,9 @@ export class Agent {
     if (dynRaw) {
       const dynTools = normalizeToolMap((dynRaw as { tools?: Record<string, ToolDefinition> | ToolDefinition[] }).tools);
       const rawDepth = (dynRaw as { maxDepth?: unknown }).maxDepth;
-      if (rawDepth !== undefined && !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)) {
-        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1 (default ${DEFAULT_MAX_DEPTH}); set dynamicSubagents.enabled: false to turn workers off.`);
+      // Depth is unlimited unless the developer sets a cap (a whole number >= 1; Infinity also means unlimited).
+      if (rawDepth !== undefined && rawDepth !== Infinity && !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)) {
+        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1, or omit it for no limit; set dynamicSubagents.enabled: false to turn workers off.`);
       }
       const rawBudget = (dynRaw as { workerBudget?: { maxCostUsd?: unknown; maxTotalTokens?: unknown } }).workerBudget;
       for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
@@ -329,8 +333,12 @@ export class Agent {
           throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.workerBudget.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`);
         }
       }
-      const rawMax = (dynRaw as any)?.maxSpawn;
-      const maxSpawn = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax as number)) : 4;
+      // Open workers are unlimited unless the developer sets a cap (a number >= 1; Infinity also means unlimited).
+      const rawMax = (dynRaw as { maxSpawn?: unknown }).maxSpawn;
+      if (rawMax !== undefined && (typeof rawMax !== "number" || Number.isNaN(rawMax))) {
+        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxSpawn ${JSON.stringify(rawMax)}: expected a whole number >= 1, or omit it for no limit.`);
+      }
+      const maxSpawn = rawMax === undefined || rawMax === Infinity ? Infinity : Math.max(1, Math.floor(rawMax));
       // `workerTimeoutMs ?? timeout`, or -1 when `modelMaySetTimeout` (see normalizeWorkerTimeout).
       const timeout = normalizeWorkerTimeout(dynRaw as { timeout?: number; workerTimeoutMs?: number; modelMaySetTimeout?: boolean });
       this.dynamicSubagents = {

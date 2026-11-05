@@ -236,8 +236,8 @@ export function resolveWorkerCredentials(
   return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
 }
 
-/** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise. */
-export const DEFAULT_MAX_DEPTH = 3;
+/** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise: unlimited. */
+export const DEFAULT_MAX_DEPTH = Infinity;
 
 /**
  * Config of a dynamic worker (scheduled actions, the worker registry): the developer's fixed worker

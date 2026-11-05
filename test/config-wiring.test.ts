@@ -299,3 +299,60 @@ describe("budgets, limits and worker inheritance are enforced", () => {
     }
   });
 });
+
+describe("network timeouts: defaults, changing them, turning them off", () => {
+  const agentWith = (fn: typeof fetch, limits?: Record<string, number>) =>
+    new Agent({ model: "groq/m", apiKey: "k", baseUrl: "https://example.test/v1", fetch: fn, runRetries: 0, retry: { maxRetries: 0 }, ...(limits ? { limits } : {}) });
+  const slow = (ms: number, stream = false): typeof fetch =>
+    (async () => {
+      await new Promise((r) => setTimeout(r, ms));
+      return stream
+        ? new Response(
+            `data: ${JSON.stringify({ id: "s", choices: [{ delta: { content: "ok" } }] })}\n\ndata: ${JSON.stringify({ id: "s", choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`,
+            { status: 200, headers: { "content-type": "text/event-stream" } }
+          )
+        : new Response(JSON.stringify(chat()), { status: 200 });
+    }) as unknown as typeof fetch;
+
+  it("the defaults: three finite network timeouts, and no run limit or budget at all", () => {
+    const a = agentWith(slow(0));
+    expect(a.runLimits).toEqual({ requestTimeoutMs: 300_000, firstByteTimeoutMs: 120_000, streamIdleTimeoutMs: 300_000 });
+    expect(a.budget).toBeUndefined();
+    expect(a.maxTurns).toBe(Infinity);
+  });
+
+  it("limits.requestTimeoutMs changes how long one provider call may take", async () => {
+    await expect(agentWith(slow(200), { requestTimeoutMs: 30 }).run("hi")).rejects.toMatchObject({ name: "TimeoutError" });
+    expect((await agentWith(slow(60), { requestTimeoutMs: 5_000 }).run("hi")).text).toBe("ok");
+  });
+
+  it("0 and Infinity both turn the request timeout off", async () => {
+    for (const off of [0, Infinity]) {
+      const a = agentWith(slow(120), { requestTimeoutMs: off });
+      expect(a.runLimits.requestTimeoutMs).toBe(off);
+      expect((await a.run("hi")).text).toBe("ok");
+    }
+  });
+
+  it("limits.firstByteTimeoutMs bounds the wait for a stream to start; 0 turns it off", async () => {
+    await expect(agentWith(slow(200, true), { firstByteTimeoutMs: 30 }).stream("hi").result()).rejects.toMatchObject({ name: "TimeoutError" });
+    for (const off of [0, Infinity]) {
+      const a = agentWith(slow(120, true), { firstByteTimeoutMs: off, streamIdleTimeoutMs: off });
+      expect(a.runLimits).toMatchObject({ firstByteTimeoutMs: off, streamIdleTimeoutMs: off }); // a default would be 120 s / 300 s
+      expect((await a.stream("hi").result()).text).toBe("ok");
+    }
+  });
+
+  it("a timeout that is not a number falls back to its default", () => {
+    const limits = agentWith(slow(0), { requestTimeoutMs: "soon" as never, firstByteTimeoutMs: Number.NaN }).runLimits;
+    expect(limits).toMatchObject({ requestTimeoutMs: 300_000, firstByteTimeoutMs: 120_000 });
+  });
+
+  it("workers inherit the timeouts of their parent", () => {
+    const parent = new Agent({ model: "groq/m", apiKey: "k", baseUrl: "https://example.test/v1", limits: { requestTimeoutMs: 1234, streamIdleTimeoutMs: 0, firstByteTimeoutMs: Infinity } });
+    const inherited = parent.inheritableConfig().limits!;
+    expect(inherited).toMatchObject({ requestTimeoutMs: 1234, streamIdleTimeoutMs: 0, firstByteTimeoutMs: Infinity });
+    // A worker built from it keeps them: Infinity survives the round trip.
+    expect(new Agent({ model: "groq/m", apiKey: "k", baseUrl: "https://example.test/v1", limits: inherited }).runLimits).toMatchObject({ requestTimeoutMs: 1234, streamIdleTimeoutMs: 0, firstByteTimeoutMs: Infinity });
+  });
+});

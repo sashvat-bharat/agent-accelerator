@@ -342,9 +342,11 @@ function resolveLoopLimits(config: AgentLoopConfig, fallbackMaxTurns: number): L
   const deadlineMs = num(raw.deadlineMs) ?? Infinity;
   const maxToolCallsPerRun = num(raw.maxToolCallsPerRun) ?? Infinity;
   const maxTotalTokens = num(raw.maxTotalTokens) ?? Infinity;
-  const requestTimeoutMs = num(raw.requestTimeoutMs) ?? 300_000;
-  const firstByteTimeoutMs = num(raw.firstByteTimeoutMs) ?? 120_000;
-  const streamIdleTimeoutMs = num(raw.streamIdleTimeoutMs) ?? 300_000;
+  // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
+  const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
+  const requestTimeoutMs = timeout(raw.requestTimeoutMs) ?? 300_000;
+  const firstByteTimeoutMs = timeout(raw.firstByteTimeoutMs) ?? 120_000;
+  const streamIdleTimeoutMs = timeout(raw.streamIdleTimeoutMs) ?? 300_000;
   return { maxTurns, deadlineMs, maxToolCallsPerRun, maxTotalTokens, requestTimeoutMs, firstByteTimeoutMs, streamIdleTimeoutMs };
 }
 

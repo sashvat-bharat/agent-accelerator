@@ -271,7 +271,7 @@ export class WorkerRegistry {
         "[Agent Accelerator] Cannot spawn workers: no sub-agent model is configured. Set dynamicSubagents.model in Agent config or set the SUB_AGENT_MODEL environment variable."
       );
     }
-    const maxOpen = parent.dynamicSubagents?.maxSpawn ?? 4;
+    const maxOpen = parent.dynamicSubagents?.maxSpawn ?? Infinity;
     if (this.list().length >= maxOpen) {
       throw new ValidationError(`Too many open workers (${maxOpen} is the limit). Close one first; open workers: ${this.list().map((w) => w.id).join(", ")}.`);
     }

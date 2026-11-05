@@ -39,6 +39,52 @@ console.log((await agent.run("Hello")).finishReason);
 
 Cancel anytime with `{ signal }` or `agent.interrupt()`; the error carries `err.partial` (usage, turns, text, tool calls/results).
 
+### What is limited by default
+
+**Nothing that costs you money or stops your work is limited until you say so.** Every cap below is off (unlimited) by default, so a run never stops because of a limit you did not write:
+
+| Setting | Default | What it caps |
+|---|---|---|
+| `maxTurns` / `limits.maxTurns` | unlimited | model ↔ tool turns in one run |
+| `limits.deadlineMs` | unlimited | wall-clock time of one run |
+| `limits.maxToolCallsPerRun` | unlimited | tool calls in one run |
+| `limits.maxTotalTokens` | unlimited | tokens in one run |
+| `budget` (`maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`) | unlimited | one run of this agent, workers included |
+| `dynamicSubagents.workerBudget` | unlimited | the run of each worker (and of each scheduled-action run) |
+| `dynamicSubagents.maxSpawn` | unlimited | workers open at the same time (`maxSpawn: 3` caps it) |
+| `dynamicSubagents.maxDepth` | unlimited | levels of workers below the agent (`maxDepth: 2` lets a worker start workers, and no deeper) |
+
+A scheduled-action run is capped by `workerBudget` only. It never borrows the agent's own `budget`, which is for the agent's own runs; with no `workerBudget` a scheduled run has no cap.
+
+Unlimited also means unbounded cost and memory when a model keeps starting workers. For unattended runs set `workerBudget`, `maxSpawn` and/or `maxDepth`. The only other default cap is the waiting-prompt buffer: `midSession.maxQueued` / `maxSteers` (20 each), which protects memory and can be raised.
+
+### Network timeouts
+
+The only limits that are on by default are three network timeouts. They are not budgets: they exist so a silent connection fails instead of hanging forever. Change them in `limits` (agent level; workers and scheduled runs inherit them):
+
+| Option | Default | What it waits for |
+|---|---|---|
+| `limits.requestTimeoutMs` | 300 000 (300 s) | One provider call. For `run()` that is the whole call, answer included; for a stream it is the time to open the stream. |
+| `limits.firstByteTimeoutMs` | 120 000 (120 s) | Streaming only: how long after sending the request the stream may take to start. |
+| `limits.streamIdleTimeoutMs` | 300 000 (300 s) | Streaming only: the longest silence allowed between two events once the stream has started. |
+
+```ts
+const agent = new Agent({
+  model: "openai/gpt-5",
+  limits: {
+    requestTimeoutMs: 600_000, // a slow reasoning model answering without streaming: give it 10 minutes
+    firstByteTimeoutMs: 0, // 0 (or Infinity) turns this timeout off
+    streamIdleTimeoutMs: 120_000, // fail a stream that goes quiet for 2 minutes
+  },
+});
+```
+
+- **`0` or `Infinity` turns a timeout off** (no timer is started). A value that is not a number falls back to the default.
+- **When one fires** you get a `TimeoutError`, which counts as a transient failure: a failed `run()` is tried again by `runRetries` (default 3, `runRetries: 0` turns that off). A `stream()` is not retried.
+- Raise `firstByteTimeoutMs` and `streamIdleTimeoutMs` for models that think for minutes before the first token.
+- A long-running call (Google long decode, or a provider whose `isLongRunning()` is true) times each HTTP request only, never the whole call or stream.
+- Tools have their own `timeoutMs` (see [Tools](tools-and-streaming.md)); workers started with `subagents` have no timeout.
+
 **Recommendations**
 - ✅ Production defaults: finite `maxTurns`, a `deadlineMs`, a `budget.maxCostUsd`, and an `AbortSignal.timeout(...)` per request.
 - ✅ Keep tool timeouts shorter than the run deadline. ❌ Don't retry side-effecting tools blindly.

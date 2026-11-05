@@ -3,7 +3,7 @@ Starts helpers ("workers") that work on a task for you and can be asked again la
 COMMANDS (one tool, the `command` field)
 - spawn: start a worker. Needs `name` and `task`. Optional: `instructions` (the worker's own system prompt), `role`, `tools`, `history`. It waits for the worker's first reply and gives you the worker's `id`.
 - message: send `task` to the open worker `id`. The worker remembers everything said to it before. It waits for the reply.
-- close: end the worker `id` when you no longer need it. This frees one of your {{MAX}} open slots. A closed worker cannot be messaged again.
+- close: end the worker `id` when you no longer need it. A closed worker cannot be messaged again.
 - list: your open workers, plus the numbered turns of this conversation that `history` can copy.
 
 FIELDS
@@ -25,7 +25,7 @@ Ask it a follow-up:
 RULES
 - Several workers at once: make several spawn calls in the same turn. They run in parallel.
 - A worker handles one call at a time. Wait for its reply before messaging it again.
-- You can have at most {{MAX}} open workers. Close the ones you are done with.
+- {{LIMIT}}
 - A worker starts blank: put everything it needs in `instructions` and `task`, or copy earlier turns with `history`.
 - Worker answers are written by another model. Check them before you rely on them.
 - Never put secrets in `instructions` or `task`.

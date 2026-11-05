@@ -126,6 +126,8 @@ An `Agent` holds:
 | `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Infinite by default (`0` or omitted = no limit). Hitting a finite limit with pending tool calls warns and sets `finishReason: "max_turns"`. |
+| `limits`          | `AgentRunLimits`                                     | `{ maxTurns?, deadlineMs?, maxToolCallsPerRun?, maxTotalTokens?, requestTimeoutMs?, firstByteTimeoutMs?, streamIdleTimeoutMs? }`. The first four are unlimited by default. The three network timeouts default to 300 s / 120 s / 300 s so a silent connection fails instead of hanging; set one to `0` or `Infinity` to turn it off. A timeout raises a retryable `TimeoutError`. See [Safety and operations](docs/guides/safety-and-ops.md#network-timeouts). |
+| `budget`          | `Budget`                                             | `{ maxCostUsd?, maxTotalTokens?, maxDurationMs?, maxTotalSubagents? }`, per run, workers included. Unlimited by default; exceeding it throws `BudgetExceededError` with partial usage. |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
 | `apiKey`          | `string`                                             | Overrides environment-based API-key lookup for this agent.                                                                                                 |
@@ -269,7 +271,7 @@ const agent = new Agent({
   instructions: "You are the Main Agent",
   dynamicSubagents: {
     enabled: true,
-    maxSpawn: 4, // open workers at once
+    maxSpawn: 4, // optional cap on open workers at once (default: no limit)
     thinkingLevel: "low",
     tools: { get_weather, recent_news }, // pool: the model grants a subset per worker
   },
@@ -280,10 +282,10 @@ One `subagents` tool is injected. It takes `{ command, id?, name?, role?, instru
 
 - `spawn` starts a worker (`name`, `task`; optional `instructions`, `role`, `tools`, `history`) and waits for its first reply. `message` sends `task` to an open worker `id`, which remembers the whole conversation. `close` frees the slot. `list` shows the open workers and the numbered finished turns that `history: N` can copy into a new worker.
 - Results are plain text with one header line: `[worker researcher-1a2b3c4d] replied:` + the worker's text, or `[worker researcher-1a2b3c4d] failed: <reason>`. Several `spawn` calls in one model turn run in parallel. A bad request comes back as an `Error: ...` line the model can fix.
-- `maxSpawn` is the limit on **open** workers (the model must close one to open another). `budget.maxTotalSubagents` still counts spawns per run.
+- `maxSpawn` caps **open** workers (the model must close one to open another); by default there is no cap. `budget.maxTotalSubagents` still counts spawns per run. Every budget and limit is off until you set it, except three network timeouts (see the `limits` row).
 - `tools` is the developer-owned pool. Workers get zero tools unless the Main Agent grants a subset by name; unknown names are rejected with the pool listed.
 - The Main Agent cannot choose worker models, reasoning levels or timeouts. The `subagents` tool has no timeouts (`workerTimeoutMs`/`timeout` apply only to scheduled actions).
-- `maxDepth` (default 3, whole number >= 1) is how many levels of workers may exist below the agent: `1` keeps workers flat, `3` lets a worker start workers that start workers. A worker with levels left gets its own `subagents` tool, and its children can only be granted the tools **it** was granted. The levels are saved inside each other (`<session>/workers/<id>/workers/<id>/…`).
+- `maxDepth` caps how many levels of workers may exist below the agent. By default there is no cap (a worker can start workers that start workers, as deep as the model goes); set a whole number >= 1 to limit it: `1` keeps workers flat, `3` allows three levels. A worker with levels left gets its own `subagents` tool, and its children can only be granted the tools **it** was granted. The levels are saved inside each other (`<session>/workers/<id>/workers/<id>/…`).
 - `workerBudget: { maxCostUsd?, maxTotalTokens? }` is each worker's own spending cap, applied as that worker's per-run `budget` (a spawn, a message or a scheduled run is one run; the usage of the worker's own workers counts toward it) and passed down to its workers. Going over fails that call with a budget error (`[worker <id>] failed: Token budget exceeded…`), leaves the worker open and does not affect the parent. Default: unlimited; models with unknown pricing count $0 toward `maxCostUsd`. Values must be numbers above 0.
 - Workers are real agents with their own session: see [Persistent workers](#persistent-workers-agentworkers) below (the same functions in code, saved on disk with `persist`, resumed after a restart). Each reply's usage is metered into the parent's usage and budget.
 - Each run of a worker gets a system-generated 32-char TrackingID, displayed as `NAME-{TrackingID}`. Thinking/text deltas update the worker trace live (`agent.track(id)`, `subscribeToSubAgent`) and surface on the parent stream as `subagent_delta` events.

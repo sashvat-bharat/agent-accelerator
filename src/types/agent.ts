@@ -246,6 +246,7 @@ export interface AgentRunLimits {
   deadlineMs?: number;
   maxTotalTokens?: number;
   maxToolCallsPerRun?: number;
+  /** Network timeouts in ms. Defaults 300 000 / 120 000 / 300 000. `0` or `Infinity` turns one off. */
   requestTimeoutMs?: number;
   firstByteTimeoutMs?: number;
   streamIdleTimeoutMs?: number;
@@ -288,7 +289,7 @@ export interface DynamicSubagentsConfig {
   allowScheduledActions?: boolean;
   /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then `SUB_AGENT_MODEL` env, then the parent model. */
   model?: string | ModelSpec | ModelProviderInstance;
-  /** Max workers that may be open at once on this agent (the model must close one before spawning another). Defaults to 4. */
+  /** Max workers that may be open at once on this agent (the model must close one before spawning another). Default: no limit; set a whole number >= 1 to cap it. */
   maxSpawn?: number;
   /** Fixed reasoning level for all dynamic workers. The Main Agent cannot override it. Falls back to the parent level when omitted. */
   thinkingLevel?: ThinkingLevel;
@@ -300,9 +301,9 @@ export interface DynamicSubagentsConfig {
    */
   workerBudget?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
   /**
-   * How many levels of workers may exist below this agent (default 3). `1` = workers cannot start workers of their own;
-   * `3` = a worker may start workers that start workers. A worker with levels left gets its own `subagents` tool, and
-   * its children can only be granted the tools the worker itself was granted. Whole number >= 1.
+   * How many levels of workers may exist below this agent. Default: no limit. `1` = workers cannot start workers of their
+   * own; `3` = a worker may start workers that start workers. A worker with levels left gets its own `subagents` tool, and
+   * its children can only be granted the tools the worker itself was granted. A whole number >= 1, or omit it for no limit.
    */
   maxDepth?: number;
   /** Tool pool available to dynamic workers. Workers receive zero tools unless the Main Agent grants a per-task `tools` subset by name. */

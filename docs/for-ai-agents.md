@@ -61,7 +61,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 
 - **Stable prompts.** Never put timestamps or per-request data in `instructions` or change the tool set between calls; use `additionalContext`.
 - **Explicit config wins** over env. A custom provider prefix needs its own `<PREFIX>_API_KEY` and `<PREFIX>_BASE_URL`; never reuse another vendor's key.
-- **Bound everything unattended:** `maxTurns`, `limits.deadlineMs`, `budget`, and a `signal`.
+- **Bound everything unattended:** nothing is limited by default except three network timeouts, so set `maxTurns`, `limits.deadlineMs`, `budget`, a `signal`, and for workers `dynamicSubagents.workerBudget` / `maxSpawn` / `maxDepth` (all unlimited until set). `0` or `Infinity` turns a network timeout off.
 - **Branch on error classes and `err.retryable`, never on message text.** Use `isAbortError(err)` for cancellation.
 - **Unknown cost is `undefined`**, not zero.
 - **Tool names** match `^[a-zA-Z0-9_-]{1,64}$`. Pass `ctx.signal` to I/O.
