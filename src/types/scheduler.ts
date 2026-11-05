@@ -15,6 +15,12 @@ export interface ScheduleSpec {
   repeatEvery?: string;
   /** Extra attempts if a run fails, only while time remains before delivery. Default 0. */
   retries?: number;
+  /**
+   * What happens when the host program was not running at a delivery time. `"skip"`: move on to the next time (a one-shot
+   * is done). `"run"`: run it as soon as the program is back. Omitted: the action is marked `missed` and waits for
+   * `runScheduledAction` or `skipScheduledAction`.
+   */
+  onMissed?: "skip" | "run";
 }
 
 /** What `createScheduledAction` receives: dynamic sub-agent fields plus the schedule. */
@@ -24,6 +30,7 @@ export interface ScheduledActionInput {
   task: string;
   /** Names from the developer's `dynamicSubagents.tools` pool. */
   tools?: string[];
+  /** Longest one run may take, in ms. Never above `dynamicSubagents.workerTimeoutMs` when the developer set one. */
   timeoutMs?: number;
   scheduled_action: ScheduleSpec & {
     /** Human label. */
@@ -74,8 +81,8 @@ export interface ScheduledDelivery {
   late: boolean;
 }
 
-/** Result of `killScheduledAction`. */
-export type KillResult =
+/** Result of `deleteScheduledAction`. */
+export type DeleteResult =
   | { ok: true }
   | { ok: false; reason: "not_found" }
   | { ok: false; reason: "running"; message: string };

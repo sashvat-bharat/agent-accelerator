@@ -37,6 +37,7 @@ export { Agent, SubAgentModelError } from "./agent/agent.ts";
  */
 export { SubAgent, agentFromEnv } from "./agent/subagent.ts";
 export type { SubAgentConfig } from "./agent/subagent.ts";
+export type { EditableAgentConfig } from "./types/agent.ts";
 export {
   tool,
   toStandardToolDeclarations,
@@ -44,7 +45,6 @@ export {
   TOOL_NAME_PATTERN,
   normalizeThinkingV2,
   resolveWhenBusy,
-  normalizeWorkerTimeout,
   normalizeMaxAttempts,
 } from "./tools/tool.ts";
 export type { CreateToolOptions } from "./tools/tool.ts";
@@ -94,7 +94,7 @@ export {
   updateScheduledAction,
   runScheduledAction,
   skipScheduledAction,
-  killScheduledAction,
+  deleteScheduledAction,
 } from "./scheduler/scheduler.ts";
 export { getDatetimeTool } from "./scheduler/tool.ts";
 export { setHome, resolveHome } from "./utils/home.ts";
@@ -106,7 +106,7 @@ export type {
   ScheduledState,
   ScheduledRunStatus,
   ScheduleSpec,
-  KillResult,
+  DeleteResult,
 } from "./types/scheduler.ts";
 
 // Providers & Registry — unified multi-provider layer, all native REST

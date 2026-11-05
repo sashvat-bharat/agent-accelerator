@@ -13,6 +13,35 @@ describe("Streaming & SSE Parser", () => {
     expect(messages[1]!.data).toBe("{\"text\":\" World\"}");
   });
 
+  it("buffer: false keeps no events: listeners see every one, nothing overflows, result() still resolves", async () => {
+    const { telemetryBus } = await import("../src/telemetry.ts");
+    const codes: string[] = [];
+    const off = telemetryBus.onEvent((ev) => codes.push(ev.code));
+    try {
+      const plain = new AssistantMessageEventStream({ buffer: false });
+      let seen = 0;
+      plain.on("text_delta", () => seen++);
+      for (let i = 0; i < 3000; i++) plain.push({ type: "text_delta", delta: "x" }); // far past the 1000-event buffer, no reader
+      expect(seen).toBe(3000);
+      expect(codes).not.toContain("stream_buffer_overflow");
+      const response = new AgentResponse({ text: "x", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, model: "m", provider: "google", durationMs: 1, raw: { request: {} as any } });
+      plain.end(response);
+      expect(await plain.result()).toBe(response);
+
+      // The default keeps the bound and says so when it drops events.
+      const normal = new AssistantMessageEventStream();
+      for (let i = 0; i < 1100; i++) normal.push({ type: "text_delta", delta: "x" });
+      expect(codes).toContain("stream_buffer_overflow");
+
+      // A failure still reaches result() without a reader.
+      const failing = new AssistantMessageEventStream({ buffer: false });
+      failing.fail(new Error("boom"));
+      await expect(failing.result()).rejects.toThrow("boom");
+    } finally {
+      off();
+    }
+  });
+
   it("should propagate stream events via AsyncIterable", async () => {
     const stream = new AssistantMessageEventStream();
     const chunks: string[] = [];

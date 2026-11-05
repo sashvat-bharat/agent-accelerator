@@ -10,14 +10,33 @@ import { getProvider, resolveModel } from "../src/providers/registry.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
+// Every OpenRouter request streams, so a reply is SSE. This turns a non-streaming chat completion fixture into the
+// frames a streamed request gets: one chunk with the whole message as a delta, one with the finish reason and usage.
+function sseReply(json: any): Response {
+  const choice = json.choices?.[0] ?? {};
+  const m = choice.message ?? {};
+  const delta: Record<string, unknown> = { role: "assistant" };
+  if (m.content) delta["content"] = m.content;
+  if (m.reasoning_details) delta["reasoning_details"] = m.reasoning_details;
+  else if (m.reasoning) delta["reasoning"] = m.reasoning;
+  if (m.tool_calls) delta["tool_calls"] = m.tool_calls.map((t: any, index: number) => ({ index, id: t.id, type: "function", function: t.function }));
+  const first: Record<string, unknown> = { id: json.id, model: json.model, choices: [{ index: 0, delta, finish_reason: null }] };
+  if (json.error) first["error"] = json.error; // a provider failure arrives as an error frame inside the stream
+  const last = { id: json.id, choices: [{ index: 0, delta: {}, finish_reason: choice.finish_reason }], usage: json.usage };
+  const frames = [first, last].map((f) => `data: ${JSON.stringify(f)}\n\n`).join("") + "data: [DONE]\n\n";
+  return new Response(frames, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
 function mockFetchOnce(body: unknown, init?: { status?: number }) {
-  const text = typeof body === "string" ? body : JSON.stringify(body);
   (globalThis as any).fetch = async (_url: unknown, _req: unknown) => {
-    return new Response(text, {
-      status: init?.status ?? 200,
-      statusText: init?.status === 400 ? "Bad Request" : "OK",
-      headers: { "Content-Type": "application/json" },
-    });
+    if ((init?.status ?? 200) >= 400 || typeof body === "string") {
+      return new Response(typeof body === "string" ? body : JSON.stringify(body), {
+        status: init?.status ?? 200,
+        statusText: init?.status === 400 ? "Bad Request" : "OK",
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return sseReply(body);
   };
 }
 
@@ -112,7 +131,7 @@ describe("Canonical OpenRouter Chat Completions mappings", () => {
     const bodies: any[] = [];
     (globalThis as any).fetch = async (_url: unknown, req: any) => {
       bodies.push(JSON.parse(req.body));
-      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+      return sseReply(TEXT_RESPONSE);
     };
     const w = captureWarnings();
     try {
@@ -167,7 +186,7 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
       sentUrl = String(url);
       sentBody = JSON.parse(req.body);
       sentHeaders = req.headers;
-      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+      return sseReply(TEXT_RESPONSE);
     };
     const provider = new OpenRouterChatCompletionsProvider();
     const res = await provider.generate(
@@ -187,6 +206,7 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
     expect(res.finishReason).toBe("stop");
     expect(sentUrl).toBe("https://openrouter.ai/api/v1/chat/completions");
     expect(sentBody.model).toBe("z-ai/glm-5.3-flash");
+    expect(sentBody.stream).toBe(true); // OpenRouter only cancels streaming requests, so even generate() streams
     expect(sentBody.messages[0]).toEqual({ role: "system", content: "Be concise." });
     expect(sentBody.reasoning).toEqual({ effort: "low" });
     expect(sentBody.store).toBeUndefined();
@@ -204,7 +224,7 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
       const b = JSON.parse(req.body);
       bodies.push(b);
       const hasToolResult = Array.isArray(b.messages) && b.messages.some((m: any) => m.role === "tool");
-      return new Response(JSON.stringify(hasToolResult ? TEXT_RESPONSE : TOOL_RESPONSE), { status: 200 });
+      return sseReply(hasToolResult ? TEXT_RESPONSE : TOOL_RESPONSE);
     };
     const provider = new OpenRouterChatCompletionsProvider();
     const tools = [{ name: "get_weather", description: "d", parameters: { type: "object", properties: {} } }];
@@ -254,7 +274,7 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
     const bodies: any[] = [];
     (globalThis as any).fetch = async (_url: unknown, req: any) => {
       bodies.push(JSON.parse(req.body));
-      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+      return sseReply(TEXT_RESPONSE);
     };
     const provider = new OpenRouterChatCompletionsProvider();
     await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k" });
@@ -283,7 +303,7 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
     let sentBody: any = null;
     (globalThis as any).fetch = async (_url: unknown, req: any) => {
       sentBody = JSON.parse(req.body);
-      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+      return sseReply(TEXT_RESPONSE);
     };
     const provider = new OpenRouterChatCompletionsProvider();
     await provider.generate(
@@ -497,5 +517,97 @@ describe("per-media resolution is Google-only", () => {
     }
     expect(warnings.length).toBe(1);
     expect(bodies.join("")).not.toContain("resolution");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OpenRouter only cancels a request that streams, so generate() streams too (docs: "Stream cancellation").
+// ---------------------------------------------------------------------------
+describe("every OpenRouter request can be cancelled: generate() is served over a stream", () => {
+  const enc = new TextEncoder();
+  const frame = (o: unknown): string => `data: ${JSON.stringify(o)}\n\n`;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // A reply that keeps producing tokens until the client closes the connection (cancel of the response body).
+  function endless(): { response: Response; state: { sent: number; cancelled: boolean } } {
+    const state = { sent: 0, cancelled: false };
+    let timer: ReturnType<typeof setInterval>;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        timer = setInterval(() => {
+          state.sent++;
+          controller.enqueue(enc.encode(frame({ id: "g", choices: [{ index: 0, delta: { content: "tok " } }] })));
+        }, 5);
+      },
+      cancel() {
+        state.cancelled = true;
+        clearInterval(timer);
+      },
+    });
+    return { response: new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } }), state };
+  }
+  const ctx = { messages: [{ role: "user" as const, content: "write a novel" }] };
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+  });
+
+  it("an abort closes the connection: the body is cancelled, the tokens stop, and the caller's reason is kept", async () => {
+    const e = endless();
+    let sent: AbortSignal | undefined;
+    (globalThis as any).fetch = async (_u: unknown, req: any) => ((sent = req.signal), e.response);
+    const ctl = new AbortController();
+    const pending = new OpenRouterChatCompletionsProvider().generate("m", ctx, { apiKey: "k", signal: ctl.signal }).catch((err) => err);
+    for (let i = 0; i < 400 && e.state.sent < 3; i++) await sleep(5);
+    ctl.abort(new Error("user pressed stop"));
+    const err = await pending;
+    expect(err).toMatchObject({ name: "AbortError", message: "user pressed stop" });
+    const at = e.state.sent;
+    await sleep(60);
+    expect(e.state.cancelled).toBe(true); // the connection is closed, so OpenRouter can stop the model
+    expect(e.state.sent).toBe(at);
+    expect(sent?.aborted).toBe(true);
+  });
+
+  it("timeoutMs still bounds the whole call, not just the wait for the first byte", async () => {
+    const e = endless(); // headers at once, tokens forever
+    (globalThis as any).fetch = async () => e.response;
+    const started = Date.now();
+    const err = await new OpenRouterChatCompletionsProvider().generate("m", ctx, { apiKey: "k", timeoutMs: 60 } as any).catch((x) => x);
+    expect(err).toMatchObject({ name: "AbortError" });
+    expect(Date.now() - started).toBeLessThan(1500);
+    await sleep(30);
+    expect(e.state.cancelled).toBe(true);
+  });
+
+  it("a long answer is drained: no buffer-overflow warning, nothing lost", async () => {
+    const frames = Array.from({ length: 1500 }, () => frame({ id: "g", choices: [{ index: 0, delta: { content: "a" } }] })).join("");
+    const done = frame({ id: "g", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1500, total_tokens: 1501 } });
+    (globalThis as any).fetch = async () => new Response(frames + done + "data: [DONE]\n\n", { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const { telemetryBus } = await import("../src/telemetry.ts");
+    const codes: string[] = [];
+    const off = telemetryBus.onEvent((ev) => codes.push(ev.code));
+    try {
+      const res = await new OpenRouterChatCompletionsProvider().generate("m", ctx, { apiKey: "k" });
+      expect(res.text).toBe("a".repeat(1500));
+      expect(res.usage.outputTokens).toBe(1500);
+    } finally {
+      off();
+    }
+    expect(codes).not.toContain("stream_buffer_overflow");
+  });
+
+  it("a transient failure before the first byte is still retried", async () => {
+    let n = 0;
+    (globalThis as any).fetch = async () => (++n === 1 ? new Response(JSON.stringify({ error: { message: "busy", code: 503 } }), { status: 503 }) : sseReply(TEXT_RESPONSE));
+    const res = await new OpenRouterChatCompletionsProvider().generate("m", ctx, { apiKey: "k", maxRetries: 1, retryBaseDelayMs: 1 });
+    expect(res.text).toBe("Hello there");
+    expect(n).toBe(2);
+  });
+
+  it("an HTTP error is reported as before (concise, with its status)", async () => {
+    mockFetchOnce({ error: { message: "bad key", code: 401 } }, { status: 401 });
+    const err = await new OpenRouterChatCompletionsProvider().generate("m", ctx, { apiKey: "k" }).catch((x) => x);
+    expect(String(err.message)).toContain("[openrouter/m]");
+    expect(String(err.message)).toContain("(401)");
   });
 });

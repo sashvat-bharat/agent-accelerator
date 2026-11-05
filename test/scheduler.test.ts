@@ -15,7 +15,7 @@ import {
   updateScheduledAction,
   runScheduledAction,
   skipScheduledAction,
-  killScheduledAction,
+  deleteScheduledAction,
   getDatetimeTool,
   type AgentConfig,
   type ScheduledActionInput,
@@ -24,13 +24,16 @@ import {
 import { z } from "zod";
 import { getScheduler, resetSchedulers, type Scheduler } from "../src/scheduler/scheduler.ts";
 import { createScheduledActionsTool } from "../src/scheduler/tool.ts";
+import { scheduledRunTimeoutMs } from "../src/agent/worker.ts";
 import {
   readDeliveries,
+  readRun,
   readTasks,
   removeTaskFolder,
   resolveHome,
   updateDeliveries,
   updateTasks,
+  validateDelivery,
   validateRecord,
   writeRunFile,
   type RunHeader,
@@ -524,6 +527,82 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(readDeliveries(h.home)[0]!.status).toBe("ok");
   });
 
+  it("the run header records the run's exact spending, like usageReport does for workers", async () => {
+    const h = harness();
+    createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input()); // 10 in + 5 out, no known price for the test model
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const header = readRun(h.home, readDeliveries(h.home)[0]!.file)!.header;
+    expect(header).toMatchObject({
+      status: "ok",
+      model: "groq/test-model",
+      turns: "1",
+      tokens: "15",
+      inputTokens: "10",
+      freshInputTokens: "10",
+      cacheReadTokens: "0",
+      cacheWriteTokens: "0",
+      outputTokens: "5",
+      thinkingTokens: "0",
+      cacheHitRate: "0",
+      costUsd: "unknown",
+      costSource: "unknown",
+      unpricedTurns: "1",
+    });
+  });
+
+  it("the run header splits cache reads from fresh input and uses the provider's reported cost", async () => {
+    const h = harness();
+    const cached = () =>
+      new Response(
+        JSON.stringify({
+          id: "c",
+          choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, prompt_tokens_details: { cached_tokens: 80 }, completion_tokens_details: { reasoning_tokens: 7 }, cost: 0.0005 },
+        }),
+        { status: 200 }
+      );
+    createScheduledAction(h.agent(mockFetch(cached).fn), input());
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const header = readRun(h.home, readDeliveries(h.home)[0]!.file)!.header;
+    expect(header).toMatchObject({ tokens: "120", inputTokens: "100", freshInputTokens: "20", cacheReadTokens: "80", outputTokens: "20", thinkingTokens: "7", cacheHitRate: "0.8", costUsd: "0.0005", costSource: "provider" });
+    expect(header["unpricedTurns"]).toBeUndefined(); // every turn had a price
+  });
+
+  it("a failed run still records what it spent, over all attempts", async () => {
+    const h = harness();
+    const toolTurn = () =>
+      new Response(
+        JSON.stringify({
+          id: "c",
+          choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "recent_news", arguments: "{}" } }] }, finish_reason: "tool_calls" }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+        { status: 200 }
+      );
+    // Attempt 1: a tool turn (15 tokens), then the provider rejects the next call. Attempt 2: a plain answer (15 tokens).
+    const { fn } = mockFetch((n) => (n === 1 ? toolTurn() : n === 2 ? badReply() : chatReply()));
+    createScheduledAction(h.agent(fn), input({ retries: 1 }));
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const ok = readRun(h.home, readDeliveries(h.home)[0]!.file)!.header;
+    expect(ok).toMatchObject({ status: "ok", turns: "2", tokens: "30" }); // the response alone would say 15
+
+    const h2 = harness();
+    createScheduledAction(h2.agent(mockFetch((n) => (n === 1 ? toolTurn() : badReply())).fn), input());
+    h2.set(18, 50);
+    h2.s.tick();
+    await h2.settle();
+    const failed = readRun(h2.home, readDeliveries(h2.home)[0]!.file)!.header;
+    expect(failed).toMatchObject({ status: "failed", turns: "1", tokens: "15", inputTokens: "10", outputTokens: "5" });
+    expect(failed["error"]).toBeTruthy();
+    expect(failed["model"]).toBeUndefined();
+  });
+
   it("records a failed run (file + delivery) when no time is left to retry", async () => {
     const h = harness();
     const { codes, of } = capture();
@@ -543,6 +622,51 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(text).toContain("The run failed:");
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ status: "failed", late: true });
+  });
+
+  it("scheduledRunTimeoutMs: the action's timeoutMs, never above the developer's ceiling, which is also the default", () => {
+    expect(scheduledRunTimeoutMs(Infinity, undefined)).toBe(0); // nothing set anywhere: no timeout
+    expect(scheduledRunTimeoutMs(Infinity, 5000)).toBe(5000); // the action's own limit is honored without a ceiling
+    expect(scheduledRunTimeoutMs(1000, undefined)).toBe(1000); // the ceiling is the default
+    expect(scheduledRunTimeoutMs(1000, 5000)).toBe(1000); // ...and a cap
+    expect(scheduledRunTimeoutMs(1000, 300)).toBe(300); // a shorter action limit stays
+    expect(scheduledRunTimeoutMs(Infinity, 0)).toBe(0);
+  });
+
+  it("an action's own timeoutMs times its run out even when the developer set no worker timeout", async () => {
+    const h = harness();
+    const g = gate();
+    const { fn } = mockFetch(async () => {
+      await g.open;
+      return chatReply();
+    });
+    createScheduledAction(h.agent(fn), input({}, { timeoutMs: 20 })); // the harness agent has no workerTimeoutMs
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const [pending] = readDeliveries(h.home);
+    expect(pending!.status).toBe("failed");
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    g.release();
+  });
+
+  it("the developer's workerTimeoutMs caps an action that asks for longer", async () => {
+    const h = harness();
+    const g = gate();
+    const { fn } = mockFetch(async () => {
+      await g.open;
+      return chatReply();
+    });
+    createScheduledAction(
+      h.agent(fn, { dynamicSubagents: { enabled: false, model: "groq/test-model", allowScheduledActions: true, tools: {}, workerTimeoutMs: 20 } }),
+      input({}, { tools: [], timeoutMs: 600_000 })
+    );
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const [pending] = readDeliveries(h.home);
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    g.release();
   });
 
   it("times a run out with the developer's worker timeout and records the failure", async () => {
@@ -591,6 +715,41 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toMatch(/no longer in the pool: gone_tool/);
   });
 
+  // A parent whose scheduled runs use `extra` (budget / workerBudget); the pool and worker model are the harness defaults.
+  const withBudgets = (h: Harness, fn: typeof fetch, extra: { budget?: AgentConfig["budget"]; workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number } }) =>
+    h.agent(fn, {
+      ...(extra.budget ? { budget: extra.budget } : {}),
+      dynamicSubagents: {
+        enabled: false,
+        model: "groq/test-model",
+        allowScheduledActions: true,
+        ...(extra.workerBudget ? { workerBudget: extra.workerBudget } : {}),
+        tools: { recent_news: tool({ description: "news", input: z.object({}), execute: () => "n" }) },
+      },
+    });
+  const runText = async (h: Harness): Promise<string> => {
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    return fs.readFileSync(path.join(h.home, "scheduled_actions", readDeliveries(h.home)[0]!.file), "utf8");
+  };
+
+  it("a scheduled run is capped by workerBudget: going over records a failed run", async () => {
+    const h = harness();
+    createScheduledAction(withBudgets(h, mockFetch(() => chatReply()).fn, { workerBudget: { maxTotalTokens: 3 } }), input()); // one model turn = 15 tokens
+    const text = await runText(h);
+    expect(text).toContain("status: failed");
+    expect(text).toContain("Token budget exceeded");
+  });
+
+  it("without workerBudget a scheduled run has no cap, and the agent's own budget is not borrowed", async () => {
+    const h = harness();
+    createScheduledAction(withBudgets(h, mockFetch(() => chatReply("fine")).fn, { budget: { maxTotalTokens: 1, maxCostUsd: 0.0000001 } }), input());
+    const text = await runText(h);
+    expect(text).toContain("status: ok");
+    expect(text).toContain("fine");
+  });
+
   it("counts a run as missed (never runs it) when the creating Agent is no longer alive", () => {
     const h = harness();
     const { fn, calls } = mockFetch(() => chatReply());
@@ -602,6 +761,13 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "missed" });
     expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "no_agent" });
     expect(calls).toHaveLength(0);
+  });
+
+  it("a delivery entry's late flag must be a boolean when present", () => {
+    const entry = { id: "a-b12345", file: "a-b12345/26-october-2026.md", status: "ok", readyAt: iso(19, 0), deliverAt: iso(19, 0) };
+    expect(validateDelivery(entry)).toBeUndefined();
+    expect(validateDelivery({ ...entry, late: true })).toBeUndefined();
+    expect(validateDelivery({ ...entry, late: "yes" })).toMatch(/late/);
   });
 
   it("skips a damaged deliveries.json entry (warns once) instead of stalling the scheduler", async () => {
@@ -673,6 +839,87 @@ describe("scheduler startup sweep", () => {
     expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "interrupted" });
   });
 
+  it("onMissed skip: a missed repeating run moves on to the next time without running", () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "skip" }));
+    h.boot();
+    h.set(20, 0);
+    const { codes, of } = capture();
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "waiting", nextDeliverAt: iso(19, 0, 0, 27), nextCookAt: iso(18, 50, 0, 27) });
+    expect(codes().filter((c) => c === "scheduled_action.missed" || c === "scheduled_action.skipped")).toEqual(["scheduled_action.missed", "scheduled_action.skipped"]);
+    expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "process_down", onMissed: "skip" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("onMissed skip: a missed one-shot is done", () => {
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    createScheduledAction(h.agent(fn), input({ onMissed: "skip" }));
+    h.boot();
+    h.set(20, 0);
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "done", nextCookAt: null, nextDeliverAt: null });
+  });
+
+  it("onMissed run: a missed run starts at once and the schedule moves to the next time", async () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply("late brief"));
+    const rec = createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "run" }));
+    h.boot();
+    h.set(20, 0);
+    const { codes, of } = capture();
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "cooking", nextDeliverAt: iso(19, 0, 0, 27) });
+    await h.settle();
+    h.s.tick();
+    expect(calls).toHaveLength(1);
+    expect(codes()).toEqual(expect.arrayContaining(["scheduled_action.missed", "scheduled_action.started", "scheduled_action.ready", "scheduled_action.delivered"]));
+    expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ onMissed: "run" });
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true }); // it ran after its time
+    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "waiting", nextDeliverAt: iso(19, 0, 0, 27), lastRun: { status: "ok", late: true } });
+    h.s.tick();
+    expect(calls).toHaveLength(1); // the missed occurrence ran once, not again
+  });
+
+  it("onMissed applies to a run a crash cut off (stale cooking, no run file)", () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "skip" }));
+    updateTasks(h.home, (tasks) => {
+      tasks[0]!.state = "cooking";
+      tasks[0]!.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+      tasks[0]!.nextCookAt = iso(18, 50, 0, 27); // advanced before the run, as the scheduler does
+      tasks[0]!.nextDeliverAt = iso(19, 0, 0, 27);
+    });
+    h.boot();
+    h.set(18, 55);
+    const { of } = capture();
+    h.agent(fn);
+    h.s.tick();
+    expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "interrupted", onMissed: "skip" });
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "waiting", nextDeliverAt: iso(19, 0, 0, 27) });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("without onMissed a missed run still waits for run_now or skip", () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00" }));
+    h.boot();
+    h.set(20, 0);
+    const { codes } = capture();
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "missed" });
+    expect(codes()).not.toContain("scheduled_action.skipped");
+    expect(calls).toHaveLength(0);
+  });
+
   it("rebuilds the delivery when a crash left the run file but no entry", async () => {
     const h = harness();
     const fn = mockFetch(() => chatReply()).fn;
@@ -695,6 +942,28 @@ describe("scheduler startup sweep", () => {
     expect(readTasks(h.home)[0]!.current).toBeUndefined();
   });
 
+  it("a crash after the run file was written keeps the late flag of a replaced missed run", async () => {
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "run" }));
+    h.boot();
+    h.set(20, 0);
+    h.agent(fn);
+    h.s.tick();
+    await h.settle(); // the missed run ran and wrote its file with `late: true`
+    updateDeliveries(h.home, (p) => void p.splice(0)); // crash: the delivery entry and the task update are lost
+    updateTasks(h.home, (tasks) => {
+      tasks[0]!.state = "cooking";
+      tasks[0]!.current = { cookStartedAt: iso(20, 0), deliverAt: iso(20, 0) };
+    });
+    h.boot();
+    h.set(20, 0, 30); // 30 s later: on time by the clock, so only the saved flag can make it late
+    const { of } = capture();
+    h.agent(fn);
+    h.s.tick(); // the startup sweep rebuilds the entry, and the same tick delivers it
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true });
+  });
+
   it("delivers a saved result that is past due on the first tick, marked late", async () => {
     const h = harness();
     const fn = mockFetch(() => chatReply()).fn;
@@ -707,6 +976,7 @@ describe("scheduler startup sweep", () => {
     const { of } = capture();
     h.agent(fn);
     expect(of("scheduled_action.delivered")).toHaveLength(0); // nothing inside the constructor
+    h.s.tickMs = 1000; // the real tick length: 30 minutes past due is far more than two ticks
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true });
   });
@@ -715,7 +985,7 @@ describe("scheduler startup sweep", () => {
 // ---------------------------------------------------------------------------
 // Public functions
 // ---------------------------------------------------------------------------
-describe("list / update / run_now / skip / kill", () => {
+describe("list / update / run_now / skip / delete", () => {
   it("lists every action with a running flag", async () => {
     const h = harness();
     const g = gate();
@@ -753,6 +1023,18 @@ describe("list / update / run_now / skip / kill", () => {
     await h.settle();
   });
 
+  it("onMissed is validated, stored, and changeable with update", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    expect(() => createScheduledAction(agent, input({ onMissed: "later" as never }))).toThrow(/onMissed.*"skip" or "run"/);
+    expect(readTasks(h.home)).toEqual([]);
+    const rec = createScheduledAction(agent, input({ onMissed: "run" }));
+    expect(readTasks(h.home)[0]!.schedule.onMissed).toBe("run");
+    expect(updateScheduledAction(rec.id, { scheduled_action: { onMissed: "skip" } }, { home: h.home }).schedule.onMissed).toBe("skip");
+    expect(() => updateScheduledAction(rec.id, { scheduled_action: { onMissed: "never" as never } }, { home: h.home })).toThrow(/onMissed/);
+    expect(readTasks(h.home)[0]!.schedule.onMissed).toBe("skip");
+  });
+
   it("run_now runs immediately without shifting the schedule, and is delivered on the next tick", async () => {
     const h = harness();
     const rec = createScheduledAction(h.agent(mockFetch(() => chatReply("manual")).fn), input());
@@ -765,14 +1047,38 @@ describe("list / update / run_now / skip / kill", () => {
     expect(readDeliveries(h.home)).toEqual([]);
   });
 
-  it("run_now needs a live agent; list/get/kill/skip do not", async () => {
+  it("run_now that takes seconds is delivered when it finishes and is not late", async () => {
+    const h = harness();
+    const { of } = capture();
+    const rec = createScheduledAction(h.agent(mockFetch(() => { h.set(15, 0, 5); return chatReply("manual"); }).fn), input());
+    runScheduledAction(rec.id, { home: h.home });
+    await h.settle();
+    h.s.tick();
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false, readyAt: iso(15, 0, 5), deliverAt: iso(15, 0, 5) });
+    expect(readTasks(h.home)[0]!.lastRun).toMatchObject({ late: false, deliverAt: iso(15, 0, 5) });
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
+  });
+
+  it("a scheduled run that finishes inside its delivery second is not late", async () => {
+    const h = harness();
+    const { of } = capture();
+    const rec = createScheduledAction(h.agent(mockFetch(() => { h.clock = new Date(at(19, 0).getTime() + 400); return chatReply(); }).fn), input());
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
+    h.s.tick();
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false });
+  });
+
+  it("run_now needs a live agent; list/get/delete/skip do not", async () => {
     const h = harness();
     const rec = createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
     h.boot(); // restarted, Agent not constructed yet
     expect(() => runScheduledAction(rec.id, { home: h.home })).toThrow(ConfigError);
     expect(listScheduledActions({ home: h.home })).toHaveLength(1);
     expect(() => skipScheduledAction(rec.id, { home: h.home })).toThrow(/nothing to skip/);
-    expect(await killScheduledAction(rec.id, { home: h.home })).toEqual({ ok: true });
+    expect(await deleteScheduledAction(rec.id, { home: h.home })).toEqual({ ok: true });
   });
 
   it("run_now resolves a missed repeating action by moving to the next occurrence after now", async () => {
@@ -789,6 +1095,31 @@ describe("list / update / run_now / skip / kill", () => {
     expect(readTasks(h.home)[0]!.state).toBe("waiting");
   });
 
+  it("a run_now that replaces a missed occurrence is late; a plain run_now is not", async () => {
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    const missedRec = createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00" }));
+    h.boot();
+    h.set(20, 0);
+    h.agent(fn);
+    h.s.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("missed");
+    runScheduledAction(missedRec.id, { home: h.home });
+    await h.settle();
+    expect(readDeliveries(h.home)[0]).toMatchObject({ id: missedRec.id, late: true }); // the flag is on the saved entry
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", readDeliveries(h.home)[0]!.file), "utf8")).toContain("late: true");
+    const { of } = capture();
+    h.s.tick();
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true });
+    expect(readTasks(h.home)[0]!.lastRun).toMatchObject({ late: true });
+
+    // The same action run early (it is waiting again) is a plain run_now: on time.
+    runScheduledAction(missedRec.id, { home: h.home });
+    await h.settle();
+    h.s.tick();
+    expect(of("scheduled_action.delivered")[1]!.data).toMatchObject({ late: false });
+  });
+
   it("skip ignores a missed run: next occurrence for a repeat, done for a one-shot", () => {
     const h = harness();
     const fn = mockFetch(() => chatReply()).fn;
@@ -802,30 +1133,36 @@ describe("list / update / run_now / skip / kill", () => {
     expect(skipScheduledAction(once.id, { home: h.home })).toMatchObject({ state: "done", nextDeliverAt: null, nextCookAt: null });
   });
 
-  it("kill: not found, idle, running (needs force), force aborts without a run file, purge removes the folder", async () => {
+  it("the old kill names are gone from the public API (no alias)", async () => {
+    const mod = (await import("../src/index.ts")) as Record<string, unknown>;
+    expect(typeof mod.deleteScheduledAction).toBe("function");
+    expect(mod.killScheduledAction).toBeUndefined();
+  });
+
+  it("delete: not found, idle, running (needs force), force aborts without a run file, purge removes the folder", async () => {
     const h = harness();
     const { of } = capture();
     const g = gate();
     const { fn } = mockFetch(async () => (await g.open, chatReply()));
-    expect(await killScheduledAction("nope-abc123", { home: h.home })).toEqual({ ok: false, reason: "not_found" });
+    expect(await deleteScheduledAction("nope-abc123", { home: h.home })).toEqual({ ok: false, reason: "not_found" });
 
     const idle = createScheduledAction(h.agent(fn), input({ id: "idle-one" }));
-    expect(await killScheduledAction(idle.id, { home: h.home })).toEqual({ ok: true });
+    expect(await deleteScheduledAction(idle.id, { home: h.home })).toEqual({ ok: true });
     expect(readTasks(h.home)).toEqual([]);
 
     const rec = createScheduledAction(h.agent(fn), input());
     h.set(18, 50);
     h.s.tick();
-    const refused = await killScheduledAction(rec.id, { home: h.home });
+    const refused = await deleteScheduledAction(rec.id, { home: h.home });
     expect(refused).toMatchObject({ ok: false, reason: "running" });
     expect((refused as { message: string }).message).toContain("force: true");
     expect(readTasks(h.home)).toHaveLength(1);
 
-    expect(await killScheduledAction(rec.id, { home: h.home, force: true })).toEqual({ ok: true });
+    expect(await deleteScheduledAction(rec.id, { home: h.home, force: true })).toEqual({ ok: true });
     expect(readTasks(h.home)).toEqual([]);
     expect(readDeliveries(h.home)).toEqual([]);
     expect(fs.existsSync(runDir(h, rec.id))).toBe(false); // an aborted run writes no file
-    expect(of("scheduled_action.killed").map((e) => (e.data as any).forced)).toEqual([false, true]);
+    expect(of("scheduled_action.deleted").map((e) => (e.data as any).forced)).toEqual([false, true]);
     g.release();
 
     // purge: a finished action's run files are kept unless asked.
@@ -834,13 +1171,13 @@ describe("list / update / run_now / skip / kill", () => {
     h.s.tick();
     await h.settle();
     expect(fs.existsSync(runDir(h, kept.id))).toBe(true);
-    await killScheduledAction(kept.id, { home: h.home });
+    await deleteScheduledAction(kept.id, { home: h.home });
     expect(fs.existsSync(runDir(h, kept.id))).toBe(true);
     const purged = createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input({ id: "purged-one" }));
     h.set(18, 50);
     h.s.tick();
     await h.settle();
-    await killScheduledAction(purged.id, { home: h.home, purge: true });
+    await deleteScheduledAction(purged.id, { home: h.home, purge: true });
     expect(fs.existsSync(runDir(h, purged.id))).toBe(false);
   });
 });
@@ -853,6 +1190,18 @@ describe("scheduled_actions and get_datetime tools", () => {
     const [r] = await executeToolCalls({ tools: agent.tools, toolCalls: [{ id: "t1", name: "scheduled_actions", arguments: args }] });
     return r!;
   };
+
+  it("create accepts onMissed and the manual explains it", async () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    expect(agent.tools["scheduled_actions"]!.description).toContain("onMissed");
+    const ok = await call(agent, { command: "create", instructions: "i", task: "t", scheduled_action: { name: "N", id: "n-job", timeToDeliver: "00:07:00", meridiem: "PM", startCookingInAdvance: "00:00:10", onMissed: "run" } });
+    expect(ok.isError).toBe(false);
+    expect(readTasks(h.home)[0]!.schedule.onMissed).toBe("run");
+    const bad = await call(agent, { command: "create", instructions: "i", task: "t", scheduled_action: { name: "N", id: "n-two", timeToDeliver: "00:07:00", meridiem: "PM", startCookingInAdvance: "00:00:10", onMissed: "maybe" } });
+    expect(bad.isError).toBe(true);
+    expect(readTasks(h.home)).toHaveLength(1);
+  });
 
   it("the description is the manual with the worker pool filled in", () => {
     const h = harness();
@@ -897,10 +1246,10 @@ describe("scheduled_actions and get_datetime tools", () => {
     await expect(scheduledActions.execute({ command: "frobnicate" }, { toolCallId: "t" })).rejects.toThrow(/Unknown command "frobnicate"/);
   });
 
-  it("get/update/kill/run_now/skip need an id; get returns the latest result text", async () => {
+  it("get/update/delete/run_now/skip need an id; get returns the latest result text", async () => {
     const h = harness();
     const agent = h.agent(mockFetch(() => chatReply("Latest brief text.")).fn);
-    for (const command of ["get", "update", "kill", "run_now", "skip"]) {
+    for (const command of ["get", "update", "delete", "run_now", "skip"]) {
       const r = await call(agent, { command });
       expect(r.isError).toBe(true);
       expect(String(r.result)).toContain('needs "id"');
@@ -914,8 +1263,8 @@ describe("scheduled_actions and get_datetime tools", () => {
     h.s.tick();
     const got = (await call(agent, { command: "get", id: made.id })).result as any;
     expect(got).toMatchObject({ id: made.id, lastRun: { status: "ok" }, latestResult: "Latest brief text." });
-    const killed = await call(agent, { command: "kill", id: made.id, purge: true });
-    expect(killed.result).toEqual({ ok: true });
+    const removed = await call(agent, { command: "delete", id: made.id, purge: true });
+    expect(removed.result).toEqual({ ok: true });
     expect(String((await call(agent, { command: "get", id: made.id })).result)).toContain("No scheduled action");
   });
 
@@ -954,5 +1303,96 @@ describe("setHome", () => {
       setHome();
     }
     expect(resolveHome()).toBe(path.resolve(".agent-accel"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The on-disk format is a stable contract: docs/scheduled-action-files.md says what is below.
+// ---------------------------------------------------------------------------
+describe("scheduled action files (stable contract)", () => {
+  const dirOf = (h: Harness): string => path.join(h.home, "scheduled_actions");
+  const json = (h: Harness, name: string): any => JSON.parse(fs.readFileSync(path.join(dirOf(h), name), "utf8"));
+  const sorted = (o: object): string[] => Object.keys(o).sort();
+  const HEADER_ORDER = ["id", "name", "status", "startedAt", "finishedAt", "deliverAt", "late", "model", "turns", "tokens", "inputTokens", "freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "thinkingTokens", "cacheHitRate", "costUsd", "costSource", "unpricedTurns"];
+  const doc = fs.readFileSync(path.join(import.meta.dir, "..", "docs", "scheduled-action-files.md"), "utf8");
+
+  // The header parser exactly as the page shows it.
+  function readRunLikeTheDocs(dir: string, file: string): { header: Record<string, string>; body: string } {
+    const text = fs.readFileSync(path.join(dir, file), "utf8");
+    const m = /^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/.exec(text);
+    if (!m) throw new Error(`${file} is not a run file`);
+    const header = Object.fromEntries(m[1]!.split("\n").map((l) => [l.slice(0, l.indexOf(": ")), l.slice(l.indexOf(": ") + 2)]));
+    return { header, body: m[2]!.trimEnd() };
+  }
+
+  it("tasks.json: the version, the exact fields of a minimal and of a full record, and the states", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    createScheduledAction(agent, input());
+    const file = json(h, "tasks.json");
+    expect(Object.keys(file)).toEqual(["version", "tasks"]);
+    expect(file.version).toBe(1);
+    expect(sorted(file.tasks[0])).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "schedule", "state", "task", "tools"]);
+    expect(sorted(file.tasks[0].schedule)).toEqual(["meridiem", "startCookingInAdvance", "timeToDeliver"]);
+    expect(file.tasks[0].state).toBe("waiting");
+
+    createScheduledAction(agent, input({ id: "full-one", repeatEvery: "01:00:00", retries: 1, onMissed: "run" }, { role: "analyst", timeoutMs: 600_000 }));
+    const full = json(h, "tasks.json").tasks[1];
+    expect(sorted(full)).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "role", "schedule", "state", "task", "timeoutMs", "tools"]);
+    expect(sorted(full.schedule)).toEqual(["meridiem", "onMissed", "repeatEvery", "retries", "startCookingInAdvance", "timeToDeliver"]);
+    expect(full.id).toMatch(/^full-one-[a-z0-9]{6}$/);
+    expect(full.nextDeliverAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/); // local time, no offset
+  });
+
+  it("a run's files: current, deliveries.json, the run header (keys and order) and lastRun", async () => {
+    const h = harness();
+    const { of } = capture();
+    const rec = createScheduledAction(h.agent(mockFetch(() => chatReply("Result text.")).fn), input());
+    h.set(18, 50);
+    h.s.tick();
+    expect(sorted(json(h, "tasks.json").tasks[0].current)).toEqual(["cookStartedAt", "deliverAt"]); // only while cooking
+    await h.settle();
+    expect(json(h, "tasks.json").tasks[0].current).toBeUndefined();
+
+    const deliveries = json(h, "deliveries.json");
+    expect(Object.keys(deliveries)).toEqual(["version", "pending"]);
+    expect(deliveries.version).toBe(1);
+    expect(sorted(deliveries.pending[0])).toEqual(["deliverAt", "file", "id", "readyAt", "status"]);
+    expect(deliveries.pending[0].file).toBe(`${rec.id}/26-october-2026.md`);
+
+    const text = fs.readFileSync(path.join(dirOf(h), deliveries.pending[0].file), "utf8");
+    expect(text.startsWith("---\n")).toBe(true);
+    const { header, body } = readRunLikeTheDocs(dirOf(h), deliveries.pending[0].file);
+    expect(Object.keys(header)).toEqual(HEADER_ORDER);
+    expect(body).toBe("Result text.");
+    expect(header).toMatchObject({ status: "ok", late: "false", costUsd: "unknown", costSource: "unknown" });
+
+    h.set(19, 0);
+    h.s.tick();
+    expect(json(h, "deliveries.json").pending).toEqual([]);
+    expect(sorted(json(h, "tasks.json").tasks[0].lastRun)).toEqual(["deliverAt", "deliveredAt", "file", "late", "status"]);
+    expect(sorted(of("scheduled_action.delivered")[0]!.data as object)).toEqual(["deliverAt", "file", "id", "late", "name", "readyAt", "status"]);
+  });
+
+  it("keeps fields it does not know on rewrite, and keeps the last good copy as .bak", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    updateTasks(h.home, (tasks) => void ((tasks[0] as unknown as Record<string, unknown>)["owner"] = "ops"));
+    updateScheduledAction(rec.id, { task: "A new assignment." }, { home: h.home });
+    const kept = json(h, "tasks.json").tasks[0];
+    expect(kept.owner).toBe("ops");
+    expect(kept.task).toBe("A new assignment.");
+    expect(fs.existsSync(path.join(dirOf(h), "tasks.json.bak"))).toBe(true);
+    expect(validateRecord(kept)).toBeUndefined(); // an extra key is not a validation problem
+  });
+
+  it("the docs page names every header key, state and event", () => {
+    for (const key of HEADER_ORDER) expect(doc).toContain(`\`${key}\``);
+    for (const state of ["waiting", "cooking", "missed", "done"]) expect(doc).toContain(`\`${state}\``);
+    for (const code of ["created", "updated", "started", "ready", "failed", "delivered", "missed", "skipped", "deleted", "invalid", "store_corrupt", "error"]) {
+      expect(doc).toContain(`\`scheduled_action.${code}\``);
+    }
+    expect(doc).toContain('"version": 1');
   });
 });

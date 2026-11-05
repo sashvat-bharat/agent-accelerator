@@ -29,11 +29,11 @@ function asResult(reply: WorkerReply): ReturnType<typeof makeSubagentResult> {
 /** Builds the `subagents` tool for `agent`; its description is the manual with the worker pool and the open-worker limit filled in. */
 export function createSubagentsTool(agent: Agent): ToolDefinition {
   const poolNames = Object.keys(agent.dynamicSubagents?.tools ?? {});
-  const max = agent.dynamicSubagents?.maxSpawn ?? 4;
+  const max = agent.dynamicSubagents?.maxSpawn ?? Infinity;
   return tool({
     name: "subagents",
     description: loadManual()
-      .replace(/\{\{MAX\}\}/g, String(max))
+      .replace("{{LIMIT}}", Number.isFinite(max) ? `You can have at most ${max} open workers. Close the ones you are done with.` : "There is no limit on open workers. Close the ones you are done with: each one keeps its whole conversation.")
       .replace("{{TOOLS}}", poolNames.length > 0 ? poolNames.join(", ") : "none (omit tools)"),
     input: z.object({
       command: z.enum(COMMANDS),

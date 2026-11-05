@@ -21,11 +21,12 @@
 | Specialist helpers | `subagents: [agentA, agentB]` | [Multi-agent](guides/multi-agent.md) |
 | Model-invented helpers | `dynamicSubagents: { model, tools }` | [Multi-agent](guides/multi-agent.md) |
 | Work later or on repeat | `dynamicSubagents.allowScheduledActions` + `createScheduledAction` | [Multi-agent](guides/multi-agent.md) |
-| Redirect a busy agent | `steer()`, `queue()`, `interrupt()` | [Tools and streaming](guides/tools-and-streaming.md) |
+| Redirect a busy agent | `steer()`, `queue()`, `interrupt()`, `interrupt(message)` | [Tools and streaming](guides/tools-and-streaming.md) |
 | Save / resume / survive a crash | `persist: { dir }` + same `sessionId` (cut-off runs resume by themselves), `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
 | What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
+| Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, `allowedModels` | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | Observe | `telemetryBus.onEvent` |
 | Ask permission before a tool acts | check inside `execute`, refuse with `ctx.stop(reason)` (run ends `stopped`) | [Tools and streaming](guides/tools-and-streaming.md) | [Safety](guides/safety-and-ops.md) |
 
@@ -61,7 +62,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 
 - **Stable prompts.** Never put timestamps or per-request data in `instructions` or change the tool set between calls; use `additionalContext`.
 - **Explicit config wins** over env. A custom provider prefix needs its own `<PREFIX>_API_KEY` and `<PREFIX>_BASE_URL`; never reuse another vendor's key.
-- **Bound everything unattended:** `maxTurns`, `limits.deadlineMs`, `budget`, and a `signal`.
+- **Bound everything unattended:** nothing is limited by default except three network timeouts, so set `maxTurns`, `limits.deadlineMs`, `budget`, a `signal`, and for workers `dynamicSubagents.workerBudget` / `maxSpawn` / `maxDepth` (all unlimited until set). `0` or `Infinity` turns a network timeout off.
 - **Branch on error classes and `err.retryable`, never on message text.** Use `isAbortError(err)` for cancellation.
 - **Unknown cost is `undefined`**, not zero.
 - **Tool names** match `^[a-zA-Z0-9_-]{1,64}$`. Pass `ctx.signal` to I/O.

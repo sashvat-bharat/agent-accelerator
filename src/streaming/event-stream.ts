@@ -14,6 +14,8 @@ export interface EventStreamOptions {
   includePartial?: boolean;
   /** Max buffered events when no iterator is attached. Default 1000. Oldest dropped. */
   maxBufferedEvents?: number;
+  /** `false`: events go to listeners and waiting iterators only, never into the buffer (for a caller that only wants `result()`). Default true. */
+  buffer?: boolean;
   /** Max approx bytes for a single delta event. Default 1MB. Oversized dropped. */
   maxEventBytes?: number;
 }
@@ -61,6 +63,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
   private resolveFinalResult!: (result: AgentResponse) => void;
   private rejectFinalResult!: (err: Error) => void;
   private readonly includePartial: boolean;
+  private readonly buffered: boolean;
   private readonly maxBufferedEvents: number;
   private readonly maxEventBytes: number;
   /** First listener exception captured for inspection (Q-29/Q-41). */
@@ -80,6 +83,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
    */
   constructor(opts?: EventStreamOptions) {
     this.includePartial = opts?.includePartial !== false;
+    this.buffered = opts?.buffer !== false;
     this.maxBufferedEvents =
       typeof opts?.maxBufferedEvents === "number" && Number.isFinite(opts.maxBufferedEvents) && opts.maxBufferedEvents > 0
         ? Math.floor(opts.maxBufferedEvents)
@@ -151,8 +155,9 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     } else {
       // No waiter right now (typical between `next()` polls of a burst):
       // buffer for the iterator with a hard cap (Q-29). Overflow drops the
-      // oldest with an anomaly report — see `enqueueBounded`.
-      this.enqueueBounded(out);
+      // oldest with an anomaly report — see `enqueueBounded`. A stream built
+      // with `buffer: false` has no iterator to feed and keeps nothing.
+      if (this.buffered) this.enqueueBounded(out);
     }
   }
 

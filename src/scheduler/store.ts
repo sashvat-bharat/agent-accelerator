@@ -17,6 +17,7 @@ import { telemetryBus } from "../telemetry.ts";
 import { resolveHome } from "../utils/home.ts";
 export { resolveHome };
 import { ValidationError } from "../types/errors.ts";
+import type { CostSource } from "../session/usage.ts";
 import type { ScheduledActionRecord, ScheduledRunStatus } from "../types/scheduler.ts";
 import { durationMs, runFileName } from "./time.ts";
 
@@ -33,6 +34,8 @@ export interface PendingDelivery {
   status: ScheduledRunStatus;
   readyAt: string;
   deliverAt: string;
+  /** Set when the run replaced a missed occurrence: it is late whatever the clock says (a `run_now` on a `missed` action, or `onMissed: "run"`). */
+  late?: boolean;
 }
 
 /** Header written at the top of every run file. */
@@ -46,9 +49,26 @@ export interface RunHeader {
   /** The run finished after its delivery time. */
   late: boolean;
   model?: string;
+  /** Model calls the run made (all attempts), and what they spent: the same numbers `usageReport()` keeps for workers. */
+  turns?: number;
+  /** Input + output tokens. */
   tokens?: number;
-  /** `unknown` when the model has no known pricing (never a made-up 0). */
+  /** Everything sent; `freshInputTokens + cacheReadTokens + cacheWriteTokens`. */
+  inputTokens?: number;
+  freshInputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** Everything generated, thinking included. */
+  outputTokens?: number;
+  thinkingTokens?: number;
+  /** `cacheReadTokens / inputTokens`, 0 to 1; absent when nothing was sent. */
+  cacheHitRate?: number;
+  /** `unknown` when no turn had a known price (never a made-up 0). */
   costUsd?: number | "unknown";
+  /** Where the price came from: the `provider`'s reported cost, the `catalog`, `mixed`, or `unknown`. */
+  costSource?: CostSource;
+  /** Turns with no known price; when present, `costUsd` is a lower bound. */
+  unpricedTurns?: number;
   error?: string;
 }
 
@@ -163,6 +183,7 @@ const recordSchema = z
       startCookingInAdvance: z.string(),
       repeatEvery: z.string().optional(),
       retries: z.number().int().min(0).optional(),
+      onMissed: z.enum(["skip", "run"]).optional(),
     }),
     state: z.enum(["waiting", "cooking", "missed", "done"]),
     nextCookAt: iso.nullable(),
@@ -195,6 +216,7 @@ const deliverySchema = z.object({
   status: z.enum(["ok", "failed"]),
   readyAt: iso,
   deliverAt: iso,
+  late: z.boolean().optional(),
 });
 
 /** `undefined` when a `deliveries.json` entry is usable, else a one-line reason. Never throws. */

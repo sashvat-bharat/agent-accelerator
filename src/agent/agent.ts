@@ -1,7 +1,7 @@
-import type { AgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState, InterruptedRun } from "../types/agent.ts";
+import type { AgentConfig, EditableAgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState, InterruptedRun } from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
-import { normalizeThinkingV2, resolveWhenBusy, normalizeWorkerTimeout } from "../tools/tool.ts";
+import { normalizeThinkingV2, resolveWhenBusy } from "../tools/tool.ts";
 import type { ToolDefinition, ToolResultRecord } from "../types/tool.ts";
 import { isSubagentResult } from "../tools/subagent-result.ts";
 import { CACHE_OPTIONS, type ThinkingLevel, type ThinkingConfig, type CacheOption, type ServiceTier } from "../types/core.ts";
@@ -25,6 +25,7 @@ import { resolveHome } from "../scheduler/store.ts";
 import { persistTelemetry } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
+import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, endsWithStop, accumulateUsage, type SteerEntry } from "./loop.ts";
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
@@ -95,6 +96,8 @@ function resolveAgentLimits(config: { limits?: Record<string, unknown> }): Agent
   const raw = (config as { limits?: Record<string, unknown> }).limits ?? {};
   const num = (v: unknown): number | undefined =>
     typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
+  const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
   return {
     ...(num(raw.maxTurns) !== undefined ? { maxTurns: Math.max(1, Math.floor(num(raw.maxTurns)!)) } : {}),
     ...(num(raw.deadlineMs) !== undefined ? { deadlineMs: num(raw.deadlineMs)! } : {}),
@@ -102,9 +105,9 @@ function resolveAgentLimits(config: { limits?: Record<string, unknown> }): Agent
       ? { maxToolCallsPerRun: Math.max(1, Math.floor(num(raw.maxToolCallsPerRun)!)) }
       : {}),
     ...(num(raw.maxTotalTokens) !== undefined ? { maxTotalTokens: Math.max(1, Math.floor(num(raw.maxTotalTokens)!)) } : {}),
-    requestTimeoutMs: num(raw.requestTimeoutMs) ?? 300_000,
-    firstByteTimeoutMs: num(raw.firstByteTimeoutMs) ?? 120_000,
-    streamIdleTimeoutMs: num(raw.streamIdleTimeoutMs) ?? 300_000,
+    requestTimeoutMs: timeout(raw.requestTimeoutMs) ?? 300_000,
+    firstByteTimeoutMs: timeout(raw.firstByteTimeoutMs) ?? 120_000,
+    streamIdleTimeoutMs: timeout(raw.streamIdleTimeoutMs) ?? 300_000,
   };
 }
 
@@ -165,13 +168,15 @@ export class Agent {
   readonly dynamicSubagents?: {
     enabled: boolean;
     model?: string | any;
+    /** Open workers at once; `Infinity` (the default) = no limit. */
     maxSpawn: number;
     thinkingLevel?: ThinkingLevel;
     tools: Record<string, ToolDefinition>;
-    timeout: number;
+    /** Longest a scheduled run may take, in ms; `Infinity` (the default) = no limit. */
+    workerTimeoutMs: number;
     /** Scheduled actions (`scheduled_actions` + `get_datetime` tools) are on. */
     allowScheduledActions: boolean;
-    /** Levels of workers allowed below this agent. */
+    /** Levels of workers allowed below this agent; `Infinity` (the default) = no limit. */
     maxDepth: number;
     /** Per-run spending cap of each worker (unset = unlimited). */
     workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
@@ -257,6 +262,8 @@ export class Agent {
     deferredStream?: AssistantMessageEventStream;
     resolve: (res: AgentResponse) => void;
     reject: (err: unknown) => void;
+    /** Put here by `interrupt(message)`: runs before every other waiting prompt. */
+    urgent?: boolean;
   }> = [];
   /** Named session contexts for `sessionId` runs (Q-19a, LRU 100 + TTL). */
   private sessions = new Map<string, { context: AgentContext; lastAccess: number }>();
@@ -311,6 +318,7 @@ export class Agent {
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
     this.modelStringOrSpec = modelStringOrSpec as string | any;
+    assertModelAllowed(config.allowedModels, modelKey(modelStringOrSpec));
     const dynRaw = config.dynamicSubagents;
     // Unified worker-model chain: dynamicSubagents.model > subagentModel > SUB_AGENT_MODEL.
     const dynModel = resolveDynamicModelInput(dynRaw, config.subagentModel);
@@ -319,8 +327,9 @@ export class Agent {
     if (dynRaw) {
       const dynTools = normalizeToolMap((dynRaw as { tools?: Record<string, ToolDefinition> | ToolDefinition[] }).tools);
       const rawDepth = (dynRaw as { maxDepth?: unknown }).maxDepth;
-      if (rawDepth !== undefined && !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)) {
-        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1 (default ${DEFAULT_MAX_DEPTH}); set dynamicSubagents.enabled: false to turn workers off.`);
+      // Depth is unlimited unless the developer sets a cap (a whole number >= 1; Infinity also means unlimited).
+      if (rawDepth !== undefined && rawDepth !== Infinity && !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)) {
+        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1, or omit it for no limit; set dynamicSubagents.enabled: false to turn workers off.`);
       }
       const rawBudget = (dynRaw as { workerBudget?: { maxCostUsd?: unknown; maxTotalTokens?: unknown } }).workerBudget;
       for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
@@ -329,17 +338,30 @@ export class Agent {
           throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.workerBudget.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`);
         }
       }
-      const rawMax = (dynRaw as any)?.maxSpawn;
-      const maxSpawn = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax as number)) : 4;
-      // `workerTimeoutMs ?? timeout`, or -1 when `modelMaySetTimeout` (see normalizeWorkerTimeout).
-      const timeout = normalizeWorkerTimeout(dynRaw as { timeout?: number; workerTimeoutMs?: number; modelMaySetTimeout?: boolean });
+      // Open workers are unlimited unless the developer sets a cap (a number >= 1; Infinity also means unlimited).
+      const rawMax = (dynRaw as { maxSpawn?: unknown }).maxSpawn;
+      if (rawMax !== undefined && (typeof rawMax !== "number" || Number.isNaN(rawMax))) {
+        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxSpawn ${JSON.stringify(rawMax)}: expected a whole number >= 1, or omit it for no limit.`);
+      }
+      const maxSpawn = rawMax === undefined || rawMax === Infinity ? Infinity : Math.max(1, Math.floor(rawMax));
+      // Only scheduled actions are timed: no limit unless the developer sets one (0 and Infinity mean none).
+      for (const removed of ["timeout", "modelMaySetTimeout"]) {
+        if ((dynRaw as Record<string, unknown>)[removed] !== undefined) {
+          throw new ConfigError(`[Agent Accelerator] dynamicSubagents.${removed} was removed: set dynamicSubagents.workerTimeoutMs (the longest a scheduled run may take, optional) and let each scheduled action carry its own timeoutMs.`);
+        }
+      }
+      const rawTimeout = (dynRaw as { workerTimeoutMs?: unknown }).workerTimeoutMs;
+      if (rawTimeout !== undefined && (typeof rawTimeout !== "number" || Number.isNaN(rawTimeout) || rawTimeout < 0)) {
+        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.workerTimeoutMs ${JSON.stringify(rawTimeout)}: expected a number of milliseconds > 0, or omit it (0 and Infinity mean no limit).`);
+      }
+      const workerTimeoutMs = !rawTimeout ? Infinity : Math.max(1, Math.floor(rawTimeout));
       this.dynamicSubagents = {
         enabled: dynEnabled,
         model: dynModel as string | any | undefined,
         maxSpawn,
         thinkingLevel: (dynRaw as any)?.thinkingLevel,
         tools: dynTools,
-        timeout,
+        workerTimeoutMs,
         allowScheduledActions: dynRaw.allowScheduledActions === true,
         maxDepth: (rawDepth as number | undefined) ?? DEFAULT_MAX_DEPTH,
         ...(rawBudget ? { workerBudget: { ...(rawBudget as { maxCostUsd?: number; maxTotalTokens?: number }) } } : {}),
@@ -805,20 +827,44 @@ export class Agent {
   }
 
   /**
-   * Interrupts the active run immediately (STOP. Do this instead).
-   * Cancels the active stream and aborts provider/tool/sub-agent work via
-   * the run's internal `AbortController`. No-op when idle. The interrupted
-   * run rejects with `AbortError`; queued follow-ups still run afterwards.
+   * Stops the active run now (STOP.) and, given a message, starts it next (STOP. Do this instead). The provider
+   * request is aborted (connection closed, so the provider stops generating where it can), the stream is cancelled, and
+   * running tools and workers get the abort signal; the interrupted run rejects with `AbortError` and keeps its partial
+   * history. `interrupt()` and `interrupt(error)` only stop (no-op when idle) and return nothing. `interrupt(message)`
+   * also runs `message` as the next run, ahead of queued follow-ups, in every `midSession` mode, and resolves with that
+   * run's response; when idle it simply runs the message. For a stream use `stream(message, { enqueue: "interrupt" })`.
    */
-  interrupt(reason?: unknown): void {
+  interrupt(reason?: Error): void;
+  interrupt(message: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse>;
+  interrupt(arg?: Error | string | ContentPart[], options?: AgentRunOptions): void | Promise<AgentResponse> {
+    if (typeof arg === "string" || Array.isArray(arg)) {
+      if (options?.stream === true) {
+        throw new Error('[Agent Accelerator] interrupt(message) is non-streaming. Use stream(prompt, { enqueue: "interrupt" }) for a streaming interrupt.');
+      }
+      return this.run(arg, { ...options, enqueue: "interrupt" });
+    }
+    this.abortActive(arg instanceof Error ? arg : undefined);
+  }
+
+  // Aborts the active run (provider request, tools, workers, stream) through its own controller; no-op when idle; in: interrupt and queueUrgent, out: the run settles as AbortError.
+  private abortActive(reason?: Error): void {
     const active = this.currentRun;
     if (!active) return;
     try {
-      active.abortController.abort(reason instanceof Error ? reason : new Error("Agent interrupted"));
+      active.abortController.abort(reason ?? new Error("Agent interrupted"));
     } catch {}
     try {
       active.outerStream?.cancel(reason);
     } catch {}
+  }
+
+  // Puts a prompt ahead of everything waiting (behind earlier interrupts) and aborts the active run, so it starts as soon as that run has settled; ignores midSession mode and maxQueued; in: run()/stream() with enqueue "interrupt", out: pendingQueue + the abort.
+  private queueUrgent(entry: Agent["pendingQueue"][number]): void {
+    entry.urgent = true;
+    const firstOrdinary = this.pendingQueue.findIndex((e) => !e.urgent);
+    this.pendingQueue.splice(firstOrdinary < 0 ? this.pendingQueue.length : firstOrdinary, 0, entry);
+    this.persistNow();
+    this.abortActive();
   }
 
   /**
@@ -1009,7 +1055,9 @@ export class Agent {
             reject: entry.settle?.reject ?? (() => {}),
           });
         }
-        this.pendingQueue.unshift(...lateSteers);
+        // ...but behind an interrupt(message), which is the newest and most urgent instruction.
+        const firstOrdinary = this.pendingQueue.findIndex((e) => !e.urgent);
+        this.pendingQueue.splice(firstOrdinary < 0 ? this.pendingQueue.length : firstOrdinary, 0, ...lateSteers);
       } catch {}
     }
     this.persistNow();
@@ -1103,6 +1151,24 @@ export class Agent {
     });
     if (parentSessionId) (copy as unknown as { parentSessionId?: string }).parentSessionId = parentSessionId;
     return copy;
+  }
+
+  /**
+   * The part of this agent that an agent may edit, as plain JSON: `{ model, instructions, tools }` (`model` is the
+   * `provider/model` string, never a key; `tools` are the names of the tools you passed in `tools`). Store it, show it
+   * to the model, and rebuild with {@link Agent.fromConfig}.
+   */
+  toConfig(): Required<EditableAgentConfig> {
+    return toEditableConfig(this.modelStringOrSpec, this.instructions, this.forkConfig.tools);
+  }
+
+  /**
+   * Builds an Agent from your full `base` config with an agent's edits applied. Only `model`, `instructions` and
+   * `tools` of `editable` count (other keys are ignored with a `config.not_editable` warning); `tools` are names picked
+   * from `base.tools`, an unknown name throws; `base.allowedModels` is enforced. Keys and limits always come from `base`.
+   */
+  static fromConfig(editable: EditableAgentConfig, base: AgentConfig): Agent {
+    return new Agent(applyEditable(editable, base));
   }
 
   /** Budgets are per run: counters restart whenever a new run begins. */
@@ -1690,8 +1756,11 @@ export class Agent {
       return s;
     }
 
-    // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
+    // Mid-session: busy agent serializes via steer (same turn) or queue (next turn), or stops the active run and starts this prompt (interrupt).
     if (this.currentRun) {
+      if (options?.enqueue === "interrupt") {
+        return new Promise<AgentResponse>((resolve, reject) => this.queueUrgent({ prompt, options, isStream: false, resolve, reject }));
+      }
       const enforced = this.midSessionConfig.mode;
       const requested = options?.enqueue;
       if (requested && (enforced === "steer" || enforced === "queue") && requested !== enforced) {
@@ -1805,13 +1874,14 @@ export class Agent {
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
     if (this.currentRun) {
       const enforcedStream = this.midSessionConfig.mode;
-      const requestedStream = options?.enqueue;
+      const urgent = options?.enqueue === "interrupt"; // stops the active run and goes first, in every mode and whatever the queue holds
+      const requestedStream = options?.enqueue === "interrupt" ? undefined : options?.enqueue;
       if (requestedStream && (enforcedStream === "steer" || enforcedStream === "queue") && requestedStream !== enforcedStream) {
         throw new Error(
           `[Agent Accelerator] enqueue "${requestedStream}" is disabled by midSession.mode "${enforcedStream}". Use ${enforcedStream}() or set mode to "auto"/"${requestedStream}".`
         );
       }
-      const mode = this.resolveEnqueueMode(requestedStream);
+      const mode = urgent ? "queue" : this.resolveEnqueueMode(requestedStream);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
         this.assertSteerRoom(this.currentRun.steerInbox);
@@ -1844,14 +1914,14 @@ export class Agent {
         }
         return stub;
       }
-      if (this.midSessionConfig.mode === "steer") {
+      if (!urgent && this.midSessionConfig.mode === "steer") {
         throw new Error(
           '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
         );
       }
       this.assertPromptValid(prompt);
       const max = this.midSessionConfig.maxQueued ?? 20;
-      if (this.pendingQueue.length >= max) {
+      if (!urgent && this.pendingQueue.length >= max) {
         throw new Error(
           `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
         );
@@ -1859,13 +1929,15 @@ export class Agent {
       const deferred = new AssistantMessageEventStream();
       this.wireStreamCallbacks(deferred, options);
       // Notify the active stream (if any) that a follow-up was queued.
-      try {
-        this.currentRun.outerStream?.push({
-          type: "queued",
-          queuedPrompt: this.previewPrompt(prompt),
-          queueLength: this.pendingQueue.length + 1,
-        } as any);
-      } catch {}
+      if (!urgent) {
+        try {
+          this.currentRun.outerStream?.push({
+            type: "queued",
+            queuedPrompt: this.previewPrompt(prompt),
+            queueLength: this.pendingQueue.length + 1,
+          } as any);
+        } catch {}
+      }
       const queuedEntry: {
         prompt: string | ContentPart[];
         options?: AgentRunOptions;
@@ -1901,8 +1973,12 @@ export class Agent {
           }
         } catch {}
       });
-      this.pendingQueue.push(queuedEntry as any);
-      this.persistNow();
+      if (urgent) {
+        this.queueUrgent(queuedEntry as Agent["pendingQueue"][number]);
+      } else {
+        this.pendingQueue.push(queuedEntry as any);
+        this.persistNow();
+      }
       // Attach deferred completion to queued promise without exposing it.
       // Real events are piped in pumpQueue() when the turn starts.
       void done.then(

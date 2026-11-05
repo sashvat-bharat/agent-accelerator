@@ -171,9 +171,11 @@ export function normalizeToolMap(
 // Shared dynamic-worker helpers (pure, no store access)
 // ---------------------------------------------------------------------------
 
-/** Resolves per-worker timeout: `>0` fixed, `0` unlimited, `-1` per-task. */
-export function normalizeWorkerTimeoutValue(cfgTimeout: number, taskTimeoutMs: unknown): number {
-  return cfgTimeout > 0 ? cfgTimeout : cfgTimeout === -1 && (taskTimeoutMs as number) > 0 ? Math.floor(taskTimeoutMs as number) : 0;
+// The time limit of one scheduled run in ms, 0 = none: the action's own `timeoutMs`, never above the developer's `workerTimeoutMs` (Infinity = none), which is also the limit when the action sets none; in: Agent.dynamicSubagents.workerTimeoutMs + the saved action, out: Scheduler.attempt.
+export function scheduledRunTimeoutMs(cap: number, taskTimeoutMs: number | undefined): number {
+  const own = typeof taskTimeoutMs === "number" && taskTimeoutMs > 0 ? Math.floor(taskTimeoutMs) : Infinity;
+  const ms = Math.min(own, cap);
+  return Number.isFinite(ms) ? ms : 0;
 }
 
 /**
@@ -236,8 +238,8 @@ export function resolveWorkerCredentials(
   return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
 }
 
-/** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise. */
-export const DEFAULT_MAX_DEPTH = 3;
+/** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise: unlimited. */
+export const DEFAULT_MAX_DEPTH = Infinity;
 
 /**
  * Config of a dynamic worker (scheduled actions, the worker registry): the developer's fixed worker

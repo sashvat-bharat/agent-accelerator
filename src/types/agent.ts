@@ -121,7 +121,8 @@ export interface AgentConfig {
    * - `{ mode: "steer" }`: only steer (inject into current turn) is allowed.
    * - `{ mode: "queue" }`: only queue (next-turn follow-up) is allowed.
    * - `{ mode: "auto" }` (default): caller picks per message via `enqueue` or `steer()`/`queue()`.
-   * `interrupt` (cancel stream now) is always available via `interrupt()`/`cancel()`/`AbortSignal`.
+   * `interrupt` (stop the active run now, optionally start a new message) is always available, whatever the mode:
+   * `interrupt()`, `interrupt(message)`, `enqueue: "interrupt"`, `cancel()` and `AbortSignal`.
    */
   midSession?: MidSessionConfig;
   /**
@@ -227,6 +228,25 @@ export interface AgentConfig {
   budget?: Budget;
   /** Run + network limits (Q-22). Turn/budget caps unlimited by default; network timeouts finite. */
   limits?: AgentRunLimits;
+  /**
+   * The only models this agent may use, as `provider/model` strings compared as written. Unset (default) = any model.
+   * Checked when the Agent is built (also for a config an agent edited through {@link Agent.fromConfig}); a model
+   * outside the list throws a `ConfigError`. Workers and `subagentModel` are not affected.
+   */
+  allowedModels?: string[];
+}
+
+/**
+ * The part of an agent that an agent may edit (self-improvement): see {@link Agent.toConfig} and {@link Agent.fromConfig}.
+ * Plain JSON. Every other setting (limits, budget, cache, thinking, keys, ...) stays with the developer.
+ */
+export interface EditableAgentConfig {
+  /** `provider/model`; must be in `allowedModels` when the developer set it. */
+  model?: string;
+  /** System instructions. */
+  instructions?: string;
+  /** Names of tools, picked from the developer's tool pool (`base.tools` of `fromConfig`). */
+  tools?: string[];
 }
 
 /** A run that a crash cut off (see {@link Agent.interrupted}). */
@@ -246,6 +266,7 @@ export interface AgentRunLimits {
   deadlineMs?: number;
   maxTotalTokens?: number;
   maxToolCallsPerRun?: number;
+  /** Network timeouts in ms. Defaults 300 000 / 120 000 / 300 000. `0` or `Infinity` turns one off. */
   requestTimeoutMs?: number;
   firstByteTimeoutMs?: number;
   streamIdleTimeoutMs?: number;
@@ -288,7 +309,7 @@ export interface DynamicSubagentsConfig {
   allowScheduledActions?: boolean;
   /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then `SUB_AGENT_MODEL` env, then the parent model. */
   model?: string | ModelSpec | ModelProviderInstance;
-  /** Max workers that may be open at once on this agent (the model must close one before spawning another). Defaults to 4. */
+  /** Max workers that may be open at once on this agent (the model must close one before spawning another). Default: no limit; set a whole number >= 1 to cap it. */
   maxSpawn?: number;
   /** Fixed reasoning level for all dynamic workers. The Main Agent cannot override it. Falls back to the parent level when omitted. */
   thinkingLevel?: ThinkingLevel;
@@ -300,27 +321,19 @@ export interface DynamicSubagentsConfig {
    */
   workerBudget?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
   /**
-   * How many levels of workers may exist below this agent (default 3). `1` = workers cannot start workers of their own;
-   * `3` = a worker may start workers that start workers. A worker with levels left gets its own `subagents` tool, and
-   * its children can only be granted the tools the worker itself was granted. Whole number >= 1.
+   * How many levels of workers may exist below this agent. Default: no limit. `1` = workers cannot start workers of their
+   * own; `3` = a worker may start workers that start workers. A worker with levels left gets its own `subagents` tool, and
+   * its children can only be granted the tools the worker itself was granted. A whole number >= 1, or omit it for no limit.
    */
   maxDepth?: number;
   /** Tool pool available to dynamic workers. Workers receive zero tools unless the Main Agent grants a per-task `tools` subset by name. */
   tools?: Record<string, ToolDefinition> | ToolDefinition[];
-  /** Per-run timeout in ms of a SCHEDULED ACTION's worker (the `subagents` tool and `agent.workers` have no timeouts). `0` (default) = no limit. `-1` = the action sets its own `timeoutMs`. `>0` = fixed. */
-  timeout?: number;
   /**
-   * Canonical timeout in ms for scheduled-action workers (Q-52, preferred over `timeout`).
-   * Maps to `timeout`: `workerTimeoutMs ?? timeout ?? 0`. See
-   * `normalizeWorkerTimeout` (re-exported from the root entry).
+   * Longest a SCHEDULED ACTION's run may take, in ms (the `subagents` tool and `agent.workers` have no timeouts). An
+   * action can set its own shorter `timeoutMs`; this is the ceiling for it, and the limit for actions that set none.
+   * Default: no limit (`0` and `Infinity` mean the same).
    */
   workerTimeoutMs?: number;
-  /**
-   * Scheduled actions only: when true, each action sets its own `timeoutMs` (maps to
-   * `timeout: -1`). When both are set, an explicit `timeout`/`workerTimeoutMs`
-   * wins over `modelMaySetTimeout`.
-   */
-  modelMaySetTimeout?: boolean;
 }
 
 /** Per-run overrides for {@link Agent.run}, {@link Agent.ask}, and {@link Agent.stream}. */
@@ -346,8 +359,10 @@ export interface AgentRunOptions {
    * enforces `"steer"` or `"queue"`, that policy wins and this field is ignored.
    * When idle, this field is ignored and the call runs immediately.
    * Defaults to `"queue"` (finish current turn, run as next turn).
+   * `"interrupt"` is honored in every mode: it stops the active run (provider request, tools, workers) and starts this
+   * prompt as the next run, ahead of queued follow-ups.
    */
-  enqueue?: "steer" | "queue";
+  enqueue?: "steer" | "queue" | "interrupt";
   /** Headers merged for this run only. */
   headers?: Record<string, string>;
   /** Called for each text delta as it streams (only when stream:true). */

@@ -32,13 +32,14 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `runRetries` | Times a whole run that failed for a transient reason is tried again from where it stopped (default 3, `0` = off) | [Safety](guides/safety-and-ops.md) |
 | `fileAccess`, `captureRaw`, `onFailure` | `{ roots }`, `"redacted"`/`true`/`false`, `"auto"`/`"rollback"`/`"keep"` | [Safety](guides/safety-and-ops.md) |
 | `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
+| `allowedModels` | `string[]` of `provider/model`, compared as written. Unset = any model. A model outside the list throws `ConfigError` when the Agent is built (also through `Agent.fromConfig`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text) to `<home>/telemetry/<date>.ndjson`. Off by default | [Safety](guides/safety-and-ops.md) |
 | `logger`, `hooks`, `contextManagement` | **Not implemented**; emit `config.unsupported_option`. Use `telemetryBus` | |
 
-**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (4, open workers at once), `maxDepth` (3, levels of workers below the agent, whole number >= 1), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each worker's own per-run cap, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (canonical; `0` none, `-1` the action sets it, `>0` fixed), `timeout` (legacy), `modelMaySetTimeout`. The `subagents` tool and `agent.workers` have no timeouts.
+**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each worker's own per-run cap, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).
 **`midSession`**: `mode`, `whenBusy`, `maxQueued` (20).
 **`budget`** (per run, includes workers): `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`.
-**`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). A long-running call (Google long decode, or any `Provider` whose `isLongRunning()` returns true) times each HTTP request only, never the whole call or stream.
+**`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). Everything except these three network timeouts is unlimited until set; `0` or `Infinity` turns a timeout off (details: [Safety and operations](guides/safety-and-ops.md#what-is-limited-by-default)). A long-running call (Google long decode, or any `Provider` whose `isLongRunning()` returns true) times each HTTP request only, never the whole call or stream.
 
 Precedence: explicit config > environment; per-run options > agent defaults (objects merge per key).
 
@@ -53,7 +54,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `signal` | Cancels provider, tools and sub-agents |
 | `sessionId` | Which in-memory session to use |
 | `additionalContext` | Per-turn context added to the user turn (not to `instructions`) |
-| `enqueue` | `"steer"` or `"queue"` when the agent is busy |
+| `enqueue` | `"steer"`, `"queue"` or `"interrupt"` when the agent is busy. `"interrupt"` works in every `midSession` mode: it aborts the active run and starts this prompt next, ahead of queued follow-ups |
 | `headers` | Extra request headers |
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
 | `wrapThinking` | Display reasoning inside `<think>…</think>` |
@@ -108,6 +109,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 |---|---|
 | `config.unsupported_option` | A placeholder or unsupported option was given and dropped |
 | `config.thinking_budget_ignored` | `thinking.budgetTokens` is not forwarded |
+| `config.not_editable` | `Agent.fromConfig` got keys other than `model`, `instructions`, `tools`; they were ignored (`data.fields`) |
 | `provider_warning` | A provider-specific option was dropped (e.g. `stop` on Google) |
 | `agent.max_turns_truncated` | Run stopped at `maxTurns` with tool work pending |
 | `turn.thinking` | Full reasoning text of a turn (bus only) |
@@ -121,7 +123,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed / resuming (or a prompt that was waiting) failed |
 | `worker.invalid` | A saved `worker.json` is damaged and that worker is skipped |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
-| `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.killed`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle |
+| `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle; payloads in [Scheduled action files](scheduled-action-files.md#events) |
 
 ## Errors
 

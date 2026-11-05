@@ -15,7 +15,7 @@
  *   4. Let the MODEL schedule one: it reads the clock itself (get_datetime)
  *      and uses the same timing (scheduled_actions tool).
  *   5. Watch the REAL scheduled deliveries arrive and read the result files.
- *   6. Clean up (killScheduledAction).
+ *   6. Clean up (deleteScheduledAction).
  *
  * Run:
  *   bun run examples/14-scheduled-actions.ts           (about 3 minutes: waits for the real deliveries)
@@ -42,7 +42,7 @@ import {
   createScheduledAction,
   listScheduledActions,
   runScheduledAction,
-  killScheduledAction,
+  deleteScheduledAction,
 } from "agent-accelerator";
 import { z } from "zod";
 import { fail } from "./_shared";
@@ -129,8 +129,8 @@ function nextDelivery(id: string, ms: number): Promise<Delivery> {
 /** Removes every action in the demo-only folder (force: abort a run in flight; purge: delete its run files). */
 async function removeDemoActions(say: (t: string) => void): Promise<void> {
   for (const a of listScheduledActions({ home: HOME })) {
-    const r = await killScheduledAction(a.id, { home: HOME, force: true, purge: true });
-    say(`  kill ${a.id}: ${r.ok ? "removed" : JSON.stringify(r)}`);
+    const r = await deleteScheduledAction(a.id, { home: HOME, force: true, purge: true });
+    say(`  delete ${a.id}: ${r.ok ? "removed" : JSON.stringify(r)}`);
   }
 }
 

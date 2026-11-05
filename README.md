@@ -121,11 +121,13 @@ An `Agent` holds:
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Falls back to `SUB_AGENT_MODEL`. |
-| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned workers: `{ enabled, model?, maxSpawn?, maxDepth?, workerBudget?, thinkingLevel?, tools?, timeout?, allowScheduledActions? }` (`timeout` is for scheduled actions only). See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
+| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned workers: `{ enabled, model?, maxSpawn?, maxDepth?, workerBudget?, thinkingLevel?, tools?, workerTimeoutMs?, allowScheduledActions? }` (`workerTimeoutMs` is for scheduled actions only). See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Infinite by default (`0` or omitted = no limit). Hitting a finite limit with pending tool calls warns and sets `finishReason: "max_turns"`. |
+| `limits`          | `AgentRunLimits`                                     | `{ maxTurns?, deadlineMs?, maxToolCallsPerRun?, maxTotalTokens?, requestTimeoutMs?, firstByteTimeoutMs?, streamIdleTimeoutMs? }`. The first four are unlimited by default. The three network timeouts default to 300 s / 120 s / 300 s so a silent connection fails instead of hanging; set one to `0` or `Infinity` to turn it off. A timeout raises a retryable `TimeoutError`. See [Safety and operations](docs/guides/safety-and-ops.md#network-timeouts). |
+| `budget`          | `Budget`                                             | `{ maxCostUsd?, maxTotalTokens?, maxDurationMs?, maxTotalSubagents? }`, per run, workers included. Unlimited by default; exceeding it throws `BudgetExceededError` with partial usage. |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
 | `apiKey`          | `string`                                             | Overrides environment-based API-key lookup for this agent.                                                                                                 |
@@ -144,6 +146,11 @@ When `dynamicSubagents.enabled` is set without a resolvable worker model, constr
 await agent.run(prompt, opts?) // non-streaming, or streaming when opts.stream is true
 agent.ask(prompt, optsOrBool?) // deprecated (use run): string deltas when streaming, otherwise same as run
 agent.stream(prompt, opts?) // AssistantMessageEventStream
+agent.steer(prompt) / agent.queue(prompt) // while busy: join the active run / start after it
+agent.interrupt() // stop the active run now (provider request aborted, stream cancelled, tools get ctx.signal)
+await agent.interrupt(message) // stop it AND run `message` next, ahead of queued follow-ups (stream: opts.enqueue = "interrupt")
+agent.toConfig() // { model, instructions, tools }: the part an agent may edit, plain JSON (no keys)
+Agent.fromConfig(editable, base) // new Agent: your full `base` config + an agent's edits of model/instructions/tools only
 agent.reset() // clears messages + signatures, keeps config
 agent.exportSession(telemetry?) // storable snapshot for saveSessionFile
 agent.importSession(saved) // restores messages + config from loadSessionFile
@@ -170,7 +177,8 @@ Use `ContentPart[]` when sending images, audio, or video alongside text.
 | `additionalContext`             | Added only to the current user turn. Keeps the system prompt stable for better caching.                                                         |
 | `sessionId`                     | Per-run session override.                                                                                                                       |
 | `headers`                       | Per-run header merge.                                                                                                                           |
-| `signal`                        | `AbortSignal` used to cancel generation, tools, and subagents.                                                                                  |
+| `signal`                        | `AbortSignal` used to cancel generation, tools, and subagents. The provider request is aborted and a stream's body is cancelled; see [what interrupting stops at the provider](docs/guides/safety-and-ops.md#what-interrupting-stops-at-the-provider). |
+| `enqueue`                       | When the agent is busy: `"steer"` (join the active run), `"queue"` (run after it) or `"interrupt"` (stop it and run this prompt next, in every `midSession` mode). |
 
 ### Streaming
 
@@ -269,7 +277,7 @@ const agent = new Agent({
   instructions: "You are the Main Agent",
   dynamicSubagents: {
     enabled: true,
-    maxSpawn: 4, // open workers at once
+    maxSpawn: 4, // optional cap on open workers at once (default: no limit)
     thinkingLevel: "low",
     tools: { get_weather, recent_news }, // pool: the model grants a subset per worker
   },
@@ -280,10 +288,10 @@ One `subagents` tool is injected. It takes `{ command, id?, name?, role?, instru
 
 - `spawn` starts a worker (`name`, `task`; optional `instructions`, `role`, `tools`, `history`) and waits for its first reply. `message` sends `task` to an open worker `id`, which remembers the whole conversation. `close` frees the slot. `list` shows the open workers and the numbered finished turns that `history: N` can copy into a new worker.
 - Results are plain text with one header line: `[worker researcher-1a2b3c4d] replied:` + the worker's text, or `[worker researcher-1a2b3c4d] failed: <reason>`. Several `spawn` calls in one model turn run in parallel. A bad request comes back as an `Error: ...` line the model can fix.
-- `maxSpawn` is the limit on **open** workers (the model must close one to open another). `budget.maxTotalSubagents` still counts spawns per run.
+- `maxSpawn` caps **open** workers (the model must close one to open another); by default there is no cap. `budget.maxTotalSubagents` still counts spawns per run. Every budget and limit is off until you set it, except three network timeouts (see the `limits` row).
 - `tools` is the developer-owned pool. Workers get zero tools unless the Main Agent grants a subset by name; unknown names are rejected with the pool listed.
-- The Main Agent cannot choose worker models, reasoning levels or timeouts. The `subagents` tool has no timeouts (`workerTimeoutMs`/`timeout` apply only to scheduled actions).
-- `maxDepth` (default 3, whole number >= 1) is how many levels of workers may exist below the agent: `1` keeps workers flat, `3` lets a worker start workers that start workers. A worker with levels left gets its own `subagents` tool, and its children can only be granted the tools **it** was granted. The levels are saved inside each other (`<session>/workers/<id>/workers/<id>/…`).
+- The Main Agent cannot choose worker models, reasoning levels or timeouts. The `subagents` tool has no timeouts (`workerTimeoutMs` and an action's `timeoutMs` apply only to scheduled actions).
+- `maxDepth` caps how many levels of workers may exist below the agent. By default there is no cap (a worker can start workers that start workers, as deep as the model goes); set a whole number >= 1 to limit it: `1` keeps workers flat, `3` allows three levels. A worker with levels left gets its own `subagents` tool, and its children can only be granted the tools **it** was granted. The levels are saved inside each other (`<session>/workers/<id>/workers/<id>/…`).
 - `workerBudget: { maxCostUsd?, maxTotalTokens? }` is each worker's own spending cap, applied as that worker's per-run `budget` (a spawn, a message or a scheduled run is one run; the usage of the worker's own workers counts toward it) and passed down to its workers. Going over fails that call with a budget error (`[worker <id>] failed: Token budget exceeded…`), leaves the worker open and does not affect the parent. Default: unlimited; models with unknown pricing count $0 toward `maxCostUsd`. Values must be numbers above 0.
 - Workers are real agents with their own session: see [Persistent workers](#persistent-workers-agentworkers) below (the same functions in code, saved on disk with `persist`, resumed after a restart). Each reply's usage is metered into the parent's usage and budget.
 - Each run of a worker gets a system-generated 32-char TrackingID, displayed as `NAME-{TrackingID}`. Thinking/text deltas update the worker trace live (`agent.track(id)`, `subscribeToSubAgent`) and surface on the parent stream as `subagent_delta` events.
@@ -341,7 +349,7 @@ const agent = new Agent({
 });
 ```
 
-The Main Agent then gets two tools, fixed by config so the prompt cache stays stable: `scheduled_actions` (one tool, `command` = `create | list | get | update | kill | run_now | skip`) and `get_datetime` (the machine's local date and time, also exported as `getDatetimeTool`). The tool description is exactly [`src/scheduler/scheduled-actions.md`](src/scheduler/scheduled-actions.md) (the worker pool names are filled in), so you can read what the model is told.
+The Main Agent then gets two tools, fixed by config so the prompt cache stays stable: `scheduled_actions` (one tool, `command` = `create | list | get | update | delete | run_now | skip`) and `get_datetime` (the machine's local date and time, also exported as `getDatetimeTool`). The tool description is exactly [`src/scheduler/scheduled-actions.md`](src/scheduler/scheduled-actions.md) (the worker pool names are filled in), so you can read what the model is told.
 
 The same code is available to your program:
 
@@ -360,6 +368,7 @@ createScheduledAction(agent, {
     startCookingInAdvance: "00:00:30", // optional, a "DD:HH:MM" duration (default 10 minutes)
     repeatEvery: "01:00:00", // optional; omit to run once
     retries: 1, // optional; used only while time remains before delivery
+    onMissed: "run", // optional: "skip" | "run" if your program was down at delivery time (omit to decide later)
   },
 });
 
@@ -375,17 +384,19 @@ telemetryBus.onEvent((e) => {
 | `updateScheduledAction(id, patch, { home? })` | Change instructions, task, tools, timeout, role or any schedule field. Schedule changes are refused while it is cooking. |
 | `runScheduledAction(id, { home? })` | Run now, outside the schedule (also resolves a missed run). Needs the creating `Agent` alive. |
 | `skipScheduledAction(id, { home? })` | Ignore a missed run and wait for the next scheduled time. |
-| `killScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
+| `deleteScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
 
 **How it behaves**
 
 * **One local clock.** A single timer per home folder (guarded by a one-process lock, `<home>/.lock`) ticks once a second against the machine's own time and only asks what is overdue, so drift or sleep cannot skip a run. There is no timezone or daylight-saving logic. The timer is `unref`'d and runs only while something is pending, so actions run only while your process is alive.
 * **The creating `Agent` runs it.** The task stores the Agent's `name`; each run goes to the live Agent with that name (latest wins), using its worker model and tool pool. The scheduler holds only a weak reference, so keep your `Agent` referenced; if none is alive, the run counts as missed.
 * **Each run is fresh.** A new stateless dynamic sub-agent built from the saved fields, on your fixed worker model and tool pool, never touching the Main Agent's session. It inherits the parent's limits, retry policy, `fileAccess` and `captureRaw`.
-* **Files are the truth.** Everything lives in `<home>/scheduled_actions/`: `tasks.json` (every action), `deliveries.json` (saved results waiting for their delivery time) and one folder per action with one `.md` file per run (a small header, then the result). The file is re-read and validated before each run, so editing `instructions` or `task` there takes effect on the next run. API keys, the model and tool code are never stored. Don't put secrets in `instructions`.
-* **Ready, then delivered.** A finished run is saved immediately (`scheduled_action.ready`); at `timeToDeliver` the SDK emits `scheduled_action.delivered` on `telemetryBus` with `{ id, name, status, file, readyAt, deliverAt, late }`. There is no notification system: what happens next is your code. Other events: `.created`, `.updated`, `.started`, `.failed`, `.missed`, `.skipped`, `.killed`, plus the warnings `.invalid` and `.store_corrupt`.
+* **Files are the truth.** Everything lives in `<home>/scheduled_actions/` (the format is a stable contract with a changelog: [docs/scheduled-action-files.md](docs/scheduled-action-files.md)): `tasks.json` (every action), `deliveries.json` (saved results waiting for their delivery time) and one folder per action with one `.md` file per run (a small header, then the result). The file is re-read and validated before each run, so editing `instructions` or `task` there takes effect on the next run. API keys, the model and tool code are never stored. Don't put secrets in `instructions`.
+* **What a run costs.** Each run file's header records the run's exact spending, the same numbers `usageReport()` keeps for workers: `turns`, `tokens` (input + output), `inputTokens`, `freshInputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outputTokens`, `thinkingTokens`, `cacheHitRate` (0 to 1), `costUsd`, `costSource` (`provider`, `catalog`, `mixed` or `unknown`) and `unpricedTurns` (only when above 0, then `costUsd` is a lower bound). Unknown pricing is `costUsd: unknown`, never 0. The numbers cover every attempt of the run (`retries` included) and are recorded for failed runs too. The report itself does not list scheduled runs.
+* **Time limit of a run.** An action may carry `timeoutMs` (top level of the action, not inside `scheduled_action`): a run that takes longer is stopped and recorded as failed. By default there is no limit. `dynamicSubagents.workerTimeoutMs` is an optional ceiling: an action cannot ask for more, and it is the limit for actions that set none (`0` and `Infinity` mean no ceiling). The former `dynamicSubagents.timeout`, `modelMaySetTimeout` and the `-1` mode were removed; passing them throws a `ConfigError` that says what to use.
+* **Ready, then delivered.** A finished run is saved immediately (`scheduled_action.ready`); at `timeToDeliver` the SDK emits `scheduled_action.delivered` on `telemetryBus` with `{ id, name, status, file, readyAt, deliverAt, late }`. There is no notification system: what happens next is your code. Other events: `.created`, `.updated`, `.started`, `.failed`, `.missed`, `.skipped`, `.deleted`, plus the warnings `.invalid` and `.store_corrupt`.
 * **Overlap and failure.** A run still cooking when the next one is due is skipped, never stacked. A failed run still writes a file saying why and is delivered like any result (`status: "failed"`).
-* **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once and runs nothing by itself: pick `run_now` or `skip`. A result saved before the process exited is simply delivered (marked `late`) on the first tick after start.
+* **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once. By default it runs nothing by itself and the action waits as `missed`: pick `run_now` or `skip`. Set `scheduled_action.onMissed` per action to decide in advance: `"skip"` moves on to the next time (a one-shot is `done`; a `skipped` event follows), `"run"` runs it as soon as the program is back (delivered when it finishes, marked `late`). The same applies to a run a crash cut off. An action whose creating Agent is gone stays `missed` whatever `onMissed` says (nothing can run it). A result saved before the process exited is simply delivered (marked `late`) on the first tick after start. `late` means the result was delivered more than two ticks after its time, finished after its delivery second, or replaced a missed run. A `run_now` result is delivered when it finishes: it is `late` only when it replaces a missed run (a `run_now` on a `missed` action, or `onMissed: "run"`), never for an ordinary early run.
 
 ---
 ## Tools
@@ -1048,7 +1059,7 @@ report.total;   // agent + all workers
 - **Own turns only.** Every agent records the model calls it made itself, priced **per turn** in integer micro-USD, and saves them in its session (`usage`), so the numbers survive a restart (load the session and the totals carry on; workers are rebuilt from their folders). A parent's `res.usage` already contains its workers' usage, which is why the report never adds responses together: `report.total.tokens.total` equals what the responses show.
 - **Cache-aware.** `input` includes the cache reads and writes (`freshInput = input - cacheRead - cacheWrite`); `output` includes `thinking`. Fresh input, cache reads and cache writes are each priced at their own catalog price, and `serviceTier` is applied. `cacheHitRate` is `cacheRead / input` (0 to 1, `null` when nothing was sent).
 - **Honest costs.** `cost.source` is `provider` (the provider reported the cost, which is exact), `catalog` (estimated from the model catalog), `mixed`, or `unknown`. Unknown pricing is `totalUsd: null`, never 0; `unpricedTurns` above 0 means the total is a lower bound. For turns whose cost the provider reported only the total is exact, so `parts` can add up to less than `totalUsd`.
-- **Not in the report:** the one-shot workers of scheduled actions (their cost is in each run file), and workers started inside a fixed `subagents` worker's per-call copy (their cost is in the response usage). `reset()` does not clear the totals: they are spending, not conversation.
+- **Not in the report:** the one-shot workers of scheduled actions (their exact cost is in each run file's header), and workers started inside a fixed `subagents` worker's per-call copy (their cost is in the response usage). `reset()` does not clear the totals: they are spending, not conversation.
 
 ### ProviderRawData
 
@@ -1348,7 +1359,7 @@ bun run examples/11-session-identity.ts
 # sub-agent TrackingIDs, live worker boxes, lineage, track(), durable sessions
 
 bun run examples/12-mid-session.ts
-# steer, queue and stream while a turn is running
+# steer, queue and stream while a turn is running (interrupt() stops it; interrupt(message) stops it and runs the message)
 
 bun run examples/13-structured-output.ts
 # JSON Schema structured outputs on every provider

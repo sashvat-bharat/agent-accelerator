@@ -422,6 +422,21 @@ function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+// Settles with `work`, or rejects "Tool execution aborted" the moment `signal` aborts, without waiting for a tool that never looks at its signal (it finishes in the background, its result is dropped); in: executeAttempt, out: the attempt's result or error.
+function raceAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("Tool execution aborted"));
+    if (signal.aborted) {
+      work.catch(() => {}); // the abandoned tool may still fail later: nobody listens
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 async function executeAttempt(
   toolDef: ToolDefinition,
   parsedInput: unknown,
@@ -429,7 +444,7 @@ async function executeAttempt(
   timeoutMs: number | undefined
 ): Promise<unknown> {
   if (!timeoutMs || timeoutMs <= 0) {
-    return toolDef.execute(parsedInput as any, context);
+    return raceAbort(Promise.resolve(toolDef.execute(parsedInput as any, context)), context.signal);
   }
 
   const controller = new AbortController();
@@ -453,7 +468,7 @@ async function executeAttempt(
       }, timeoutMs);
     });
     const result = await Promise.race([
-      Promise.resolve(toolDef.execute(parsedInput as any, executionContext)),
+      raceAbort(Promise.resolve(toolDef.execute(parsedInput as any, executionContext)), context.signal),
       timeout,
     ]);
     // A resolved promise can beat a timer callback even when the event loop

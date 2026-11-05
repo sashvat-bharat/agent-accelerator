@@ -14,14 +14,15 @@
  */
 import type { Agent } from "../agent/agent.ts";
 import { createChildSessionId } from "../agent/delegation.ts";
-import { buildDynamicWorkerConfig, grantWorkerTools, normalizeWorkerTimeoutValue } from "../agent/worker.ts";
+import { buildDynamicWorkerConfig, grantWorkerTools, scheduledRunTimeoutMs } from "../agent/worker.ts";
 import { telemetryBus } from "../telemetry.ts";
+import { readUsage, usageLine, type UsageTotals } from "../session/usage.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { AgentResponse } from "../types/response.ts";
 import type {
-  KillResult,
+  DeleteResult,
   ScheduledActionInput,
   ScheduledActionPatch,
   ScheduledActionRecord,
@@ -68,15 +69,42 @@ export interface HomeOptions {
 }
 
 type PoolTools = Record<string, ToolDefinition>;
-type Outcome = { res: AgentResponse } | { error: string };
+type Outcome = ({ res: AgentResponse } | { error: string }) & { usage?: UsageTotals };
 interface RunningEntry {
-  /** Aborted by `kill`; every attempt of the run listens to it. */
+  /** Aborted by `delete`; every attempt of the run listens to it. */
   controller: AbortController;
   done: Promise<void>;
-  killed: boolean;
+  deleted: boolean;
+  /** Started by `run_now` or `onMissed: "run"`: due when it finishes. */
+  manual: boolean;
+  /** A manual run that replaces a missed occurrence: always `late`. A plain `run_now` is never late. */
+  missed: boolean;
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+// A run's exact spending as run-header fields, the numbers `usageReport()` keeps for workers (tokens split, cache hit rate, cost and where the price came from); in: the one-shot worker's totals over all attempts, out: finish's RunHeader.
+function usageFields(totals: UsageTotals | undefined): Partial<RunHeader> {
+  if (!totals || totals.turns === 0) return {};
+  const u = usageLine(totals);
+  return {
+    turns: u.turns,
+    tokens: u.tokens.total,
+    inputTokens: u.tokens.input,
+    freshInputTokens: u.tokens.freshInput,
+    cacheReadTokens: u.tokens.cacheRead,
+    cacheWriteTokens: u.tokens.cacheWrite,
+    outputTokens: u.tokens.output,
+    thinkingTokens: u.tokens.thinking,
+    ...(u.cacheHitRate !== null ? { cacheHitRate: Math.round(u.cacheHitRate * 10_000) / 10_000 } : {}),
+    costUsd: u.cost.totalUsd === null ? "unknown" : Number(u.cost.totalUsd.toFixed(6)),
+    costSource: u.cost.source,
+    ...(u.cost.unpricedTurns > 0 ? { unpricedTurns: u.cost.unpricedTurns } : {}),
+  };
+}
+
+// Whole seconds since the epoch: stored times have no milliseconds, so lateness is compared at this precision; in: a clock reading or stored time, out: finish and deliver.
+const secondOf = (d: Date): number => Math.floor(d.getTime() / 1000);
 
 function emit(code: string, message: string, data: Record<string, unknown>, level: "info" | "warn" = "info"): void {
   telemetryBus.emit({ code: `scheduled_action.${code}`, message: `[Agent Accelerator] ${message}`, level, data });
@@ -140,6 +168,9 @@ function checkSchedule(
   }
   if (sa.retries !== undefined && !(Number.isInteger(sa.retries) && sa.retries >= 0)) {
     problems.push("scheduled_action.retries: must be a whole number >= 0.");
+  }
+  if (sa.onMissed !== undefined && sa.onMissed !== "skip" && sa.onMissed !== "run") {
+    problems.push(`scheduled_action.onMissed: must be "skip" or "run" (omit it to decide later with run_now or skip); got ${JSON.stringify(sa.onMissed)}.`);
   }
 }
 
@@ -227,7 +258,7 @@ export class Scheduler {
         this.swept = true;
         this.startupSweep(now);
       }
-      this.deliverDue(now, first);
+      this.deliverDue(now);
       this.startDue(now);
       if (!this.hasPending()) this.stop();
     } catch (err) {
@@ -277,7 +308,7 @@ export class Scheduler {
     for (const t of this.snapshot().live) {
       if (t.state === "cooking") this.recoverCooking(t);
       else if (t.state === "waiting" && t.nextDeliverAt && parseLocalIso(t.nextDeliverAt).getTime() <= now.getTime()) {
-        this.markMissed(t.id, "process_down");
+        this.markMissed(t.id, "process_down", t.schedule.onMissed);
       }
     }
   }
@@ -288,7 +319,7 @@ export class Scheduler {
     const file = findRunFile(this.home, t.id, parseLocalIso(current.deliverAt), current.cookStartedAt);
     const run = file ? readRun(this.home, file) : undefined;
     if (!file || !run) {
-      this.markMissed(t.id, "interrupted");
+      this.markMissed(t.id, "interrupted", t.schedule.onMissed);
       return;
     }
     updateDeliveries(this.home, (pending) => {
@@ -299,6 +330,7 @@ export class Scheduler {
         status: run.header["status"] === "failed" ? "failed" : "ok",
         readyAt: run.header["finishedAt"] ?? current.deliverAt,
         deliverAt: current.deliverAt,
+        ...(run.header["late"] === "true" ? { late: true } : {}),
       });
     });
     updateTasks(this.home, (tasks) => {
@@ -309,7 +341,8 @@ export class Scheduler {
     });
   }
 
-  private markMissed(id: string, reason: string): void {
+  // Marks a run whose moment passed as missed, then applies the action's onMissed policy: `skip` moves on to the next time, `run` runs it now, unset waits for run_now / skip; in: the startup sweep, out: tasks.json + the missed (and skipped / started) events.
+  private markMissed(id: string, reason: string, policy?: "skip" | "run"): void {
     let name = id;
     updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === id);
@@ -318,25 +351,28 @@ export class Scheduler {
       t.state = "missed";
       delete t.current;
     });
-    emit("missed", `"${name}" (${id}) missed its run (${reason}). Use run_now or skip.`, { id, name, reason }, "warn");
+    const next = policy === "skip" ? "Skipping it (onMissed: skip)." : policy === "run" ? "Running it now (onMissed: run)." : "Use run_now or skip.";
+    emit("missed", `"${name}" (${id}) missed its run (${reason}). ${next}`, { id, name, reason, ...(policy ? { onMissed: policy } : {}) }, "warn");
+    if (policy === "skip") this.skip(id);
+    else if (policy === "run") this.startCook(id, true);
   }
 
   // ----- delivery ----------------------------------------------------------
 
-  private deliverDue(now: Date, first: boolean): void {
+  private deliverDue(now: Date): void {
     for (const entry of this.snapshot().pending) {
-      if (parseLocalIso(entry.deliverAt).getTime() <= now.getTime()) this.deliver(entry, now, first);
+      if (parseLocalIso(entry.deliverAt).getTime() <= now.getTime()) this.deliver(entry, now);
     }
   }
 
-  /** Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens). */
-  private deliver(entry: PendingDelivery, now: Date, first: boolean): void {
+  // Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens); late = it replaced a missed occurrence, was delivered over two ticks after its time, or finished after it; in: deliverDue, out: tasks.json + the delivered event.
+  private deliver(entry: PendingDelivery, now: Date): void {
     updateDeliveries(this.home, (pending) => {
       const i = pending.findIndex((p) => p.id === entry.id && p.file === entry.file);
       if (i >= 0) pending.splice(i, 1);
     });
     const deliverAt = parseLocalIso(entry.deliverAt).getTime();
-    const late = first || now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
+    const late = entry.late === true || now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
     let name = entry.id;
     updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === entry.id);
@@ -382,7 +418,7 @@ export class Scheduler {
    */
   private startCook(id: string, manual: boolean): ScheduledActionRecord | undefined {
     const now = this.now();
-    const ctx: { agent?: Agent; noAgent?: boolean } = {};
+    const ctx: { agent?: Agent; noAgent?: boolean; replacesMissed?: boolean } = {};
     const started = updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === id);
       if (!t) return undefined;
@@ -392,6 +428,7 @@ export class Scheduler {
         return undefined;
       }
       if (t.state === "cooking") return undefined;
+      ctx.replacesMissed = manual && t.state === "missed";
       ctx.agent = this.agents.get(t.agent)?.deref();
       if (!ctx.agent) {
         t.state = "missed";
@@ -427,7 +464,7 @@ export class Scheduler {
       cookStartedAt: started.current!.cookStartedAt,
       deliverAt: started.current!.deliverAt,
     });
-    this.launch(started, ctx.agent);
+    this.launch(started, ctx.agent, manual, ctx.replacesMissed === true);
     return started;
   }
 
@@ -458,8 +495,9 @@ export class Scheduler {
     }
   }
 
-  private launch(task: ScheduledActionRecord, agent: Agent): void {
-    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), killed: false };
+  // Starts one run without awaiting it and tracks it until it ends; in: startCook, out: this.running + the run's files.
+  private launch(task: ScheduledActionRecord, agent: Agent, manual: boolean, missed: boolean): void {
+    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), deleted: false, manual, missed };
     this.running.set(task.id, entry);
     entry.done = this.runWorker(task, agent, entry)
       .catch((err) => {
@@ -476,8 +514,8 @@ export class Scheduler {
   private async runWorker(task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<void> {
     const deliverAt = parseLocalIso(task.current!.deliverAt);
     const outcome = await this.execute(task, agent, entry, deliverAt);
-    if (entry.killed) return; // killed: no run file, nothing delivered
-    this.finish(task, outcome, task.current!.cookStartedAt, deliverAt);
+    if (entry.deleted) return; // deleted: no run file, nothing delivered
+    this.finish(task, outcome, task.current!.cookStartedAt, deliverAt, entry);
   }
 
   /** A fresh stateless worker built from the saved fields; retries only while there is time before delivery. */
@@ -502,13 +540,13 @@ export class Scheduler {
       const attempts = 1 + (task.schedule.retries ?? 0);
       for (let attempt = 1; ; attempt++) {
         try {
-          return { res: await this.attempt(worker, task, agent, entry) };
+          return { res: await this.attempt(worker, task, agent, entry), usage: readUsage(worker.usageTotals) };
         } catch (err) {
-          if (entry.killed || attempt >= attempts || this.now().getTime() >= deliverAt.getTime()) throw err;
+          if (entry.deleted || attempt >= attempts || this.now().getTime() >= deliverAt.getTime()) throw err;
         }
       }
     } catch (err) {
-      return { error: errText(err) };
+      return { error: errText(err), ...(worker ? { usage: readUsage(worker.usageTotals) } : {}) };
     } finally {
       try {
         worker?.reset();
@@ -519,14 +557,14 @@ export class Scheduler {
   }
 
   private async attempt(worker: Agent, task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<AgentResponse> {
-    const ms = normalizeWorkerTimeoutValue(agent.dynamicSubagents?.timeout ?? 0, task.timeoutMs);
-    // One controller per attempt (the timeout is per attempt), fed by the entry's kill controller.
+    const ms = scheduledRunTimeoutMs(agent.dynamicSubagents?.workerTimeoutMs ?? Infinity, task.timeoutMs);
+    // One controller per attempt (the timeout is per attempt), fed by the entry's delete controller.
     const controller = new AbortController();
-    const kill = () => controller.abort(entry.controller.signal.reason ?? new Error("killed"));
-    if (entry.controller.signal.aborted) kill();
-    else entry.controller.signal.addEventListener("abort", kill, { once: true });
+    const onDelete = () => controller.abort(entry.controller.signal.reason ?? new Error("deleted"));
+    if (entry.controller.signal.aborted) onDelete();
+    else entry.controller.signal.addEventListener("abort", onDelete, { once: true });
     const timer = ms > 0 ? setTimeout(() => controller.abort(new Error(`timed out after ${ms}ms`)), ms) : undefined;
-    // Raced so a timeout or kill ends the attempt even if the provider ignores the signal.
+    // Raced so a timeout or delete ends the attempt even if the provider ignores the signal.
     const aborted = new Promise<never>((_, reject) => {
       controller.signal.addEventListener("abort", () => reject(controller.signal.reason ?? new Error("aborted")), { once: true });
     });
@@ -534,35 +572,33 @@ export class Scheduler {
       return await Promise.race([worker.run(task.task, { signal: controller.signal }), aborted]);
     } finally {
       clearTimeout(timer);
-      entry.controller.signal.removeEventListener("abort", kill);
+      entry.controller.signal.removeEventListener("abort", onDelete);
     }
   }
 
-  /** Write order: run file, then the `deliveries.json` entry, then `tasks.json`. A crash in between is repaired on start. */
-  private finish(task: ScheduledActionRecord, outcome: Outcome, startedAt: string, deliverAt: Date): void {
+  // Writes a finished run: run file, then the `deliveries.json` entry, then `tasks.json` (a crash in between is repaired on start); a manual run is due when it finishes and is late only if it replaced a missed occurrence, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
+  private finish(task: ScheduledActionRecord, outcome: Outcome, startedAt: string, deliverAt: Date, run: Pick<RunningEntry, "manual" | "missed">): void {
     const now = this.now();
     const ok = "res" in outcome;
     const finishedAt = toLocalIso(now);
+    const due = run.manual ? now : deliverAt;
+    const late = run.missed || secondOf(now) > secondOf(due);
     const header: RunHeader = {
       id: task.id,
       name: task.name,
       status: ok ? "ok" : "failed",
       startedAt,
       finishedAt,
-      deliverAt: toLocalIso(deliverAt),
-      late: now.getTime() > deliverAt.getTime(),
-      ...(ok
-        ? {
-            model: `${outcome.res.provider}/${outcome.res.model}`,
-            tokens: outcome.res.usage.totalTokens,
-            costUsd: outcome.res.usage.cost?.totalCost ?? "unknown",
-          }
-        : { error: outcome.error }),
+      deliverAt: toLocalIso(due),
+      late,
+      ...(ok ? { model: `${outcome.res.provider}/${outcome.res.model}` } : {}),
+      ...usageFields(outcome.usage),
+      ...(ok ? {} : { error: outcome.error }),
     };
     const body = ok ? outcome.res.text.trim() || "[The worker returned no text.]" : `The run failed: ${outcome.error}`;
     const file = writeRunFile(this.home, task.id, deliverAt, header, body);
     updateDeliveries(this.home, (pending) => {
-      pending.push({ id: task.id, file, status: header.status, readyAt: finishedAt, deliverAt: header.deliverAt });
+      pending.push({ id: task.id, file, status: header.status, readyAt: finishedAt, deliverAt: header.deliverAt, ...(run.missed ? { late: true } : {}) });
     });
     updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === task.id);
@@ -611,7 +647,7 @@ export class Scheduler {
     return rec;
   }
 
-  async kill(id: string, opts: { force?: boolean; purge?: boolean }): Promise<KillResult> {
+  async delete(id: string, opts: { force?: boolean; purge?: boolean }): Promise<DeleteResult> {
     const rec = readTasks(this.home).find((t) => t.id === id);
     if (!rec) return { ok: false, reason: "not_found" };
     const run = this.running.get(id);
@@ -619,12 +655,12 @@ export class Scheduler {
       return {
         ok: false,
         reason: "running",
-        message: `"${id}" is cooking right now, so nothing was changed. Ask the user whether to abort it; if they agree, call kill again with force: true.`,
+        message: `"${id}" is cooking right now, so nothing was changed. Ask the user whether to abort it; if they agree, call delete again with force: true.`,
       };
     }
     if (run) {
-      run.killed = true;
-      run.controller.abort(new Error("killed"));
+      run.deleted = true;
+      run.controller.abort(new Error("deleted"));
       await run.done;
     }
     updateTasks(this.home, (tasks) => {
@@ -635,7 +671,7 @@ export class Scheduler {
       for (let i = pending.length - 1; i >= 0; i--) if (pending[i]!.id === id) pending.splice(i, 1);
     });
     if (opts.purge) removeTaskFolder(this.home, id);
-    emit("killed", `"${rec.name}" (${id}) was killed.`, { id, name: rec.name, forced: !!run, purged: !!opts.purge });
+    emit("deleted", `"${rec.name}" (${id}) was deleted.`, { id, name: rec.name, forced: !!run, purged: !!opts.purge });
     return { ok: true };
   }
 }
@@ -712,6 +748,7 @@ export function createScheduledAction(agent: Agent, input: ScheduledActionInput)
         startCookingInAdvance: lead,
         ...(sa.repeatEvery !== undefined ? { repeatEvery: sa.repeatEvery } : {}),
         ...(sa.retries !== undefined ? { retries: sa.retries } : {}),
+        ...(sa.onMissed !== undefined ? { onMissed: sa.onMissed } : {}),
       },
       state: "waiting",
       nextCookAt: toLocalIso(cookTime(deliverAt, durationMs(lead, "scheduled_action.startCookingInAdvance"))),
@@ -811,6 +848,6 @@ export function skipScheduledAction(id: string, opts?: HomeOptions): ScheduledAc
  * `force: true` (the run is aborted, then deleted). Past run files are kept
  * unless `purge: true`.
  */
-export function killScheduledAction(id: string, opts?: HomeOptions & { force?: boolean; purge?: boolean }): Promise<KillResult> {
-  return schedulerFor(opts).kill(id, { force: opts?.force, purge: opts?.purge });
+export function deleteScheduledAction(id: string, opts?: HomeOptions & { force?: boolean; purge?: boolean }): Promise<DeleteResult> {
+  return schedulerFor(opts).delete(id, { force: opts?.force, purge: opts?.purge });
 }

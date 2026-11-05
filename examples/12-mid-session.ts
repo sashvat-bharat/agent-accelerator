@@ -87,7 +87,7 @@ info("Streaming live. Steer lands mid-turn; interrupt() would stop it.");
   const s = agent.stream("Call slow_tool once, then reply 'stream done'.", live());
   await new Promise((r) => setTimeout(r, 150));
   void agent.steer("Keep it to one line.");
-  // To stop instead: agent.interrupt();
+  // To stop instead: agent.interrupt();  or stop AND redirect: agent.interrupt("Stop. Just give me the summary.");
   const res = await s.result().catch(fail);
   console.log("");
   ok(`Done: ${res.turns} turns (${res.finishReason}).`);

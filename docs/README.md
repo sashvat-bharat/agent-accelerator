@@ -13,6 +13,7 @@ Agent Accelerator (`agent-accelerator`) gives you **one `Agent` class** over Goo
 | New | [Getting started](getting-started.md) |
 | An AI agent | [For AI agents](for-ai-agents.md) and [`llms.txt`](llms.txt) |
 | Looking something up | [Reference](reference.md) |
+| Reading scheduled-action results from disk | [Scheduled action files](scheduled-action-files.md) |
 
 ## 60 seconds
 
@@ -44,6 +45,7 @@ console.log(res.usage);
 - [Getting started](getting-started.md): install, keys, first agent, core ideas.
 - Guides: [Agents and models](guides/agents-and-models.md) · [Tools and streaming](guides/tools-and-streaming.md) · [Multi-agent and scheduling](guides/multi-agent.md) · [Data and media](guides/data-and-media.md) · [Safety and operations](guides/safety-and-ops.md)
 - [Reference](reference.md): every config key, run option, response field, event, error and environment variable.
+- [Scheduled action files](scheduled-action-files.md): the stable on-disk format of scheduled actions (`tasks.json`, `deliveries.json`, run files), how to read them and the changelog.
 - [For AI agents](for-ai-agents.md): decision table, hard rules, what does not exist, error-to-fix lookup.
 
 Each guide ends with a **For AI agents** section (exact signatures, defaults, gotchas). All TypeScript snippets are complete programs and are type-checked against the SDK; ones that call a model need a provider key and cost real tokens. Runnable demos live in [`examples/`](../examples/).
