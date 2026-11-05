@@ -74,9 +74,14 @@ interface RunningEntry {
   controller: AbortController;
   done: Promise<void>;
   killed: boolean;
+  /** Started by `run_now`: delivered when it finishes, never late. */
+  manual: boolean;
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+// Whole seconds since the epoch: stored times have no milliseconds, so lateness is compared at this precision; in: a clock reading or stored time, out: finish and deliver.
+const secondOf = (d: Date): number => Math.floor(d.getTime() / 1000);
 
 function emit(code: string, message: string, data: Record<string, unknown>, level: "info" | "warn" = "info"): void {
   telemetryBus.emit({ code: `scheduled_action.${code}`, message: `[Agent Accelerator] ${message}`, level, data });
@@ -227,7 +232,7 @@ export class Scheduler {
         this.swept = true;
         this.startupSweep(now);
       }
-      this.deliverDue(now, first);
+      this.deliverDue(now);
       this.startDue(now);
       if (!this.hasPending()) this.stop();
     } catch (err) {
@@ -323,20 +328,20 @@ export class Scheduler {
 
   // ----- delivery ----------------------------------------------------------
 
-  private deliverDue(now: Date, first: boolean): void {
+  private deliverDue(now: Date): void {
     for (const entry of this.snapshot().pending) {
-      if (parseLocalIso(entry.deliverAt).getTime() <= now.getTime()) this.deliver(entry, now, first);
+      if (parseLocalIso(entry.deliverAt).getTime() <= now.getTime()) this.deliver(entry, now);
     }
   }
 
-  /** Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens). */
-  private deliver(entry: PendingDelivery, now: Date, first: boolean): void {
+  // Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens); late = delivered over two ticks after its time or finished after it; in: deliverDue, out: tasks.json + the delivered event.
+  private deliver(entry: PendingDelivery, now: Date): void {
     updateDeliveries(this.home, (pending) => {
       const i = pending.findIndex((p) => p.id === entry.id && p.file === entry.file);
       if (i >= 0) pending.splice(i, 1);
     });
     const deliverAt = parseLocalIso(entry.deliverAt).getTime();
-    const late = first || now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
+    const late = now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
     let name = entry.id;
     updateTasks(this.home, (tasks) => {
       const t = tasks.find((x) => x.id === entry.id);
@@ -427,7 +432,7 @@ export class Scheduler {
       cookStartedAt: started.current!.cookStartedAt,
       deliverAt: started.current!.deliverAt,
     });
-    this.launch(started, ctx.agent);
+    this.launch(started, ctx.agent, manual);
     return started;
   }
 
@@ -458,8 +463,9 @@ export class Scheduler {
     }
   }
 
-  private launch(task: ScheduledActionRecord, agent: Agent): void {
-    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), killed: false };
+  // Starts one run without awaiting it and tracks it until it ends; in: startCook, out: this.running + the run's files.
+  private launch(task: ScheduledActionRecord, agent: Agent, manual: boolean): void {
+    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), killed: false, manual };
     this.running.set(task.id, entry);
     entry.done = this.runWorker(task, agent, entry)
       .catch((err) => {
@@ -477,7 +483,7 @@ export class Scheduler {
     const deliverAt = parseLocalIso(task.current!.deliverAt);
     const outcome = await this.execute(task, agent, entry, deliverAt);
     if (entry.killed) return; // killed: no run file, nothing delivered
-    this.finish(task, outcome, task.current!.cookStartedAt, deliverAt);
+    this.finish(task, outcome, task.current!.cookStartedAt, deliverAt, entry.manual);
   }
 
   /** A fresh stateless worker built from the saved fields; retries only while there is time before delivery. */
@@ -538,19 +544,20 @@ export class Scheduler {
     }
   }
 
-  /** Write order: run file, then the `deliveries.json` entry, then `tasks.json`. A crash in between is repaired on start. */
-  private finish(task: ScheduledActionRecord, outcome: Outcome, startedAt: string, deliverAt: Date): void {
+  // Writes a finished run: run file, then the `deliveries.json` entry, then `tasks.json` (a crash in between is repaired on start); a manual run is due when it finishes, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
+  private finish(task: ScheduledActionRecord, outcome: Outcome, startedAt: string, deliverAt: Date, manual: boolean): void {
     const now = this.now();
     const ok = "res" in outcome;
     const finishedAt = toLocalIso(now);
+    const due = manual ? now : deliverAt;
     const header: RunHeader = {
       id: task.id,
       name: task.name,
       status: ok ? "ok" : "failed",
       startedAt,
       finishedAt,
-      deliverAt: toLocalIso(deliverAt),
-      late: now.getTime() > deliverAt.getTime(),
+      deliverAt: toLocalIso(due),
+      late: secondOf(now) > secondOf(due),
       ...(ok
         ? {
             model: `${outcome.res.provider}/${outcome.res.model}`,

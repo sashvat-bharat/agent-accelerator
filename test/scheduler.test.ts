@@ -707,6 +707,7 @@ describe("scheduler startup sweep", () => {
     const { of } = capture();
     h.agent(fn);
     expect(of("scheduled_action.delivered")).toHaveLength(0); // nothing inside the constructor
+    h.s.tickMs = 1000; // the real tick length: 30 minutes past due is far more than two ticks
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true });
   });
@@ -763,6 +764,30 @@ describe("list / update / run_now / skip / kill", () => {
     h.s.tick();
     expect(readTasks(h.home)[0]).toMatchObject({ state: "waiting", nextDeliverAt: iso(19, 0), lastRun: { status: "ok", deliverAt: iso(15, 0) } });
     expect(readDeliveries(h.home)).toEqual([]);
+  });
+
+  it("run_now that takes seconds is delivered when it finishes and is not late", async () => {
+    const h = harness();
+    const { of } = capture();
+    const rec = createScheduledAction(h.agent(mockFetch(() => { h.set(15, 0, 5); return chatReply("manual"); }).fn), input());
+    runScheduledAction(rec.id, { home: h.home });
+    await h.settle();
+    h.s.tick();
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false, readyAt: iso(15, 0, 5), deliverAt: iso(15, 0, 5) });
+    expect(readTasks(h.home)[0]!.lastRun).toMatchObject({ late: false, deliverAt: iso(15, 0, 5) });
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
+  });
+
+  it("a scheduled run that finishes inside its delivery second is not late", async () => {
+    const h = harness();
+    const { of } = capture();
+    const rec = createScheduledAction(h.agent(mockFetch(() => { h.clock = new Date(at(19, 0).getTime() + 400); return chatReply(); }).fn), input());
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
+    h.s.tick();
+    expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false });
   });
 
   it("run_now needs a live agent; list/get/kill/skip do not", async () => {
