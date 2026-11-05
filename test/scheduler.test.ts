@@ -1305,3 +1305,94 @@ describe("setHome", () => {
     expect(resolveHome()).toBe(path.resolve(".agent-accel"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// The on-disk format is a stable contract: docs/scheduled-action-files.md says what is below.
+// ---------------------------------------------------------------------------
+describe("scheduled action files (stable contract)", () => {
+  const dirOf = (h: Harness): string => path.join(h.home, "scheduled_actions");
+  const json = (h: Harness, name: string): any => JSON.parse(fs.readFileSync(path.join(dirOf(h), name), "utf8"));
+  const sorted = (o: object): string[] => Object.keys(o).sort();
+  const HEADER_ORDER = ["id", "name", "status", "startedAt", "finishedAt", "deliverAt", "late", "model", "turns", "tokens", "inputTokens", "freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "thinkingTokens", "cacheHitRate", "costUsd", "costSource", "unpricedTurns"];
+  const doc = fs.readFileSync(path.join(import.meta.dir, "..", "docs", "scheduled-action-files.md"), "utf8");
+
+  // The header parser exactly as the page shows it.
+  function readRunLikeTheDocs(dir: string, file: string): { header: Record<string, string>; body: string } {
+    const text = fs.readFileSync(path.join(dir, file), "utf8");
+    const m = /^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/.exec(text);
+    if (!m) throw new Error(`${file} is not a run file`);
+    const header = Object.fromEntries(m[1]!.split("\n").map((l) => [l.slice(0, l.indexOf(": ")), l.slice(l.indexOf(": ") + 2)]));
+    return { header, body: m[2]!.trimEnd() };
+  }
+
+  it("tasks.json: the version, the exact fields of a minimal and of a full record, and the states", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    createScheduledAction(agent, input());
+    const file = json(h, "tasks.json");
+    expect(Object.keys(file)).toEqual(["version", "tasks"]);
+    expect(file.version).toBe(1);
+    expect(sorted(file.tasks[0])).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "schedule", "state", "task", "tools"]);
+    expect(sorted(file.tasks[0].schedule)).toEqual(["meridiem", "startCookingInAdvance", "timeToDeliver"]);
+    expect(file.tasks[0].state).toBe("waiting");
+
+    createScheduledAction(agent, input({ id: "full-one", repeatEvery: "01:00:00", retries: 1, onMissed: "run" }, { role: "analyst", timeoutMs: 600_000 }));
+    const full = json(h, "tasks.json").tasks[1];
+    expect(sorted(full)).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "role", "schedule", "state", "task", "timeoutMs", "tools"]);
+    expect(sorted(full.schedule)).toEqual(["meridiem", "onMissed", "repeatEvery", "retries", "startCookingInAdvance", "timeToDeliver"]);
+    expect(full.id).toMatch(/^full-one-[a-z0-9]{6}$/);
+    expect(full.nextDeliverAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/); // local time, no offset
+  });
+
+  it("a run's files: current, deliveries.json, the run header (keys and order) and lastRun", async () => {
+    const h = harness();
+    const { of } = capture();
+    const rec = createScheduledAction(h.agent(mockFetch(() => chatReply("Result text.")).fn), input());
+    h.set(18, 50);
+    h.s.tick();
+    expect(sorted(json(h, "tasks.json").tasks[0].current)).toEqual(["cookStartedAt", "deliverAt"]); // only while cooking
+    await h.settle();
+    expect(json(h, "tasks.json").tasks[0].current).toBeUndefined();
+
+    const deliveries = json(h, "deliveries.json");
+    expect(Object.keys(deliveries)).toEqual(["version", "pending"]);
+    expect(deliveries.version).toBe(1);
+    expect(sorted(deliveries.pending[0])).toEqual(["deliverAt", "file", "id", "readyAt", "status"]);
+    expect(deliveries.pending[0].file).toBe(`${rec.id}/26-october-2026.md`);
+
+    const text = fs.readFileSync(path.join(dirOf(h), deliveries.pending[0].file), "utf8");
+    expect(text.startsWith("---\n")).toBe(true);
+    const { header, body } = readRunLikeTheDocs(dirOf(h), deliveries.pending[0].file);
+    expect(Object.keys(header)).toEqual(HEADER_ORDER);
+    expect(body).toBe("Result text.");
+    expect(header).toMatchObject({ status: "ok", late: "false", costUsd: "unknown", costSource: "unknown" });
+
+    h.set(19, 0);
+    h.s.tick();
+    expect(json(h, "deliveries.json").pending).toEqual([]);
+    expect(sorted(json(h, "tasks.json").tasks[0].lastRun)).toEqual(["deliverAt", "deliveredAt", "file", "late", "status"]);
+    expect(sorted(of("scheduled_action.delivered")[0]!.data as object)).toEqual(["deliverAt", "file", "id", "late", "name", "readyAt", "status"]);
+  });
+
+  it("keeps fields it does not know on rewrite, and keeps the last good copy as .bak", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    updateTasks(h.home, (tasks) => void ((tasks[0] as unknown as Record<string, unknown>)["owner"] = "ops"));
+    updateScheduledAction(rec.id, { task: "A new assignment." }, { home: h.home });
+    const kept = json(h, "tasks.json").tasks[0];
+    expect(kept.owner).toBe("ops");
+    expect(kept.task).toBe("A new assignment.");
+    expect(fs.existsSync(path.join(dirOf(h), "tasks.json.bak"))).toBe(true);
+    expect(validateRecord(kept)).toBeUndefined(); // an extra key is not a validation problem
+  });
+
+  it("the docs page names every header key, state and event", () => {
+    for (const key of HEADER_ORDER) expect(doc).toContain(`\`${key}\``);
+    for (const state of ["waiting", "cooking", "missed", "done"]) expect(doc).toContain(`\`${state}\``);
+    for (const code of ["created", "updated", "started", "ready", "failed", "delivered", "missed", "skipped", "deleted", "invalid", "store_corrupt", "error"]) {
+      expect(doc).toContain(`\`scheduled_action.${code}\``);
+    }
+    expect(doc).toContain('"version": 1');
+  });
+});

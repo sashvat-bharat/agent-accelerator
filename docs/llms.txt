@@ -9,4 +9,5 @@
 - [Multi-agent and scheduling](guides/multi-agent.md): fixed and dynamic sub-agents, tracking, scheduled actions (DD:HH:MM)
 - [Data and media](guides/data-and-media.md): persistence/resume, images/audio/video/files, usage and cost, model catalog
 - [Safety and operations](guides/safety-and-ops.md): limits, budget, retry, onFailure, errors, telemetry, security, known limitations
+- [Scheduled action files](scheduled-action-files.md): stable on-disk format of scheduled actions (tasks.json, deliveries.json, run file header), reading, editing rules, changelog
 - [Reference](reference.md): all AgentConfig keys, run options, response fields, stream events, telemetry codes, errors, env vars
