@@ -713,7 +713,7 @@ Thinking levels map to `reasoning.effort` verbatim, the same as OpenAI (`dynamic
 It also:
 
 * passes `service_tier` (`flex` | `priority`);
-* enables the `file-parser` plugin when file parts are present (remote file URLs are additionally surfaced in text);
+* sends file parts as `file.file_data` (a public URL or a base64 data URL) and never adds a plugin: OpenRouter reads the file natively or with its own default parser;
 * maps `tool_choice` (`auto` omitted; `none`, `required`, and function pins supported);
 * reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present.
 

@@ -270,15 +270,14 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
     expect(toolMsg.content).toBe("21C");
   });
 
-  it("enables file-parser plugin only when file parts are present", async () => {
+  it("sends files in the documented shape: file_data for URLs and data URLs, never a plugin or file_url", async () => {
     const bodies: any[] = [];
     (globalThis as any).fetch = async (_url: unknown, req: any) => {
       bodies.push(JSON.parse(req.body));
       return sseReply(TEXT_RESPONSE);
     };
     const provider = new OpenRouterChatCompletionsProvider();
-    await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k" });
-    expect(bodies[0].plugins).toBeUndefined();
+    const bytes = new TextEncoder().encode("a,b\n1,2\n");
     await provider.generate(
       "m",
       {
@@ -287,16 +286,21 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
             role: "user",
             content: [
               { type: "text", text: "Summarize." },
-              { type: "file", file: "https://example.com/d.pdf", mimeType: "application/pdf" } as any,
+              { type: "file", file: "https://example.com/d.pdf", filename: "d.pdf", mimeType: "application/pdf" } as any,
+              { type: "file", file: bytes, mimeType: "text/csv" } as any,
             ],
           },
         ],
       },
       { apiKey: "k" }
     );
-    expect(bodies[1].plugins).toEqual([{ id: "file-parser" }]);
-    const userMsg = bodies[1].messages.find((m: any) => m.role === "user");
-    expect(JSON.stringify(userMsg.content)).toContain("https://example.com/d.pdf");
+    expect(bodies[0].plugins).toBeUndefined();
+    const content = bodies[0].messages.find((m: any) => m.role === "user").content;
+    expect(content).toHaveLength(3); // text + two files: the URL is not repeated as a text part
+    expect(content[1]).toEqual({ type: "file", file: { filename: "d.pdf", file_data: "https://example.com/d.pdf" } });
+    expect(content[2].file.file_data).toBe(`data:text/csv;base64,${Buffer.from(bytes).toString("base64")}`);
+    expect(content[2].file.filename).toBeUndefined();
+    expect(JSON.stringify(bodies[0])).not.toContain("file_url");
   });
 
   it("sends video_url parts natively (no video fail-fast on this transport)", async () => {

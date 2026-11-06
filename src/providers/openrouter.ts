@@ -115,7 +115,6 @@ interface ChatRequestBody {
   reasoning?: { effort: string };
   service_tier?: string;
   session_id?: string;
-  plugins?: Array<{ id: string }>;
   cache_control?: { type: "ephemeral"; ttl: "5m" | "1h" };
   response_format?: { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
   stream?: boolean;
@@ -183,14 +182,9 @@ function audioFormatFor(mimeType?: string): string {
   return "mp3";
 }
 
-async function contentPartsToBlocks(parts: ContentPart[]): Promise<{
-  blocks: ChatContentPart[];
-  fileUrls: string[];
-  hasFiles: boolean;
-}> {
+// Maps canonical text and media parts to Chat Completions content blocks; in: a user message's parts, out: fullHistoryMessages.
+async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPart[]> {
   const blocks: ChatContentPart[] = [];
-  const fileUrls: string[] = [];
-  let hasFiles = false;
   for (const part of parts) {
     if (part.type === "text" && part.text) {
       blocks.push({ type: "text", text: part.text });
@@ -235,37 +229,20 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<{
         input_audio: { data: norm.base64Data, format: audioFormatFor(norm.mimeType) },
       });
     } else if (part.type === "file") {
-      hasFiles = true;
       const raw = (part as { file?: unknown }).file;
       const filename = (part as { filename?: string }).filename;
-      if (typeof raw === "string" && (raw.startsWith("http://") || raw.startsWith("https://"))) {
-        // Bare `{type:file}` parts are ignored by the route (observed live),
-        // so the URL must ALSO ride in text for the file-parser plugin (see
-        // fullHistoryMessages). Still sent forward-compat.
-        fileUrls.push(raw);
-        blocks.push({
-          type: "file",
-          file: {
-            ...(typeof filename === "string" && filename ? { filename } : {}),
-            file_url: raw,
-          },
-        });
-        continue;
-      }
-      const norm = await normalizeMediaInput(
-        raw as string | Uint8Array | ArrayBuffer,
-        (part as { mimeType?: string }).mimeType
-      );
+      // `file_data` takes a public URL or a base64 data URL (api-ref ChatContentFile; a `file_url` field does not exist).
+      const fileData =
+        typeof raw === "string" && (raw.startsWith("http://") || raw.startsWith("https://"))
+          ? raw
+          : (await normalizeMediaInput(raw as string | Uint8Array | ArrayBuffer, (part as { mimeType?: string }).mimeType)).dataUrl;
       blocks.push({
         type: "file",
-        file: {
-          ...(typeof filename === "string" && filename ? { filename } : {}),
-          file_data: norm.dataUrl,
-        },
+        file: { ...(typeof filename === "string" && filename ? { filename } : {}), file_data: fileData },
       });
     }
   }
-  return { blocks, fileUrls, hasFiles };
+  return blocks;
 }
 
 function resultToOutput(result: unknown): string {
@@ -278,15 +255,8 @@ function resultToOutput(result: unknown): string {
  * Stateless transport: no chaining primitives exist here, so every turn
  * carries everything. Assistant items carry no provider `id`/`status`
  * requirements (unlike the discontinued Responses skin).
- *
- * File handling: remote file URLs must be visible in text for the
- * `file-parser` plugin (bare `{type:file}` parts are ignored by the route),
- * so each remote file URL is appended as its own text part.
  */
-async function fullHistoryMessages(context: ProviderContext): Promise<{
-  messages: ChatMessage[];
-  hasFiles: boolean;
-}> {
+async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessage[]> {
   // Map assistant tool_call ids so tool results pair even though the
   // executor keys results by the call id.
   const pairing = new Map<string, string>();
@@ -310,7 +280,6 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
   if (context.systemPrompt) {
     messages.push({ role: "system", content: context.systemPrompt });
   }
-  let hasFiles = false;
   let lastRole: string | null = "system";
   for (const m of context.messages) {
     if (m.role === "system") continue;
@@ -323,12 +292,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
       if (typeof m.content === "string") {
         if (m.content) { messages.push({ role: "user", content: m.content }); lastRole = "user"; }
       } else {
-        const { blocks, fileUrls, hasFiles: hf } = await contentPartsToBlocks(m.content);
-        if (hf) hasFiles = true;
-        // Surface remote file URLs in text for the file-parser plugin.
-        for (const url of fileUrls) {
-          blocks.push({ type: "text", text: url });
-        }
+        const blocks = await contentPartsToBlocks(m.content);
         if (blocks.length > 0) { messages.push({ role: "user", content: blocks }); lastRole = "user"; }
       }
     } else if (m.role === "assistant") {
@@ -388,7 +352,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
       }
     }
   }
-  return { messages, hasFiles };
+  return messages;
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +447,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         fallback: "emulated JSON instruction + client validation (no response_format is sent)",
       });
     }
-    const { messages, hasFiles } = await fullHistoryMessages(effectiveContext);
+    const messages = await fullHistoryMessages(effectiveContext);
     const body: ChatRequestBody = {
       model: modelId,
       messages,
@@ -510,9 +474,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         // why: invalid output shapes fail fast at Agent construction/loop validation.
       }
     }
-    // PDF ingestion is a documented plugin, not a message shape: enable it
-    // only when file parts are present (never by default).
-    if (hasFiles) body.plugins = [{ id: "file-parser" }];
     // No store/previous_response_id/conversation: they do not exist
     // on this endpoint.
     // Session affinity: top-level `session_id` is the documented sticky-routing
