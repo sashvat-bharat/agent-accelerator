@@ -715,6 +715,7 @@ It also:
 * passes `service_tier` (`flex` | `priority`);
 * sends file parts as `file.file_data` (a public URL or a base64 data URL) and never adds a plugin: OpenRouter reads the file natively or with its own default parser;
 * maps `tool_choice` (`auto` omitted; `none`, `required`, and function pins supported);
+* treats an error chunk inside a stream (HTTP 200) like an HTTP error: its status comes from the chunk's `code`, or from its `error_type` (`rate_limit_exceeded` 429, `provider_overloaded` 503, `provider_unavailable` 502, `timeout` 504, `server` 500), so `runRetries` retries the retryable ones;
 * reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present.
 
 `serviceTier` values other than `flex` / `priority` are omitted (standard routing).

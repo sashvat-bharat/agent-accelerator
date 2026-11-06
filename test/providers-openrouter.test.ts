@@ -9,6 +9,7 @@ import {
   selectRawArguments,
 } from "../src/providers.ts";
 import { getProvider, resolveModel } from "../src/providers/registry.ts";
+import { isRetryableRun } from "../src/utils/retry.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -653,5 +654,42 @@ describe("tool calls without arguments", () => {
       .then(() => null)
       .catch((e) => e);
     expect((err as any)?.code).toBe("incomplete_stream");
+  });
+});
+
+describe("errors in the middle of a stream", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const run = async (error: Record<string, unknown>) => {
+    const frames =
+      `data: ${JSON.stringify({ id: "g1", choices: [{ index: 0, delta: { content: "Hel" }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: "g1", error, choices: [{ index: 0, delta: { content: "" }, finish_reason: "error" }] })}\n\n`;
+    (globalThis as any).fetch = async () => new Response(frames, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    return new OpenRouterChatCompletionsProvider()
+      .generate("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k", maxRetries: 0 })
+      .then(() => null)
+      .catch((e) => e as any);
+  };
+
+  it("carries the HTTP status of a numeric code, so the run retry treats it like an HTTP error", async () => {
+    const err = await run({ code: 429, message: "Rate limit exceeded", metadata: { error_type: "rate_limit_exceeded" } });
+    expect(err.statusCode).toBe(429);
+    expect(err.message).toContain("(429)");
+    expect(err.errorType).toBe("rate_limit_exceeded");
+    expect(isRetryableRun(err)).toBe(true);
+  });
+
+  it("maps a string code through its error_type, and leaves non-retryable errors alone", async () => {
+    const overloaded = await run({ code: "server_error", message: "Provider disconnected", metadata: { error_type: "provider_unavailable" } });
+    expect(overloaded.statusCode).toBe(502);
+    expect(isRetryableRun(overloaded)).toBe(true);
+    const bad = await run({ code: 400, message: "Bad input", metadata: { error_type: "invalid_request" } });
+    expect(bad.statusCode).toBe(400);
+    expect(isRetryableRun(bad)).toBe(false);
+    const unknown = await run({ code: "weird", message: "?" });
+    expect(unknown.statusCode).toBeUndefined();
+    expect(isRetryableRun(unknown)).toBe(false);
   });
 });

@@ -163,6 +163,13 @@ function cleanModelId(model: string | ModelSpec): string {
   return rawId.replace(/^openrouter\//i, "");
 }
 
+// The HTTP status of an error chunk inside a stream (the HTTP status itself is 200): its numeric `code`, else the status of its retryable `error_type` (errors-and-debugging.md, "Typed Error Codes"); in: the chunk's error, out: streamInto, where it makes the error retryable.
+const RETRYABLE_ERROR_TYPE_STATUS: Record<string, number> = { rate_limit_exceeded: 429, provider_overloaded: 503, provider_unavailable: 502, timeout: 504, server: 500 };
+function midStreamStatus(code: unknown, errorType: unknown): number | undefined {
+  if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) return code;
+  return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
+}
+
 function toOpenRouterTools(tools?: StandardToolDeclaration[]): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined;
   return tools.map((t) => ({
@@ -720,6 +727,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
             if (topError.code !== undefined) failure["code"] = topError.code;
             if (typeof topError.metadata?.error_type === "string") failure["errorType"] = topError.metadata.error_type;
+            const status = midStreamStatus(topError.code, topError.metadata?.error_type);
+            if (status !== undefined) failure["statusCode"] = status; // lets the retry logic and the message treat it like an HTTP error
             failure["url"] = url;
             throw toConciseProviderError(failure, "openrouter", clean);
           }
