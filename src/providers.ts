@@ -248,17 +248,17 @@ export function resolveCache(
   return undefined;
 }
 
-/** Warns once per provider/model that per-media `resolution` is ignored (no such control on that wire); in: an adapter's request messages, out: telemetry bus only. */
-export function warnIgnoredMediaResolution(provider: string, messages: Message[], modelRef: string): void {
+/** Warns once per provider/model that per-media `resolution` is ignored (no such control on that wire for the given kinds of media); in: an adapter's request messages, out: telemetry bus only. */
+export function warnIgnoredMediaResolution(provider: string, messages: Message[], modelRef: string, kinds: Array<"image" | "video"> = ["image", "video"]): void {
   const used = messages.some(
-    (m) => Array.isArray(m.content) && m.content.some((p) => (p.type === "image" || p.type === "video") && p.resolution)
+    (m) => Array.isArray(m.content) && m.content.some((p) => (p.type === "image" || p.type === "video") && kinds.includes(p.type) && p.resolution)
   );
   if (!used) return;
   emitProviderWarning({
     provider,
     capability: "media resolution",
     requested: modelRef,
-    reason: "this provider has no per-media detail control (Google only).",
+    reason: "this provider has no per-media detail control for this kind of media.",
     fallback: "the provider's default detail",
   });
 }

@@ -86,7 +86,7 @@ import {
 
 type ChatContentPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } }
+  | { type: "image_url"; image_url: { url: string; detail?: string } }
   | { type: "video_url"; video_url: { url: string } }
   | { type: "input_audio"; input_audio: { data: string; format: string } }
   | { type: "file"; file: { filename?: string; file_data?: string; file_url?: string } }
@@ -190,6 +190,9 @@ function audioFormatFor(mimeType?: string): string {
   return AUDIO_FORMAT[subtype] ?? (subtype || "mp3");
 }
 
+// `ImagePart.resolution` as OpenRouter's `image_url.detail` (api-ref ChatContentImage: auto, low, high, original; `original` is downgraded to `high` where unsupported); videos have no such field; in: an image part, out: contentPartsToBlocks.
+const IMAGE_DETAIL: Record<string, "low" | "auto" | "high" | "original"> = { low: "low", medium: "auto", high: "high", ultra_high: "original" };
+
 // Maps canonical text and media parts to Chat Completions content blocks; in: a user message's parts, out: fullHistoryMessages.
 async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPart[]> {
   const blocks: ChatContentPart[] = [];
@@ -200,15 +203,16 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
       const raw = (part as { image?: unknown }).image;
       // Remote URLs pass through (router downloads; `image_download_failed`
       // surfaces if unreachable). Inline only local/base64/binary.
+      const detail = IMAGE_DETAIL[(part as { resolution?: string }).resolution ?? ""];
       if (typeof raw === "string" && (raw.startsWith("http://") || raw.startsWith("https://"))) {
-        blocks.push({ type: "image_url", image_url: { url: raw } });
+        blocks.push({ type: "image_url", image_url: { url: raw, ...(detail ? { detail } : {}) } });
         continue;
       }
       const norm = await normalizeMediaInput(
         raw as string | Uint8Array | ArrayBuffer,
         (part as { mimeType?: string }).mimeType
       );
-      blocks.push({ type: "image_url", image_url: { url: norm.dataUrl } });
+      blocks.push({ type: "image_url", image_url: { url: norm.dataUrl, ...(detail ? { detail } : {}) } });
     } else if (part.type === "video") {
       const raw = (part as { video?: unknown }).video;
       // `video_url` is the completions video shape (live: shape accepted,
@@ -429,7 +433,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     const serviceTier = mapServiceTierToOpenRouter(options?.serviceTier);
     // Anthropic models take a top-level `cache_control` TTL; every other route caches implicitly (docs: prompt-caching.md).
     const cache = resolveCache("openrouter", options?.cache, modelId.startsWith("anthropic/") ? ["implicit", "5m", "1h"] : ["implicit"], `openrouter/${modelId}`);
-    warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`);
+    warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`, ["video"]);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system-prompt instruction + client validation (catalog

@@ -497,33 +497,53 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
   });
 });
 
-describe("per-media resolution is Google-only", () => {
+describe("per-media resolution on OpenRouter", () => {
   afterEach(() => {
     globalThis.fetch = ORIGINAL_FETCH;
     clearEmittedWarnings();
   });
 
-  it("warns once on the bus and never sends the field", async () => {
+  const run = async (content: any[]) => {
     const { telemetryBus } = await import("../src/telemetry.ts");
     clearEmittedWarnings();
-    const bodies: string[] = [];
-    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(req.body), new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 }));
-    const warnings: unknown[] = [];
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), sseReply(TEXT_RESPONSE));
+    const warnings: any[] = [];
     const off = telemetryBus.onEvent((e) => {
       if (e.code === "provider_warning" && (e.data as any)?.capability === "media resolution") warnings.push(e.data);
     });
     const w = captureWarnings();
     try {
       const provider = new OpenRouterChatCompletionsProvider();
-      const content = [{ type: "image", image: "https://example.com/a.png", resolution: "high" }] as any;
       await provider.generate("x/model", { messages: [{ role: "user", content }] }, { apiKey: "k" });
       await provider.generate("x/model", { messages: [{ role: "user", content }] }, { apiKey: "k" });
     } finally {
       off();
       w.restore();
     }
+    return { bodies, warnings };
+  };
+
+  it("sends an image's resolution as image_url.detail (URL and inline) and does not warn", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]);
+    const { bodies, warnings } = await run([
+      { type: "image", image: "https://example.com/a.png", resolution: "low" },
+      { type: "image", image: "https://example.com/b.png", resolution: "medium" },
+      { type: "image", image: png, resolution: "high" },
+      { type: "image", image: "https://example.com/c.png", resolution: "ultra_high" },
+      { type: "image", image: "https://example.com/d.png" },
+    ] as any);
+    const images = bodies[0].messages[0].content.map((c: any) => c.image_url);
+    expect(images.map((i: any) => i.detail)).toEqual(["low", "auto", "high", "original", undefined]);
+    expect(images[2].url.startsWith("data:image/png;base64,")).toBe(true);
+    expect(warnings).toEqual([]);
+  });
+
+  it("warns once on the bus for a video's resolution and never sends the field", async () => {
+    const { bodies, warnings } = await run([{ type: "video", video: "https://example.com/v.mp4", resolution: "high" }] as any);
     expect(warnings.length).toBe(1);
-    expect(bodies.join("")).not.toContain("resolution");
+    expect(JSON.stringify(bodies)).not.toContain("resolution");
+    expect(JSON.stringify(bodies)).not.toContain("detail");
   });
 });
 
