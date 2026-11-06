@@ -26,6 +26,11 @@ export function inferMimeType(input: string, fallback = "application/octet-strea
   if (clean.endsWith(".mp3")) return "audio/mp3";
   if (clean.endsWith(".wav")) return "audio/wav";
   if (clean.endsWith(".ogg")) return "audio/ogg";
+  if (clean.endsWith(".flac")) return "audio/flac";
+  if (clean.endsWith(".m4a")) return "audio/m4a";
+  if (clean.endsWith(".aac")) return "audio/aac";
+  if (clean.endsWith(".aiff") || clean.endsWith(".aif")) return "audio/aiff";
+  if (clean.endsWith(".mpeg") || clean.endsWith(".mpg")) return "video/mpeg";
   if (clean.endsWith(".mp4")) return "video/mp4";
   if (clean.endsWith(".webm")) return "video/webm";
   if (clean.endsWith(".mov")) return "video/quicktime";
@@ -53,8 +58,12 @@ export function sniffMimeType(bytes: Uint8Array): string | undefined {
   if (ascii(bytes, 0, "RIFF") && ascii(bytes, 8, "WAVE")) return "audio/wav";
   if (ascii(bytes, 0, "%PDF")) return "application/pdf";
   if (ascii(bytes, 0, "OggS")) return "audio/ogg";
+  if (ascii(bytes, 0, "fLaC")) return "audio/flac";
+  if (ascii(bytes, 0, "FORM") && ascii(bytes, 8, "AIF")) return "audio/aiff";
+  if (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xf6) === 0xf0) return "audio/aac"; // ADTS: sync bits plus layer 00 (MP3 frames have a non-zero layer)
   if (ascii(bytes, 0, "ID3") || (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xe0) === 0xe0)) return "audio/mp3";
-  if (ascii(bytes, 4, "ftyp")) return ascii(bytes, 8, "qt") ? "video/quicktime" : "video/mp4";
+  if (ascii(bytes, 4, "ftyp")) return ascii(bytes, 8, "M4A") || ascii(bytes, 8, "M4B") ? "audio/m4a" : ascii(bytes, 8, "qt") ? "video/quicktime" : "video/mp4";
+  if (bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 1 && bytes[3] === 0xba) return "video/mpeg"; // MPEG program stream
   if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return "video/webm";
   return undefined;
 }

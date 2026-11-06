@@ -175,3 +175,60 @@ describe("media MIME detection when no type is supplied", () => {
     }
   });
 });
+
+describe("audio and video detection (OpenRouter inputs)", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    (globalThis as any).fetch = realFetch;
+  });
+  const bytes = (...head: number[]) => new Uint8Array([...head, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const ascii = (s: string) => [...s].map((c) => c.charCodeAt(0));
+
+  it("recognises flac, aiff, aac (ADTS) and m4a by content, and keeps mp3 and mp4 as they were", async () => {
+    const { sniffMimeType } = await import("../src/index.ts");
+    expect(sniffMimeType(bytes(...ascii("fLaC")))).toBe("audio/flac");
+    expect(sniffMimeType(bytes(...ascii("FORM"), 0, 0, 0, 0, ...ascii("AIFF")))).toBe("audio/aiff");
+    expect(sniffMimeType(bytes(0xff, 0xf1))).toBe("audio/aac");
+    expect(sniffMimeType(bytes(0xff, 0xf9))).toBe("audio/aac");
+    expect(sniffMimeType(bytes(0xff, 0xfb))).toBe("audio/mp3"); // an MP3 frame is not AAC
+    expect(sniffMimeType(bytes(...ascii("ID3")))).toBe("audio/mp3");
+    expect(sniffMimeType(bytes(0, 0, 0, 0x20, ...ascii("ftypM4A ")))).toBe("audio/m4a"); // not video/mp4
+    expect(sniffMimeType(bytes(0, 0, 0, 0x20, ...ascii("ftypisom")))).toBe("video/mp4");
+    expect(sniffMimeType(bytes(0, 0, 0, 0x14, ...ascii("ftypqt  ")))).toBe("video/quicktime");
+    expect(sniffMimeType(bytes(0, 0, 1, 0xba))).toBe("video/mpeg");
+  });
+
+  it("infers flac, m4a, aac, aiff and mpeg from the extension", () => {
+    expect(inferMimeType("a.flac")).toBe("audio/flac");
+    expect(inferMimeType("a.m4a")).toBe("audio/m4a");
+    expect(inferMimeType("a.aac")).toBe("audio/aac");
+    expect(inferMimeType("a.aiff")).toBe("audio/aiff");
+    expect(inferMimeType("v.mpeg")).toBe("video/mpeg");
+    expect(inferMimeType("v.mpg")).toBe("video/mpeg");
+  });
+
+  it("OpenRouter sends the real audio format and names QuickTime video/mov", async () => {
+    const { OpenRouterChatCompletionsProvider } = await import("../src/providers/openrouter.ts");
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(`data: ${JSON.stringify({ id: "g", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    };
+    const formats: Array<[Uint8Array, string | undefined, string]> = [
+      [bytes(...ascii("fLaC")), undefined, "flac"],
+      [bytes(0, 0, 0, 0x20, ...ascii("ftypM4A ")), undefined, "m4a"],
+      [bytes(...ascii("OggS")), undefined, "ogg"],
+      [bytes(0xff, 0xf1), undefined, "aac"],
+      [bytes(...ascii("RIFF"), 0, 0, 0, 0, ...ascii("WAVE")), undefined, "wav"],
+      [bytes(...ascii("ID3")), undefined, "mp3"],
+      [bytes(1, 2, 3, 4), "audio/x-aiff", "aiff"],
+    ];
+    const provider = new OpenRouterChatCompletionsProvider();
+    for (const [audio, mimeType] of formats) {
+      await provider.generate("m", { messages: [{ role: "user", content: [{ type: "audio", audio, ...(mimeType ? { mimeType } : {}) } as any] }] }, { apiKey: "k" });
+    }
+    expect(bodies.map((b) => b.messages[0].content[0].input_audio.format)).toEqual(formats.map((f) => f[2]));
+    await provider.generate("m", { messages: [{ role: "user", content: [{ type: "video", video: bytes(0, 0, 0, 0x14, ...ascii("ftypqt  ")) } as any] }] }, { apiKey: "k" });
+    expect(bodies.at(-1).messages[0].content[0].video_url.url.startsWith("data:video/mov;base64,")).toBe(true);
+  });
+});

@@ -183,10 +183,11 @@ function toOpenRouterTools(tools?: StandardToolDeclaration[]): Array<Record<stri
   }));
 }
 
+// The `input_audio.format` for a MIME type: Chat Completions takes any format string the provider supports (audio.md: wav, mp3, aiff, aac, ogg, flac, m4a, pcm16 ...), so the real format is sent, never a guess; in: an audio part's MIME type, out: contentPartsToBlocks.
+const AUDIO_FORMAT: Record<string, string> = { wav: "wav", wave: "wav", mpeg: "mp3", mp3: "mp3", mp4: "m4a", m4a: "m4a", aac: "aac", ogg: "ogg", flac: "flac", aiff: "aiff" };
 function audioFormatFor(mimeType?: string): string {
-  const mime = (mimeType || "").toLowerCase();
-  if (mime.includes("wav")) return "wav";
-  return "mp3";
+  const subtype = (mimeType || "").toLowerCase().split(";")[0]!.split("/")[1]?.replace(/^x-/, "") ?? "";
+  return AUDIO_FORMAT[subtype] ?? (subtype || "mp3");
 }
 
 // Maps canonical text and media parts to Chat Completions content blocks; in: a user message's parts, out: fullHistoryMessages.
@@ -221,7 +222,9 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
         raw as string | Uint8Array | ArrayBuffer,
         (part as { mimeType?: string }).mimeType
       );
-      blocks.push({ type: "video_url", video_url: { url: norm.dataUrl } });
+      // video-inputs.md names the QuickTime type `video/mov`.
+      const url = norm.mimeType === "video/quicktime" ? `data:video/mov;base64,${norm.base64Data}` : norm.dataUrl;
+      blocks.push({ type: "video_url", video_url: { url } });
     } else if (part.type === "audio") {
       const raw = (part as { audio?: unknown }).audio;
       const mimeType = (part as { mimeType?: string }).mimeType;
