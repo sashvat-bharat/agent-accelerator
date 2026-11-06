@@ -205,7 +205,10 @@ export function shortHashId(value: string): string {
 export function clampToolCallId(id: string): string {
   const clean = String(id ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
   if (!clean.includes("|")) {
-    return clean.length > 40 ? clean.slice(0, 40) : clean || "call_unknown";
+    if (clean.length <= 40) return clean || "call_unknown";
+    // A hard cut would give two long ids with the same first 40 characters the same id; a hash of the whole id keeps them apart.
+    const hash = shortHashId(id);
+    return `${clean.slice(0, 40 - hash.length - 1)}_${hash}`;
   }
   const sep = clean.indexOf("|");
   const callId = clean.slice(0, sep).replace(/_+$/, "") || "call";
@@ -215,6 +218,16 @@ export function clampToolCallId(id: string): string {
   const hash = shortHashId(id).slice(0, 8);
   const prefix = callId.slice(0, Math.max(1, 40 - hash.length - 1));
   return `${prefix}_${hash}`;
+}
+
+// The finish reason of a turn that produced tool calls: `tool_calls`, except that a turn cut off by the output limit (`length`) keeps saying so when one of its calls was cut mid-JSON; in: the wire finish reason + the assembled calls, out: each streaming adapter.
+export function toolTurnFinishReason(finishReason: string, toolCalls: Array<{ arguments: unknown }>): string {
+  return finishReason === "length" && toolCalls.some((c) => isTruncatedArguments(c.arguments)) ? "length" : "tool_calls";
+}
+
+// The JSON text of a tool call's arguments for a history message: `{}` for a call whose streamed arguments were cut off (the internal `__truncated_raw` marker was never the model's own output and is never resent); in: a stored tool call, out: each adapter's history builder.
+export function toolArgumentsJson(args: unknown): string {
+  return isTruncatedArguments(args) ? "{}" : JSON.stringify(args || {});
 }
 
 /** Plain lower-cased header record from a fetch `Headers` object. */

@@ -10,6 +10,7 @@ import {
 } from "../src/providers.ts";
 import { getProvider, resolveModel } from "../src/providers/registry.ts";
 import { isRetryableRun } from "../src/utils/retry.ts";
+import { clampToolCallId } from "../src/providers/shared.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -795,5 +796,71 @@ describe("402 from the in-flight spending budget", () => {
     expect(calls).toBe(1);
     expect(err.statusCode).toBe(402);
     expect(err.retryable).toBeUndefined();
+  });
+});
+
+describe("tool-call ids and cut-off tool calls in history", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const frame = (f: unknown) => `data: ${JSON.stringify(f)}\n\n`;
+  const sse = (body: string) => new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  const usage = { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 };
+  const toolTurn = (id: string, args: string, finish: string) =>
+    sse(
+      frame({ id: "g", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id, type: "function", function: { name: "t", arguments: args } }] }, finish_reason: null }] }) +
+        frame({ id: "g", choices: [{ index: 0, delta: {}, finish_reason: finish }], usage }) +
+        "data: [DONE]\n\n"
+    );
+  const ask = (messages: any[]) => new OpenRouterChatCompletionsProvider().generate("m", { messages }, { apiKey: "k" });
+
+  it("keeps long ids that share a 40-character start apart, and short ids as they are", () => {
+    const a = `call_${"x".repeat(45)}_A`;
+    const b = `call_${"x".repeat(45)}_B`;
+    const [ca, cb] = [clampToolCallId(a), clampToolCallId(b)];
+    expect(ca).not.toBe(cb);
+    expect(ca.length).toBeLessThanOrEqual(40);
+    expect(clampToolCallId(a)).toBe(ca); // stable
+    expect(clampToolCallId("call_abc-123")).toBe("call_abc-123");
+    expect(clampToolCallId("a1b2c3d4-e5f6-7890-abcd-ef1234567890")).toBe("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+  });
+
+  it("stores the id it sends back: an id with ':' and '.' is the same in the result and in the next request", async () => {
+    (globalThis as any).fetch = async () => toolTurn("call:1.a", "{}", "tool_calls");
+    const first = await ask([{ role: "user", content: "go" }]);
+    const id = first.toolCalls![0]!.id;
+    expect(id).toBe("call_1_a");
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), sseReply(TEXT_RESPONSE));
+    await ask([
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool_call", id, name: "t", arguments: {} }] },
+      { role: "tool", name: "t", content: [{ type: "tool_result", id, name: "t", result: "done" }] },
+    ]);
+    const sent = bodies[0].messages;
+    expect(sent[1].tool_calls[0].id).toBe(id);
+    expect(sent[2].tool_call_id).toBe(id);
+  });
+
+  it("does not resend a cut-off call as a made-up argument object, and keeps finish_reason length", async () => {
+    (globalThis as any).fetch = async () => toolTurn("call_cut", '{"a":"abc', "length");
+    const first = await ask([{ role: "user", content: "go" }]);
+    expect(first.finishReason).toBe("length");
+    expect(first.toolCalls![0]!.arguments).toEqual({ __truncated_raw: '{"a":"abc' });
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), sseReply(TEXT_RESPONSE));
+    await ask([
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool_call", id: "call_cut", name: "t", arguments: first.toolCalls![0]!.arguments }] },
+      { role: "tool", name: "t", content: [{ type: "tool_result", id: "call_cut", name: "t", result: "Error: arguments truncated", isError: true }] },
+    ]);
+    expect(bodies[0].messages[1].tool_calls[0].function.arguments).toBe("{}");
+    expect(JSON.stringify(bodies[0])).not.toContain("__truncated_raw");
+  });
+
+  it("still reports tool_calls for a complete call that ended normally or by length", async () => {
+    (globalThis as any).fetch = async () => toolTurn("call_ok", '{"a":1}', "length");
+    expect((await ask([{ role: "user", content: "go" }])).finishReason).toBe("tool_calls");
   });
 });

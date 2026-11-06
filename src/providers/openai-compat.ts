@@ -69,6 +69,8 @@ import {
   readErrorPayload,
   incompleteStreamError,
   hasUnfinishedToolCall,
+  toolArgumentsJson,
+  toolTurnFinishReason,
   combinedSignal,
   timeoutFor,
   hasAuthHeader,
@@ -450,7 +452,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
           } = {
             id: clampToolCallId(part.callId || part.id),
             type: "function",
-            function: { name: part.name, arguments: JSON.stringify(part.arguments || {}) },
+            function: { name: part.name, arguments: toolArgumentsJson(part.arguments) },
           };
           // Echo provider-issued thought signatures verbatim so endpoints
           // that minted them (Gemini behind a compat proxy) keep working.
@@ -1216,7 +1218,7 @@ export class OpenAICompatibleChatProvider implements Provider {
         const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
         noteProviderTurn(sessionId, prefix);
         if (toolCalls.length > 0) {
-          finishReason = "tool_calls";
+          finishReason = toolTurnFinishReason(finishReason, toolCalls);
           sawFinishReason = true;
         } else if (refusalSeen) {
           finishReason = "refusal";

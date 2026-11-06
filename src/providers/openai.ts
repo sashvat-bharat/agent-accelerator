@@ -61,6 +61,8 @@ import {
   readErrorPayload,
   incompleteStreamError,
   hasUnfinishedToolCall,
+  toolArgumentsJson,
+  toolTurnFinishReason,
   combinedSignal,
   timeoutFor,
   hasAuthHeader,
@@ -340,7 +342,7 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
             id: normalizeResponsesItemId(itemId),
             call_id: normalizeResponsesIdPart(callId),
             name: part.name,
-            arguments: JSON.stringify(part.arguments || {}),
+            arguments: toolArgumentsJson(part.arguments),
           });
         } else if (part.type === "text" && part.text) {
           texts.push(part.text);
@@ -1074,7 +1076,7 @@ export class OpenAIResponsesProvider implements Provider {
         const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
         noteProviderTurn(sessionId, "openai");
         if (toolCalls.length > 0) {
-          finishReason = "tool_calls";
+          finishReason = toolTurnFinishReason(finishReason, toolCalls);
           sawFinishReason = true;
         } else if (refusalSeen && finishReason !== "length") {
           finishReason = "refusal";

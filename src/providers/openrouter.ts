@@ -53,6 +53,8 @@ import {
   readErrorPayload,
   incompleteStreamError,
   hasUnfinishedToolCall,
+  toolArgumentsJson,
+  toolTurnFinishReason,
   combinedSignal,
   timeoutFor,
   hasAuthHeader,
@@ -323,7 +325,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
           calls.push({
             id: clampToolCallId(part.callId || part.id),
             type: "function",
-            function: { name: part.name, arguments: JSON.stringify(part.arguments || {}) },
+            function: { name: part.name, arguments: toolArgumentsJson(part.arguments) },
           });
         } else if (part.type === "text" && part.text) {
           texts.push(part.text);
@@ -863,7 +865,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         for (const c of calls.values()) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const record: ToolCallRecord = {
-            id: c.id && !c.id.includes("|") && c.id.length <= 40 ? c.id : clampToolCallId(c.id || newToolCallId()),
+            id: clampToolCallId(c.id || newToolCallId()), // the id the history sends back, so the stored id and the wire id are one
             name: c.name,
             arguments: args,
             rawArguments: selectRawArguments(c.startArgs, c.deltaArgs),
@@ -876,7 +878,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
         noteProviderTurn(sessionId, "openrouter");
         if (toolCalls.length > 0) {
-          finishReason = "tool_calls";
+          finishReason = toolTurnFinishReason(finishReason, toolCalls);
           sawFinishReason = true;
         } else if (refusalSeen && finishReason !== "content_filter") {
           finishReason = "refusal";
