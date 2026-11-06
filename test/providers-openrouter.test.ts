@@ -864,3 +864,30 @@ describe("tool-call ids and cut-off tool calls in history", () => {
     expect((await ask([{ role: "user", content: "go" }])).finishReason).toBe("tool_calls");
   });
 });
+
+describe("hint for the opaque 400 of a bad media link", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const bad = (message: string) => async () =>
+    new Response(JSON.stringify({ error: { code: 400, message, metadata: { raw: "ERROR", provider_name: "Stealth" } } }), { status: 400, headers: { "Content-Type": "application/json" } });
+  const ask = (image: string | Uint8Array) =>
+    new OpenRouterChatCompletionsProvider()
+      .generate("m", { messages: [{ role: "user", content: [{ type: "text", text: "look" }, { type: "image", image } as any] }] }, { apiKey: "k" })
+      .then(() => "", (e) => String(e.message));
+
+  it("points at the remote link when the route only says 'Provider returned error'", async () => {
+    (globalThis as any).fetch = bad("Provider returned error");
+    const message = await ask("https://example.com/missing.png");
+    expect(message).toContain("Provider returned error");
+    expect(message).toContain("remote image or video link");
+  });
+
+  it("adds nothing for an inline image or for a different 400", async () => {
+    (globalThis as any).fetch = bad("Provider returned error");
+    expect(await ask(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]))).not.toContain("remote image or video link");
+    (globalThis as any).fetch = bad("max_tokens is too large");
+    expect(await ask("https://example.com/a.png")).not.toContain("remote image or video link");
+  });
+});

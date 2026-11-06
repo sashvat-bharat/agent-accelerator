@@ -17,9 +17,10 @@
  * - EVERY request streams, `generate()` included (it collects its own `stream()`): OpenRouter only cancels a request that
  *   streams ("Stream cancellation" in its docs), so a plain non-streaming request could not be stopped by an interrupt.
  * - STATELESS per request: every turn sends the full canonical `messages`
- *   array explicitly. Completions defines no `store`/`previous_response_id`/
- *   `conversation`/`prompt_cache_key`/`session_id` body primitives, so none
- *   are ever sent; affinity is headers-only best effort (`x-session-id`).
+ *   array explicitly. Completions has no `store`/`previous_response_id`/
+ *   `conversation`/`prompt_cache_key`, so none are ever sent. Session affinity is
+ *   the documented top-level body `session_id` (the sticky-routing key, which wins
+ *   over the header) plus the `x-session-id` / `x-client-request-id` headers.
  * - IDs are provider-generated (`gen-…` generations, `call_…`/uuid tool ids)
  *   and echoed verbatim (`tool_call_id`). The `call_${random}` fallback in
  *   parsers is a local canonical correlation id only; it is never sent.
@@ -194,6 +195,18 @@ function audioFormatFor(mimeType?: string): string {
 
 // `ImagePart.resolution` as OpenRouter's `image_url.detail` (api-ref ChatContentImage: auto, low, high, original; `original` is downgraded to `high` where unsupported); videos have no such field; in: an image part, out: contentPartsToBlocks.
 const IMAGE_DETAIL: Record<string, "low" | "auto" | "high" | "original"> = { low: "low", medium: "auto", high: "high", ultra_high: "original" };
+
+// True when a request's messages carry an image or video by web link (the router fetches those itself); in: the built messages, out: throwIfError's hint.
+function hasRemoteMedia(messages: ChatMessage[]): boolean {
+  return messages.some(
+    (m) =>
+      Array.isArray(m.content) &&
+      (m.content as ChatContentPart[]).some((p) => {
+        const url = (p as { image_url?: { url?: string }; video_url?: { url?: string } }).image_url?.url ?? (p as { video_url?: { url?: string } }).video_url?.url;
+        return typeof url === "string" && /^https?:\/\//.test(url);
+      })
+  );
+}
 
 // Maps canonical text and media parts to Chat Completions content blocks; in: a user message's parts, out: fullHistoryMessages.
 async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPart[]> {
@@ -525,14 +538,18 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     url: string,
     bodyText: string,
     modelId: string,
-    headers?: Record<string, string>
+    headers?: Record<string, string>,
+    remoteMedia = false
   ): void {
     if (status >= 200 && status < 300) return;
     const { message, code, errorType, raw, limitSource } = readErrorPayload(bodyText);
     const hint =
       status === 401
         ? " Check OPENROUTER_API_KEY (no quotes/spaces, correct provider) and that the key is loaded (bun --env-file=.env.local)."
-        : "";
+        : // A bad or unreachable image/video link comes back as the bare "Provider returned error" without saying which part failed.
+          status === 400 && remoteMedia && message === "Provider returned error"
+          ? " The request carries a remote image or video link: it may be unreachable or not accepted by this route. Try passing the file itself (a local path or bytes) instead."
+          : "";
     const fullMessage = `${message}${hint}`;
     const err: Record<string, unknown> & Error = new Error(fullMessage) as Record<string, unknown> & Error;
     (err as Record<string, unknown>)["statusCode"] = status;
@@ -673,7 +690,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
               if (timer) clearTimeout(timer);
             }
           },
-          onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
+          onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers), hasRemoteMedia(body.messages)),
           noBodyError: () => toConciseProviderError(new Error("OpenRouter streaming response had no body"), "openrouter", clean),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
