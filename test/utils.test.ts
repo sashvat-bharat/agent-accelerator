@@ -109,6 +109,14 @@ describe("modality guard (catalog-driven)", () => {
     ).not.toThrow();
   });
 
+  it("does not gate files on the catalog's pdf flag for OpenRouter, but still does for other providers", () => {
+    const withFile = ctx({ type: "file", file: "https://x/d.pdf", mimeType: "application/pdf" });
+    // z-ai/glm-5.2:free is a catalog model without "pdf" input.
+    expect(() => assertModalitiesSupported(withFile, "openrouter", "z-ai/glm-5.2:free")).not.toThrow();
+    expect(() => assertModalitiesSupported(ctx({ type: "file", file: "https://x/d.pdf" }, { type: "image", image: "https://x/y.png" }), "openrouter", "z-ai/glm-5.2:free")).toThrow(/unsupported image input/);
+    expect(() => assertModalitiesSupported(withFile, "openai", "gpt-5-nano")).toThrow(/unsupported pdf input/);
+  });
+
   it("skips unknown models — provider verdict stands", () => {
     expect(() =>
       assertModalitiesSupported(ctx({ type: "video", video: "https://x/y.mp4" }), "openrouter", "some/unknown-model")

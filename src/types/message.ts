@@ -9,7 +9,7 @@ export interface TextPart {
   thoughtSignature?: string;
 }
 
-/** Detail level a provider spends on one image or video (more detail = more input tokens). Google only; other providers ignore it with a warning. */
+/** Detail level a provider spends on one image or video (more detail = more input tokens). Google (images and videos) and OpenRouter (images, as `image_url.detail`) honour it; other providers ignore it with a warning. */
 export type MediaResolution = "low" | "medium" | "high" | "ultra_high";
 
 /** Image content accepted as a URL, data, path, or binary value. */

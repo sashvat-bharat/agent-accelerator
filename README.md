@@ -713,9 +713,12 @@ Thinking levels map to `reasoning.effort` verbatim, the same as OpenAI (`dynamic
 It also:
 
 * passes `service_tier` (`flex` | `priority`);
-* enables the `file-parser` plugin when file parts are present (remote file URLs are additionally surfaced in text);
+* sends audio with its real format (`wav`, `mp3`, `aiff`, `aac`, `ogg`, `flac`, `m4a`) and QuickTime video as `video/mov`;
+* sends file parts as `file.file_data` (a public URL or a base64 data URL) and never adds a plugin: OpenRouter reads the file natively or with its own default parser;
 * maps `tool_choice` (`auto` omitted; `none`, `required`, and function pins supported);
-* reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present.
+* treats an error chunk inside a stream (HTTP 200) like an HTTP error: its status comes from the chunk's `code`, or from its `error_type` (`rate_limit_exceeded` 429, `provider_overloaded` 503, `provider_unavailable` 502, `timeout` 504, `server` 500), so `runRetries` retries the retryable ones;
+* reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present (a reported `0`, a free model or a cache hit, stays a known `$0`);
+* accepts `anthropic/...` and `~anthropic/...` model names for the `5m` / `1h` cache setting, and sends at most 4 `stop` sequences (the Chat Completions maximum; extra ones are dropped with one `provider_warning`).
 
 `serviceTier` values other than `flex` / `priority` are omitted (standard routing).
 
@@ -1300,8 +1303,11 @@ documents. The supported lists are the `GOOGLE_*_MIME` constants at the top of
 `resolution` (`MediaResolution`: `"low" | "medium" | "high" | "ultra_high"`)
 sets how much detail Google spends on one image or video, and so how many
 input tokens it costs (image: 280 / 560 / 1120 / 2240; video per frame:
-`low` and `medium` 70, `high` 280). Omit it for Google's default. Other
-providers ignore it with one `provider_warning`.
+`low` and `medium` 70, `high` 280). Omit it for Google's default. On
+OpenRouter an image's `resolution` is sent as `image_url.detail` (`low` → `low`,
+`medium` → `auto`, `high` → `high`, `ultra_high` → `original`, which OpenRouter
+downgrades to `high` where unsupported); a video's `resolution` is ignored. Other
+providers (and OpenRouter videos) ignore it with one `provider_warning`.
 
 Before any network call, the executor checks `image` / `audio` / `video` /
 `file`-as-PDF parts against the catalog's `modalities.input` for that

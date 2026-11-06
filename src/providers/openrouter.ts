@@ -17,9 +17,10 @@
  * - EVERY request streams, `generate()` included (it collects its own `stream()`): OpenRouter only cancels a request that
  *   streams ("Stream cancellation" in its docs), so a plain non-streaming request could not be stopped by an interrupt.
  * - STATELESS per request: every turn sends the full canonical `messages`
- *   array explicitly. Completions defines no `store`/`previous_response_id`/
- *   `conversation`/`prompt_cache_key`/`session_id` body primitives, so none
- *   are ever sent; affinity is headers-only best effort (`x-session-id`).
+ *   array explicitly. Completions has no `store`/`previous_response_id`/
+ *   `conversation`/`prompt_cache_key`, so none are ever sent. Session affinity is
+ *   the documented top-level body `session_id` (the sticky-routing key, which wins
+ *   over the header) plus the `x-session-id` / `x-client-request-id` headers.
  * - IDs are provider-generated (`gen-…` generations, `call_…`/uuid tool ids)
  *   and echoed verbatim (`tool_call_id`). The `call_${random}` fallback in
  *   parsers is a local canonical correlation id only; it is never sent.
@@ -39,7 +40,6 @@ import type { ProviderContext, ContentPart } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
-import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { getApiKey, getEnv } from "../utils/env.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
@@ -52,7 +52,14 @@ import {
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
-  hasTruncatedToolArguments,
+  hasUnfinishedToolCall,
+  linkStreamAbort,
+  withAbortTimer,
+  readSseData,
+  incompleteStreamCheck,
+  failStream,
+  toolArgumentsJson,
+  toolTurnFinishReason,
   combinedSignal,
   timeoutFor,
   hasAuthHeader,
@@ -86,7 +93,7 @@ import {
 
 type ChatContentPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } }
+  | { type: "image_url"; image_url: { url: string; detail?: string } }
   | { type: "video_url"; video_url: { url: string } }
   | { type: "input_audio"; input_audio: { data: string; format: string } }
   | { type: "file"; file: { filename?: string; file_data?: string; file_url?: string } }
@@ -115,7 +122,6 @@ interface ChatRequestBody {
   reasoning?: { effort: string };
   service_tier?: string;
   session_id?: string;
-  plugins?: Array<{ id: string }>;
   cache_control?: { type: "ephemeral"; ttl: "5m" | "1h" };
   response_format?: { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
   stream?: boolean;
@@ -164,6 +170,13 @@ function cleanModelId(model: string | ModelSpec): string {
   return rawId.replace(/^openrouter\//i, "");
 }
 
+// The HTTP status of an error chunk inside a stream (the HTTP status itself is 200): its numeric `code`, else the status of its retryable `error_type` (errors-and-debugging.md, "Typed Error Codes"); in: the chunk's error, out: streamInto, where it makes the error retryable.
+const RETRYABLE_ERROR_TYPE_STATUS: Record<string, number> = { rate_limit_exceeded: 429, provider_overloaded: 503, provider_unavailable: 502, timeout: 504, server: 500 };
+function midStreamStatus(code: unknown, errorType: unknown): number | undefined {
+  if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) return code;
+  return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
+}
+
 function toOpenRouterTools(tools?: StandardToolDeclaration[]): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined;
   return tools.map((t) => ({
@@ -177,20 +190,31 @@ function toOpenRouterTools(tools?: StandardToolDeclaration[]): Array<Record<stri
   }));
 }
 
+// The `input_audio.format` for a MIME type: Chat Completions takes any format string the provider supports (audio.md: wav, mp3, aiff, aac, ogg, flac, m4a, pcm16 ...), so the real format is sent, never a guess; in: an audio part's MIME type, out: contentPartsToBlocks.
+const AUDIO_FORMAT: Record<string, string> = { wav: "wav", wave: "wav", mpeg: "mp3", mp3: "mp3", mp4: "m4a", m4a: "m4a", aac: "aac", ogg: "ogg", flac: "flac", aiff: "aiff" };
 function audioFormatFor(mimeType?: string): string {
-  const mime = (mimeType || "").toLowerCase();
-  if (mime.includes("wav")) return "wav";
-  return "mp3";
+  const subtype = (mimeType || "").toLowerCase().split(";")[0]!.split("/")[1]?.replace(/^x-/, "") ?? "";
+  return AUDIO_FORMAT[subtype] ?? (subtype || "mp3");
 }
 
-async function contentPartsToBlocks(parts: ContentPart[]): Promise<{
-  blocks: ChatContentPart[];
-  fileUrls: string[];
-  hasFiles: boolean;
-}> {
+// `ImagePart.resolution` as OpenRouter's `image_url.detail` (api-ref ChatContentImage: auto, low, high, original; `original` is downgraded to `high` where unsupported); videos have no such field; in: an image part, out: contentPartsToBlocks.
+const IMAGE_DETAIL: Record<string, "low" | "auto" | "high" | "original"> = { low: "low", medium: "auto", high: "high", ultra_high: "original" };
+
+// True when a request's messages carry an image or video by web link (the router fetches those itself); in: the built messages, out: throwIfError's hint.
+function hasRemoteMedia(messages: ChatMessage[]): boolean {
+  return messages.some(
+    (m) =>
+      Array.isArray(m.content) &&
+      (m.content as ChatContentPart[]).some((p) => {
+        const url = (p as { image_url?: { url?: string }; video_url?: { url?: string } }).image_url?.url ?? (p as { video_url?: { url?: string } }).video_url?.url;
+        return typeof url === "string" && /^https?:\/\//.test(url);
+      })
+  );
+}
+
+// Maps canonical text and media parts to Chat Completions content blocks; in: a user message's parts, out: fullHistoryMessages.
+async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPart[]> {
   const blocks: ChatContentPart[] = [];
-  const fileUrls: string[] = [];
-  let hasFiles = false;
   for (const part of parts) {
     if (part.type === "text" && part.text) {
       blocks.push({ type: "text", text: part.text });
@@ -198,15 +222,16 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<{
       const raw = (part as { image?: unknown }).image;
       // Remote URLs pass through (router downloads; `image_download_failed`
       // surfaces if unreachable). Inline only local/base64/binary.
+      const detail = IMAGE_DETAIL[(part as { resolution?: string }).resolution ?? ""];
       if (typeof raw === "string" && (raw.startsWith("http://") || raw.startsWith("https://"))) {
-        blocks.push({ type: "image_url", image_url: { url: raw } });
+        blocks.push({ type: "image_url", image_url: { url: raw, ...(detail ? { detail } : {}) } });
         continue;
       }
       const norm = await normalizeMediaInput(
         raw as string | Uint8Array | ArrayBuffer,
         (part as { mimeType?: string }).mimeType
       );
-      blocks.push({ type: "image_url", image_url: { url: norm.dataUrl } });
+      blocks.push({ type: "image_url", image_url: { url: norm.dataUrl, ...(detail ? { detail } : {}) } });
     } else if (part.type === "video") {
       const raw = (part as { video?: unknown }).video;
       // `video_url` is the completions video shape (live: shape accepted,
@@ -220,7 +245,9 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<{
         raw as string | Uint8Array | ArrayBuffer,
         (part as { mimeType?: string }).mimeType
       );
-      blocks.push({ type: "video_url", video_url: { url: norm.dataUrl } });
+      // video-inputs.md names the QuickTime type `video/mov`.
+      const url = norm.mimeType === "video/quicktime" ? `data:video/mov;base64,${norm.base64Data}` : norm.dataUrl;
+      blocks.push({ type: "video_url", video_url: { url } });
     } else if (part.type === "audio") {
       const raw = (part as { audio?: unknown }).audio;
       const mimeType = (part as { mimeType?: string }).mimeType;
@@ -235,37 +262,20 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<{
         input_audio: { data: norm.base64Data, format: audioFormatFor(norm.mimeType) },
       });
     } else if (part.type === "file") {
-      hasFiles = true;
       const raw = (part as { file?: unknown }).file;
       const filename = (part as { filename?: string }).filename;
-      if (typeof raw === "string" && (raw.startsWith("http://") || raw.startsWith("https://"))) {
-        // Bare `{type:file}` parts are ignored by the route (observed live),
-        // so the URL must ALSO ride in text for the file-parser plugin (see
-        // fullHistoryMessages). Still sent forward-compat.
-        fileUrls.push(raw);
-        blocks.push({
-          type: "file",
-          file: {
-            ...(typeof filename === "string" && filename ? { filename } : {}),
-            file_url: raw,
-          },
-        });
-        continue;
-      }
-      const norm = await normalizeMediaInput(
-        raw as string | Uint8Array | ArrayBuffer,
-        (part as { mimeType?: string }).mimeType
-      );
+      // `file_data` takes a public URL or a base64 data URL (api-ref ChatContentFile; a `file_url` field does not exist).
+      const fileData =
+        typeof raw === "string" && (raw.startsWith("http://") || raw.startsWith("https://"))
+          ? raw
+          : (await normalizeMediaInput(raw as string | Uint8Array | ArrayBuffer, (part as { mimeType?: string }).mimeType)).dataUrl;
       blocks.push({
         type: "file",
-        file: {
-          ...(typeof filename === "string" && filename ? { filename } : {}),
-          file_data: norm.dataUrl,
-        },
+        file: { ...(typeof filename === "string" && filename ? { filename } : {}), file_data: fileData },
       });
     }
   }
-  return { blocks, fileUrls, hasFiles };
+  return blocks;
 }
 
 function resultToOutput(result: unknown): string {
@@ -278,15 +288,8 @@ function resultToOutput(result: unknown): string {
  * Stateless transport: no chaining primitives exist here, so every turn
  * carries everything. Assistant items carry no provider `id`/`status`
  * requirements (unlike the discontinued Responses skin).
- *
- * File handling: remote file URLs must be visible in text for the
- * `file-parser` plugin (bare `{type:file}` parts are ignored by the route),
- * so each remote file URL is appended as its own text part.
  */
-async function fullHistoryMessages(context: ProviderContext): Promise<{
-  messages: ChatMessage[];
-  hasFiles: boolean;
-}> {
+async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessage[]> {
   // Map assistant tool_call ids so tool results pair even though the
   // executor keys results by the call id.
   const pairing = new Map<string, string>();
@@ -310,7 +313,6 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
   if (context.systemPrompt) {
     messages.push({ role: "system", content: context.systemPrompt });
   }
-  let hasFiles = false;
   let lastRole: string | null = "system";
   for (const m of context.messages) {
     if (m.role === "system") continue;
@@ -323,12 +325,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
       if (typeof m.content === "string") {
         if (m.content) { messages.push({ role: "user", content: m.content }); lastRole = "user"; }
       } else {
-        const { blocks, fileUrls, hasFiles: hf } = await contentPartsToBlocks(m.content);
-        if (hf) hasFiles = true;
-        // Surface remote file URLs in text for the file-parser plugin.
-        for (const url of fileUrls) {
-          blocks.push({ type: "text", text: url });
-        }
+        const blocks = await contentPartsToBlocks(m.content);
         if (blocks.length > 0) { messages.push({ role: "user", content: blocks }); lastRole = "user"; }
       }
     } else if (m.role === "assistant") {
@@ -345,7 +342,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
           calls.push({
             id: clampToolCallId(part.callId || part.id),
             type: "function",
-            function: { name: part.name, arguments: JSON.stringify(part.arguments || {}) },
+            function: { name: part.name, arguments: toolArgumentsJson(part.arguments) },
           });
         } else if (part.type === "text" && part.text) {
           texts.push(part.text);
@@ -388,7 +385,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<{
       }
     }
   }
-  return { messages, hasFiles };
+  return messages;
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +407,7 @@ function mapUsage(raw?: ChatUsage): TokenUsage {
     cacheWriteTokens: raw?.prompt_tokens_details?.cache_write_tokens ?? 0,
     thinkingTokens: raw?.completion_tokens_details?.reasoning_tokens ?? 0,
   };
-  if (typeof raw?.cost === "number" && raw.cost > 0) {
+  if (typeof raw?.cost === "number" && raw.cost >= 0) { // an explicit 0 (a free model, a response-cache hit) is a known cost, not a missing one
     usage.cost = { totalCost: raw.cost };
   }
   return usage;
@@ -454,8 +451,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     const { effort } = mapThinkingLevelToOpenRouterChat(options?.thinking?.level);
     const serviceTier = mapServiceTierToOpenRouter(options?.serviceTier);
     // Anthropic models take a top-level `cache_control` TTL; every other route caches implicitly (docs: prompt-caching.md).
-    const cache = resolveCache("openrouter", options?.cache, modelId.startsWith("anthropic/") ? ["implicit", "5m", "1h"] : ["implicit"], `openrouter/${modelId}`);
-    warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`);
+    const cache = resolveCache("openrouter", options?.cache, /^~?anthropic\//.test(modelId) ? ["implicit", "5m", "1h"] : ["implicit"], `openrouter/${modelId}`);
+    warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`, ["video"]);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system-prompt instruction + client validation (catalog
@@ -483,7 +480,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         fallback: "emulated JSON instruction + client validation (no response_format is sent)",
       });
     }
-    const { messages, hasFiles } = await fullHistoryMessages(effectiveContext);
+    const messages = await fullHistoryMessages(effectiveContext);
     const body: ChatRequestBody = {
       model: modelId,
       messages,
@@ -499,7 +496,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (serviceTier) body.service_tier = serviceTier;
     if (cache === "5m" || cache === "1h") body.cache_control = { type: "ephemeral", ttl: cache };
     // Documented Chat Completions generation controls (only those the caller set).
-    Object.assign(body, mapGenerationParamsToChat(options));
+    Object.assign(body, mapGenerationParamsToChat(options, "openrouter", `openrouter/${modelId}`));
     // Structured outputs: Chat Completions `response_format{type:json_schema,json_schema}`.
     // Skipped when emulated (unsupported model): instruction already in messages.
     if (outputSpec && !outputEmulated) {
@@ -510,9 +507,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         // why: invalid output shapes fail fast at Agent construction/loop validation.
       }
     }
-    // PDF ingestion is a documented plugin, not a message shape: enable it
-    // only when file parts are present (never by default).
-    if (hasFiles) body.plugins = [{ id: "file-parser" }];
     // No store/previous_response_id/conversation: they do not exist
     // on this endpoint.
     // Session affinity: top-level `session_id` is the documented sticky-routing
@@ -548,14 +542,18 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     url: string,
     bodyText: string,
     modelId: string,
-    headers?: Record<string, string>
+    headers?: Record<string, string>,
+    remoteMedia = false
   ): void {
     if (status >= 200 && status < 300) return;
-    const { message, code, errorType, raw } = readErrorPayload(bodyText);
+    const { message, code, errorType, raw, limitSource } = readErrorPayload(bodyText);
     const hint =
       status === 401
         ? " Check OPENROUTER_API_KEY (no quotes/spaces, correct provider) and that the key is loaded (bun --env-file=.env.local)."
-        : "";
+        : // A bad or unreachable image/video link comes back as the bare "Provider returned error" without saying which part failed.
+          status === 400 && remoteMedia && message === "Provider returned error"
+          ? " The request carries a remote image or video link: it may be unreachable or not accepted by this route. Try passing the file itself (a local path or bytes) instead."
+          : "";
     const fullMessage = `${message}${hint}`;
     const err: Record<string, unknown> & Error = new Error(fullMessage) as Record<string, unknown> & Error;
     (err as Record<string, unknown>)["statusCode"] = status;
@@ -568,7 +566,13 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (raw) (err as Record<string, unknown>)["raw"] = raw;
     const retryAfterMs = parseRetryAfterMs(headers);
     if (retryAfterMs !== undefined) (err as Record<string, unknown>)["retryAfterMs"] = retryAfterMs;
-    throw toConciseProviderError(err, "openrouter", modelId);
+    const concise = toConciseProviderError(err, "openrouter", modelId);
+    // A 402 from the in-flight spending budget clears by itself once running requests settle (errors-and-debugging.md, Retry-After): retry it after the header's wait. A 402 for missing credits does not.
+    if (status === 402 && limitSource === "openrouter_in_flight_budget") {
+      (concise as unknown as Record<string, unknown>)["retryable"] = true;
+      (concise as unknown as Record<string, unknown>)["transient"] = true;
+    }
+    throw concise;
   }
 
   // OpenRouter can only cancel a request that streams ("Stream cancellation": for a non-streaming request the model keeps processing and you are billed in full), so even a plain generate is sent as a stream and collected here: an interrupt then closes the connection and stops processing and billing at the providers OpenRouter can cancel; in: the loop's non-streaming turn, out: the same ProviderGenerateResult a JSON reply gave.
@@ -626,23 +630,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     const startTime = Date.now();
     const clean = cleanModelId(model);
 
-    const linked = new AbortController();
-    const forwardUserAbort = () => {
-      try {
-        linked.abort((options?.signal as { reason?: unknown })?.reason);
-      } catch {
-        try {
-          linked.abort();
-        } catch {}
-      }
-    };
-    if (options?.signal?.aborted) forwardUserAbort();
-    else options?.signal?.addEventListener("abort", forwardUserAbort, { once: true });
-    const removeStreamCancel = eventStream.onCancel(() => {
-      try {
-        linked.abort();
-      } catch {}
-    });
+    const { linked, release } = linkStreamAbort(eventStream, options?.signal);
 
     (async () => {
       try {
@@ -675,22 +663,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({
-          fetchOnce: async () => {
-            const timer =
-              streamTimeoutMs && streamTimeoutMs > 0
-                ? setTimeout(() => {
-                    try {
-                      linked.abort();
-                    } catch {}
-                  }, streamTimeoutMs)
-                : undefined;
-            try {
-              return await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
-            } finally {
-              if (timer) clearTimeout(timer);
-            }
-          },
-          onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
+          fetchOnce: () => withAbortTimer(linked, streamTimeoutMs, () => (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))),
+          onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers), hasRemoteMedia(body.messages)),
           noBodyError: () => toConciseProviderError(new Error("OpenRouter streaming response had no body"), "openrouter", clean),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
@@ -703,9 +677,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
-        const parser = new SSEParser();
-        const reader = res.body!.getReader(); // openStreamResponse guarantees a body
-        const decoder = new TextDecoder();
         let text = "";
         let thinking = "";
         // Tool calls keyed by choice index: { id, name, startArgs, deltaArgs }.
@@ -722,18 +693,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
-        let aborted = false;
-        linked.signal.addEventListener(
-          "abort",
-          () => {
-            aborted = true;
-            try {
-              void reader.cancel();
-            } catch {}
-          },
-          { once: true }
-        );
-
         const handleMessage = (data: string): void => {
           if (!data) return;
           if (data === "[DONE]") {
@@ -759,6 +718,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
             if (topError.code !== undefined) failure["code"] = topError.code;
             if (typeof topError.metadata?.error_type === "string") failure["errorType"] = topError.metadata.error_type;
+            const status = midStreamStatus(topError.code, topError.metadata?.error_type);
+            if (status !== undefined) failure["statusCode"] = status; // lets the retry logic and the message treat it like an HTTP error
             failure["url"] = url;
             throw toConciseProviderError(failure, "openrouter", clean);
           }
@@ -855,32 +816,13 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           }
         };
 
-        while (true) {
-          if (linked.signal.aborted || eventStream.isCancelled()) {
-            try {
-              await reader.cancel();
-            } catch {}
-            throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
-          }
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          for (const m of parser.feed(chunk)) handleMessage(m.data);
-        }
-        for (const m of parser.flush()) handleMessage(m.data);
-        try {
-          reader.releaseLock();
-        } catch {}
-
-        if (linked.signal.aborted || eventStream.isCancelled() || aborted) {
-          throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
-        }
+        await readSseData(res.body!, linked, eventStream, handleMessage); // openStreamResponse guarantees a body
 
         const toolCalls: ToolCallRecord[] = [];
         for (const c of calls.values()) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const record: ToolCallRecord = {
-            id: c.id && !c.id.includes("|") && c.id.length <= 40 ? c.id : clampToolCallId(c.id || newToolCallId()),
+            id: clampToolCallId(c.id || newToolCallId()), // the id the history sends back, so the stored id and the wire id are one
             name: c.name,
             arguments: args,
             rawArguments: selectRawArguments(c.startArgs, c.deltaArgs),
@@ -889,9 +831,11 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           eventStream.push({ type: "tool_call_complete", toolCall: record });
         }
 
+        // Did the stream really end? Read before the tool-call and refusal overrides below, which also set sawFinishReason.
+        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
         noteProviderTurn(sessionId, "openrouter");
         if (toolCalls.length > 0) {
-          finishReason = "tool_calls";
+          finishReason = toolTurnFinishReason(finishReason, toolCalls);
           sawFinishReason = true;
         } else if (refusalSeen && finishReason !== "content_filter") {
           finishReason = "refusal";
@@ -901,26 +845,21 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
         // instead of resolving empty success. Skipped for non-SSE payloads
         // (JSON mocks) where no SSE frames were ever seen.
-        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
-        const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
-        const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
-        const isSSEPayload =
-          (typeof ctEntry?.[1] === "string" && ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
-          framesSeen > 0 ||
-          badFrames > 0;
-        if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
-          eventStream.fail(incompleteStreamError("openrouter", clean));
+        const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const incomplete = incompleteStreamCheck({
+          provider: "openrouter",
+          modelId: clean,
+          hasTerminal,
+          empty: !text && !cleanThinking && toolCalls.length === 0,
+          unfinishedCall: hasUnfinishedToolCall(calls.values(), toolCalls),
+          responseHeaders,
+          framesSeen,
+          badFrames,
+        });
+        if (incomplete) {
+          eventStream.fail(incomplete);
           return;
         }
-        // Refuse unfinished tool calls whose args never parsed (output_item.done
-        // never arrived): truncated `{raw}` must not reach the executor (pi
-        // api/openai-responses-shared.ts:766 rule). Non-SSE mocks preserve legacy.
-        if (!hasTerminal && toolCalls.some((c) => hasTruncatedToolArguments(c.arguments)) && isSSEPayload) {
-          eventStream.fail(incompleteStreamError("openrouter", clean));
-          return;
-        }
-
-        const cleanThinking = cleanThinkingEarly;
         const finalResponse = new AgentResponse({
           text,
           thinking: cleanThinking || undefined,
@@ -940,21 +879,9 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);
       } catch (err: unknown) {
-        const raw = err instanceof Error ? err : new Error(String(err));
-        const isAbort =
-          linked.signal.aborted ||
-          eventStream.isCancelled() ||
-          (raw as { name?: string }).name === "AbortError";
-        eventStream.fail(
-          isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw
-        );
+        failStream(eventStream, linked, err);
       } finally {
-        try {
-          options?.signal?.removeEventListener("abort", forwardUserAbort);
-        } catch {}
-        try {
-          removeStreamCancel();
-        } catch {}
+        release();
       }
     })();
 

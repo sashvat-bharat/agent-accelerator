@@ -113,7 +113,8 @@ const PART_TO_MODALITY: Record<string, "image" | "audio" | "video" | "pdf"> = {
 
 /**
  * Fails fast — before any network call — when the catalog knows the model
- * lacks a requested input modality (image/audio/video/document). Unknown
+ * lacks a requested input modality (image/audio/video/document; files are
+ * not checked on OpenRouter, which parses them for any model). Unknown
  * models (custom providers, dynamic routers) are skipped: the provider
  * verdict stands and surfaces via toConciseProviderError instead.
  */
@@ -130,6 +131,8 @@ export function assertModalitiesSupported(
       if (mapped) needed.add(mapped);
     }
   }
+  // OpenRouter reads a file with the model's native support or its own parser, so the catalog's "pdf" flag never gates a file there.
+  if (providerId === "openrouter") needed.delete("pdf");
   if (needed.size === 0) return;
   let supported: readonly string[] | undefined;
   try {

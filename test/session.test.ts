@@ -501,3 +501,16 @@ describe("priceUsage: cache hits, cache writes, missing cache prices, service ti
     expect(priceUsage({ ...usage, cost: { totalCost: 0.7 } }, spec, { serviceTier: "priority" })!.totalCost).toBe(0.7);
   });
 });
+
+describe("priceUsage: a provider-reported cost of exactly 0", () => {
+  it("is a known zero (free model or cache hit), not a missing cost to guess from the catalog", () => {
+    const spec = { id: "m", provider: "openrouter", name: "m", contextWindow: 1, maxOutputTokens: 1, capabilities: {}, pricing: { inputPerMillion: 5, outputPerMillion: 15 } } as any;
+    const usage = { inputTokens: 10_000, outputTokens: 1_000, totalTokens: 11_000, cost: { totalCost: 0 } };
+    const priced = priceUsage(usage, spec)!;
+    expect(priced.source).toBe("provider");
+    expect(priced.totalCost).toBe(0);
+    expect(priced.breakdown.totalMicroUSD).toBe(0);
+    // No reported cost at all still falls back to the catalog.
+    expect(priceUsage({ inputTokens: 10_000, outputTokens: 1_000, totalTokens: 11_000 }, spec)!.source).toBe("catalog");
+  });
+});

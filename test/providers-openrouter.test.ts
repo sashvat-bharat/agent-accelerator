@@ -5,8 +5,12 @@ import {
   mapServiceTierToOpenRouter,
   mapToolChoiceToOpenRouterChat,
   clearEmittedWarnings,
+  parseStreamedToolArguments,
+  selectRawArguments,
 } from "../src/providers.ts";
 import { getProvider, resolveModel } from "../src/providers/registry.ts";
+import { isRetryableRun } from "../src/utils/retry.ts";
+import { clampToolCallId } from "../src/providers/shared.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -270,15 +274,14 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
     expect(toolMsg.content).toBe("21C");
   });
 
-  it("enables file-parser plugin only when file parts are present", async () => {
+  it("sends files in the documented shape: file_data for URLs and data URLs, never a plugin or file_url", async () => {
     const bodies: any[] = [];
     (globalThis as any).fetch = async (_url: unknown, req: any) => {
       bodies.push(JSON.parse(req.body));
       return sseReply(TEXT_RESPONSE);
     };
     const provider = new OpenRouterChatCompletionsProvider();
-    await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k" });
-    expect(bodies[0].plugins).toBeUndefined();
+    const bytes = new TextEncoder().encode("a,b\n1,2\n");
     await provider.generate(
       "m",
       {
@@ -287,16 +290,21 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
             role: "user",
             content: [
               { type: "text", text: "Summarize." },
-              { type: "file", file: "https://example.com/d.pdf", mimeType: "application/pdf" } as any,
+              { type: "file", file: "https://example.com/d.pdf", filename: "d.pdf", mimeType: "application/pdf" } as any,
+              { type: "file", file: bytes, mimeType: "text/csv" } as any,
             ],
           },
         ],
       },
       { apiKey: "k" }
     );
-    expect(bodies[1].plugins).toEqual([{ id: "file-parser" }]);
-    const userMsg = bodies[1].messages.find((m: any) => m.role === "user");
-    expect(JSON.stringify(userMsg.content)).toContain("https://example.com/d.pdf");
+    expect(bodies[0].plugins).toBeUndefined();
+    const content = bodies[0].messages.find((m: any) => m.role === "user").content;
+    expect(content).toHaveLength(3); // text + two files: the URL is not repeated as a text part
+    expect(content[1]).toEqual({ type: "file", file: { filename: "d.pdf", file_data: "https://example.com/d.pdf" } });
+    expect(content[2].file.file_data).toBe(`data:text/csv;base64,${Buffer.from(bytes).toString("base64")}`);
+    expect(content[2].file.filename).toBeUndefined();
+    expect(JSON.stringify(bodies[0])).not.toContain("file_url");
   });
 
   it("sends video_url parts natively (no video fail-fast on this transport)", async () => {
@@ -490,33 +498,53 @@ describe("OpenRouterChatCompletionsProvider (REST, mocked)", () => {
   });
 });
 
-describe("per-media resolution is Google-only", () => {
+describe("per-media resolution on OpenRouter", () => {
   afterEach(() => {
     globalThis.fetch = ORIGINAL_FETCH;
     clearEmittedWarnings();
   });
 
-  it("warns once on the bus and never sends the field", async () => {
+  const run = async (content: any[]) => {
     const { telemetryBus } = await import("../src/telemetry.ts");
     clearEmittedWarnings();
-    const bodies: string[] = [];
-    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(req.body), new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 }));
-    const warnings: unknown[] = [];
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), sseReply(TEXT_RESPONSE));
+    const warnings: any[] = [];
     const off = telemetryBus.onEvent((e) => {
       if (e.code === "provider_warning" && (e.data as any)?.capability === "media resolution") warnings.push(e.data);
     });
     const w = captureWarnings();
     try {
       const provider = new OpenRouterChatCompletionsProvider();
-      const content = [{ type: "image", image: "https://example.com/a.png", resolution: "high" }] as any;
       await provider.generate("x/model", { messages: [{ role: "user", content }] }, { apiKey: "k" });
       await provider.generate("x/model", { messages: [{ role: "user", content }] }, { apiKey: "k" });
     } finally {
       off();
       w.restore();
     }
+    return { bodies, warnings };
+  };
+
+  it("sends an image's resolution as image_url.detail (URL and inline) and does not warn", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]);
+    const { bodies, warnings } = await run([
+      { type: "image", image: "https://example.com/a.png", resolution: "low" },
+      { type: "image", image: "https://example.com/b.png", resolution: "medium" },
+      { type: "image", image: png, resolution: "high" },
+      { type: "image", image: "https://example.com/c.png", resolution: "ultra_high" },
+      { type: "image", image: "https://example.com/d.png" },
+    ] as any);
+    const images = bodies[0].messages[0].content.map((c: any) => c.image_url);
+    expect(images.map((i: any) => i.detail)).toEqual(["low", "auto", "high", "original", undefined]);
+    expect(images[2].url.startsWith("data:image/png;base64,")).toBe(true);
+    expect(warnings).toEqual([]);
+  });
+
+  it("warns once on the bus for a video's resolution and never sends the field", async () => {
+    const { bodies, warnings } = await run([{ type: "video", video: "https://example.com/v.mp4", resolution: "high" }] as any);
     expect(warnings.length).toBe(1);
-    expect(bodies.join("")).not.toContain("resolution");
+    expect(JSON.stringify(bodies)).not.toContain("resolution");
+    expect(JSON.stringify(bodies)).not.toContain("detail");
   });
 });
 
@@ -609,5 +637,257 @@ describe("every OpenRouter request can be cancelled: generate() is served over a
     const err = await new OpenRouterChatCompletionsProvider().generate("m", ctx, { apiKey: "k" }).catch((x) => x);
     expect(String(err.message)).toContain("[openrouter/m]");
     expect(String(err.message)).toContain("(401)");
+  });
+});
+
+describe("tool calls without arguments", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const frame = (f: unknown) => `data: ${JSON.stringify(f)}\n\n`;
+  const sse = (body: string) => new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  const call = { index: 0, id: "call_1", type: "function", function: { name: "ping", arguments: "" } };
+
+  it("treats empty streamed arguments as {} while broken JSON stays truncated", () => {
+    expect(parseStreamedToolArguments("", "")).toEqual({});
+    expect(parseStreamedToolArguments("  ", "\n")).toEqual({});
+    expect(selectRawArguments("", "")).toBe("{}");
+    expect(parseStreamedToolArguments("", '{"a":"abc')).toEqual({ __truncated_raw: '{"a":"abc' });
+  });
+
+  it("returns a no-argument call that finished normally with {} arguments", async () => {
+    (globalThis as any).fetch = async () =>
+      sse(
+        frame({ id: "g1", choices: [{ index: 0, delta: { tool_calls: [call] }, finish_reason: null }] }) +
+          frame({ id: "g1", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 } }) +
+          "data: [DONE]\n\n"
+      );
+    const res = await new OpenRouterChatCompletionsProvider().generate("m", { messages: [{ role: "user", content: "go" }] }, { apiKey: "k" });
+    expect(res.toolCalls?.[0]?.arguments).toEqual({});
+    expect(res.toolCalls?.[0]?.rawArguments).toBe("{}");
+  });
+
+  it("still fails a cut-off stream whose call never received its arguments", async () => {
+    (globalThis as any).fetch = async () => sse(frame({ id: "g1", choices: [{ index: 0, delta: { tool_calls: [call] }, finish_reason: null }] }));
+    const err = await new OpenRouterChatCompletionsProvider()
+      .generate("m", { messages: [{ role: "user", content: "go" }] }, { apiKey: "k", maxRetries: 0 })
+      .then(() => null)
+      .catch((e) => e);
+    expect((err as any)?.code).toBe("incomplete_stream");
+  });
+});
+
+describe("errors in the middle of a stream", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const run = async (error: Record<string, unknown>) => {
+    const frames =
+      `data: ${JSON.stringify({ id: "g1", choices: [{ index: 0, delta: { content: "Hel" }, finish_reason: null }] })}\n\n` +
+      `data: ${JSON.stringify({ id: "g1", error, choices: [{ index: 0, delta: { content: "" }, finish_reason: "error" }] })}\n\n`;
+    (globalThis as any).fetch = async () => new Response(frames, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    return new OpenRouterChatCompletionsProvider()
+      .generate("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k", maxRetries: 0 })
+      .then(() => null)
+      .catch((e) => e as any);
+  };
+
+  it("carries the HTTP status of a numeric code, so the run retry treats it like an HTTP error", async () => {
+    const err = await run({ code: 429, message: "Rate limit exceeded", metadata: { error_type: "rate_limit_exceeded" } });
+    expect(err.statusCode).toBe(429);
+    expect(err.message).toContain("(429)");
+    expect(err.errorType).toBe("rate_limit_exceeded");
+    expect(isRetryableRun(err)).toBe(true);
+  });
+
+  it("maps a string code through its error_type, and leaves non-retryable errors alone", async () => {
+    const overloaded = await run({ code: "server_error", message: "Provider disconnected", metadata: { error_type: "provider_unavailable" } });
+    expect(overloaded.statusCode).toBe(502);
+    expect(isRetryableRun(overloaded)).toBe(true);
+    const bad = await run({ code: 400, message: "Bad input", metadata: { error_type: "invalid_request" } });
+    expect(bad.statusCode).toBe(400);
+    expect(isRetryableRun(bad)).toBe(false);
+    const unknown = await run({ code: "weird", message: "?" });
+    expect(unknown.statusCode).toBeUndefined();
+    expect(isRetryableRun(unknown)).toBe(false);
+  });
+});
+
+describe("small request and usage values", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+    clearEmittedWarnings();
+  });
+
+  const frames = (usage: unknown) =>
+    new Response(
+      `data: ${JSON.stringify({ id: "g", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }], usage })}\n\ndata: [DONE]\n\n`,
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+
+  it("keeps a reported cost of 0 as a known cost", async () => {
+    (globalThis as any).fetch = async () => frames({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7, cost: 0 });
+    const res = await new OpenRouterChatCompletionsProvider().generate("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    expect(res.usage.cost).toEqual({ totalCost: 0 });
+    (globalThis as any).fetch = async () => frames({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
+    const none = await new OpenRouterChatCompletionsProvider().generate("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    expect(none.usage.cost).toBeUndefined();
+  });
+
+  it("offers the 5m/1h cache TTL to ~anthropic/ aliases too", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), frames({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }));
+    const w = captureWarnings();
+    try {
+      await new OpenRouterChatCompletionsProvider().generate("~anthropic/claude-sonnet-latest", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k", cache: "1h" });
+    } finally {
+      w.restore();
+    }
+    expect(bodies[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("sends at most 4 stop sequences and says so once", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), frames({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }));
+    const w = captureWarnings();
+    try {
+      const provider = new OpenRouterChatCompletionsProvider();
+      const ctx = { messages: [{ role: "user" as const, content: "hi" }] };
+      await provider.generate("m", ctx, { apiKey: "k", stop: ["a", "b", "c", "d", "e", "f"] });
+      await provider.generate("m", ctx, { apiKey: "k", stop: ["a", "b"] });
+    } finally {
+      w.restore();
+    }
+    expect(bodies[0].stop).toEqual(["a", "b", "c", "d"]);
+    expect(bodies[1].stop).toEqual(["a", "b"]);
+    expect(w.messages.length).toBe(1);
+    expect(w.messages[0]).toMatch(/at most 4 stop sequences/);
+  });
+});
+
+describe("402 from the in-flight spending budget", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const payment = (metadata: Record<string, unknown>) =>
+    new Response(JSON.stringify({ error: { code: 402, message: "This request would exceed your available credits", metadata } }), {
+      status: 402,
+      headers: { "Content-Type": "application/json", "retry-after-ms": "5" },
+    });
+  const generate = () => new OpenRouterChatCompletionsProvider().generate("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+
+  it("is retried after the Retry-After wait, and then succeeds", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = async () =>
+      ++calls === 1 ? payment({ reason: "in_flight_budget_exhausted", limit_source: "openrouter_in_flight_budget" }) : sseReply(TEXT_RESPONSE);
+    const res = await generate();
+    expect(res.text).toBe("Hello there");
+    expect(calls).toBe(2);
+  });
+
+  it("is not retried when the account is simply out of credits", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = async () => (calls++, payment({ reason: "weight_exceeds_budget", limit_source: "openrouter_credits" }));
+    const err = await generate().then(() => null, (e) => e);
+    expect(calls).toBe(1);
+    expect(err.statusCode).toBe(402);
+    expect(err.retryable).toBeUndefined();
+  });
+});
+
+describe("tool-call ids and cut-off tool calls in history", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const frame = (f: unknown) => `data: ${JSON.stringify(f)}\n\n`;
+  const sse = (body: string) => new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  const usage = { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 };
+  const toolTurn = (id: string, args: string, finish: string) =>
+    sse(
+      frame({ id: "g", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id, type: "function", function: { name: "t", arguments: args } }] }, finish_reason: null }] }) +
+        frame({ id: "g", choices: [{ index: 0, delta: {}, finish_reason: finish }], usage }) +
+        "data: [DONE]\n\n"
+    );
+  const ask = (messages: any[]) => new OpenRouterChatCompletionsProvider().generate("m", { messages }, { apiKey: "k" });
+
+  it("keeps long ids that share a 40-character start apart, and short ids as they are", () => {
+    const a = `call_${"x".repeat(45)}_A`;
+    const b = `call_${"x".repeat(45)}_B`;
+    const [ca, cb] = [clampToolCallId(a), clampToolCallId(b)];
+    expect(ca).not.toBe(cb);
+    expect(ca.length).toBeLessThanOrEqual(40);
+    expect(clampToolCallId(a)).toBe(ca); // stable
+    expect(clampToolCallId("call_abc-123")).toBe("call_abc-123");
+    expect(clampToolCallId("a1b2c3d4-e5f6-7890-abcd-ef1234567890")).toBe("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+  });
+
+  it("stores the id it sends back: an id with ':' and '.' is the same in the result and in the next request", async () => {
+    (globalThis as any).fetch = async () => toolTurn("call:1.a", "{}", "tool_calls");
+    const first = await ask([{ role: "user", content: "go" }]);
+    const id = first.toolCalls![0]!.id;
+    expect(id).toBe("call_1_a");
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), sseReply(TEXT_RESPONSE));
+    await ask([
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool_call", id, name: "t", arguments: {} }] },
+      { role: "tool", name: "t", content: [{ type: "tool_result", id, name: "t", result: "done" }] },
+    ]);
+    const sent = bodies[0].messages;
+    expect(sent[1].tool_calls[0].id).toBe(id);
+    expect(sent[2].tool_call_id).toBe(id);
+  });
+
+  it("does not resend a cut-off call as a made-up argument object, and keeps finish_reason length", async () => {
+    (globalThis as any).fetch = async () => toolTurn("call_cut", '{"a":"abc', "length");
+    const first = await ask([{ role: "user", content: "go" }]);
+    expect(first.finishReason).toBe("length");
+    expect(first.toolCalls![0]!.arguments).toEqual({ __truncated_raw: '{"a":"abc' });
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), sseReply(TEXT_RESPONSE));
+    await ask([
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool_call", id: "call_cut", name: "t", arguments: first.toolCalls![0]!.arguments }] },
+      { role: "tool", name: "t", content: [{ type: "tool_result", id: "call_cut", name: "t", result: "Error: arguments truncated", isError: true }] },
+    ]);
+    expect(bodies[0].messages[1].tool_calls[0].function.arguments).toBe("{}");
+    expect(JSON.stringify(bodies[0])).not.toContain("__truncated_raw");
+  });
+
+  it("still reports tool_calls for a complete call that ended normally or by length", async () => {
+    (globalThis as any).fetch = async () => toolTurn("call_ok", '{"a":1}', "length");
+    expect((await ask([{ role: "user", content: "go" }])).finishReason).toBe("tool_calls");
+  });
+});
+
+describe("hint for the opaque 400 of a bad media link", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const bad = (message: string) => async () =>
+    new Response(JSON.stringify({ error: { code: 400, message, metadata: { raw: "ERROR", provider_name: "Stealth" } } }), { status: 400, headers: { "Content-Type": "application/json" } });
+  const ask = (image: string | Uint8Array) =>
+    new OpenRouterChatCompletionsProvider()
+      .generate("m", { messages: [{ role: "user", content: [{ type: "text", text: "look" }, { type: "image", image } as any] }] }, { apiKey: "k" })
+      .then(() => "", (e) => String(e.message));
+
+  it("points at the remote link when the route only says 'Provider returned error'", async () => {
+    (globalThis as any).fetch = bad("Provider returned error");
+    const message = await ask("https://example.com/missing.png");
+    expect(message).toContain("Provider returned error");
+    expect(message).toContain("remote image or video link");
+  });
+
+  it("adds nothing for an inline image or for a different 400", async () => {
+    (globalThis as any).fetch = bad("Provider returned error");
+    expect(await ask(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]))).not.toContain("remote image or video link");
+    (globalThis as any).fetch = bad("max_tokens is too large");
+    expect(await ask("https://example.com/a.png")).not.toContain("remote image or video link");
   });
 });

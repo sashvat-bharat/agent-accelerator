@@ -9,6 +9,8 @@ import { toConciseProviderError } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { redactHeadersCentral } from "../utils/cache.ts";
 import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
+import { SSEParser } from "../streaming/sse-parser.ts";
+import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 
 /** Parses a JSON tool-argument string; non-objects degrade to the truncated-arguments marker. */
 export function parseArguments(raw: string | undefined): Record<string, unknown> {
@@ -43,17 +45,17 @@ export function redactedHeaders(headers: Record<string, string>): Record<string,
 }
 
 /**
- * Extracts `{ message, code, errorType, raw }` from a non-2xx JSON body. Handles
- * OpenAI `type`, OpenRouter `metadata.error_type` + `metadata.raw`, and Google
+ * Extracts `{ message, code, errorType, raw, limitSource }` from a non-2xx JSON body. Handles
+ * OpenAI `type`, OpenRouter `metadata.error_type` + `metadata.raw` + `metadata.limit_source`, and Google
  * `status` code shapes; unknown bodies degrade to a 300-char slice.
  */
 export function readErrorPayload(
   bodyText: string
-): { message: string; code?: string | number; errorType?: string; raw?: string } {
+): { message: string; code?: string | number; errorType?: string; raw?: string; limitSource?: string } {
   try {
     const parsed: unknown = JSON.parse(bodyText);
     const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const err = (first as { error?: { message?: string; code?: string | number; type?: string; status?: string | number; metadata?: { error_type?: string; raw?: unknown } } })?.error;
+    const err = (first as { error?: { message?: string; code?: string | number; type?: string; status?: string | number; metadata?: { error_type?: string; raw?: unknown; limit_source?: unknown } } })?.error;
     if (err && typeof err.message === "string") {
       const code = err.code ?? err.status;
       const errorType =
@@ -67,6 +69,7 @@ export function readErrorPayload(
         ...(code !== undefined ? { code } : {}),
         ...(typeof errorType === "string" ? { errorType } : {}),
         ...(raw ? { raw } : {}),
+        ...(typeof err.metadata?.limit_source === "string" ? { limitSource: err.metadata.limit_source } : {}),
       };
     }
     return { message: bodyText.slice(0, 300) };
@@ -180,6 +183,12 @@ export function hasTruncatedToolArguments(args: unknown): boolean {
   return isTruncatedArguments(args);
 }
 
+// True when a stream with no terminal event left a tool call whose arguments never fully arrived (none at all, or cut mid-JSON); in: the adapter's assembled calls and their records, out: its incomplete_stream guard.
+export function hasUnfinishedToolCall(calls: Iterable<{ startArgs: string; deltaArgs: string }>, toolCalls: Array<{ arguments: unknown }>): boolean {
+  for (const c of calls) if (!c.startArgs.trim() && !c.deltaArgs.trim()) return true;
+  return toolCalls.some((c) => isTruncatedArguments(c.arguments));
+}
+
 /** Short hash for tool-ID clamping (FNV-1a, 8 hex chars, no deps). */
 export function shortHashId(value: string): string {
   let h = 0x811c9dc5;
@@ -198,7 +207,10 @@ export function shortHashId(value: string): string {
 export function clampToolCallId(id: string): string {
   const clean = String(id ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
   if (!clean.includes("|")) {
-    return clean.length > 40 ? clean.slice(0, 40) : clean || "call_unknown";
+    if (clean.length <= 40) return clean || "call_unknown";
+    // A hard cut would give two long ids with the same first 40 characters the same id; a hash of the whole id keeps them apart.
+    const hash = shortHashId(id);
+    return `${clean.slice(0, 40 - hash.length - 1)}_${hash}`;
   }
   const sep = clean.indexOf("|");
   const callId = clean.slice(0, sep).replace(/_+$/, "") || "call";
@@ -208,6 +220,16 @@ export function clampToolCallId(id: string): string {
   const hash = shortHashId(id).slice(0, 8);
   const prefix = callId.slice(0, Math.max(1, 40 - hash.length - 1));
   return `${prefix}_${hash}`;
+}
+
+// The finish reason of a turn that produced tool calls: `tool_calls`, except that a turn cut off by the output limit (`length`) keeps saying so when one of its calls was cut mid-JSON; in: the wire finish reason + the assembled calls, out: each streaming adapter.
+export function toolTurnFinishReason(finishReason: string, toolCalls: Array<{ arguments: unknown }>): string {
+  return finishReason === "length" && toolCalls.some((c) => isTruncatedArguments(c.arguments)) ? "length" : "tool_calls";
+}
+
+// The JSON text of a tool call's arguments for a history message: `{}` for a call whose streamed arguments were cut off (the internal `__truncated_raw` marker was never the model's own output and is never resent); in: a stored tool call, out: each adapter's history builder.
+export function toolArgumentsJson(args: unknown): string {
+  return isTruncatedArguments(args) ? "{}" : JSON.stringify(args || {});
 }
 
 /** Plain lower-cased header record from a fetch `Headers` object. */
@@ -281,4 +303,111 @@ export function retryOptionsFrom(options: {
     baseDelayMs: options?.retryBaseDelayMs,
     retryBudgetMs: options?.retryBudgetMs,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Streaming scaffold shared by the SSE adapters (abort linking, request timer, read loop, end-of-stream check, failure)
+// ---------------------------------------------------------------------------
+
+// Ties a provider stream to the caller's signal and to the stream's own cancel: one controller that aborts when either does; in: an adapter's stream(), out: the controller its request uses and the `release` its finally block calls.
+export function linkStreamAbort(eventStream: AssistantMessageEventStream, signal: AbortSignal | undefined): { linked: AbortController; release: () => void } {
+  const linked = new AbortController();
+  const forwardUserAbort = (): void => {
+    try {
+      linked.abort((signal as { reason?: unknown } | undefined)?.reason);
+    } catch {
+      try {
+        linked.abort();
+      } catch {}
+    }
+  };
+  if (signal?.aborted) forwardUserAbort();
+  else signal?.addEventListener("abort", forwardUserAbort, { once: true });
+  const removeStreamCancel = eventStream.onCancel(() => {
+    try {
+      linked.abort();
+    } catch {}
+  });
+  return {
+    linked,
+    release: () => {
+      try {
+        signal?.removeEventListener("abort", forwardUserAbort);
+      } catch {}
+      try {
+        removeStreamCancel();
+      } catch {}
+    },
+  };
+}
+
+// Runs one request attempt under a timer that aborts `controller` after `ms` (none when unset); in: an adapter's fetchOnce, out: its Response.
+export async function withAbortTimer<T>(controller: AbortController, ms: number | undefined, run: () => Promise<T>): Promise<T> {
+  const timer =
+    ms && ms > 0
+      ? setTimeout(() => {
+          try {
+            controller.abort();
+          } catch {}
+        }, ms)
+      : undefined;
+  try {
+    return await run();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Reads an SSE response body to its end, handing each `data:` payload to `onData`; stops with an AbortError as soon as the stream is aborted or cancelled (cancelling the body, whose rejection is absorbed); in: the opened Response body of an SSE adapter, out: calls to onData.
+export async function readSseData(
+  body: ReadableStream<Uint8Array>,
+  linked: AbortController,
+  eventStream: AssistantMessageEventStream,
+  onData: (data: string) => void
+): Promise<void> {
+  const parser = new SSEParser();
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const abort = (): Error => Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+  linked.signal.addEventListener("abort", () => void reader.cancel().catch(() => {}), { once: true }); // an aborted body is already errored: its cancel() rejects, and nobody else listens
+  while (true) {
+    if (linked.signal.aborted || eventStream.isCancelled()) {
+      try {
+        await reader.cancel();
+      } catch {}
+      throw abort();
+    }
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (const m of parser.feed(decoder.decode(value, { stream: true }))) onData(m.data);
+  }
+  for (const m of parser.flush()) onData(m.data);
+  try {
+    reader.releaseLock();
+  } catch {}
+  if (linked.signal.aborted || eventStream.isCancelled()) throw abort();
+}
+
+// The error to fail with when an SSE stream ended without its final event while carrying no content or an unfinished tool call (checked only for real SSE payloads, not JSON mocks); in: the adapter's state after reading, out: `eventStream.fail`, else undefined.
+export function incompleteStreamCheck(a: {
+  provider: string;
+  modelId: string;
+  hasTerminal: boolean;
+  empty: boolean;
+  unfinishedCall: boolean;
+  responseHeaders: Record<string, string>;
+  framesSeen: number;
+  badFrames: number;
+}): Error | undefined {
+  if (a.hasTerminal || !(a.empty || a.unfinishedCall)) return undefined;
+  const contentType = Object.entries(a.responseHeaders).find(([k]) => k.toLowerCase() === "content-type")?.[1];
+  const isSSEPayload = (typeof contentType === "string" && (contentType.includes("event-stream") || contentType.startsWith("text/"))) || a.framesSeen > 0 || a.badFrames > 0;
+  return isSSEPayload ? incompleteStreamError(a.provider, a.modelId) : undefined;
+}
+
+// Fails a stream with the right error: an abort (the signal, the stream's cancel, or an AbortError) becomes the plain `AbortError`, anything else passes through; in: an adapter's catch block, out: the stream's result() rejection.
+export function failStream(eventStream: AssistantMessageEventStream, linked: AbortController, err: unknown): void {
+  const raw = err instanceof Error ? err : new Error(String(err));
+  const isAbort = linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
+  eventStream.fail(isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw);
 }

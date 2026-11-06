@@ -58,6 +58,8 @@ import {
   retryOptionsFrom,
   headersToRecord,
   parseRetryAfterMs,
+  linkStreamAbort,
+  withAbortTimer,
 } from "./shared.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
@@ -1097,23 +1099,7 @@ export class GoogleInteractionsProvider implements Provider {
     const startTime = Date.now();
     const clean = cleanModelId(model);
 
-    const linked = new AbortController();
-    const forwardUserAbort = () => {
-      try {
-        linked.abort((options?.signal as { reason?: unknown })?.reason);
-      } catch {
-        try {
-          linked.abort();
-        } catch {}
-      }
-    };
-    if (options?.signal?.aborted) forwardUserAbort();
-    else options?.signal?.addEventListener("abort", forwardUserAbort, { once: true });
-    const removeStreamCancel = eventStream.onCancel(() => {
-      try {
-        linked.abort();
-      } catch {}
-    });
+    const { linked, release } = linkStreamAbort(eventStream, options?.signal);
 
     (async () => {
       // Hoisted for the catch-block self-heal (consts inside try are not
@@ -1159,21 +1145,7 @@ export class GoogleInteractionsProvider implements Provider {
         // (429/5xx/network) are retried before the first byte; a live stream is never retried.
         const open = (target: string, method: "POST" | "GET"): Promise<Response> =>
           openStreamResponse({
-            fetchOnce: async () => {
-              const timer =
-                streamTimeoutMs && streamTimeoutMs > 0
-                  ? setTimeout(() => {
-                      try {
-                        linked.abort();
-                      } catch {}
-                    }, streamTimeoutMs)
-                  : undefined;
-              try {
-                return await (options?.fetch ?? fetch)(target, this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, linked.signal));
-              } finally {
-                if (timer) clearTimeout(timer);
-              }
-            },
+            fetchOnce: () => withAbortTimer(linked, streamTimeoutMs, () => (options?.fetch ?? fetch)(target, this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, linked.signal))),
             onHttpError: (r, text) => this.throwIfError(r.status, r.statusText, target, text, clean, headersToRecord(r.headers)),
             noBodyError: () => toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
             retry: retryOptionsFrom(options),
@@ -1210,7 +1182,7 @@ export class GoogleInteractionsProvider implements Provider {
           () => {
             aborted = true;
             try {
-              void reader?.cancel();
+              void reader?.cancel().catch(() => {}); // an aborted body is already errored: its cancel() rejects, and nobody else listens
             } catch {}
           },
           { once: true }
@@ -1465,12 +1437,7 @@ export class GoogleInteractionsProvider implements Provider {
           eventStream.fail(raw);
         }
       } finally {
-        try {
-          options?.signal?.removeEventListener("abort", forwardUserAbort);
-        } catch {}
-        try {
-          removeStreamCancel();
-        } catch {}
+        release();
       }
     })();
 

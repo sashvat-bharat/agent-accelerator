@@ -87,6 +87,7 @@ Unsupported options are **warned on the telemetry bus and dropped**, never sent.
 - ✅ Use explicit `ModelProvider.*` or `apiKey`/`baseUrl` when running several providers in one process.
 - ✅ Check what a string resolves to with `resolveModel("...")` before shipping.
 - ❌ Do not rely on `stop`/`seed` with Google or OpenAI.
+- `stop` is capped at 4 sequences on Chat Completions endpoints (OpenRouter and custom prefixes); extra ones are dropped with one `provider_warning`.
 - 💡 Switching providers mid-session is supported; the conversation history is provider-neutral.
 
 ## Thinking (reasoning)

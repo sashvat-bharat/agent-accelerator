@@ -248,17 +248,17 @@ export function resolveCache(
   return undefined;
 }
 
-/** Warns once per provider/model that per-media `resolution` is ignored (no such control on that wire); in: an adapter's request messages, out: telemetry bus only. */
-export function warnIgnoredMediaResolution(provider: string, messages: Message[], modelRef: string): void {
+/** Warns once per provider/model that per-media `resolution` is ignored (no such control on that wire for the given kinds of media); in: an adapter's request messages, out: telemetry bus only. */
+export function warnIgnoredMediaResolution(provider: string, messages: Message[], modelRef: string, kinds: Array<"image" | "video"> = ["image", "video"]): void {
   const used = messages.some(
-    (m) => Array.isArray(m.content) && m.content.some((p) => (p.type === "image" || p.type === "video") && p.resolution)
+    (m) => Array.isArray(m.content) && m.content.some((p) => (p.type === "image" || p.type === "video") && kinds.includes(p.type) && p.resolution)
   );
   if (!used) return;
   emitProviderWarning({
     provider,
     capability: "media resolution",
     requested: modelRef,
-    reason: "this provider has no per-media detail control (Google only).",
+    reason: "this provider has no per-media detail control for this kind of media.",
     fallback: "the provider's default detail",
   });
 }
@@ -399,6 +399,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * @example `parseStreamedToolArguments("{}", '{"location":"Paris"}')`
  */
 export function parseStreamedToolArguments(startText: string, deltaText: string): Record<string, unknown> {
+  if (!startText.trim() && !deltaText.trim()) return {}; // no argument text at all is a call that takes none
   const candidates = [startText + deltaText, deltaText, startText].filter((c) => c && c.trim());
   for (const candidate of candidates) {
     try {
@@ -422,6 +423,7 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
  * @example `selectRawArguments("{}", '{"location":"Paris"}') // '{"location":"Paris"}'`
  */
 export function selectRawArguments(startText: string, deltaText: string): string {
+  if (!startText.trim() && !deltaText.trim()) return "{}";
   const candidates = [startText + deltaText, deltaText, startText].filter((c) => c && c.trim());
   for (const candidate of candidates) {
     try {
@@ -445,6 +447,8 @@ export interface GenerationParams {
   seed?: number;
 }
 
+/** Most stop sequences a Chat Completions request may carry (OpenRouter chat-completion api-ref `maxItems`, OpenAI the same). */
+const MAX_CHAT_STOP = 4;
 const finiteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 /** Normalizes the public `stop` option (`string | string[]`) to a clean array, or undefined. */
@@ -460,11 +464,22 @@ export function normalizeStop(stop: string | string[] | undefined): string[] | u
  * `max_tokens`, `stop`, `seed`. Only set values are
  * emitted, so strict endpoints never see anything the caller did not ask for.
  */
-export function mapGenerationParamsToChat(params: GenerationParams | undefined): Record<string, unknown> {
+export function mapGenerationParamsToChat(params: GenerationParams | undefined, provider = "chat", modelRef = ""): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (!params) return out;
   if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out["max_tokens"] = Math.floor(params.maxOutputTokens);
-  if (params.stop && params.stop.length > 0) out["stop"] = params.stop;
+  if (params.stop && params.stop.length > 0) {
+    out["stop"] = params.stop.slice(0, MAX_CHAT_STOP);
+    if (params.stop.length > MAX_CHAT_STOP) {
+      emitProviderWarning({
+        provider,
+        capability: "stop sequences",
+        requested: `${params.stop.length} sequences (${modelRef})`,
+        reason: `Chat Completions allows at most ${MAX_CHAT_STOP} stop sequences.`,
+        fallback: `the first ${MAX_CHAT_STOP}`,
+      });
+    }
+  }
   if (finiteNumber(params.seed)) out["seed"] = Math.floor(params.seed);
   return out;
 }
