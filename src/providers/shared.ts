@@ -180,6 +180,12 @@ export function hasTruncatedToolArguments(args: unknown): boolean {
   return isTruncatedArguments(args);
 }
 
+// True when a stream with no terminal event left a tool call whose arguments never fully arrived (none at all, or cut mid-JSON); in: the adapter's assembled calls and their records, out: its incomplete_stream guard.
+export function hasUnfinishedToolCall(calls: Iterable<{ startArgs: string; deltaArgs: string }>, toolCalls: Array<{ arguments: unknown }>): boolean {
+  for (const c of calls) if (!c.startArgs.trim() && !c.deltaArgs.trim()) return true;
+  return toolCalls.some((c) => isTruncatedArguments(c.arguments));
+}
+
 /** Short hash for tool-ID clamping (FNV-1a, 8 hex chars, no deps). */
 export function shortHashId(value: string): string {
   let h = 0x811c9dc5;

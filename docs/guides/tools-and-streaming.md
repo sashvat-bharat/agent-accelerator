@@ -33,7 +33,7 @@ console.log(res.text, res.toolCalls.length);
 
 How a call is executed, in order:
 1. **Name**: matched exactly, then case/format-insensitively; a near miss returns "Did you mean …?" to the model.
-2. **Arguments**: validated with your schema; a failure is sent back to the model to fix (truncated streamed JSON never executes).
+2. **Arguments**: validated with your schema; a failure is sent back to the model to fix (truncated streamed JSON never executes; a call that streams no argument text at all is a call with no arguments and runs with `{}`; a stream that ends without its final event fails as retryable instead of running half-received calls).
 3. **Concurrency**: up to 8 tools at once, plus your per-tool `maxConcurrency`.
 4. **Run**: default **one attempt**; `idempotent: true` allows up to 3 on transient failures; an explicit `maxTries` wins. Timeouts are not retried unless you set `maxTries`.
 5. **Result**: made JSON-safe, secrets/paths scrubbed from errors, capped at `maxResultChars` (default 20000, with a `[Truncated…]` marker); `undefined` becomes `"null"`; failures become `Error executing <name>: …` plus a JSON block (error code/status, attempts, last `ctx.emit({ type: "progress", … })` snapshot, a do-not-repeat hint) so the model repairs only what remains; every call also emits `tool.*` events on `telemetryBus` (see [reference](../reference.md#telemetry-codes)). Every result has `durationMs`.

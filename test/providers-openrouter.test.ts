@@ -5,6 +5,8 @@ import {
   mapServiceTierToOpenRouter,
   mapToolChoiceToOpenRouterChat,
   clearEmittedWarnings,
+  parseStreamedToolArguments,
+  selectRawArguments,
 } from "../src/providers.ts";
 import { getProvider, resolveModel } from "../src/providers/registry.ts";
 
@@ -613,5 +615,43 @@ describe("every OpenRouter request can be cancelled: generate() is served over a
     const err = await new OpenRouterChatCompletionsProvider().generate("m", ctx, { apiKey: "k" }).catch((x) => x);
     expect(String(err.message)).toContain("[openrouter/m]");
     expect(String(err.message)).toContain("(401)");
+  });
+});
+
+describe("tool calls without arguments", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const frame = (f: unknown) => `data: ${JSON.stringify(f)}\n\n`;
+  const sse = (body: string) => new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  const call = { index: 0, id: "call_1", type: "function", function: { name: "ping", arguments: "" } };
+
+  it("treats empty streamed arguments as {} while broken JSON stays truncated", () => {
+    expect(parseStreamedToolArguments("", "")).toEqual({});
+    expect(parseStreamedToolArguments("  ", "\n")).toEqual({});
+    expect(selectRawArguments("", "")).toBe("{}");
+    expect(parseStreamedToolArguments("", '{"a":"abc')).toEqual({ __truncated_raw: '{"a":"abc' });
+  });
+
+  it("returns a no-argument call that finished normally with {} arguments", async () => {
+    (globalThis as any).fetch = async () =>
+      sse(
+        frame({ id: "g1", choices: [{ index: 0, delta: { tool_calls: [call] }, finish_reason: null }] }) +
+          frame({ id: "g1", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 } }) +
+          "data: [DONE]\n\n"
+      );
+    const res = await new OpenRouterChatCompletionsProvider().generate("m", { messages: [{ role: "user", content: "go" }] }, { apiKey: "k" });
+    expect(res.toolCalls?.[0]?.arguments).toEqual({});
+    expect(res.toolCalls?.[0]?.rawArguments).toBe("{}");
+  });
+
+  it("still fails a cut-off stream whose call never received its arguments", async () => {
+    (globalThis as any).fetch = async () => sse(frame({ id: "g1", choices: [{ index: 0, delta: { tool_calls: [call] }, finish_reason: null }] }));
+    const err = await new OpenRouterChatCompletionsProvider()
+      .generate("m", { messages: [{ role: "user", content: "go" }] }, { apiKey: "k", maxRetries: 0 })
+      .then(() => null)
+      .catch((e) => e);
+    expect((err as any)?.code).toBe("incomplete_stream");
   });
 });

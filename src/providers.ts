@@ -399,6 +399,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * @example `parseStreamedToolArguments("{}", '{"location":"Paris"}')`
  */
 export function parseStreamedToolArguments(startText: string, deltaText: string): Record<string, unknown> {
+  if (!startText.trim() && !deltaText.trim()) return {}; // no argument text at all is a call that takes none
   const candidates = [startText + deltaText, deltaText, startText].filter((c) => c && c.trim());
   for (const candidate of candidates) {
     try {
@@ -422,6 +423,7 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
  * @example `selectRawArguments("{}", '{"location":"Paris"}') // '{"location":"Paris"}'`
  */
 export function selectRawArguments(startText: string, deltaText: string): string {
+  if (!startText.trim() && !deltaText.trim()) return "{}";
   const candidates = [startText + deltaText, deltaText, startText].filter((c) => c && c.trim());
   for (const candidate of candidates) {
     try {

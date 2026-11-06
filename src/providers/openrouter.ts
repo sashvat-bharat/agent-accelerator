@@ -52,7 +52,7 @@ import {
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
-  hasTruncatedToolArguments,
+  hasUnfinishedToolCall,
   combinedSignal,
   timeoutFor,
   hasAuthHeader,
@@ -850,6 +850,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           eventStream.push({ type: "tool_call_complete", toolCall: record });
         }
 
+        // Did the stream really end? Read before the tool-call and refusal overrides below, which also set sawFinishReason.
+        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
         noteProviderTurn(sessionId, "openrouter");
         if (toolCalls.length > 0) {
           finishReason = "tool_calls";
@@ -862,7 +864,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
         // instead of resolving empty success. Skipped for non-SSE payloads
         // (JSON mocks) where no SSE frames were ever seen.
-        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
         const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
         const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
         const isSSEPayload =
@@ -876,7 +877,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         // Refuse unfinished tool calls whose args never parsed (output_item.done
         // never arrived): truncated `{raw}` must not reach the executor (pi
         // api/openai-responses-shared.ts:766 rule). Non-SSE mocks preserve legacy.
-        if (!hasTerminal && toolCalls.some((c) => hasTruncatedToolArguments(c.arguments)) && isSSEPayload) {
+        if (!hasTerminal && hasUnfinishedToolCall(calls.values(), toolCalls) && isSSEPayload) {
           eventStream.fail(incompleteStreamError("openrouter", clean));
           return;
         }
