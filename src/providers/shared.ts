@@ -43,17 +43,17 @@ export function redactedHeaders(headers: Record<string, string>): Record<string,
 }
 
 /**
- * Extracts `{ message, code, errorType, raw }` from a non-2xx JSON body. Handles
- * OpenAI `type`, OpenRouter `metadata.error_type` + `metadata.raw`, and Google
+ * Extracts `{ message, code, errorType, raw, limitSource }` from a non-2xx JSON body. Handles
+ * OpenAI `type`, OpenRouter `metadata.error_type` + `metadata.raw` + `metadata.limit_source`, and Google
  * `status` code shapes; unknown bodies degrade to a 300-char slice.
  */
 export function readErrorPayload(
   bodyText: string
-): { message: string; code?: string | number; errorType?: string; raw?: string } {
+): { message: string; code?: string | number; errorType?: string; raw?: string; limitSource?: string } {
   try {
     const parsed: unknown = JSON.parse(bodyText);
     const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const err = (first as { error?: { message?: string; code?: string | number; type?: string; status?: string | number; metadata?: { error_type?: string; raw?: unknown } } })?.error;
+    const err = (first as { error?: { message?: string; code?: string | number; type?: string; status?: string | number; metadata?: { error_type?: string; raw?: unknown; limit_source?: unknown } } })?.error;
     if (err && typeof err.message === "string") {
       const code = err.code ?? err.status;
       const errorType =
@@ -67,6 +67,7 @@ export function readErrorPayload(
         ...(code !== undefined ? { code } : {}),
         ...(typeof errorType === "string" ? { errorType } : {}),
         ...(raw ? { raw } : {}),
+        ...(typeof err.metadata?.limit_source === "string" ? { limitSource: err.metadata.limit_source } : {}),
       };
     }
     return { message: bodyText.slice(0, 300) };

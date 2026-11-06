@@ -766,3 +766,34 @@ describe("small request and usage values", () => {
     expect(w.messages[0]).toMatch(/at most 4 stop sequences/);
   });
 });
+
+describe("402 from the in-flight spending budget", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const payment = (metadata: Record<string, unknown>) =>
+    new Response(JSON.stringify({ error: { code: 402, message: "This request would exceed your available credits", metadata } }), {
+      status: 402,
+      headers: { "Content-Type": "application/json", "retry-after-ms": "5" },
+    });
+  const generate = () => new OpenRouterChatCompletionsProvider().generate("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+
+  it("is retried after the Retry-After wait, and then succeeds", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = async () =>
+      ++calls === 1 ? payment({ reason: "in_flight_budget_exhausted", limit_source: "openrouter_in_flight_budget" }) : sseReply(TEXT_RESPONSE);
+    const res = await generate();
+    expect(res.text).toBe("Hello there");
+    expect(calls).toBe(2);
+  });
+
+  it("is not retried when the account is simply out of credits", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = async () => (calls++, payment({ reason: "weight_exceeds_budget", limit_source: "openrouter_credits" }));
+    const err = await generate().then(() => null, (e) => e);
+    expect(calls).toBe(1);
+    expect(err.statusCode).toBe(402);
+    expect(err.retryable).toBeUndefined();
+  });
+});

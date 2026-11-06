@@ -526,7 +526,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     headers?: Record<string, string>
   ): void {
     if (status >= 200 && status < 300) return;
-    const { message, code, errorType, raw } = readErrorPayload(bodyText);
+    const { message, code, errorType, raw, limitSource } = readErrorPayload(bodyText);
     const hint =
       status === 401
         ? " Check OPENROUTER_API_KEY (no quotes/spaces, correct provider) and that the key is loaded (bun --env-file=.env.local)."
@@ -543,7 +543,13 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (raw) (err as Record<string, unknown>)["raw"] = raw;
     const retryAfterMs = parseRetryAfterMs(headers);
     if (retryAfterMs !== undefined) (err as Record<string, unknown>)["retryAfterMs"] = retryAfterMs;
-    throw toConciseProviderError(err, "openrouter", modelId);
+    const concise = toConciseProviderError(err, "openrouter", modelId);
+    // A 402 from the in-flight spending budget clears by itself once running requests settle (errors-and-debugging.md, Retry-After): retry it after the header's wait. A 402 for missing credits does not.
+    if (status === 402 && limitSource === "openrouter_in_flight_budget") {
+      (concise as unknown as Record<string, unknown>)["retryable"] = true;
+      (concise as unknown as Record<string, unknown>)["transient"] = true;
+    }
+    throw concise;
   }
 
   // OpenRouter can only cancel a request that streams ("Stream cancellation": for a non-streaming request the model keeps processing and you are billed in full), so even a plain generate is sent as a stream and collected here: an interrupt then closes the connection and stops processing and billing at the providers OpenRouter can cancel; in: the loop's non-streaming turn, out: the same ProviderGenerateResult a JSON reply gave.
