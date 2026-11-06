@@ -23,7 +23,7 @@ export function getPackageVersion(): string {
     const v = (globalThis as any).process?.env?.npm_package_version;
     if (typeof v === "string" && v) return v;
   } catch {}
-  return "0.5.5";
+  return "0.5.6";
 }
 
 function getAgentAccelUserAgent(): string {
