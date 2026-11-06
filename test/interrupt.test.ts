@@ -294,3 +294,51 @@ describe("interrupt(message): stop what is running and start the new message", (
     expect(lastUser(f.calls[1])).toBe("never mind");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Aborting a streaming request closes the connection, which errors the response body. Cancelling that already-errored
+// body rejects, so every adapter must absorb that rejection: nothing may reach `unhandledRejection` (which crashes a host).
+// ---------------------------------------------------------------------------
+describe("aborting a stream leaves nothing unhandled", () => {
+  for (const [label, model, extra] of [
+    ["OpenRouter", "openrouter/x/y", {}],
+    ["OpenAI", "openai/gpt-5-nano", {}],
+    ["a custom endpoint", "groq/some-model", { env: { GROQ_BASE_URL: "http://localhost:1/v1" } }],
+    ["Google", "google/gemini-3-test", {}],
+  ] as const) {
+    it(`${label}: stream()${label === "OpenRouter" ? " and run()" : ""} aborted by a signal`, async () => {
+      const seen: unknown[] = [];
+      const onUnhandled = (reason: unknown) => seen.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        // A response that stays open (an SSE comment only) and errors its body when the request is aborted, like a real connection.
+        const open = (async (_url: unknown, init: RequestInit) =>
+          new Response(
+            new ReadableStream({
+              start(c) {
+                c.enqueue(enc.encode(": keep-alive\n\n"));
+                init.signal?.addEventListener("abort", () => c.error(Object.assign(new Error("connection aborted"), { name: "AbortError" })));
+              },
+            }),
+            { status: 200, headers: { "content-type": "text/event-stream" } }
+          )) as unknown as typeof fetch;
+        const agent = new Agent({ model, apiKey: "k", fetch: open, runRetries: 0, ...extra });
+        // OpenRouter streams even for run(); the other adapters read a stream only for stream().
+        for (const start of label === "OpenRouter" ? ["stream", "run"] : ["stream"]) {
+          const ac = new AbortController();
+          const done =
+            start === "stream"
+              ? agent.stream("hello", { signal: ac.signal }).result().then(() => null, (e) => e)
+              : agent.run("hello", { signal: ac.signal }).then(() => null, (e) => e);
+          await sleep(40);
+          ac.abort(new Error("stop"));
+          expect((await done)?.name).toBe("AbortError");
+          await sleep(100);
+        }
+        expect(seen).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+    });
+  }
+});

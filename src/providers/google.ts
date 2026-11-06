@@ -1210,7 +1210,7 @@ export class GoogleInteractionsProvider implements Provider {
           () => {
             aborted = true;
             try {
-              void reader?.cancel();
+              void reader?.cancel().catch(() => {}); // an aborted body is already errored: its cancel() rejects, and nobody else listens
             } catch {}
           },
           { once: true }
