@@ -52,7 +52,6 @@ import type { ProviderContext, ContentPart } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage, ThinkingConfig } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
-import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { getApiKey, getEnv } from "../utils/env.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
@@ -69,6 +68,11 @@ import {
   readErrorPayload,
   incompleteStreamError,
   hasUnfinishedToolCall,
+  linkStreamAbort,
+  withAbortTimer,
+  readSseData,
+  incompleteStreamCheck,
+  failStream,
   toolArgumentsJson,
   toolTurnFinishReason,
   combinedSignal,
@@ -951,23 +955,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     const prefix = this.prefix;
     const clean = cleanModelId(this.prefix, model);
 
-    const linked = new AbortController();
-    const forwardUserAbort = () => {
-      try {
-        linked.abort((options?.signal as { reason?: unknown })?.reason);
-      } catch {
-        try {
-          linked.abort();
-        } catch {}
-      }
-    };
-    if (options?.signal?.aborted) forwardUserAbort();
-    else options?.signal?.addEventListener("abort", forwardUserAbort, { once: true });
-    const removeStreamCancel = eventStream.onCancel(() => {
-      try {
-        linked.abort();
-      } catch {}
-    });
+    const { linked, release } = linkStreamAbort(eventStream, options?.signal);
 
     (async () => {
       try {
@@ -996,21 +984,7 @@ export class OpenAICompatibleChatProvider implements Provider {
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({
-          fetchOnce: async () => {
-            const timer =
-              streamTimeoutMs && streamTimeoutMs > 0
-                ? setTimeout(() => {
-                    try {
-                      linked.abort();
-                    } catch {}
-                  }, streamTimeoutMs)
-                : undefined;
-            try {
-              return await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal));
-            } finally {
-              if (timer) clearTimeout(timer);
-            }
-          },
+          fetchOnce: () => withAbortTimer(linked, streamTimeoutMs, () => (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))),
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
           noBodyError: () => toConciseProviderError(new Error("OpenAI-compatible streaming response had no body"), prefix, clean),
           retry: retryOptionsFrom(options),
@@ -1024,9 +998,6 @@ export class OpenAICompatibleChatProvider implements Provider {
         const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
-        const parser = new SSEParser();
-        const reader = res.body!.getReader(); // openStreamResponse guarantees a body
-        const decoder = new TextDecoder();
         let text = "";
         let thinking = "";
         // Tool calls keyed by choice index: { id, name, startArgs, deltaArgs }.
@@ -1042,18 +1013,6 @@ export class OpenAICompatibleChatProvider implements Provider {
         let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
-        let aborted = false;
-        linked.signal.addEventListener(
-          "abort",
-          () => {
-            aborted = true;
-            try {
-              void reader.cancel().catch(() => {}); // an aborted body is already errored: its cancel() rejects, and nobody else listens
-            } catch {}
-          },
-          { once: true }
-        );
-
         const handleMessage = (data: string): void => {
           if (!data) return;
           if (data === "[DONE]") {
@@ -1178,26 +1137,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           }
         };
 
-        while (true) {
-          if (linked.signal.aborted || eventStream.isCancelled()) {
-            try {
-              await reader.cancel();
-            } catch {}
-            throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
-          }
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          for (const m of parser.feed(chunk)) handleMessage(m.data);
-        }
-        for (const m of parser.flush()) handleMessage(m.data);
-        try {
-          reader.releaseLock();
-        } catch {}
-
-        if (linked.signal.aborted || eventStream.isCancelled() || aborted) {
-          throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
-        }
+        await readSseData(res.body!, linked, eventStream, handleMessage); // openStreamResponse guarantees a body
 
         const toolCalls: ToolCallRecord[] = [];
         for (const [index, c] of calls) {
@@ -1228,25 +1168,21 @@ export class OpenAICompatibleChatProvider implements Provider {
         // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
         // instead of resolving empty success. Skipped for non-SSE payloads
         // (JSON mocks) where no SSE frames were ever seen.
-        const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
-        const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
-        const isSSEPayload =
-          (typeof ctEntry?.[1] === "string" && ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
-          framesSeen > 0 ||
-          badFrames > 0;
-        if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
-          eventStream.fail(incompleteStreamError(prefix, clean));
+        const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const incomplete = incompleteStreamCheck({
+          provider: prefix,
+          modelId: clean,
+          hasTerminal,
+          empty: !text && !cleanThinking && toolCalls.length === 0,
+          unfinishedCall: hasUnfinishedToolCall(calls.values(), toolCalls),
+          responseHeaders,
+          framesSeen,
+          badFrames,
+        });
+        if (incomplete) {
+          eventStream.fail(incomplete);
           return;
         }
-        // Refuse unfinished tool calls whose args never parsed (output_item.done
-        // never arrived): truncated `{raw}` must not reach the executor (pi
-        // api/openai-responses-shared.ts:766 rule). Non-SSE mocks preserve legacy.
-        if (!hasTerminal && hasUnfinishedToolCall(calls.values(), toolCalls) && isSSEPayload) {
-          eventStream.fail(incompleteStreamError(prefix, clean));
-          return;
-        }
-
-        const cleanThinking = cleanThinkingEarly;
         const finalThoughtSignature = toolCalls.map((c) => c.thoughtSignature).find(Boolean);
         const finalResponse = new AgentResponse({
           text,
@@ -1267,21 +1203,9 @@ export class OpenAICompatibleChatProvider implements Provider {
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);
       } catch (err: unknown) {
-        const raw = err instanceof Error ? err : new Error(String(err));
-        const isAbort =
-          linked.signal.aborted ||
-          eventStream.isCancelled() ||
-          (raw as { name?: string }).name === "AbortError";
-        eventStream.fail(
-          isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw
-        );
+        failStream(eventStream, linked, err);
       } finally {
-        try {
-          options?.signal?.removeEventListener("abort", forwardUserAbort);
-        } catch {}
-        try {
-          removeStreamCancel();
-        } catch {}
+        release();
       }
     })();
 

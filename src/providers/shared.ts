@@ -9,6 +9,8 @@ import { toConciseProviderError } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { redactHeadersCentral } from "../utils/cache.ts";
 import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
+import { SSEParser } from "../streaming/sse-parser.ts";
+import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 
 /** Parses a JSON tool-argument string; non-objects degrade to the truncated-arguments marker. */
 export function parseArguments(raw: string | undefined): Record<string, unknown> {
@@ -301,4 +303,111 @@ export function retryOptionsFrom(options: {
     baseDelayMs: options?.retryBaseDelayMs,
     retryBudgetMs: options?.retryBudgetMs,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Streaming scaffold shared by the SSE adapters (abort linking, request timer, read loop, end-of-stream check, failure)
+// ---------------------------------------------------------------------------
+
+// Ties a provider stream to the caller's signal and to the stream's own cancel: one controller that aborts when either does; in: an adapter's stream(), out: the controller its request uses and the `release` its finally block calls.
+export function linkStreamAbort(eventStream: AssistantMessageEventStream, signal: AbortSignal | undefined): { linked: AbortController; release: () => void } {
+  const linked = new AbortController();
+  const forwardUserAbort = (): void => {
+    try {
+      linked.abort((signal as { reason?: unknown } | undefined)?.reason);
+    } catch {
+      try {
+        linked.abort();
+      } catch {}
+    }
+  };
+  if (signal?.aborted) forwardUserAbort();
+  else signal?.addEventListener("abort", forwardUserAbort, { once: true });
+  const removeStreamCancel = eventStream.onCancel(() => {
+    try {
+      linked.abort();
+    } catch {}
+  });
+  return {
+    linked,
+    release: () => {
+      try {
+        signal?.removeEventListener("abort", forwardUserAbort);
+      } catch {}
+      try {
+        removeStreamCancel();
+      } catch {}
+    },
+  };
+}
+
+// Runs one request attempt under a timer that aborts `controller` after `ms` (none when unset); in: an adapter's fetchOnce, out: its Response.
+export async function withAbortTimer<T>(controller: AbortController, ms: number | undefined, run: () => Promise<T>): Promise<T> {
+  const timer =
+    ms && ms > 0
+      ? setTimeout(() => {
+          try {
+            controller.abort();
+          } catch {}
+        }, ms)
+      : undefined;
+  try {
+    return await run();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Reads an SSE response body to its end, handing each `data:` payload to `onData`; stops with an AbortError as soon as the stream is aborted or cancelled (cancelling the body, whose rejection is absorbed); in: the opened Response body of an SSE adapter, out: calls to onData.
+export async function readSseData(
+  body: ReadableStream<Uint8Array>,
+  linked: AbortController,
+  eventStream: AssistantMessageEventStream,
+  onData: (data: string) => void
+): Promise<void> {
+  const parser = new SSEParser();
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const abort = (): Error => Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+  linked.signal.addEventListener("abort", () => void reader.cancel().catch(() => {}), { once: true }); // an aborted body is already errored: its cancel() rejects, and nobody else listens
+  while (true) {
+    if (linked.signal.aborted || eventStream.isCancelled()) {
+      try {
+        await reader.cancel();
+      } catch {}
+      throw abort();
+    }
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (const m of parser.feed(decoder.decode(value, { stream: true }))) onData(m.data);
+  }
+  for (const m of parser.flush()) onData(m.data);
+  try {
+    reader.releaseLock();
+  } catch {}
+  if (linked.signal.aborted || eventStream.isCancelled()) throw abort();
+}
+
+// The error to fail with when an SSE stream ended without its final event while carrying no content or an unfinished tool call (checked only for real SSE payloads, not JSON mocks); in: the adapter's state after reading, out: `eventStream.fail`, else undefined.
+export function incompleteStreamCheck(a: {
+  provider: string;
+  modelId: string;
+  hasTerminal: boolean;
+  empty: boolean;
+  unfinishedCall: boolean;
+  responseHeaders: Record<string, string>;
+  framesSeen: number;
+  badFrames: number;
+}): Error | undefined {
+  if (a.hasTerminal || !(a.empty || a.unfinishedCall)) return undefined;
+  const contentType = Object.entries(a.responseHeaders).find(([k]) => k.toLowerCase() === "content-type")?.[1];
+  const isSSEPayload = (typeof contentType === "string" && (contentType.includes("event-stream") || contentType.startsWith("text/"))) || a.framesSeen > 0 || a.badFrames > 0;
+  return isSSEPayload ? incompleteStreamError(a.provider, a.modelId) : undefined;
+}
+
+// Fails a stream with the right error: an abort (the signal, the stream's cancel, or an AbortError) becomes the plain `AbortError`, anything else passes through; in: an adapter's catch block, out: the stream's result() rejection.
+export function failStream(eventStream: AssistantMessageEventStream, linked: AbortController, err: unknown): void {
+  const raw = err instanceof Error ? err : new Error(String(err));
+  const isAbort = linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
+  eventStream.fail(isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw);
 }
