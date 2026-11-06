@@ -717,7 +717,8 @@ It also:
 * sends file parts as `file.file_data` (a public URL or a base64 data URL) and never adds a plugin: OpenRouter reads the file natively or with its own default parser;
 * maps `tool_choice` (`auto` omitted; `none`, `required`, and function pins supported);
 * treats an error chunk inside a stream (HTTP 200) like an HTTP error: its status comes from the chunk's `code`, or from its `error_type` (`rate_limit_exceeded` 429, `provider_overloaded` 503, `provider_unavailable` 502, `timeout` 504, `server` 500), so `runRetries` retries the retryable ones;
-* reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present.
+* reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present (a reported `0`, a free model or a cache hit, stays a known `$0`);
+* accepts `anthropic/...` and `~anthropic/...` model names for the `5m` / `1h` cache setting, and sends at most 4 `stop` sequences (the Chat Completions maximum; extra ones are dropped with one `provider_warning`).
 
 `serviceTier` values other than `flex` / `priority` are omitted (standard routing).
 

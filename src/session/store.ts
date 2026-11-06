@@ -1391,7 +1391,7 @@ function resolveEffectivePricing(
 /**
  * Prices one usage snapshot with integer micro-USD accumulation (Q-36).
  *
- * - Provider-reported `usage.cost.totalCost > 0` wins (source `provider`).
+ * - A provider-reported `usage.cost.totalCost` (a number, 0 included: free or cached) wins (source `provider`).
  * - Else catalog pricing via `resolveEffectivePricing` (source `catalog`).
  * - Else returns `undefined` (source `unknown` is implicit) — unknown stays
  *   unknown, never a fabricated 0 object.
@@ -1408,7 +1408,7 @@ export function priceUsage(
   opts?: { serviceTier?: ServiceTier | string; modelId?: string }
 ): PricedCost | undefined {
   const reported = usage?.cost;
-  if (reported && typeof reported.totalCost === "number" && reported.totalCost > 0) {
+  if (reported && typeof reported.totalCost === "number" && reported.totalCost >= 0) {
     const micro = (d?: number): number => (typeof d === "number" && d > 0 ? Math.round(d * 1_000_000) : 0);
     const inputMicroUSD = micro(reported.inputCost);
     const outputMicroUSD = micro(reported.outputCost);
@@ -1492,7 +1492,7 @@ export function addCostToUsage(
   spec?: ModelSpec,
   opts?: { serviceTier?: ServiceTier | string }
 ): TokenUsage["cost"] | undefined {
-  if (usage?.cost && typeof usage.cost.totalCost === "number" && usage.cost.totalCost > 0) {
+  if (usage?.cost && typeof usage.cost.totalCost === "number" && usage.cost.totalCost >= 0) {
     return usage.cost;
   }
   const priced = priceUsage(usage, spec, opts);

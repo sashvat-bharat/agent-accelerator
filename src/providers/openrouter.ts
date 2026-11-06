@@ -388,7 +388,7 @@ function mapUsage(raw?: ChatUsage): TokenUsage {
     cacheWriteTokens: raw?.prompt_tokens_details?.cache_write_tokens ?? 0,
     thinkingTokens: raw?.completion_tokens_details?.reasoning_tokens ?? 0,
   };
-  if (typeof raw?.cost === "number" && raw.cost > 0) {
+  if (typeof raw?.cost === "number" && raw.cost >= 0) { // an explicit 0 (a free model, a response-cache hit) is a known cost, not a missing one
     usage.cost = { totalCost: raw.cost };
   }
   return usage;
@@ -432,7 +432,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     const { effort } = mapThinkingLevelToOpenRouterChat(options?.thinking?.level);
     const serviceTier = mapServiceTierToOpenRouter(options?.serviceTier);
     // Anthropic models take a top-level `cache_control` TTL; every other route caches implicitly (docs: prompt-caching.md).
-    const cache = resolveCache("openrouter", options?.cache, modelId.startsWith("anthropic/") ? ["implicit", "5m", "1h"] : ["implicit"], `openrouter/${modelId}`);
+    const cache = resolveCache("openrouter", options?.cache, /^~?anthropic\//.test(modelId) ? ["implicit", "5m", "1h"] : ["implicit"], `openrouter/${modelId}`);
     warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`, ["video"]);
 
     // Structured outputs: native `response_format` when supported, else
@@ -477,7 +477,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (serviceTier) body.service_tier = serviceTier;
     if (cache === "5m" || cache === "1h") body.cache_control = { type: "ephemeral", ttl: cache };
     // Documented Chat Completions generation controls (only those the caller set).
-    Object.assign(body, mapGenerationParamsToChat(options));
+    Object.assign(body, mapGenerationParamsToChat(options, "openrouter", `openrouter/${modelId}`));
     // Structured outputs: Chat Completions `response_format{type:json_schema,json_schema}`.
     // Skipped when emulated (unsupported model): instruction already in messages.
     if (outputSpec && !outputEmulated) {

@@ -418,7 +418,7 @@ async function generateWithTimeout<T>(task: () => Promise<T>, timeoutMs: number)
 /** Prices one usage snapshot with the one cost model (`priceUsage`): provider-reported total first, else catalog pricing scaled by `serviceTier`; undefined when unknown. In: loop turns and `accumulateUsage`, out: `usage.cost`. */
 export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec, serviceTier?: string): TokenUsage["cost"] {
   try {
-    if (usage.cost && usage.cost.totalCost !== undefined && usage.cost.totalCost > 0) {
+    if (usage.cost && typeof usage.cost.totalCost === "number" && usage.cost.totalCost >= 0) {
       return usage.cost;
     }
     if (!spec) return usage.cost;

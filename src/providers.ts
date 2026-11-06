@@ -447,6 +447,8 @@ export interface GenerationParams {
   seed?: number;
 }
 
+/** Most stop sequences a Chat Completions request may carry (OpenRouter chat-completion api-ref `maxItems`, OpenAI the same). */
+const MAX_CHAT_STOP = 4;
 const finiteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 /** Normalizes the public `stop` option (`string | string[]`) to a clean array, or undefined. */
@@ -462,11 +464,22 @@ export function normalizeStop(stop: string | string[] | undefined): string[] | u
  * `max_tokens`, `stop`, `seed`. Only set values are
  * emitted, so strict endpoints never see anything the caller did not ask for.
  */
-export function mapGenerationParamsToChat(params: GenerationParams | undefined): Record<string, unknown> {
+export function mapGenerationParamsToChat(params: GenerationParams | undefined, provider = "chat", modelRef = ""): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (!params) return out;
   if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out["max_tokens"] = Math.floor(params.maxOutputTokens);
-  if (params.stop && params.stop.length > 0) out["stop"] = params.stop;
+  if (params.stop && params.stop.length > 0) {
+    out["stop"] = params.stop.slice(0, MAX_CHAT_STOP);
+    if (params.stop.length > MAX_CHAT_STOP) {
+      emitProviderWarning({
+        provider,
+        capability: "stop sequences",
+        requested: `${params.stop.length} sequences (${modelRef})`,
+        reason: `Chat Completions allows at most ${MAX_CHAT_STOP} stop sequences.`,
+        fallback: `the first ${MAX_CHAT_STOP}`,
+      });
+    }
+  }
   if (finiteNumber(params.seed)) out["seed"] = Math.floor(params.seed);
   return out;
 }

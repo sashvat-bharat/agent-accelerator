@@ -741,7 +741,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     const compatTools = toCompatTools(tools);
     if (compatTools) body.tools = compatTools;
     // Standard Chat Completions generation fields, only when the caller set them.
-    Object.assign(body, mapGenerationParamsToChat(options));
+    Object.assign(body, mapGenerationParamsToChat(options, this.prefix, `${this.prefix}/${modelId}`));
     const toolChoice = mapToolChoiceToOpenAI(
       options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
     );

@@ -713,3 +713,56 @@ describe("errors in the middle of a stream", () => {
     expect(isRetryableRun(unknown)).toBe(false);
   });
 });
+
+describe("small request and usage values", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+    clearEmittedWarnings();
+  });
+
+  const frames = (usage: unknown) =>
+    new Response(
+      `data: ${JSON.stringify({ id: "g", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }], usage })}\n\ndata: [DONE]\n\n`,
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+
+  it("keeps a reported cost of 0 as a known cost", async () => {
+    (globalThis as any).fetch = async () => frames({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7, cost: 0 });
+    const res = await new OpenRouterChatCompletionsProvider().generate("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    expect(res.usage.cost).toEqual({ totalCost: 0 });
+    (globalThis as any).fetch = async () => frames({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
+    const none = await new OpenRouterChatCompletionsProvider().generate("m", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    expect(none.usage.cost).toBeUndefined();
+  });
+
+  it("offers the 5m/1h cache TTL to ~anthropic/ aliases too", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), frames({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }));
+    const w = captureWarnings();
+    try {
+      await new OpenRouterChatCompletionsProvider().generate("~anthropic/claude-sonnet-latest", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k", cache: "1h" });
+    } finally {
+      w.restore();
+    }
+    expect(bodies[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(w.messages).toEqual([]);
+  });
+
+  it("sends at most 4 stop sequences and says so once", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), frames({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }));
+    const w = captureWarnings();
+    try {
+      const provider = new OpenRouterChatCompletionsProvider();
+      const ctx = { messages: [{ role: "user" as const, content: "hi" }] };
+      await provider.generate("m", ctx, { apiKey: "k", stop: ["a", "b", "c", "d", "e", "f"] });
+      await provider.generate("m", ctx, { apiKey: "k", stop: ["a", "b"] });
+    } finally {
+      w.restore();
+    }
+    expect(bodies[0].stop).toEqual(["a", "b", "c", "d"]);
+    expect(bodies[1].stop).toEqual(["a", "b"]);
+    expect(w.messages.length).toBe(1);
+    expect(w.messages[0]).toMatch(/at most 4 stop sequences/);
+  });
+});
