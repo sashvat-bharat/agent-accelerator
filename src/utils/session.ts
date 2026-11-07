@@ -81,6 +81,7 @@ export function nowMs(): number {
   return Date.now();
 }
 
+// 32 random lowercase hex characters; in: newRunId/newTurnId, out: a string.
 function random32Hex(): string {
   try {
     const c = (globalThis as any)?.crypto;
@@ -132,6 +133,7 @@ export interface ParsedModelRef {
   thinking?: ThinkingLevel;
 }
 
+// Splits `provider/model` on the first slash (bare ids default to openrouter); in: parseModelRef, out: provider and model id.
 function splitModelString(raw: string): { provider: string; modelId: string } {
   const trimmed = raw.trim();
   const slash = trimmed.indexOf("/");
@@ -144,12 +146,14 @@ function splitModelString(raw: string): { provider: string; modelId: string } {
   };
 }
 
+// Type guard for a `{ model: string }` helper result; in: parseModelRef, out: a boolean.
 function isModelProviderInstance(v: unknown): v is ModelProviderInstance {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   const r = v as Record<string, unknown>;
   return typeof r["model"] === "string" && (r["model"] as string).length > 0;
 }
 
+// Type guard for a catalog spec (`provider` and `id` strings); in: parseModelRef, out: a boolean.
 function isModelSpec(v: unknown): v is ModelSpec {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   const r = v as Record<string, unknown>;

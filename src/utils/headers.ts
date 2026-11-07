@@ -1,6 +1,7 @@
 import type { ProviderId } from "../types/model.ts";
 import { clampCacheKey } from "./cache.ts";
 
+/** True in a browser, worker or React Native scope, where custom headers cause CORS preflights; in: header building, out: a boolean. */
 export function isBrowserRuntime(): boolean {
   try {
     const g = globalThis as any;
@@ -26,6 +27,7 @@ export function getPackageVersion(): string {
   return "0.5.6";
 }
 
+// User-Agent string with version and platform; in: AGENT_ACCEL_USER_AGENT, out: a string.
 function getAgentAccelUserAgent(): string {
   const version = getPackageVersion();
   try {
@@ -125,6 +127,7 @@ const BROWSER_DROPPED = new Set([
   "x-goog-api-client",
 ]);
 
+// Drops the headers a browser may not or should not send; in: buildSessionHeaders, out: the safe headers.
 function stripForBrowser(headers: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) {

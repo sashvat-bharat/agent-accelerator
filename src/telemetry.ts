@@ -30,6 +30,7 @@ interface TelemetryBus {
   clear(): void;
 }
 
+/** The in-process telemetry bus: listeners subscribe with `onEvent`; emission never throws and does nothing without listeners. */
 export const telemetryBus: TelemetryBus = (() => {
   const listeners = new Set<TelemetryListener>();
   const deliver = (event: TelemetryEvent): void => {

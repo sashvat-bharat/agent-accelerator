@@ -160,6 +160,7 @@ function extractZodObjectSchema(zodSchema: any): Record<string, unknown> {
   };
 }
 
+// Best-effort JSON Schema for one Zod property when toJSONSchema is unavailable; in: extractZodObjectSchema, out: a schema fragment.
 function inferZodPropertyType(prop: any): Record<string, unknown> {
   const unwrapped = prop.unwrap?.() || prop._def?.innerType || prop;
   const description = prop.description || unwrapped.description || prop._def?.description;

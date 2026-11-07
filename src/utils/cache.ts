@@ -28,11 +28,13 @@ const SENSITIVE_VALUE_PATTERNS: RegExp[] = [
   /(^|[^A-Za-z0-9])AIza[A-Za-z0-9_-]{10,}/,
 ];
 
+// True when a header name contains key, token, secret, cookie or authorization; in: redactHeadersCentral, out: a boolean.
 function headerNameIsSensitive(name: string): boolean {
   const lower = String(name ?? "").toLowerCase();
   return REDACT_HEADER_SUBSTRINGS.some((s) => lower.includes(s));
 }
 
+// True when a string looks like a credential (sk-, gsk_, xox, AIza, long Bearer token); in: the redactors, out: a boolean.
 function valueLooksSensitive(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const v = value.trim();

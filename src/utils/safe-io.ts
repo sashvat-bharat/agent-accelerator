@@ -98,6 +98,7 @@ export async function enforceFileAccess(messages: Message[], roots: readonly str
 // Remote fetch guard (SSRF + size cap)
 // ---------------------------------------------------------------------------
 
+// True for the private, loopback, link-local and CGNAT IPv4 ranges; in: isPrivateAddress, out: a boolean.
 function ipv4Private(a: number, b: number): boolean {
   return (
     a === 0 ||
@@ -124,6 +125,7 @@ export function isPrivateAddress(address: string): boolean {
   return false;
 }
 
+// True for localhost, .local/.internal names and private addresses; in: assertRemoteUrlAllowed, out: a boolean.
 function isPrivateHostname(host: string): boolean {
   return (
     host === "localhost" ||
@@ -134,6 +136,7 @@ function isPrivateHostname(host: string): boolean {
   );
 }
 
+// Throws RemoteFetchError for a non-http(s) URL or, unless private hosts are allowed, a private host (also by DNS result); in: fetchRemoteBytes on every hop, out: nothing or a thrown error.
 async function assertRemoteUrlAllowed(url: URL, allowPrivateNetwork: boolean): Promise<void> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new RemoteFetchError("blocked", `[Agent Accelerator] Only http(s) URLs are allowed (got ${url.protocol}).`, url.href);
@@ -156,6 +159,7 @@ async function assertRemoteUrlAllowed(url: URL, allowPrivateNetwork: boolean): P
   }
 }
 
+// Reads a response body up to `maxBytes`, throwing too_large as soon as the declared or streamed size passes it; in: fetchRemoteBytes, out: the bytes.
 async function readCapped(res: Response, maxBytes: number, url: string): Promise<Uint8Array> {
   const tooLarge = () =>
     new RemoteFetchError(

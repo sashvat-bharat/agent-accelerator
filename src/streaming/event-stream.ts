@@ -30,6 +30,7 @@ export const MAX_BUFFERED_EVENTS = 1000;
 /** Default max approx bytes per delta event (Q-29). */
 export const MAX_EVENT_BYTES = 1_048_576;
 
+// Approximate size of an event's text fields; in: push's oversize guard, out: a character count.
 function approxEventBytes(event: StreamEvent): number {
   let n = 0;
   if (typeof event.delta === "string") n += event.delta.length;
@@ -39,6 +40,7 @@ function approxEventBytes(event: StreamEvent): number {
   return n;
 }
 
+// Reports a dropped or overflowing event on the bus and the legacy hook, never throwing; in: push/enqueueBounded, out: telemetryBus.
 function reportStreamAnomaly(detail: { type: string; [k: string]: unknown }): void {
   // why: bus + hook only, never console — streams are hot paths and logging
   // per-drop would spam and break no-console policy (Q-29/Q-41).
@@ -161,6 +163,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     }
   }
 
+  // Calls the listeners of the event's type and `*`, remembering the first listener error instead of throwing; in: push, out: those callbacks.
   private deliverToListeners(event: StreamEvent): void {
     const specificListeners = this.listeners.get(event.type);
     if (specificListeners) {
@@ -187,6 +190,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     }
   }
 
+  // Buffers an event for the iterator, dropping the oldest non-error events beyond the cap; in: push, out: this.queue.
   private enqueueBounded(event: StreamEvent): void {
     this.queue.push(event);
     while (this.queue.length > this.maxBufferedEvents) {
@@ -289,6 +293,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     return this.finalResultPromise;
   }
 
+  // Iterator over the stream: buffered events first, then waits for new ones; breaking out cancels the stream and a failed stream rejects after delivering its error event; in: for-await consumers, out: StreamEvents.
   [Symbol.asyncIterator](): AsyncIterator<StreamEvent> {
     let iteratorDone = false;
     return {

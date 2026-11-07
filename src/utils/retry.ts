@@ -43,6 +43,7 @@ export function isRetryableRun(error: unknown): boolean {
   return isTransientError(error);
 }
 
+/** The server's wait hint in ms from `retryAfterMs` or a Retry-After header, capped at 60 s; in: withRetries, out: ms or undefined. */
 export function readRetryAfterMs(error: unknown): number | undefined {
   const err = error as Record<string, unknown>;
   // Preferred: milliseconds attached by the adapter from the Retry-After header.
