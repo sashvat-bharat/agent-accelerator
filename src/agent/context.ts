@@ -6,6 +6,7 @@ import { clearInteractionChains } from "../providers/google.ts";
 
 const USER_PART_TYPES = new Set(["text", "image", "audio", "video", "file"]);
 
+// Throws the AgentContext validation error with the SDK prefix; in: the add* validators, out: a thrown Error.
 function fail(message: string): never {
   throw new Error(`[Agent Accelerator] AgentContext: ${message}`);
 }
@@ -32,6 +33,7 @@ export class AgentContext {
     this.systemPrompt = systemPrompt;
   }
 
+  // Validates a user prompt (string or media/text parts) and appends it; in: Agent.prepareTurn and drained steers, out: messages.
   addUserMessage(content: string | ContentPart[]): void {
     if (Array.isArray(content)) {
       if (content.length === 0) return;
@@ -120,6 +122,7 @@ export class AgentContext {
     }
   }
 
+  // Appends one tool message per result, keeping logFile and stopped marks; in: the loops after a tool batch, out: messages.
   addToolResults(results: ToolResultRecord[]): void {
     if (!results || results.length === 0) return;
     for (let i = 0; i < results.length; i++) {
@@ -145,6 +148,7 @@ export class AgentContext {
     }
   }
 
+  // Copies the context with media bytes preserved (structuredClone, else a deep copy); in: callers needing an isolated history, out: a new AgentContext.
   clone(): AgentContext {
     const next = new AgentContext(this.systemPrompt);
     // Preserve Uint8Array/ArrayBuffer media via structuredClone when available (M8 fix)

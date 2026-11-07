@@ -15,7 +15,9 @@ const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", 
 const DDHHMM = /^(\d{2,}):(\d{2}):(\d{2})$/;
 const LOCAL_ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/;
 
+// Two-digit zero padding; in: date formatting here, out: a string.
 const pad2 = (n: number): string => String(n).padStart(2, "0");
+// JSON text of a value for error messages; in: the validators, out: a string.
 const show = (v: unknown): string => JSON.stringify(v) ?? String(v);
 
 /** Parses `DD:HH:MM` (DD >= 2 digits, MM < 60). HH is range-checked by the caller. */

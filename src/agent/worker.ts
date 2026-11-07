@@ -197,6 +197,7 @@ export function grantWorkerTools(
   return grantedTools;
 }
 
+// The provider id a model string resolves to, or undefined when it cannot be resolved; in: resolveWorkerCredentials, out: the provider match check.
 function providerOf(modelStr: string | unknown | undefined): string | undefined {
   if (!modelStr) return undefined;
   try {

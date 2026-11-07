@@ -128,6 +128,7 @@ function drainSteerInbox(context: AgentContext, inbox?: SteerEntry[]): string[] 
   return injected;
 }
 
+// Reports one finished turn to the caller's onTurn hook (ids only), never throwing; in: both loops, out: AgentRunOptions.onTurn.
 function emitTurn(
   runOptions: AgentRunOptions | undefined,
   turn: { turns: number; text?: string; thinking?: string; toolCalls?: ToolCallRecord[]; toolResults?: ToolResultRecord[] }
@@ -170,6 +171,7 @@ function shouldRollbackOnFailure(
   return !toolsExecuted;
 }
 
+// Calls the persistence checkpoint hook, never throwing; in: both loops after each step, out: Agent.persistNow.
 function emitProgress(config: { onProgress?: () => void }): void {
   try { config.onProgress?.(); } catch {}
 }
@@ -178,6 +180,7 @@ function emitProgress(config: { onProgress?: () => void }): void {
 // Structured outputs (canonical output wiring for the loop).
 // ---------------------------------------------------------------------------
 
+// Normalizes the structured-output option once per run (raw value + provider spec); in: AgentLoopConfig.output, out: the final-answer validation.
 function resolveLoopOutput(config: AgentLoopConfig): { raw: unknown; spec: import("../types/model.ts").StructuredOutputSpec | undefined } {
   const raw = (config as { output?: unknown }).output;
   const fromOptions = (config.options as { output?: import("../types/model.ts").StructuredOutputSpec } | undefined)?.output;
@@ -191,6 +194,7 @@ function resolveLoopOutput(config: AgentLoopConfig): { raw: unknown; spec: impor
   return { raw: undefined, spec: undefined };
 }
 
+// Validates the final text against the structured-output option, throwing ValidationError on mismatch; in: the last model text, out: AgentResponse.parsed.
 function parseFinalStructuredOutput(text: string, raw: unknown, spec: import("../types/model.ts").StructuredOutputSpec | undefined): unknown | undefined {
   if (raw === undefined && spec === undefined) return undefined;
   // Strict-fail when opted in: invalid JSON/schema throws ValidationError.
@@ -337,6 +341,7 @@ function resolveLoopLimits(config: AgentLoopConfig, fallbackMaxTurns: number): L
   return { maxTurns, deadlineMs, maxToolCallsPerRun, maxTotalTokens, requestTimeoutMs, firstByteTimeoutMs, streamIdleTimeoutMs };
 }
 
+// The session id a run's provider calls use (run override, else agent default); in: AgentLoopConfig, out: rollback and routing.
 function loopSessionId(config: AgentLoopConfig): string | undefined {
   try {
     return (
@@ -346,6 +351,7 @@ function loopSessionId(config: AgentLoopConfig): string | undefined {
   } catch { return undefined; }
 }
 
+// Builds an AbortError that carries the run's partial progress; in: an abort reason + partial usage, out: the error the run rejects with.
 function makeAbortError(
   partial: { usage: TokenUsage; turns: number; text?: string },
   reason?: unknown
@@ -360,6 +366,7 @@ function makeAbortError(
   return base;
 }
 
+// Throws the run's AbortError as soon as its signal is aborted; in: loop checkpoints, out: nothing or a thrown abort.
 function throwIfAborted(
   signal: AbortSignal | undefined,
   partial: { usage: TokenUsage; turns: number; text?: string }
@@ -369,6 +376,7 @@ function throwIfAborted(
   }
 }
 
+// Throws BudgetExceededError when the run's tokens pass limits.maxTotalTokens; in: both loops after usage changes, out: nothing or a thrown error.
 function checkTokenLimit(usage: TokenUsage, maxTotalTokens: number): void {
   if (Number.isFinite(maxTotalTokens) && usage.totalTokens > maxTotalTokens) {
     throw new BudgetExceededError(
@@ -378,12 +386,14 @@ function checkTokenLimit(usage: TokenUsage, maxTotalTokens: number): void {
   }
 }
 
+// Throws when the run has been going longer than limits.deadlineMs; in: both loops each turn, out: nothing or a thrown error.
 function checkDeadline(startTime: number, deadlineMs: number): void {
   if (Number.isFinite(deadlineMs) && deadlineMs !== Infinity && Date.now() - startTime > deadlineMs) {
     throw new Error(`[Agent Accelerator] Run deadline exceeded after ${deadlineMs}ms.`);
   }
 }
 
+// Races one provider call against the request timeout (a TimeoutError), clearing its timer either way; in: runAgentLoop, out: the call's result.
 async function generateWithTimeout<T>(task: () => Promise<T>, timeoutMs: number): Promise<T> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs === Infinity) return task();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -480,6 +490,7 @@ export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: M
   }
 }
 
+// Turns a tool result into what the model sees: a branded delegation envelope becomes its text and yields validated worker metadata, anything else passes through; in: executed results, out: history + usage roll-up.
 function sanitizeToolResult(r: ToolResultRecord): { sanitized: ToolResultRecord; metas: SubAgentExecutionMetadata[] } {
   // Only SDK-branded delegation envelopes are trusted. A plain object that
   // merely carries a `_subagentMetadata` key (e.g. scraped JSON) is ordinary

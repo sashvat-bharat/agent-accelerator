@@ -39,6 +39,7 @@ export function emptyUsage(): UsageTotals {
   };
 }
 
+// A finite whole number >= 0, else 0; in: the usage maths and readUsage, out: a safe count.
 const count = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
 
 /** A model reference (string or catalog spec) as a plain string for a report line. */

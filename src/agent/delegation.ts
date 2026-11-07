@@ -16,6 +16,7 @@ import { newRunId } from "../utils/session.ts";
 import { newTurnId } from "../utils/session.ts";
 import { sanitizeToolName, createLiveWorker } from "./worker.ts";
 
+/** Builds a random child session id that fits the 64-char provider limit, embedding a hash of the parent when it must be cut; in: a parent id + tag from scheduled runs, out: the worker's session id. */
 export function createChildSessionId(parentId: string, tag: string): string {
   let rand: string;
   try {
@@ -112,6 +113,7 @@ const SUBAGENT_SUBSCRIBE_TTL_MS = 5 * 60 * 1000;
 /** Last-write wall-clock per canonical trackingId (drives TTL; reads do not extend it). */
 const traceTouchedAt = new Map<string, number>();
 
+// Removes a trace under all its keys plus its listeners and TTL stamp; in: pruneTraces/lookupTrace, out: the trace store.
 function deleteTraceByCanonical(canonical: string): void {
   for (const [key, t] of [...subagentTraces]) {
     if (t.trackingId === canonical) subagentTraces.delete(key);
@@ -120,12 +122,14 @@ function deleteTraceByCanonical(canonical: string): void {
   subagentListeners.delete(canonical);
 }
 
+// True once a trace was not written for SUBAGENT_TRACE_TTL_MS; in: lookup and prune, out: their expiry decision.
 function isTraceExpired(canonical: string, now = Date.now()): boolean {
   const touched = traceTouchedAt.get(canonical);
   if (touched === undefined) return false;
   return now - touched > SUBAGENT_TRACE_TTL_MS;
 }
 
+// Stamps a trace as just written, which restarts its TTL; in: insert and the live worker hooks, out: traceTouchedAt.
 function touchTrace(canonical: string, now = Date.now()): void {
   traceTouchedAt.set(canonical, now);
 }
@@ -158,6 +162,7 @@ function trimTraceSteps(trace: SubAgentTrace): void {
   }
 }
 
+// Stores a trace under its tracking id and display id in LRU order, pruning expired and excess traces; in: openWorkerTrace, out: the trace store.
 function insertTrace(trace: SubAgentTrace, displayId: string, now = Date.now()): void {
   pruneTraces(now);
   trimTraceSteps(trace);
@@ -178,6 +183,7 @@ function insertTrace(trace: SubAgentTrace, displayId: string, now = Date.now()):
   pruneTraces(now);
 }
 
+// Finds a trace by tracking id, display id or case-insensitive id, dropping expired ones and refreshing LRU order; in: the scoped getters and subscribe, out: the live trace or undefined.
 function lookupTrace(id: string): SubAgentTrace | undefined {
   if (!id) return undefined;
   const direct = subagentTraces.get(id);
@@ -206,10 +212,12 @@ function lookupTrace(id: string): SubAgentTrace | undefined {
   return undefined;
 }
 
+// Deep-enough copy of a trace (steps and usage) so callers never see live mutation; in: the getters and notifyTrace, out: a detached SubAgentTrace.
 function snapshotTrace(t: SubAgentTrace): SubAgentTrace {
   return { ...t, steps: t.steps.map((s) => ({ ...s })), usage: t.usage ? { ...t.usage } : undefined };
 }
 
+// Sends a snapshot of a trace to its live subscribers, ignoring listener errors; in: the live worker hooks, out: subscriber callbacks.
 function notifyTrace(trackingId: string): void {
   const t = subagentTraces.get(trackingId);
   if (!t) return;
@@ -466,10 +474,12 @@ export function workerMetadata(a: {
 // clock; TTL timestamps above use wall-clock `Date.now()`.
 // ---------------------------------------------------------------------------
 
+// Reads the agent's configured budget; in: budget helpers, out: Budget or undefined.
 function readBudget(parentAgent: Agent): Budget | undefined {
   return (parentAgent as unknown as { budget?: Budget }).budget;
 }
 
+// Returns the agent's per-run budget counters, creating them on first use; in: charge and reserve helpers, out: BudgetState.
 function ensureBudgetState(parentAgent: Agent): BudgetState {
   const host = parentAgent as unknown as { budgetState?: BudgetState };
   if (!host.budgetState) {
@@ -478,6 +488,7 @@ function ensureBudgetState(parentAgent: Agent): BudgetState {
   return host.budgetState;
 }
 
+// Total tokens of a usage value, defensively (total, else input + output); in: budget helpers, out: a non-negative integer.
 function usageTokens(usage: unknown): number {
   const u = usage as { totalTokens?: unknown; inputTokens?: unknown; outputTokens?: unknown } | undefined;
   if (!u || typeof u !== "object") return 0;
@@ -487,6 +498,7 @@ function usageTokens(usage: unknown): number {
   return Math.max(0, Math.floor(inp + out));
 }
 
+// Reported total cost of a usage value in USD, 0 when absent; in: budget helpers, out: a non-negative number.
 function usageCostUsd(usage: unknown): number {
   const cost = (usage as { cost?: { totalCost?: unknown } } | undefined)?.cost;
   const v = cost?.totalCost;

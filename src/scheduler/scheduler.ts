@@ -81,6 +81,7 @@ interface RunningEntry {
   missed: boolean;
 }
 
+// The message of any thrown value; in: catch blocks here, out: event and error text.
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 // A run's exact spending as run-header fields, the numbers `usageReport()` keeps for workers (tokens split, cache hit rate, cost and where the price came from); in: the one-shot worker's totals over all attempts, out: finish's RunHeader.
@@ -106,10 +107,12 @@ function usageFields(totals: UsageTotals | undefined): Partial<RunHeader> {
 // Whole seconds since the epoch: stored times have no milliseconds, so lateness is compared at this precision; in: a clock reading or stored time, out: finish and deliver.
 const secondOf = (d: Date): number => Math.floor(d.getTime() / 1000);
 
+// Emits one `scheduled_action.<code>` event on the telemetry bus; in: the scheduler and public functions, out: telemetryBus.
 function emit(code: string, message: string, data: Record<string, unknown>, level: "info" | "warn" = "info"): void {
   telemetryBus.emit({ code: `scheduled_action.${code}`, message: `[Agent Accelerator] ${message}`, level, data });
 }
 
+// The ValidationError for an unknown action id; in: lookups by id, out: a thrown error.
 function notFound(id: string): ValidationError {
   return new ValidationError(`No scheduled action with id "${id}".`);
 }
@@ -118,6 +121,7 @@ function notFound(id: string): ValidationError {
 // Validation (collects EVERY problem so the model can fix a call in one go)
 // ---------------------------------------------------------------------------
 
+// Runs one validation step and records its message instead of throwing, so one call can report every problem; in: validateInput/checkSchedule, out: the problems list.
 function collect(problems: string[], fn: () => void): void {
   try {
     fn();
@@ -126,10 +130,12 @@ function collect(problems: string[], fn: () => void): void {
   }
 }
 
+// Throws unless the value is a non-empty string; in: field validation, out: collect.
 function requireText(field: string, value: unknown): void {
   if (typeof value !== "string" || !value.trim()) throw new ValidationError(`${field}: required, a non-empty string.`);
 }
 
+// Throws unless every requested worker tool name exists in the developer's pool; in: create/update validation, out: collect.
 function checkTools(value: unknown, pool: PoolTools): void {
   if (!Array.isArray(value) || value.some((n) => typeof n !== "string")) {
     throw new ValidationError("tools: must be an array of worker tool names, e.g. [\"recent_news\"].");
@@ -174,6 +180,7 @@ function checkSchedule(
   }
 }
 
+// Validates role, tools and timeoutMs of a create or update; in: validateInput/updateScheduledAction, out: the problems list.
 function checkOptionalFields(input: Pick<ScheduledActionPatch, "role" | "tools" | "timeoutMs">, pool: PoolTools | undefined, problems: string[]): void {
   if (input.role !== undefined && typeof input.role !== "string") problems.push("role: must be a string.");
   if (input.tools !== undefined && pool) collect(problems, () => checkTools(input.tools, pool));
@@ -208,9 +215,11 @@ export function validateInput(
   return problems;
 }
 
+// Joins validation problems into one numbered ValidationError message; in: create/update failures, out: the error text.
 const joinProblems = (what: string, problems: string[]): string =>
   `${what} (${problems.length} problem${problems.length === 1 ? "" : "s"}): ${problems.map((p, i) => `(${i + 1}) ${p}`).join(" ")}`;
 
+// Six random lowercase/digit characters appended to an action id; in: createScheduledAction, out: the unique id suffix.
 function randomSuffix(): string {
   const bytes = new Uint8Array(6);
   globalThis.crypto.getRandomValues(bytes);
@@ -244,6 +253,7 @@ export class Scheduler {
     (this.timer as { unref?: () => void }).unref?.();
   }
 
+  // Stops the clock's interval; in: tick when nothing is pending and resetSchedulers, out: no more ticks.
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
@@ -266,6 +276,7 @@ export class Scheduler {
     }
   }
 
+  // Reports an invalid record or delivery once per file/id/problem and leaves the file untouched; in: snapshot/startCook, out: a scheduled_action.invalid warning.
   private warnInvalid(id: string, problem: string, file = "tasks.json"): void {
     const key = `${file}:${id}:${problem}`;
     if (this.warned.has(key)) return;
@@ -292,6 +303,7 @@ export class Scheduler {
     return { live, pending };
   }
 
+  // True while anything keeps the clock useful (a run in flight, a saved delivery, a waiting or cooking action); in: ensureRunning and tick, out: start/stop of the interval.
   private hasPending(): boolean {
     const { live, pending } = this.snapshot();
     return this.running.size > 0 || pending.length > 0 || live.some((t) => t.state === "waiting" || t.state === "cooking");
@@ -359,6 +371,7 @@ export class Scheduler {
 
   // ----- delivery ----------------------------------------------------------
 
+  // Delivers every saved run whose delivery time has come; in: tick, out: deliver calls.
   private deliverDue(now: Date): void {
     for (const entry of this.snapshot().pending) {
       if (parseLocalIso(entry.deliverAt).getTime() <= now.getTime()) this.deliver(entry, now);
@@ -394,6 +407,7 @@ export class Scheduler {
 
   // ----- starting runs -----------------------------------------------------
 
+  // Starts waiting actions whose cook time has come and skips the overlap of those still cooking; in: tick, out: startCook/skipOverlap calls.
   private startDue(now: Date): void {
     for (const t of this.snapshot().live) {
       if (!t.nextCookAt || parseLocalIso(t.nextCookAt).getTime() > now.getTime()) continue;
@@ -468,6 +482,7 @@ export class Scheduler {
     return started;
   }
 
+  // The display name of an action from tasks.json, else its id; in: startCook's no-agent message, out: event text.
   private nameOf(id: string): string {
     return readTasks(this.home).find((t) => t.id === id)?.name ?? id;
   }
@@ -511,6 +526,7 @@ export class Scheduler {
 
   // ----- the run -----------------------------------------------------------
 
+  // Runs one action to its outcome and writes the result unless the action was deleted meanwhile; in: launch, out: finish.
   private async runWorker(task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<void> {
     const deliverAt = parseLocalIso(task.current!.deliverAt);
     const outcome = await this.execute(task, agent, entry, deliverAt);
@@ -556,6 +572,7 @@ export class Scheduler {
     }
   }
 
+  // One worker run with a per-attempt timeout and the delete signal, raced so a hung provider cannot hold it; in: execute, out: the worker's AgentResponse.
   private async attempt(worker: Agent, task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<AgentResponse> {
     const ms = scheduledRunTimeoutMs(agent.dynamicSubagents?.workerTimeoutMs ?? Infinity, task.timeoutMs);
     // One controller per attempt (the timeout is per attempt), fed by the entry's delete controller.
@@ -613,6 +630,7 @@ export class Scheduler {
 
   // ----- commands ----------------------------------------------------------
 
+  // Starts an action immediately outside its schedule (also resolves a missed one); in: runScheduledAction, out: the cooking record.
   runNow(id: string): ScheduledActionRecord {
     const rec = readTasks(this.home).find((t) => t.id === id);
     if (!rec) throw notFound(id);
@@ -629,6 +647,7 @@ export class Scheduler {
     return started;
   }
 
+  // Ignores a missed occurrence and schedules the next one (a one-shot becomes done); in: skipScheduledAction and onMissed: skip, out: the updated record.
   skip(id: string): ScheduledActionRecord {
     const now = this.now();
     const rec = updateTasks(this.home, (tasks) => {
@@ -647,6 +666,7 @@ export class Scheduler {
     return rec;
   }
 
+  // Deletes an action (aborting a cooking run only with force) and optionally purges its run files; in: deleteScheduledAction, out: a DeleteResult.
   async delete(id: string, opts: { force?: boolean; purge?: boolean }): Promise<DeleteResult> {
     const rec = readTasks(this.home).find((t) => t.id === id);
     if (!rec) return { ok: false, reason: "not_found" };
@@ -699,6 +719,7 @@ export function resetSchedulers(): void {
   schedulers.clear();
 }
 
+// The scheduler of a resolved home (option, setHome, env or default); in: the public functions, out: a Scheduler.
 const schedulerFor = (opts?: HomeOptions): Scheduler => getScheduler(resolveHome(opts?.home));
 
 /** Makes `agent` the live runner for actions created under its name, and starts the clock if work is pending. */

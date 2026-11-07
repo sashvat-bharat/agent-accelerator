@@ -72,8 +72,11 @@ export interface RunHeader {
   error?: string;
 }
 
+// The `scheduled_actions` folder of a home; in: the path helpers, out: its path.
 const baseDir = (home: string): string => path.join(home, "scheduled_actions");
+// Path of tasks.json; in: readTasks/updateTasks, out: its path.
 const tasksFile = (home: string): string => path.join(baseDir(home), "tasks.json");
+// Path of deliveries.json; in: readDeliveries/updateDeliveries, out: its path.
 const deliveriesFile = (home: string): string => path.join(baseDir(home), "deliveries.json");
 
 /** Absolute path of a run file given its `scheduled_actions/`-relative path. */
@@ -134,6 +137,7 @@ function readList(file: string, key: "tasks" | "pending"): Raw[] {
   return list ?? [];
 }
 
+// Writes `{ version, <key>: [...] }` durably (with a .bak); in: updateTasks/updateDeliveries, out: the file.
 function writeList(file: string, key: "tasks" | "pending", list: Raw[]): void {
   writeFileDurable(file, JSON.stringify({ version: 1, [key]: list }, null, 2) + "\n");
 }
@@ -151,6 +155,7 @@ export function updateTasks<T>(home: string, fn: (tasks: ScheduledActionRecord[]
   return result;
 }
 
+/** Every saved delivery as stored (entries may be invalid: check with validateDelivery); in: the scheduler, out: PendingDelivery[]. */
 export function readDeliveries(home: string): PendingDelivery[] {
   return readList(deliveriesFile(home), "pending") as unknown as PendingDelivery[];
 }
@@ -229,6 +234,7 @@ export function validateDelivery(raw: unknown): string | undefined {
 // Run files
 // ---------------------------------------------------------------------------
 
+// Renders a run file: the `---` header lines, a blank line, the result text; in: writeRunFile, out: the file text.
 function renderRun(header: RunHeader, body: string): string {
   const lines = ["---"];
   for (const [key, value] of Object.entries(header)) {

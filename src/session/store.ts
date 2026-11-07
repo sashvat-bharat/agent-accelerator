@@ -127,10 +127,12 @@ export interface PersistedAgentSession {
   tools?: SessionToolRecord[];
 }
 
+/** Zeroed cumulative session totals; in: SessionTelemetry, out: a SessionTotals. */
 export function emptyTotals(): SessionTotals {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: 0 };
 }
 
+// A finite non-negative number, else 0; in: telemetry and formatting, out: a safe number.
 function toNumber(n: unknown): number {
   const v = typeof n === "number" ? n : Number(n);
   return Number.isFinite(v) && v >= 0 ? v : 0;
@@ -191,6 +193,7 @@ export function computeSessionTurnCost(usage: TokenUsage, modelStr: string): num
   }
 }
 
+/** Compact token count (`1.2k`, `3.4M`); in: the status bar, out: a string. */
 export function formatSessionTokens(n: number): string {
   const v = toNumber(n);
   if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
@@ -198,6 +201,7 @@ export function formatSessionTokens(n: number): string {
   return `${Math.floor(v)}`;
 }
 
+/** Cost with precision that fits its size (`$0.0042`); in: the status bar and banner, out: a string. */
 export function formatSessionCost(c?: number): string {
   if (!c || c <= 0) return "$0.00";
   if (c < 0.0001) return `$${c.toFixed(6)}`;
@@ -246,10 +250,12 @@ export class SessionTelemetry {
     return turnCost;
   }
 
+  // Zeroes the totals; in: callers starting a fresh session, out: this.totals.
   reset(): void {
     this.totals = emptyTotals();
   }
 
+  // A copy of the totals for saving; in: buildSessionData/JSON.stringify, out: a SessionTotals.
   toJSON(): SessionTotals {
     return { ...this.totals };
   }
@@ -343,6 +349,7 @@ export interface SessionAgentLike {
   context: { systemPrompt?: string; messages: Message[] };
 }
 
+// Slims worker traces for the snapshot (one key per tracking id, repeated final text dropped, reasoning kept); in: buildSessionData, out: the `subagents` field.
 function snapshotSubagents(traces: Record<string, PersistedSubAgentTrace> | undefined): Record<string, PersistedSubAgentTrace> | undefined {
   if (!traces) return undefined;
   const keys = Object.keys(traces);
@@ -562,6 +569,7 @@ function toCacheOption(raw: unknown): CacheOption | undefined {
   return typeof retention === "string" ? legacy[retention] : undefined;
 }
 
+// Parses any supported snapshot shape (current, legacy pretty JSON, JSONL, ancient) or flags it over-limit; in: raw file text, out: a session, null or OVER_LIMIT.
 function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSession | null | typeof OVER_LIMIT {
   const maxMessages = limits?.maxMessages ?? MAX_SESSION_MESSAGES;
   const maxBytes = limits?.maxBytes ?? MAX_SESSION_JSON_BYTES;
@@ -780,10 +788,12 @@ export function saveSessionFile(
 
 const MEDIA_PART_KEYS = ["image", "audio", "video", "file"] as const;
 
+// True for an http(s) link, which stays a reference instead of being saved as media; in: embeddedMedia, out: a boolean.
 function isHttpRef(value: string): boolean {
   return value.startsWith("http://") || value.startsWith("https://");
 }
 
+// Splits a `data:<mime>;base64,<payload>` string; in: embeddedMedia, out: its mime type and payload or undefined.
 function parseDataUrl(value: string): { mimeType: string; base64: string } | undefined {
   const m = value.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/s);
   if (m && m[2]) return { mimeType: m[1] || "application/octet-stream", base64: m[2] };
@@ -797,6 +807,7 @@ function looksLikeEmbeddedBase64(value: string): boolean {
   return /^[A-Za-z0-9+/=\n\r]+$/.test(value.slice(0, 500));
 }
 
+// File extension for saved media from its mime type, else its filename, else `bin`; in: embeddedMedia, out: the extension.
 function extForMedia(mimeType?: string, filename?: string): string {
   const mime = (mimeType || "").toLowerCase().split(";")[0]!.trim();
   const known: Record<string, string> = {
@@ -850,6 +861,7 @@ export function embeddedMedia(part: ContentPart): { key: (typeof MEDIA_PART_KEYS
   return { key, bytes, ...(mimeType ? { mimeType } : {}), ext: extForMedia(mimeType, typeof p["filename"] === "string" ? (p["filename"] as string) : undefined) };
 }
 
+// Copy of the messages that keeps media bytes (structuredClone, else JSON); in: extractMediaToDir/resolveMediaPaths, out: a new array.
 function cloneMessages(messages: Message[]): Message[] {
   try {
     const g: any = globalThis as any;
@@ -1136,6 +1148,7 @@ export const MAX_SESSION_MESSAGES = 50_000;
 /** Default max raw JSON size accepted when loading a session snapshot (override via `SessionLimits`). */
 export const MAX_SESSION_JSON_BYTES = 100 * 1024 * 1024;
 
+// A SessionLoadError-named Error with the SDK prefix; in: validateSessionData, out: the error.
 function sessionLoadError(message: string): Error {
   const e = new Error(`[Agent Accelerator] Invalid session: ${message}`);
   e.name = "SessionLoadError";
@@ -1314,6 +1327,7 @@ const SERVICE_TIER_MULTIPLIERS: Record<string, number> = {
   fast: 2,
 };
 
+// Price multiplier for a service tier (flex 0.5, priority 2, 2.5 for gpt-5.5; estimates); in: priceUsage, out: the multiplier and tier name.
 function serviceTierMultiplier(serviceTier?: string, modelId?: string): { multiplier: number; tier?: string } {
   if (!serviceTier) return { multiplier: 1 };
   const lower = serviceTier.toLowerCase();
@@ -1327,6 +1341,7 @@ function serviceTierMultiplier(serviceTier?: string, modelId?: string): { multip
   return m !== undefined ? { multiplier: m, tier: serviceTier } : { multiplier: 1, tier: serviceTier };
 }
 
+// Integer micro-USD to dollars; in: priceUsage, out: a number.
 function toDollars(microUSD: number): number {
   return microUSD / 1_000_000;
 }
