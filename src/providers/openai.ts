@@ -167,6 +167,7 @@ const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 // Request building (canonical -> Responses)
 // ---------------------------------------------------------------------------
 
+// Endpoint from the option, OPENAI_BASE_URL/OPENAI_API_BASE, else api.openai.com; in: each request, out: the base URL without a trailing slash.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
   return (
     options?.baseUrl ||
@@ -178,6 +179,7 @@ function resolveBaseUrl(options?: ProviderRequestOptions): string {
   ).replace(/\/+$/, "");
 }
 
+// Key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
   const key = getApiKey("openai", options?.apiKey, options?.env);
   if (key) return key;
@@ -191,6 +193,7 @@ function cleanModelId(model: string | ModelSpec): string {
   return rawId.replace(/^openai\//i, "");
 }
 
+// Canonical tool declarations as Responses function tools; in: options.tools, out: request `tools`.
 function toOpenAITools(tools?: StandardToolDeclaration[]): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined;
   return tools.map((t) => ({
@@ -202,6 +205,7 @@ function toOpenAITools(tools?: StandardToolDeclaration[]): Array<Record<string, 
   }));
 }
 
+// Text and media parts as input_text, input_image and input_file blocks; web links pass through, the rest is inlined as data URLs; in: a user message's parts, out: fullHistoryInput.
 async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseContentPart[]> {
   const blocks: ResponseContentPart[] = [];
   for (const part of parts) {
@@ -258,17 +262,20 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
   return blocks;
 }
 
+// A tool result as the text of a function_call_output item; in: fullHistoryInput, out: a string.
 function resultToOutput(result: unknown): string {
   if (typeof result === "string") return result;
   return safeStringify(result);
 }
 
+// Makes an id safe for the Responses wire (allowed characters, at most 64, no trailing underscores); in: fullHistoryInput, out: the id.
 function normalizeResponsesIdPart(part: string): string {
   const sanitized = String(part ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
   const truncated = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
   return truncated.replace(/_+$/, "") || "fc_unknown";
 }
 
+// Gives a function-call item id the required `fc_` prefix; in: fullHistoryInput, out: the id.
 function normalizeResponsesItemId(itemId: string): string {
   let norm = normalizeResponsesIdPart(itemId);
   if (!norm.startsWith("fc_")) {
@@ -390,6 +397,7 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
 // Response mapping (Responses -> canonical)
 // ---------------------------------------------------------------------------
 
+// Responses usage as TokenUsage, clamping cache reads to input; in: a response or the completed event, out: TokenUsage.
 function mapUsage(raw?: ResponsesObject["usage"]): TokenUsage {
   const input = raw?.input_tokens ?? 0;
   const output = raw?.output_tokens ?? 0;
@@ -406,6 +414,7 @@ function mapUsage(raw?: ResponsesObject["usage"]): TokenUsage {
   };
 }
 
+// Turns a Responses object into text, reasoning, tool calls and usage, mapping refusals and incomplete to finish reasons and throwing on failed; in: generate, out: ProviderGenerateResult.
 function parseResponse(
   response: ResponsesObject,
   modelId: string,
@@ -509,6 +518,7 @@ export class OpenAIResponsesProvider implements Provider {
     return getModelsForProvider("openai");
   }
 
+  // The catalog spec of a model, else a permissive generic one; in: the registry, out: a ModelSpec.
   getModel(modelId: string): ModelSpec | undefined {
     const clean = cleanModelId(modelId);
     return (
@@ -519,6 +529,7 @@ export class OpenAIResponsesProvider implements Provider {
     );
   }
 
+  // Builds the stateless Responses request (full history, store:false, tools, reasoning, tier, text.format, cache key and retention); in: generate/stream, out: the body.
   private async buildBody(
     modelId: string,
     context: ProviderContext,
@@ -620,6 +631,7 @@ export class OpenAIResponsesProvider implements Provider {
     return body;
   }
 
+  // Fetch options with session-affinity headers, JSON content type and the Bearer key; in: doFetch and stream, out: RequestInit.
   private requestInit(
     body: ResponsesRequestBody,
     options: ProviderRequestOptions | undefined,
@@ -640,6 +652,7 @@ export class OpenAIResponsesProvider implements Provider {
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
+  // One HTTP call under the request timeout, returning status, headers and body text; in: generate, out: the raw reply.
   private async doFetch(
     url: string,
     body: ResponsesRequestBody,
@@ -662,6 +675,7 @@ export class OpenAIResponsesProvider implements Provider {
     }
   }
 
+  // Throws a concise provider error (status, code, Retry-After, key hint) for a non-2xx reply; in: generate and stream, out: nothing or a thrown error.
   private throwIfError(
     status: number,
     url: string,
@@ -692,6 +706,7 @@ export class OpenAIResponsesProvider implements Provider {
     throw toConciseProviderError(err, "openai", modelId);
   }
 
+  // Non-streaming turn as one retried JSON request; in: runAgentLoop, out: ProviderGenerateResult.
   async generate(
     model: string | ModelSpec,
     context: ProviderContext,
@@ -773,6 +788,7 @@ export class OpenAIResponsesProvider implements Provider {
     }
   }
 
+  // Streaming turn over SSE: assembles text, reasoning, tool calls and usage, retrying only before the first byte; in: streamAgentLoop, out: an AssistantMessageEventStream.
   stream(
     model: string | ModelSpec,
     context: ProviderContext,
@@ -793,7 +809,7 @@ export class OpenAIResponsesProvider implements Provider {
           );
         }
         assertModalitiesSupported(context, "openai", clean);
-    assertNoVideoPartsOnResponses(context, "openai", clean);
+        assertNoVideoPartsOnResponses(context, "openai", clean);
         const baseUrl = resolveBaseUrl(options);
         const url = `${baseUrl}/responses`;
         const sessionId = options?.sessionId;

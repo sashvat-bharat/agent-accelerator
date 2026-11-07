@@ -41,6 +41,7 @@ const MODALITY_OVERRIDES: Record<string, { input?: string[]; output?: string[] }
   // 404 still surfaces as a one-line error.
 };
 
+// Applies the verified modality corrections over the catalog's input/output lists; in: mapModelSpec, out: ModelModalities.
 function applyModalityOverrides(provider: string, modelId: string, base: ModelModalities): ModelModalities {
   const hit =
     MODALITY_OVERRIDES[`${provider}/${modelId}`] ??
@@ -65,6 +66,7 @@ function allowsGlobalFallback(providerInput: string, modelIdInput: string): bool
   return p in PROVIDER_ALIASES || p === "gemini" || p === modelIdInput.trim().toLowerCase();
 }
 
+// Drops a leading `provider/` scope from a model id; in: the lookups, out: the bare id.
 function normalizeModelIdForLookup(modelId: string): string {
   if (modelId.includes("/")) {
     const parts = modelId.split("/");
@@ -93,6 +95,7 @@ function setLookupCache(key: string, value: ModelSpec | undefined): void {
 // Custom-registered models (Q-33): checked first in getModelFromCatalog.
 const customModelRegistry = new Map<string, ModelSpec>();
 
+// Case-insensitive key of a registered custom model; in: registerModel and lookups, out: a string.
 function customRegistryKey(provider: string, modelId: string): string {
   return `${provider.toLowerCase()}::${modelId.toLowerCase()}`;
 }
@@ -141,6 +144,7 @@ export function getModelSource(provider: string, modelId: string): "catalog" | "
   return getModelFromCatalog(provider, modelId) ? "catalog" : "unknown";
 }
 
+// Derives capability flags (thinking, caching, tools, structured output, modalities) from a raw catalog entry; in: mapModelSpec, out: ModelCapabilities.
 function mapCapabilities(raw: any, cost: ModelCost, reasoning: boolean, toolCall: boolean, modalities: ModelModalities) {
   return {
     supportsThinking: reasoning,
@@ -158,6 +162,7 @@ function mapCapabilities(raw: any, cost: ModelCost, reasoning: boolean, toolCall
   };
 }
 
+// Turns a raw models.dev entry into a ModelSpec with limits, cost, pricing and capabilities; in: the lookups, out: a ModelSpec.
 function mapModelSpec(provider: string, modelId: string, raw: any): ModelSpec {
   const limit: ModelLimit = raw.limit || { context: 128000, output: 8192 };
   const cost: ModelCost = raw.cost || {};
@@ -214,6 +219,7 @@ interface IndexEntry {
 
 let globalIndex: Map<string, IndexEntry> | null = null;
 
+// The lazily built id-to-entry index across all providers, used only for first-class or bare-id fallbacks; in: getModelFromCatalog, out: the index.
 function getGlobalIndex(): Map<string, IndexEntry> {
   if (globalIndex) return globalIndex;
   globalIndex = new Map();
@@ -576,6 +582,7 @@ export const GOOGLE_MODELS: ModelSpec[] = [...getModelsForProvider("google")];
 export const OPENAI_MODELS: ModelSpec[] = [...getModelsForProvider("openai")];
 export const OPENROUTER_MODELS: ModelSpec[] = [...getModelsForProvider("openrouter")];
 
+// Rebuilds the GOOGLE/OPENAI/OPENROUTER_MODELS arrays in place after a catalog change; in: the update listener, out: those exports.
 function refreshExportedModels(): void {
   GOOGLE_MODELS.length = 0;
   GOOGLE_MODELS.push(...getModelsForProvider("google"));

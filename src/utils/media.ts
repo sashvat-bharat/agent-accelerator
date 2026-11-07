@@ -38,6 +38,7 @@ export function inferMimeType(input: string, fallback = "application/octet-strea
   return fallback;
 }
 
+// True when the bytes spell `text` at `start`; in: sniffMimeType, out: a boolean.
 const ascii = (bytes: Uint8Array, start: number, text: string): boolean =>
   bytes.length >= start + text.length && [...text].every((ch, i) => bytes[start + i] === ch.charCodeAt(0));
 

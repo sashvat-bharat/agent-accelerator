@@ -3,6 +3,7 @@ import { getModelFromCatalog } from "../models/catalog.ts";
 
 const CONCISE = "__agentAccelConcise";
 
+// HTTP status from the shapes provider errors carry, else undefined; in: toConciseProviderError, out: a status.
 function readStatus(error: any): number | undefined {
   const s =
     error?.statusCode ??
@@ -14,6 +15,7 @@ function readStatus(error: any): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+// The request URL of an error without its query string; in: toConciseProviderError, out: a string.
 function readUrl(error: any): string {
   const raw =
     (typeof error?.url === "string" && error.url) ||
@@ -22,6 +24,7 @@ function readUrl(error: any): string {
   return raw.split("?")[0];
 }
 
+// The provider's own message from the error's data, body or message; in: toConciseProviderError, out: one trimmed line.
 function readProviderMessage(error: any): string {
   const data = error?.data;
   if (typeof data?.error?.message === "string" && data.error.message.trim()) return data.error.message.trim();
@@ -39,6 +42,7 @@ function readProviderMessage(error: any): string {
   return String(error?.message ?? error).slice(0, 300);
 }
 
+// `provider/model` without doubling an existing prefix; in: the error messages, out: a label.
 function displayModel(providerId: string, modelId: string): string {
   if (modelId.toLowerCase().startsWith(`${providerId.toLowerCase()}/`)) return modelId;
   return `${providerId}/${modelId}`;

@@ -34,6 +34,7 @@ export function isSubagentResult(value: unknown): value is SubagentResult {
   return !!value && typeof value === "object" && (value as Record<symbol, unknown>)[SUBAGENT_RESULT_BRAND] === true;
 }
 
+// A finite number >= 0, else 0; in: normalizeSubagentMetadata, out: a safe usage count.
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
 
 /**

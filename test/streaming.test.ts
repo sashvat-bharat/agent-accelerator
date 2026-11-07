@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { SSEParser, AssistantMessageEventStream, AgentResponse } from "../src/index.ts";
+import { AssistantMessageEventStream, AgentResponse } from "../src/index.ts";
+import { SSEParser } from "../src/streaming/sse-parser.ts";
 
 describe("Streaming & SSE Parser", () => {
   it("should parse SSE events from chunks correctly", () => {

@@ -42,6 +42,7 @@ const FIRST_CLASS = new Set([
 // resolve anywhere.
 const REMOVED_PROVIDERS = new Set(["opencode", "opencode-go"]);
 
+// The error text for a removed provider prefix; in: assertProviderNotRemoved, out: a message.
 function removedProviderMessage(id: string): string {
   return (
     `[Agent Accelerator] Provider "${id}" has been removed: OpenCode free models are ` +

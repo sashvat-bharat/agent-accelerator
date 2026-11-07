@@ -136,7 +136,7 @@ telemetryBus.onEvent((e) => {
 });
 ```
 
-Also exported: `listScheduledActions`, `updateScheduledAction`, `runScheduledAction` (run now), `skipScheduledAction`, `deleteScheduledAction(id, { force, purge })`, `getDatetimeTool`. The model gets the same power through the `scheduled_actions` tool (`create | list | get | update | delete | run_now | skip`) and reads the machine clock with `get_datetime`.
+Also exported: `listScheduledActions`, `updateScheduledAction`, `runScheduledAction` (run now), `skipScheduledAction`, `deleteScheduledAction(id, { force, purge })`, `getDatetimeTool`. All of them except `createScheduledAction` accept `{ home }`: pass it when the Agent was built with its own `home`, otherwise they use `setHome()`, `AGENT_ACCEL_HOME` or `.agent-accel/` in the working directory. The model gets the same power through the `scheduled_actions` tool (`create | list | get | update | delete | run_now | skip`) and reads the machine clock with `get_datetime`.
 
 How it works:
 - **Time format.** `timeToDeliver` is `DD:HH:MM`: `DD` days from today (`00` today, `01` tomorrow, no upper limit), `HH:MM` on a 12-hour clock with `meridiem`. `startCookingInAdvance` and `repeatEvery` are durations (`HH` 00–23). Delivery has **one-minute resolution**. Repeats use calendar days, so 7:00 AM stays 7:00 AM. The lead time must be shorter than the repeat gap.

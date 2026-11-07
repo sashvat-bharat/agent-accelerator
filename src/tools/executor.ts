@@ -28,20 +28,24 @@ export interface ExecuteToolsOptions {
 
 const DEFAULT_TOOL_CONCURRENCY = 8;
 
+// Wall-clock milliseconds; in: the executor's timing, out: a number.
 function nowMs(): number {
   return Date.now();
 }
 
+// Milliseconds since `start`, at least 1 so a result never reports 0; in: result records, out: durationMs.
 function elapsedMs(start: number): number {
   return Math.max(1, nowMs() - start);
 }
 
+// A finite number >= 0 from a number or numeric string option, else undefined; in: tool options, out: timeout and limits.
 function numericOption(value: number | string | undefined): number | undefined {
   if (value === undefined || value === "") return undefined;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
+// numericOption rounded down to a whole number; in: tool options, out: attempts, concurrency and char caps.
 function integerOption(value: number | string | undefined): number | undefined {
   const parsed = numericOption(value);
   return parsed === undefined ? undefined : Math.floor(parsed);
@@ -128,11 +132,13 @@ export function sanitizeErrorMessage(message: string): string {
   return out;
 }
 
+// The tool's `maxResultChars` or the 20000 default; in: runSingle, out: the cap on a result kept for the model.
 function resultCharLimit(toolDef: ToolDefinition): number {
   const configured = integerOption((toolDef as any).maxResultChars);
   return configured && configured > 0 ? configured : DEFAULT_MAX_RESULT_CHARS;
 }
 
+// Cuts a string to the limit and appends a `[Truncated: ...]` note; in: runSingle, out: the capped result.
 function truncateResultString(value: string, limit: number): string {
   if (value.length <= limit) return value;
   return value.slice(0, limit) + `\n[Truncated: showing ${limit} of ${value.length} chars]`;
@@ -275,12 +281,14 @@ export function traceToolEvent(
   });
 }
 
+// Scrubbed, JSON-safe value capped to `max` serialized characters for logs and events; in: progress and event tracing, out: a value or a truncated string.
 function capJson(value: unknown, max = 2000): unknown {
   const safe = scrubErrors(toJsonSafe(value));
   const json = JSON.stringify(safe);
   return typeof json === "string" && json.length > max ? `${json.slice(0, max)}…[truncated]` : safe;
 }
 
+// Edit distance between two strings; in: resolveTool's did-you-mean, out: a number.
 function levenshtein(a: string, b: string): number {
   const row = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {
@@ -303,6 +311,7 @@ interface ResolvedTool {
   suggestion?: string;
 }
 
+// Finds the tool a call names (exact, then case/format-insensitive), else suggests the closest name; in: runSingle and findToolDefinition, out: ResolvedTool.
 function resolveTool(tools: Record<string, ToolDefinition>, requestedName: string): ResolvedTool {
   const direct = tools[requestedName];
   if (direct) return { definition: direct, name: direct.name || requestedName };
@@ -348,6 +357,7 @@ class Semaphore {
 
   constructor(private readonly limit: number) {}
 
+  // Takes a slot (immediately if free, else waits in line), rejecting if the run aborts first; in: runSingle, out: a release function.
   acquire(signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) return Promise.reject(new Error("Tool execution aborted"));
     if (this.limit === Number.POSITIVE_INFINITY || this.active < this.limit) {
@@ -372,6 +382,7 @@ class Semaphore {
     });
   }
 
+  // Frees a slot and hands it to the next live waiter, dropping aborted ones; in: the function acquire returned, out: the next waiter's grant.
   private release(): void {
     this.active = Math.max(0, this.active - 1);
     while (this.waiters.length > 0) {
@@ -405,6 +416,7 @@ function isTransientError(error: any): boolean {
   return false;
 }
 
+// Waits the retry backoff, rejecting `Tool execution aborted` as soon as the run aborts; in: runSingle's retry loop, out: nothing.
 function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -437,6 +449,7 @@ function raceAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promis
   });
 }
 
+// One attempt of a tool: runs it, raced against the run's abort and the per-attempt timeout (which also aborts the tool's signal); in: runSingle, out: the tool's result or a thrown timeout/abort.
 async function executeAttempt(
   toolDef: ToolDefinition,
   parsedInput: unknown,

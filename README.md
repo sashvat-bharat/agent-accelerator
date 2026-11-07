@@ -386,6 +386,8 @@ telemetryBus.onEvent((e) => {
 | `skipScheduledAction(id, { home? })` | Ignore a missed run and wait for the next scheduled time. |
 | `deleteScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
 
+Every function except `createScheduledAction` finds the home folder through `setHome()`, `AGENT_ACCEL_HOME`, or `.agent-accel/` in the working directory. If you built the Agent with its own `home`, pass the same `{ home }` to these calls (the model's `scheduled_actions` tool already does).
+
 **How it behaves**
 
 * **One local clock.** A single timer per home folder (guarded by a one-process lock, `<home>/.lock`) ticks once a second against the machine's own time and only asks what is overdue, so drift or sleep cannot skip a run. There is no timezone or daylight-saving logic. The timer is `unref`'d and runs only while something is pending, so actions run only while your process is alive.
@@ -657,7 +659,7 @@ Implement the `Provider` interface when adding a fully custom transport.
 
 ### Google
 
-`GoogleInteractionsProvider` (aliased as `GoogleAIStudioProvider`) and `GOOGLE_MODELS` provide Google support over the Interactions API (`POST {baseUrl}/interactions`, streaming via `?alt=sse`).
+`GoogleInteractionsProvider` and `GOOGLE_MODELS` provide Google support over the Interactions API (`POST {baseUrl}/interactions`, streaming via `?alt=sse`).
 
 Turns chain statefully through `previous_interaction_id` per session, falling back to stateless full-history sends when the session switches providers or models.
 
@@ -683,7 +685,7 @@ Helpers:
 
 ### OpenAI
 
-`OpenAIResponsesProvider` (aliased as `OpenAIProvider`) and `OPENAI_MODELS` provide OpenAI support over the Responses API (`POST {baseUrl}/responses`).
+`OpenAIResponsesProvider` and `OPENAI_MODELS` provide OpenAI support over the Responses API (`POST {baseUrl}/responses`).
 
 Every turn is stateless: the full history is sent explicitly with `store: false`, so no `previous_response_id`, `background`, or conversation chaining is ever used.
 
@@ -702,7 +704,7 @@ It also:
 
 ### OpenRouter
 
-`OpenRouterChatCompletionsProvider` (aliased as `OpenRouterProvider` / `OpenRouter`) and `OPENROUTER_MODELS` provide OpenRouter support over Chat Completions (`POST {baseUrl}/chat/completions`).
+`OpenRouterChatCompletionsProvider` and `OPENROUTER_MODELS` provide OpenRouter support over Chat Completions (`POST {baseUrl}/chat/completions`).
 
 Every turn is stateless: the full `messages[]` array is sent explicitly — no chaining primitives exist on this endpoint.
 
@@ -731,7 +733,7 @@ setAttribution({ referer: "https://my.app", title: "My App" });
 
 ### Custom
 
-`OpenAICompatibleProvider` is also exposed through the `CustomProvider`, `createCustomProvider`, and `createOpenAICompatibleProvider(prefix, opts?)` aliases.
+`OpenAICompatibleChatProvider` is also exposed through the `CustomProvider`, `createCustomProvider`, and `createOpenAICompatibleProvider(prefix, opts?)` aliases.
 
 `CustomProviderOptions`:
 
@@ -930,15 +932,6 @@ Use:
 
 Breaking out of `for await` cancels the stream. Your `AbortSignal` and stream cancellation share one linked controller, so `controller.abort()` and `stream.cancel()` both stop the HTTP request. Abort rejects with `AbortError` (never retried) and never resolves partial results. `agent.run(prompt, { stream: true, signal })` exposes the same
 `cancel` handle.
-
-`SSEParser` provides:
-
-```ts
-feed(chunk)
-flush()
-```
-
-It parses provider SSE streams and is only needed when implementing custom transports.
 
 ---
 ## Response, Usage, and Raw Data

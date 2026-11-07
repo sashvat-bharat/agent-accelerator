@@ -64,11 +64,13 @@ export interface RefreshCatalogOptions {
 type CatalogUpdateListener = () => void;
 const updateListeners: Set<CatalogUpdateListener> = new Set();
 
+/** Registers a callback run whenever the catalog changes; in: catalog.ts (cache invalidation), out: an unsubscribe function. */
 export function registerCatalogUpdateListener(listener: CatalogUpdateListener): () => void {
   updateListeners.add(listener);
   return () => updateListeners.delete(listener);
 }
 
+// Runs every catalog-change listener, ignoring their errors; in: refresh and home change, out: the listeners.
 function notifyUpdateListeners(): void {
   for (const listener of updateListeners) {
     try {
@@ -93,6 +95,7 @@ export function getCacheFilePath(): string {
   return path.join(getCacheDir(), "models.dev.json");
 }
 
+// Reads and parses a JSON file, null when missing or damaged; in: the cache loader, out: the parsed value.
 function readJsonFileSync(filePath: string): any {
   try {
     if (!fs.existsSync(filePath)) return null;

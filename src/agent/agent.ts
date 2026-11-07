@@ -29,7 +29,7 @@ import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from ".
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, endsWithStop, accumulateUsage, type SteerEntry } from "./loop.ts";
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
-import { createSessionId, nowMs, newRunId } from "../utils/session.ts";
+import { createSessionId, nowMs, newRunId, previewPrompt } from "../utils/session.ts";
 import {
   chargeBudgetUsage,
   checkBudget,
@@ -590,7 +590,7 @@ export class Agent {
       .map((m) => ({
         runId: m.id,
         startedAt: m.at,
-        prompt: this.previewPrompt((this.context.messages[m.i]?.content ?? "") as string | ContentPart[]),
+        prompt: previewPrompt((this.context.messages[m.i]?.content ?? "") as string | ContentPart[]),
         pendingToolCalls: calls,
       }));
   }
@@ -652,6 +652,7 @@ export class Agent {
     this.doPersist();
   }
 
+  // Builds the system prompt: the developer's instructions plus, when thinking is on, the fixed Reasoning Directive; in: this.instructions + thinkingConfig, out: every AgentContext.systemPrompt.
   private getFullInstructions(): string | undefined {
     const base = this.instructions || "";
     let out = base;
@@ -799,30 +800,19 @@ export class Agent {
     return this.midSessionConfig.mode;
   }
 
+  // Picks steer or queue for a call that arrives while busy: the developer's enforced midSession mode wins over the per-call request; in: run()/stream() `enqueue`, out: their busy branch.
   private resolveEnqueueMode(requested?: "steer" | "queue"): "steer" | "queue" {
     const enforced = this.midSessionConfig.mode;
     if (enforced === "steer" || enforced === "queue") return enforced;
     return requested === "steer" ? "steer" : "queue";
   }
 
+  // Throws synchronously on an empty content-part array so run() and stream() fail at the same moment; in: any prompt entry point, out: nothing.
   private assertPromptValid(prompt: string | ContentPart[]): void {
     if (Array.isArray(prompt) && prompt.length === 0) {
       throw new Error(
         "[Agent Accelerator] Prompt cannot be empty: pass a non-empty string or at least one content part."
       );
-    }
-  }
-
-  private previewPrompt(prompt: string | ContentPart[]): string {
-    if (typeof prompt === "string") return prompt.slice(0, 500);
-    try {
-      const texts = prompt
-        .filter((p) => (p as { type?: unknown }).type === "text")
-        .map((p) => (p as { text?: string }).text ?? "")
-        .join("\n");
-      return (texts || "[multipart]").slice(0, 500);
-    } catch {
-      return "[multipart]";
     }
   }
 
@@ -961,13 +951,14 @@ export class Agent {
       try {
         this.currentRun?.outerStream?.push({
           type: "queued",
-          queuedPrompt: this.previewPrompt(prompt),
+          queuedPrompt: previewPrompt(prompt),
           queueLength: this.pendingQueue.length,
         } as any);
       } catch {}
     });
   }
 
+  // Starts the next waiting prompt (urgent ones first, aborted ones rejected) as a streaming or non-streaming run once the agent is idle; in: finishCurrentRun and queue changes, out: a new run whose result settles the queued caller.
   private pumpQueue(): void {
     if (this.currentRun !== null) return;
     const next = this.pendingQueue.shift();
@@ -1023,6 +1014,7 @@ export class Agent {
     this.startNonStreamingRun(next.prompt, next.options).then(next.resolve, next.reject);
   }
 
+  // Ends the active run slot: leftover steers become follow-ups at the FRONT of the queue (behind urgent ones), then the queue is pumped; in: a settled run, out: pendingQueue + persistNow.
   private finishCurrentRun(): void {
     // Q-20: leftover steer entries become queued follow-ups instead of dropping.
     let leftover: SteerEntry[] = [];
@@ -1065,6 +1057,7 @@ export class Agent {
     queueMicrotask(() => this.pumpQueue());
   }
 
+  // Removes the abort listener a run's merged signal fallback installed; in: a settled run's controller, out: nothing.
   private cleanupMerge(runController: AbortController): void {
     try {
       const dispose = mergeDisposers.get(runController);
@@ -1075,6 +1068,7 @@ export class Agent {
     } catch {}
   }
 
+  // Joins the caller's AbortSignal with the run's own controller (AbortSignal.any, else a manual forward) so both stop the run; in: AgentRunOptions.signal + the run controller, out: the signal handed to the loop.
   private mergeUserSignal(userSignal?: AbortSignal, runController?: AbortController): AbortSignal | undefined {
     if (!runController) return userSignal;
     if (!userSignal) return runController.signal;
@@ -1227,6 +1221,7 @@ export class Agent {
     };
   }
 
+  // Runs one non-streaming run as a task: catalog refresh, model resolve, prompt/mark (or a resumed mark), loop with `runRetries` backoff, trace merge, run ending recorded; in: run()/queue/resume(), out: the AgentResponse promise.
   private startNonStreamingRun(
     prompt: string | ContentPart[],
     options?: AgentRunOptions,
@@ -1328,6 +1323,7 @@ export class Agent {
     return task;
   }
 
+  // Starts one streaming run: validates the model and thinking level synchronously, adds the prompt, builds the loop config and returns the loop's event stream, recording the run ending when it settles; in: stream()/pumpQueue, out: an AssistantMessageEventStream.
   private startStreamingRun(
     prompt: string | ContentPart[],
     options?: AgentRunOptions
@@ -1655,6 +1651,7 @@ export class Agent {
     } catch {}
   }
 
+  // Adds the user prompt to the target context (fresh context when stateless, stable system prompt, additionalContext as a user prefix) and marks the run start for the default session; in: a run start, out: the new SessionRunMark.
   private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): SessionRunMark | undefined {
     // Q-20: prompt validation throws synchronously in both run() and
     // stream() (same timing; documented here).
@@ -1791,7 +1788,7 @@ export class Agent {
           try {
             this.currentRun?.outerStream?.push({
               type: "queued",
-              queuedPrompt: this.previewPrompt(prompt),
+              queuedPrompt: previewPrompt(prompt),
               queueLength: this.pendingQueue.length,
             } as any);
           } catch {}
@@ -1933,7 +1930,7 @@ export class Agent {
         try {
           this.currentRun.outerStream?.push({
             type: "queued",
-            queuedPrompt: this.previewPrompt(prompt),
+            queuedPrompt: previewPrompt(prompt),
             queueLength: this.pendingQueue.length + 1,
           } as any);
         } catch {}
@@ -2008,6 +2005,7 @@ export class Agent {
     return s;
   }
 
+  // Attaches onEvent/onDelta/onThinkingDelta to a stream and, with wrapThinking, adds display-only <think> tags and whitespace hygiene on the outer events; in: stream()/pumpQueue, out: listeners on the stream.
   private wireStreamCallbacks(
     s: AssistantMessageEventStream,
     options?: AgentRunOptions

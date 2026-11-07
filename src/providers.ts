@@ -42,6 +42,7 @@ export type ProviderCapabilityStatus =
  */
 const emittedWarnings = new Set<string>();
 
+/** Warns once per provider, capability and request about something that cannot be applied as asked: a `provider_warning` bus event, the legacy global sink and console; in: the mappers and adapters, out: those channels. */
 export function emitProviderWarning(options: {
   provider: string;
   capability: string;
@@ -190,40 +191,6 @@ export function mapThinkingLevelToOpenRouterChat(
   return {};
 }
 
-/**
- * Maps a canonical ThinkingLevel onto OpenRouter Responses `reasoning.effort`.
- * Documented efforts: minimal|low|medium|high (server default medium).
- * Wire-validated extras: `none` disables reasoning output; `xhigh`/`max` are
- * echoed but are NOT documented levels, so they clamp to `high` with a warning.
- *
- * @deprecated The Responses skin is discontinued for OpenRouter
- * (removed from core). Use
- * {@link mapThinkingLevelToOpenRouterChat} with the stable Chat Completions
- * transport instead.
- */
-export function mapThinkingLevelToOpenRouter(
-  level: ThinkingLevel | string | undefined
-): { effort?: string } {
-  if (!level) return {};
-  const norm = String(level).toLowerCase().trim();
-  if (norm === "dynamic") return {}; // server default (medium)
-  if (norm === "none") return { effort: "none" };
-  if (norm === "xhigh" || norm === "max") {
-    emitProviderWarning({
-      provider: "openrouter",
-      capability: "thinking level",
-      requested: String(level),
-      reason: "OpenRouter documents reasoning efforts up to high.",
-      fallback: "reasoning effort high",
-    });
-    return { effort: "high" };
-  }
-  if (norm === "minimal" || norm === "low" || norm === "medium" || norm === "high") {
-    return { effort: norm };
-  }
-  return {};
-}
-
 /** Maps canonical ServiceTier onto OpenRouter `service_tier` (omit = auto). */
 export function mapServiceTierToOpenRouter(tier: ServiceTier | undefined): "flex" | "priority" | undefined {
   if (tier === "flex" || tier === "priority") return tier;
@@ -284,25 +251,6 @@ export function mapToolChoiceToOpenRouterChat(
   if (choice === "none" || choice === "required") return choice;
   const name = choice.function?.name;
   if (name) return { type: "function", function: { name } };
-  return undefined;
-}
-
-/** OpenRouter Responses `tool_choice` wire values.
- * @deprecated Discontinued skin; see {@link OpenRouterChatToolChoice}. */
-export type OpenRouterToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
-
-/**
- * Maps canonical toolChoice onto OpenRouter Responses `tool_choice`.
- * `auto` is the server default (omitted); `required` is natively supported
- * (validated); a function pin passes through verbatim.
- */
-export function mapToolChoiceToOpenRouter(
-  choice: "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
-): OpenRouterToolChoice | undefined {
-  if (!choice || choice === "auto") return undefined;
-  if (choice === "none" || choice === "required") return choice;
-  const name = choice.function?.name;
-  if (name) return { type: "function", name };
   return undefined;
 }
 
@@ -383,6 +331,7 @@ export function normalizeToolChoice(
   return { mode: "any" };
 }
 
+// True for a non-array object; in: the argument and schema helpers, out: a type guard.
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -449,6 +398,7 @@ export interface GenerationParams {
 
 /** Most stop sequences a Chat Completions request may carry (OpenRouter chat-completion api-ref `maxItems`, OpenAI the same). */
 const MAX_CHAT_STOP = 4;
+// True for a finite number; in: the generation-param mappers, out: a type guard.
 const finiteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 /** Normalizes the public `stop` option (`string | string[]`) to a clean array, or undefined. */
@@ -484,6 +434,7 @@ export function mapGenerationParamsToChat(params: GenerationParams | undefined, 
   return out;
 }
 
+// Warns that `stop`/`seed` have no parameter on this wire and are dropped; in: the OpenAI and Google mappers, out: provider_warning events.
 function warnUnsupportedStopSeed(provider: string, modelRef: string, params: GenerationParams, reasonSuffix: string): void {
   if (params.stop && params.stop.length > 0) {
     emitProviderWarning({
@@ -533,6 +484,7 @@ export function mapGenerationParamsToGoogle(
 // Structured outputs (canonical, pure, no I/O)
 // ---------------------------------------------------------------------------
 
+// True when a value looks like a Zod schema (parse/safeParse/_def/~standard); in: structured-output normalization, out: a boolean.
 function isZodLike(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
@@ -544,6 +496,7 @@ function isZodLike(value: unknown): boolean {
   );
 }
 
+// True when a plain object has JSON Schema keywords; in: structured-output normalization, out: a boolean.
 function looksLikeJsonSchema(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
   const v = value as Record<string, unknown>;
@@ -559,12 +512,14 @@ function looksLikeJsonSchema(value: unknown): boolean {
   );
 }
 
+// A structured-output name limited to letters, digits, `_` and `-` (64 chars), default `structured_output`; in: normalizeStructuredOutput, out: the name.
 function sanitizeOutputName(raw: unknown): string {
   const base = typeof raw === "string" && raw.trim() ? raw.trim() : "structured_output";
   const cleaned = base.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "structured_output";
   return cleaned;
 }
 
+// A Zod schema or JSON Schema object as a JSON Schema object, else a ValidationError; in: normalizeStructuredOutput, out: the schema.
 function schemaToJsonSchema(schema: unknown, what: string): Record<string, unknown> {
   if (isZodLike(schema)) {
     try {
@@ -634,6 +589,7 @@ export function extractOutputValidator(output: unknown): { safeParse: (v: unknow
   return undefined;
 }
 
+// Removes a surrounding ```json fence from a model answer; in: parseStructuredOutput, out: the bare text.
 function stripCodeFences(text: string): string {
   const trimmed = text.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/i);

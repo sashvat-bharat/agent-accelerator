@@ -44,3 +44,20 @@ describe("audit §3 behavior locks", () => {
     expect(JSON.parse(fs.readFileSync(f, "utf8")).ok).toBe(1);
   });
 });
+
+// The public barrel carries no dead or alias exports (removed in 0.5.7); the canonical names stay.
+describe("public barrel", () => {
+  it("does not export removed aliases, internals or dead helpers", async () => {
+    const barrel = (await import("../src/index.ts")) as Record<string, unknown>;
+    for (const name of [
+      "GoogleAIStudioProvider", "OpenRouterProvider", "OpenAIProvider", "OpenAICompatibleProvider",
+      "mapThinkingLevelToOpenRouter", "mapToolChoiceToOpenRouter", "escapeXmlFromDelegation", "resolveAgentConfig",
+      "SSEParser", "appendSubAgentStep", "pruneTraces", "trimTraceSteps", "getSubAgentTrace", "getSubAgentTraceScoped",
+      "getSubAgentTraceForSessions", "listSubAgentTraceIds", "listSubAgentTraceIdsForSessions", "subscribeToSubAgent",
+      "subscribeToSubAgentForSessions", "isStreamingLoop", "MAX_SUBAGENT_TRACES",
+    ]) expect(barrel[name]).toBeUndefined();
+    for (const name of ["Agent", "GoogleInteractionsProvider", "OpenAIResponsesProvider", "OpenRouterChatCompletionsProvider", "OpenAICompatibleChatProvider", "AssistantMessageEventStream"]) {
+      expect(barrel[name]).toBeDefined();
+    }
+  });
+});

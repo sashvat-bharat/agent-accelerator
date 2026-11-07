@@ -3,6 +3,7 @@ import type { ProviderRawData } from "../types/model.ts";
 /** How much of the wire exchange `AgentResponse.raw` keeps (see `AgentConfig.captureRaw`). */
 export type CaptureRawMode = false | "redacted" | true;
 
+// Serialized length of a value, 0 if it cannot be serialized; in: the body summaries, out: a number.
 function byteLength(value: unknown): number {
   try {
     return JSON.stringify(value)?.length ?? 0;
@@ -11,6 +12,7 @@ function byteLength(value: unknown): number {
   }
 }
 
+// Tool names from a request body's `tools`, if any; in: summarizeRequestBody, out: names or undefined.
 function toolNames(tools: unknown): string[] | undefined {
   if (!Array.isArray(tools)) return undefined;
   const names = tools
@@ -34,6 +36,7 @@ function summarizeRequestBody(body: unknown): unknown {
   };
 }
 
+// Content-free summary of a response body (size, id, status); in: applyCaptureRaw, out: the summary.
 function summarizeResponseBody(body: unknown): unknown {
   if (body === null || body === undefined) return body;
   const b = (typeof body === "object" ? body : {}) as Record<string, unknown>;

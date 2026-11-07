@@ -3,11 +3,8 @@ import type { SubAgentStep } from "../types/response.ts";
 import type { AgentConfig } from "../types/agent.ts";
 import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
-import { escapeXml } from "../utils/serialization.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
 import { resolveModel } from "../providers/registry.ts";
-
-export { escapeXml };
 
 /** Minimal live-trace shape shared by fixed + dynamic workers (structural subset of `SubAgentTrace`). */
 export interface LiveWorkerTrace {
@@ -200,6 +197,7 @@ export function grantWorkerTools(
   return grantedTools;
 }
 
+// The provider id a model string resolves to, or undefined when it cannot be resolved; in: resolveWorkerCredentials, out: the provider match check.
 function providerOf(modelStr: string | unknown | undefined): string | undefined {
   if (!modelStr) return undefined;
   try {
