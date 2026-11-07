@@ -29,7 +29,7 @@ import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from ".
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, endsWithStop, accumulateUsage, type SteerEntry } from "./loop.ts";
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
-import { createSessionId, nowMs, newRunId } from "../utils/session.ts";
+import { createSessionId, nowMs, newRunId, previewPrompt } from "../utils/session.ts";
 import {
   chargeBudgetUsage,
   checkBudget,
@@ -590,7 +590,7 @@ export class Agent {
       .map((m) => ({
         runId: m.id,
         startedAt: m.at,
-        prompt: this.previewPrompt((this.context.messages[m.i]?.content ?? "") as string | ContentPart[]),
+        prompt: previewPrompt((this.context.messages[m.i]?.content ?? "") as string | ContentPart[]),
         pendingToolCalls: calls,
       }));
   }
@@ -813,19 +813,6 @@ export class Agent {
     }
   }
 
-  private previewPrompt(prompt: string | ContentPart[]): string {
-    if (typeof prompt === "string") return prompt.slice(0, 500);
-    try {
-      const texts = prompt
-        .filter((p) => (p as { type?: unknown }).type === "text")
-        .map((p) => (p as { text?: string }).text ?? "")
-        .join("\n");
-      return (texts || "[multipart]").slice(0, 500);
-    } catch {
-      return "[multipart]";
-    }
-  }
-
   /**
    * Stops the active run now (STOP.) and, given a message, starts it next (STOP. Do this instead). The provider
    * request is aborted (connection closed, so the provider stops generating where it can), the stream is cancelled, and
@@ -961,7 +948,7 @@ export class Agent {
       try {
         this.currentRun?.outerStream?.push({
           type: "queued",
-          queuedPrompt: this.previewPrompt(prompt),
+          queuedPrompt: previewPrompt(prompt),
           queueLength: this.pendingQueue.length,
         } as any);
       } catch {}
@@ -1791,7 +1778,7 @@ export class Agent {
           try {
             this.currentRun?.outerStream?.push({
               type: "queued",
-              queuedPrompt: this.previewPrompt(prompt),
+              queuedPrompt: previewPrompt(prompt),
               queueLength: this.pendingQueue.length,
             } as any);
           } catch {}
@@ -1933,7 +1920,7 @@ export class Agent {
         try {
           this.currentRun.outerStream?.push({
             type: "queued",
-            queuedPrompt: this.previewPrompt(prompt),
+            queuedPrompt: previewPrompt(prompt),
             queueLength: this.pendingQueue.length + 1,
           } as any);
         } catch {}

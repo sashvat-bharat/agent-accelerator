@@ -517,6 +517,7 @@ function mapUsage(raw?: ChatResponse["usage"]): TokenUsage {
     cacheWriteTokens: raw?.prompt_tokens_details?.cache_write_tokens ?? 0,
     thinkingTokens: raw?.completion_tokens_details?.reasoning_tokens ?? 0,
   };
+  // `cost` is an OpenRouter extension. A generic endpoint that sends it may use 0 for "not computed", so only a positive value counts as known (OpenRouter's adapter accepts an explicit 0).
   if (typeof raw?.cost === "number" && raw.cost > 0) {
     usage.cost = { totalCost: raw.cost };
   }

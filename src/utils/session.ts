@@ -109,14 +109,7 @@ export function newTurnId(): string {
   return random32Hex();
 }
 
-/**
- * Single canonical prompt preview (Q-49): merges the former
- * `previewPrompt` (agent.ts) / `steerPreview` (loop.ts) duplicates.
- * Bounded to 500 chars, display-only. Other modules own their copies;
- * new code should import this one.
- *
- * @example `previewPrompt("hello")`
- */
+/** Bounded (500 chars), display-only preview of a prompt, used in `queued`/`steer_injected` events, turn lists and `interrupted()`. */
 export function previewPrompt(prompt: string | ContentPart[]): string {
   if (typeof prompt === "string") return prompt.slice(0, 500);
   try {

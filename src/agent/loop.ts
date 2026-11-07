@@ -25,6 +25,7 @@ import { enforceFileAccess } from "../utils/safe-io.ts";
 import { isSubagentResult, normalizeSubagentMetadata } from "../tools/subagent-result.ts";
 import { BudgetExceededError } from "../types/errors.ts";
 import { applyCaptureRaw, type CaptureRawMode } from "../utils/raw-capture.ts";
+import { previewPrompt } from "../utils/session.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
 
 /** One mid-session steer request buffered while a run is active. */
@@ -99,20 +100,6 @@ export interface AgentLoopConfig {
   output?: unknown;
 }
 
-/** Short preview for `steer_injected` / `queued` event payloads (bounded, display-only). */
-function steerPreview(prompt: string | ContentPart[]): string {
-  if (typeof prompt === "string") return prompt.slice(0, 500);
-  try {
-    const texts = prompt
-      .filter((p) => (p as { type?: unknown }).type === "text")
-      .map((p) => (p as { text?: string }).text ?? "")
-      .join("\n");
-    return (texts || "[multipart]").slice(0, 500);
-  } catch {
-    return "[multipart]";
-  }
-}
-
 /**
  * Drains pending steer entries into the conversation as new user messages.
  * Returns display previews for events/telemetry. Never throws: invalid
@@ -133,7 +120,7 @@ function drainSteerInbox(context: AgentContext, inbox?: SteerEntry[]): string[] 
         else prompt = [{ type: "text", text: prefix } as ContentPart, ...prompt];
       }
       context.addUserMessage(prompt);
-      injected.push(steerPreview(entry.prompt));
+      injected.push(previewPrompt(entry.prompt));
     } catch {
       continue;
     }

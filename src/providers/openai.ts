@@ -793,7 +793,7 @@ export class OpenAIResponsesProvider implements Provider {
           );
         }
         assertModalitiesSupported(context, "openai", clean);
-    assertNoVideoPartsOnResponses(context, "openai", clean);
+        assertNoVideoPartsOnResponses(context, "openai", clean);
         const baseUrl = resolveBaseUrl(options);
         const url = `${baseUrl}/responses`;
         const sessionId = options?.sessionId;
