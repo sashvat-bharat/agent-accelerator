@@ -42,6 +42,7 @@ export type ProviderCapabilityStatus =
  */
 const emittedWarnings = new Set<string>();
 
+/** Warns once per provider, capability and request about something that cannot be applied as asked: a `provider_warning` bus event, the legacy global sink and console; in: the mappers and adapters, out: those channels. */
 export function emitProviderWarning(options: {
   provider: string;
   capability: string;
@@ -330,6 +331,7 @@ export function normalizeToolChoice(
   return { mode: "any" };
 }
 
+// True for a non-array object; in: the argument and schema helpers, out: a type guard.
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -396,6 +398,7 @@ export interface GenerationParams {
 
 /** Most stop sequences a Chat Completions request may carry (OpenRouter chat-completion api-ref `maxItems`, OpenAI the same). */
 const MAX_CHAT_STOP = 4;
+// True for a finite number; in: the generation-param mappers, out: a type guard.
 const finiteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 /** Normalizes the public `stop` option (`string | string[]`) to a clean array, or undefined. */
@@ -431,6 +434,7 @@ export function mapGenerationParamsToChat(params: GenerationParams | undefined, 
   return out;
 }
 
+// Warns that `stop`/`seed` have no parameter on this wire and are dropped; in: the OpenAI and Google mappers, out: provider_warning events.
 function warnUnsupportedStopSeed(provider: string, modelRef: string, params: GenerationParams, reasonSuffix: string): void {
   if (params.stop && params.stop.length > 0) {
     emitProviderWarning({
@@ -480,6 +484,7 @@ export function mapGenerationParamsToGoogle(
 // Structured outputs (canonical, pure, no I/O)
 // ---------------------------------------------------------------------------
 
+// True when a value looks like a Zod schema (parse/safeParse/_def/~standard); in: structured-output normalization, out: a boolean.
 function isZodLike(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
@@ -491,6 +496,7 @@ function isZodLike(value: unknown): boolean {
   );
 }
 
+// True when a plain object has JSON Schema keywords; in: structured-output normalization, out: a boolean.
 function looksLikeJsonSchema(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
   const v = value as Record<string, unknown>;
@@ -506,12 +512,14 @@ function looksLikeJsonSchema(value: unknown): boolean {
   );
 }
 
+// A structured-output name limited to letters, digits, `_` and `-` (64 chars), default `structured_output`; in: normalizeStructuredOutput, out: the name.
 function sanitizeOutputName(raw: unknown): string {
   const base = typeof raw === "string" && raw.trim() ? raw.trim() : "structured_output";
   const cleaned = base.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "structured_output";
   return cleaned;
 }
 
+// A Zod schema or JSON Schema object as a JSON Schema object, else a ValidationError; in: normalizeStructuredOutput, out: the schema.
 function schemaToJsonSchema(schema: unknown, what: string): Record<string, unknown> {
   if (isZodLike(schema)) {
     try {
@@ -581,6 +589,7 @@ export function extractOutputValidator(output: unknown): { safeParse: (v: unknow
   return undefined;
 }
 
+// Removes a surrounding ```json fence from a model answer; in: parseStructuredOutput, out: the bare text.
 function stripCodeFences(text: string): string {
   const trimmed = text.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/i);

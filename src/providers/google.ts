@@ -264,10 +264,12 @@ const PAID_CHAIN_TTL_MS = 54 * 24 * 3600 * 1000;
 /** Last-turn total tokens per session for the rehydration invariant (Rule 3). */
 const lastTurnTotals = new Map<string, number>();
 
+// Storage tier for the chain TTL (`paid` only when set, else the safe `free`); in: ProviderRequestOptions.googleTier, out: chainTtlMs.
 function resolveInteractionTier(options?: ProviderRequestOptions): "free" | "paid" {
   return options?.googleTier === "paid" ? "paid" : "free";
 }
 
+// How long a chained interaction pointer is trusted locally (23 h free, 54 d paid); in: the tier, out: liveChainFor.
 function chainTtlMs(options?: ProviderRequestOptions): number {
   return resolveInteractionTier(options) === "paid" ? PAID_CHAIN_TTL_MS : FREE_CHAIN_TTL_MS;
 }
@@ -280,11 +282,13 @@ function reportChainAnomaly(detail: { type: string; [k: string]: unknown }): voi
   } catch {}
 }
 
+// The saved interaction pointer of a session, if any; in: liveChainFor, out: a ChainEntry or undefined.
 function chainFor(sessionId: string | undefined): ChainEntry | undefined {
   if (!sessionId) return undefined;
   return interactionChains.get(sessionId);
 }
 
+// Saves the pointer of the interaction a turn just created; in: generate/stream, out: interactionChains.
 function setChain(sessionId: string | undefined, entry: ChainEntry): void {
   if (!sessionId) return;
   interactionChains.set(sessionId, entry);
@@ -347,6 +351,7 @@ export function clearInteractionChains(sessionId?: string): void {
 // Request building (canonical -> Interactions)
 // ---------------------------------------------------------------------------
 
+// Endpoint from the option, GOOGLE_BASE_URL, else the v1beta default; in: each request, out: the base URL without a trailing slash.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
   return (
     options?.baseUrl ||
@@ -356,6 +361,7 @@ function resolveBaseUrl(options?: ProviderRequestOptions): string {
   ).replace(/\/+$/, "");
 }
 
+// API key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
   const key = getApiKey("google", options?.apiKey, options?.env);
   if (key) return key;
@@ -363,6 +369,7 @@ function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
   return undefined;
 }
 
+// Strips a google/, gemini/ or models/ prefix; in: generate/stream/getModel, out: the bare model id.
 function cleanModelId(model: string | ModelSpec): string {
   const rawId = typeof model === "string" ? model : model.id;
   return rawId.replace(/^(google\/|gemini\/|models\/)/i, "");
@@ -395,6 +402,7 @@ function throwIfFailedInteraction(interaction: InteractionObject, modelId: strin
   throw toConciseProviderError(failure, "google", modelId);
 }
 
+// Canonical tool declarations as Interactions function tools with a Google-safe schema; in: options.tools, out: request `tools`.
 function toGoogleTools(tools?: StandardToolDeclaration[]): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined;
   return tools.map((t) => ({
@@ -407,6 +415,7 @@ function toGoogleTools(tools?: StandardToolDeclaration[]): Array<Record<string, 
   }));
 }
 
+// Canonical tool choice as `generation_config.tool_choice.allowed_tools`; in: options.toolChoice + tool names, out: the config value.
 function toGoogleToolChoice(
   choice: ProviderRequestOptions["toolChoice"],
   toolNames: string[]
@@ -500,6 +509,7 @@ function blockText(blocks: unknown): string {
   return blocks.map((b) => (typeof b?.text === "string" ? b.text : "")).join("");
 }
 
+// A tool result as the text of a function_result block; in: functionResultStep, out: a string.
 function resultToText(result: unknown): string {
   if (typeof result === "string") return result;
   return safeStringify(result);
@@ -654,6 +664,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
 // Response mapping (Interactions -> canonical)
 // ---------------------------------------------------------------------------
 
+// Google usage as TokenUsage, folding thought tokens into output and clamping cache reads to input; in: an interaction or step.stop usage, out: TokenUsage.
 function mapUsage(raw?: InteractionObject["usage"]): TokenUsage {
   const input = raw?.total_input_tokens ?? 0;
   // Google reports thought tokens separately from `total_output_tokens`, but bills them as output
@@ -677,6 +688,7 @@ function mapUsage(raw?: InteractionObject["usage"]): TokenUsage {
   };
 }
 
+// Interaction status as a finish reason (requires_action = tool_calls, incomplete = length, failed = error); in: parseInteraction/stream, out: finishReason.
 function mapFinishReason(status?: string): string {
   if (status === "requires_action") return "tool_calls";
   if (status === "incomplete") return "length";
@@ -684,6 +696,7 @@ function mapFinishReason(status?: string): string {
   return "stop";
 }
 
+// Turns a finished Interaction into text, thinking, tool calls, usage and replayable steps, throwing on failed or cancelled; in: generate, out: ProviderGenerateResult.
 function parseInteraction(
   interaction: InteractionObject,
   modelId: string,
@@ -767,6 +780,7 @@ export class GoogleInteractionsProvider implements Provider {
     return getModelsForProvider("google");
   }
 
+  // The catalog spec of a model, else a permissive generic one; in: the registry, out: a ModelSpec.
   getModel(modelId: string): ModelSpec | undefined {
     const clean = cleanModelId(modelId);
     return (
@@ -777,6 +791,7 @@ export class GoogleInteractionsProvider implements Provider {
     );
   }
 
+  // Builds the Interactions request: generation config, tools, structured output and the input (latest turn on a live chain, full history on a fresh or switched one); in: generate/stream, out: the request body.
   private buildBody(
     modelId: string,
     context: ProviderContext,
@@ -886,6 +901,7 @@ export class GoogleInteractionsProvider implements Provider {
     })();
   }
 
+  // Fetch options with JSON headers and the x-goog-api-key header; in: doFetch and stream, out: RequestInit.
   private requestInit(
     method: "POST" | "GET",
     body: InteractionRequestBody | undefined,
@@ -902,6 +918,7 @@ export class GoogleInteractionsProvider implements Provider {
     return { method, headers, ...(body ? { body: JSON.stringify(body) } : {}), signal };
   }
 
+  // One HTTP call under the request timeout, returning status, headers and body text; in: fetchInteraction and cancelInteraction, out: the raw reply.
   private async doFetch(
     url: string,
     method: "POST" | "GET",
@@ -924,6 +941,7 @@ export class GoogleInteractionsProvider implements Provider {
     }
   }
 
+  // Throws a concise provider error (status, code, Retry-After, key hint) for a non-2xx reply; in: every Google HTTP call, out: nothing or a thrown error.
   private throwIfError(
     status: number,
     statusText: string,
@@ -992,6 +1010,7 @@ export class GoogleInteractionsProvider implements Provider {
     void this.doFetch(`${baseUrl}/interactions/${id}/cancel`, "POST", undefined, options, apiKey).catch(() => {});
   }
 
+  // Non-streaming turn: creates the interaction (polling it when it runs in the background), records the chain and self-heals once on a lost chain; in: runAgentLoop, out: ProviderGenerateResult.
   async generate(
     model: string | ModelSpec,
     context: ProviderContext,
@@ -1090,6 +1109,7 @@ export class GoogleInteractionsProvider implements Provider {
     }
   }
 
+  // Streaming turn over SSE: assembles text, thinking, calls and exact replay steps, reconnects a dropped background stream and fails clean on a lost chain; in: streamAgentLoop, out: an AssistantMessageEventStream.
   stream(
     model: string | ModelSpec,
     context: ProviderContext,

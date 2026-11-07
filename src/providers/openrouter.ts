@@ -145,6 +145,7 @@ const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
 
+// Endpoint from the option, OPENROUTER_BASE_URL, else openrouter.ai; in: each request, out: the base URL without a trailing slash.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
   return (
     options?.baseUrl ||
@@ -154,6 +155,7 @@ function resolveBaseUrl(options?: ProviderRequestOptions): string {
   ).replace(/\/+$/, "");
 }
 
+// Key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
   const key = getApiKey("openrouter", options?.apiKey, options?.env);
   if (key) return key;
@@ -172,11 +174,13 @@ function cleanModelId(model: string | ModelSpec): string {
 
 // The HTTP status of an error chunk inside a stream (the HTTP status itself is 200): its numeric `code`, else the status of its retryable `error_type` (errors-and-debugging.md, "Typed Error Codes"); in: the chunk's error, out: streamInto, where it makes the error retryable.
 const RETRYABLE_ERROR_TYPE_STATUS: Record<string, number> = { rate_limit_exceeded: 429, provider_overloaded: 503, provider_unavailable: 502, timeout: 504, server: 500 };
+// HTTP-like status of an error chunk inside a stream, or undefined when unknown; in: streamInto's error branch, out: the status that makes the error retryable.
 function midStreamStatus(code: unknown, errorType: unknown): number | undefined {
   if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) return code;
   return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
 }
 
+// Canonical tool declarations as Chat Completions function tools; in: options.tools, out: request `tools`.
 function toOpenRouterTools(tools?: StandardToolDeclaration[]): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined;
   return tools.map((t) => ({
@@ -192,6 +196,7 @@ function toOpenRouterTools(tools?: StandardToolDeclaration[]): Array<Record<stri
 
 // The `input_audio.format` for a MIME type: Chat Completions takes any format string the provider supports (audio.md: wav, mp3, aiff, aac, ogg, flac, m4a, pcm16 ...), so the real format is sent, never a guess; in: an audio part's MIME type, out: contentPartsToBlocks.
 const AUDIO_FORMAT: Record<string, string> = { wav: "wav", wave: "wav", mpeg: "mp3", mp3: "mp3", mp4: "m4a", m4a: "m4a", aac: "aac", ogg: "ogg", flac: "flac", aiff: "aiff" };
+// The `input_audio.format` for an audio MIME type (see AUDIO_FORMAT above); in: contentPartsToBlocks, out: the format string.
 function audioFormatFor(mimeType?: string): string {
   const subtype = (mimeType || "").toLowerCase().split(";")[0]!.split("/")[1]?.replace(/^x-/, "") ?? "";
   return AUDIO_FORMAT[subtype] ?? (subtype || "mp3");
@@ -278,6 +283,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
   return blocks;
 }
 
+// A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
 function resultToOutput(result: unknown): string {
   if (typeof result === "string") return result;
   return safeStringify(result);
@@ -392,6 +398,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
 // Response mapping (Chat Completions -> canonical)
 // ---------------------------------------------------------------------------
 
+// Chat usage as TokenUsage with cache reads clamped to input, cache writes, reasoning tokens and OpenRouter's reported cost (0 counts); in: the last stream chunk, out: TokenUsage.
 function mapUsage(raw?: ChatUsage): TokenUsage {
   const input = raw?.prompt_tokens ?? 0;
   const output = raw?.completion_tokens ?? 0;
@@ -430,6 +437,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     return getModelsForProvider("openrouter");
   }
 
+  // The catalog spec of a model, else a permissive generic one; in: the registry, out: a ModelSpec.
   getModel(modelId: string): ModelSpec | undefined {
     const clean = cleanModelId(modelId);
     return (
@@ -440,6 +448,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     );
   }
 
+  // Builds the Chat request (messages, tools, tool_choice, reasoning, tier, cache_control, generation controls, response_format, session_id); in: streamInto, out: the body.
   private async buildBody(
     modelId: string,
     context: ProviderContext,
@@ -518,6 +527,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     return body;
   }
 
+  // Fetch options with session and opt-in attribution headers, JSON content type and the Bearer key; in: streamInto, out: RequestInit.
   private requestInit(
     body: ChatRequestBody,
     options: ProviderRequestOptions | undefined,
@@ -537,6 +547,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
+  // Throws a concise provider error (status, code, Retry-After, key and media-link hints) for a non-2xx reply, marking the in-flight-budget 402 retryable; in: streamInto, out: nothing or a thrown error.
   private throwIfError(
     status: number,
     url: string,
@@ -612,6 +623,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     }
   }
 
+  // Streaming turn: a normal event stream from streamInto; in: streamAgentLoop, out: an AssistantMessageEventStream.
   stream(
     model: string | ModelSpec,
     context: ProviderContext,

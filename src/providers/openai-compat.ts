@@ -192,10 +192,12 @@ interface ChatResponse {
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
 
+// Env-variable prefix of a custom provider (`my-llm` becomes `MY_LLM`); in: key and URL lookups, out: the prefix.
 function envPrefixOf(prefix: string): string {
   return prefix.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 
+// Endpoint from the option, the provider's configuration or {PREFIX}_BASE_URL; throws ConfigError when none (never another vendor's URL); in: each request, out: the base URL.
 function resolveBaseUrl(
   prefix: string,
   configuredBaseUrl: string | undefined,
@@ -221,6 +223,7 @@ function resolveBaseUrl(
   return resolved.replace(/\/+$/, "");
 }
 
+// Key from the option, the provider's configuration or {PREFIX}_API_KEY, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
 function resolveApiKey(
   prefix: string,
   configuredApiKey: string | undefined,
@@ -282,6 +285,7 @@ function cleanModelId(prefix: string, model: string | ModelSpec): string {
   return rawId.replace(new RegExp(`^${escaped}/`, "i"), "");
 }
 
+// Canonical tool declarations as Chat Completions function tools; in: options.tools, out: request `tools`.
 function toCompatTools(tools?: StandardToolDeclaration[]): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined;
   return tools.map((t) => ({
@@ -309,6 +313,7 @@ function warnThinkingDropped(prefix: string, thinking: ThinkingConfig | undefine
   });
 }
 
+// `wav` or `mp3`, the only formats Chat audio input takes here; in: contentPartsToBlocks, out: input_audio.format.
 function audioFormatFor(mimeType?: string): string {
   const mime = (mimeType || "").toLowerCase();
   if (mime.includes("wav")) return "wav";
@@ -354,6 +359,7 @@ function assertNoVideoOrFileParts(
   throw err;
 }
 
+// Text, image (link or data URL) and audio parts as Chat content blocks; in: a user message's parts, out: fullHistoryMessages.
 async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPart[]> {
   const blocks: ChatContentPart[] = [];
   for (const part of parts) {
@@ -388,6 +394,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
   return blocks;
 }
 
+// A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
 function resultToOutput(result: unknown): string {
   if (typeof result === "string") return result;
   return safeStringify(result);
@@ -502,6 +509,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
 // Response mapping (Chat Completions -> canonical)
 // ---------------------------------------------------------------------------
 
+// Chat usage as TokenUsage, clamping cache reads to input; in: a reply or the last stream chunk, out: TokenUsage.
 function mapUsage(raw?: ChatResponse["usage"]): TokenUsage {
   const input = raw?.prompt_tokens ?? 0;
   const output = raw?.completion_tokens ?? 0;
@@ -524,6 +532,7 @@ function mapUsage(raw?: ChatResponse["usage"]): TokenUsage {
   return usage;
 }
 
+// The Gemini thought signature a proxy put on a tool call, if any; in: parseResponse, out: a string or undefined.
 function extractSignature(rawTc: {
   extra_content?: { google?: { thought_signature?: string } };
 }): string | undefined {
@@ -537,6 +546,7 @@ function withCompatSignature(sig: string | undefined): { thoughtSignature?: stri
   return { thoughtSignature: sig, thoughtSignatureProvider: "google" };
 }
 
+// Throws a concise error for an HTTP 200 reply that carries only `error`; in: parseResponse, out: a thrown error.
 function throwResponseError(
   response: ChatResponse,
   prefix: string,
@@ -551,6 +561,7 @@ function throwResponseError(
   throw toConciseProviderError(failure, prefix, modelId);
 }
 
+// Turns a Chat Completions JSON reply into text, thinking, tool calls and usage; in: generate, out: ProviderGenerateResult.
 function parseResponse(
   response: ChatResponse,
   prefix: string,
@@ -665,6 +676,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     this.configuredApiKey = opts?.apiKey;
   }
 
+  // The catalog spec of a model, else a permissive generic one; in: the registry, out: a ModelSpec.
   getModel(modelId: string): ModelSpec | undefined {
     const clean = cleanModelId(this.prefix, modelId);
     return (
@@ -675,14 +687,17 @@ export class OpenAICompatibleChatProvider implements Provider {
     );
   }
 
+  // This provider's endpoint for one request; in: generate/stream, out: resolveBaseUrl.
   private baseUrl(options?: ProviderRequestOptions): string {
     return resolveBaseUrl(this.prefix, this.configuredBaseUrl, options);
   }
 
+  // This provider's key for one request; in: requireApiKey, out: resolveApiKey.
   private apiKey(options?: ProviderRequestOptions): string | undefined {
     return resolveApiKey(this.prefix, this.configuredApiKey, options);
   }
 
+  // The key, where a missing one only throws for non-local endpoints (loopback and LAN may omit it); in: generate/stream, out: the key or undefined.
   private requireApiKey(baseUrl: string, options?: ProviderRequestOptions): string | undefined {
     const key = this.apiKey(options);
     if (!key && !isLocalEndpoint(baseUrl)) {
@@ -693,6 +708,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     return key;
   }
 
+  // Builds the Chat request (messages, tools, tool_choice, generation controls, response_format, stream usage) and warns+drops what a strict endpoint cannot take; in: generate/stream, out: the body.
   private async buildBody(
     modelId: string,
     context: ProviderContext,
@@ -789,6 +805,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     return body;
   }
 
+  // Fetch options with session-affinity headers (unless opted out), JSON content type and the Bearer key; in: doFetch and stream, out: RequestInit.
   private requestInit(
     body: ChatRequestBody,
     options: ProviderRequestOptions | undefined,
@@ -824,6 +841,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     return { method: "POST", headers, body: JSON.stringify(body), signal };
   }
 
+  // One HTTP call under the request timeout, returning status, headers and body text; in: generate, out: the raw reply.
   private async doFetch(
     url: string,
     body: ChatRequestBody,
@@ -846,6 +864,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     }
   }
 
+  // Throws a concise provider error (status, code, Retry-After, key hint) for a non-2xx reply; in: generate and stream, out: nothing or a thrown error.
   private throwIfError(
     status: number,
     url: string,
@@ -874,6 +893,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     throw toConciseProviderError(err, this.prefix, modelId);
   }
 
+  // Non-streaming turn as one retried JSON request; in: runAgentLoop, out: ProviderGenerateResult.
   async generate(
     model: string | ModelSpec,
     context: ProviderContext,
@@ -946,6 +966,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     }
   }
 
+  // Streaming turn over SSE: assembles text, reasoning, tool calls and usage, retrying only before the first byte; in: streamAgentLoop, out: an AssistantMessageEventStream.
   stream(
     model: string | ModelSpec,
     context: ProviderContext,
