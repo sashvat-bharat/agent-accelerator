@@ -386,6 +386,8 @@ telemetryBus.onEvent((e) => {
 | `skipScheduledAction(id, { home? })` | Ignore a missed run and wait for the next scheduled time. |
 | `deleteScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
 
+Every function except `createScheduledAction` finds the home folder through `setHome()`, `AGENT_ACCEL_HOME`, or `.agent-accel/` in the working directory. If you built the Agent with its own `home`, pass the same `{ home }` to these calls (the model's `scheduled_actions` tool already does).
+
 **How it behaves**
 
 * **One local clock.** A single timer per home folder (guarded by a one-process lock, `<home>/.lock`) ticks once a second against the machine's own time and only asks what is overdue, so drift or sleep cannot skip a run. There is no timezone or daylight-saving logic. The timer is `unref`'d and runs only while something is pending, so actions run only while your process is alive.
