@@ -1,7 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import {
   OpenAICompatibleChatProvider,
-  OpenAICompatibleProvider,
   CustomProvider,
   createOpenAICompatibleProvider,
   createCustomProvider,
@@ -37,7 +36,7 @@ describe("OpenAICompatibleChatProvider (native REST, mocked)", () => {
     expect(r.provider.id).toBe("groq");
     expect(r.modelId).toBe("llama-3.3-70b-versatile");
     expect(r.provider).toBeInstanceOf(OpenAICompatibleChatProvider);
-    expect(r.provider).toBeInstanceOf(OpenAICompatibleProvider);
+    expect(r.provider).toBeInstanceOf(OpenAICompatibleChatProvider);
     expect(getProvider("groq")).toBe(r.provider);
   });
 

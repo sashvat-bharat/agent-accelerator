@@ -4,10 +4,10 @@ import {
   tool,
   getProvider,
   resolveModel,
-  GoogleAIStudioProvider,
-  OpenAIProvider,
-  OpenRouterProvider,
-  OpenAICompatibleProvider,
+  GoogleInteractionsProvider,
+  OpenAIResponsesProvider,
+  OpenRouterChatCompletionsProvider,
+  OpenAICompatibleChatProvider,
   stripSchemaForGoogle,
   isValidThoughtSignature,
   retainThoughtSignature,
@@ -28,9 +28,9 @@ describe("Single-File Provider Architecture & Provider-Specific Types", () => {
     const openrouter = getProvider("openrouter");
     const groq = getProvider("groq"); // Custom provider auto-created
 
-    expect(openai).toBeInstanceOf(OpenAIProvider);
-    expect(openrouter).toBeInstanceOf(OpenRouterProvider);
-    expect(groq).toBeInstanceOf(OpenAICompatibleProvider);
+    expect(openai).toBeInstanceOf(OpenAIResponsesProvider);
+    expect(openrouter).toBeInstanceOf(OpenRouterChatCompletionsProvider);
+    expect(groq).toBeInstanceOf(OpenAICompatibleChatProvider);
   });
 
   it("should expose provider-specific models and fallbacks", () => {
@@ -108,7 +108,7 @@ describe("Single-File Provider Architecture & Provider-Specific Types", () => {
   });
 
   it("should route Gemini models through the native Interactions adapter (no 2.x rejection)", async () => {
-    const google = getProvider("google") as GoogleAIStudioProvider;
+    const google = getProvider("google") as GoogleInteractionsProvider;
 
     // NOTE: catalog-populated `models` assertions live in the test above;
     // the test env ships an empty catalog cache, so routing (which falls back

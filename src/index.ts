@@ -1,28 +1,10 @@
 import type { AssistantMessageEventStream as AssistantMessageEventStreamT } from "./streaming/event-stream.ts";
 import type { AgentResponse as AgentResponseT } from "./types/response.ts";
 
-// Q-50 public API budget: ~25 core runtime exports + compat/deprecation shims.
-// Core = Agent, tool, SubAgent (deprecated alias), AgentResponse,
-// AssistantMessageEventStream, document conversion, delegation primitives,
-// provider registry, catalog, errors, and option/normalization helpers.
-// Everything else below is a shim kept for compat and marked @deprecated
-// toward a future `/internal` entry. Nothing is deleted (would break tests).
-//
-// Q-27 node split (deferred): this root entry pulls `session/store.ts`, which
-// imports `node:fs` for session persistence. A future `/node` subpath will
-// host the fs-backed persistence/telemetry surface; the root entry stays
-// runtime-agnostic. Until then, browser/bundler consumers should import the
-// documented core shims only.
-//
-// Q-51 one way to run: `run()` is canonical. `ask()` and `run/stream: true`
-// remain for compat but are deprecated — prefer `run()` for single-shot and
-// `stream()` for event iteration. `Run` (below) is the typed streaming handle.
+// Public barrel: the one entry point of the package (`main`/`module`/`types`). `run()` is the canonical way to run an
+// agent and `stream()` the canonical way to iterate events; `ask()` and `run(..., { stream: true })` remain as shorthands.
 
-/**
- * Typed streaming run handle (Q-51): the `AssistantMessageEventStream`
- * returned by `stream()`/`run(stream:true)`, with its terminal `result()` and
- * `cancel()` surfaced on the type for callers that only need the handle.
- */
+/** The `AssistantMessageEventStream` returned by `stream()`/`run(stream:true)`, typed with its terminal `result()` and `cancel()`. */
 export type Run = AssistantMessageEventStreamT & {
   result: () => Promise<AgentResponseT>;
   cancel: (reason?: unknown) => void;
@@ -64,27 +46,11 @@ export {
   createChildSessionId,
   createFixedChildSessionId,
   isSessionDescendant,
-  getSubAgentTrace,
-  getSubAgentTraceScoped,
-  getSubAgentTraceForSessions,
-  listSubAgentTraceIds,
-  listSubAgentTraceIdsForSessions,
-  subscribeToSubAgent,
-  subscribeToSubAgentForSessions,
-  appendSubAgentStep,
-  pruneTraces,
-  trimTraceSteps,
   checkBudget,
   chargeBudgetUsage,
   reserveSpawn,
-  isStreamingLoop,
-  escapeXml as escapeXmlFromDelegation,
-  MAX_SUBAGENT_TRACES,
-  SUBAGENT_TRACE_TTL_MS,
-  MAX_SUBAGENT_STEPS_PER_TRACE,
-  SUBAGENT_SUBSCRIBE_TTL_MS,
 } from "./agent/delegation.ts";
-export type { AgentAsToolTarget, SubAgentTrace, StreamingLoopHandle } from "./agent/delegation.ts";
+export type { AgentAsToolTarget, SubAgentTrace } from "./agent/delegation.ts";
 export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOptions } from "./agent/workers.ts";
 
 // Scheduled actions: dynamic sub-agents that run later and save their answer to a file
@@ -147,20 +113,12 @@ export { resolveEffectiveThinking } from "./agent/agent.ts";
 export { withRetries, isTransientError } from "./utils/retry.ts";
 export { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOnResponses } from "./utils/errors.ts";
 // Native provider implementations.
-/** @deprecated The discontinued beta-Responses transport was removed
- * directly for frozen wire-contract evidence only. It is wired nowhere and
- * must not be extended or re-exported here (Q-46). */
 export {
   OpenAICompatibleChatProvider,
   createOpenAICompatibleProvider,
   createCustomProvider,
   CustomProvider,
 } from "./providers/openai-compat.ts";
-/**
- * @deprecated Compat alias of `OpenAICompatibleChatProvider` (canonical).
- * Kept for back-compat only; new code uses the canonical name (Q-50).
- */
-export { OpenAICompatibleChatProvider as OpenAICompatibleProvider } from "./providers/openai-compat.ts";
 export type { CustomProviderOptions } from "./providers/openai-compat.ts";
 
 // Canonical provider contract (provider-agnostic) + native adapters.
@@ -168,29 +126,12 @@ export {
   GoogleInteractionsProvider,
   clearInteractionChains,
 } from "./providers/google.ts";
-/**
- * @deprecated Compat alias of `GoogleInteractionsProvider` (canonical).
- * Kept for back-compat only; new code uses the canonical name (Q-50).
- */
-export { GoogleInteractionsProvider as GoogleAIStudioProvider } from "./providers/google.ts";
 export {
   OpenRouterChatCompletionsProvider,
 } from "./providers/openrouter.ts";
-/**
- * @deprecated Compat alias of `OpenRouterChatCompletionsProvider`
- * (canonical). Kept for back-compat only (Q-50).
- */
-export { OpenRouterChatCompletionsProvider as OpenRouterProvider } from "./providers/openrouter.ts";
-// Discontinued beta-Responses transport, removed from core
-// (was frozen migration evidence, wired nowhere): OpenRouterResponsesProvider.
 export {
   OpenAIResponsesProvider,
 } from "./providers/openai.ts";
-/**
- * @deprecated Compat alias of `OpenAIResponsesProvider` (canonical).
- * Kept for back-compat only; new code uses the canonical name (Q-50).
- */
-export { OpenAIResponsesProvider as OpenAIProvider } from "./providers/openai.ts";
 /**
  * @deprecated Internal provider mappers/routing helpers. Prefer the
  * provider-agnostic registry (`resolveModel`/`getProvider`); direct mapper
@@ -205,9 +146,7 @@ export {
   clearSessionRouting,
   mapThinkingLevelToGoogle,
   mapServiceTierToGoogle,
-  mapThinkingLevelToOpenRouter,
   mapServiceTierToOpenRouter,
-  mapToolChoiceToOpenRouter,
   mapThinkingLevelToOpenRouterChat,
   mapToolChoiceToOpenRouterChat,
   mapThinkingLevelToOpenAI,
@@ -230,7 +169,6 @@ export {
 export type {
   ProviderCapabilityStatus,
   CanonicalToolChoiceMode,
-  OpenRouterToolChoice,
   OpenRouterChatToolChoice,
   OpenAIToolChoice,
   ChatCompletionsResponseFormat,
@@ -261,11 +199,6 @@ export { clampCacheKey } from "./utils/cache.ts";
 
 // Streaming & Events
 export { AssistantMessageEventStream } from "./streaming/event-stream.ts";
-/**
- * @deprecated Internal SSE plumbing. Prefer `AssistantMessageEventStream`;
- * direct parser use moves to the future `/internal` entry (Q-50).
- */
-export { SSEParser } from "./streaming/sse-parser.ts";
 export type { SteerEntry } from "./agent/loop.ts";
 
 // Responses
@@ -325,8 +258,8 @@ export type { SessionLimits, SessionPayloadStatus, PersistedAgentSession, Sessio
  * @deprecated Session-routing internals. Prefer agent-level `sessionId`;
  * direct use moves to the future `/internal` entry (Q-50).
  */
-export { createSessionId, hashSessionPart, createTrackingId, nowMs, newRunId, newTurnId, previewPrompt, parseModelRef, resolveAgentConfig } from "./utils/session.ts";
-export type { ParsedModelRef, ResolvedAgentConfig } from "./utils/session.ts";
+export { createSessionId, hashSessionPart, createTrackingId, nowMs, newRunId, newTurnId, previewPrompt, parseModelRef } from "./utils/session.ts";
+export type { ParsedModelRef } from "./utils/session.ts";
 /**
  * @deprecated Raw env access. Prefer explicit `Agent` config (which wins over
  * env) and `Agent.fromEnv()`/`agentFromEnv()`; direct use moves to the future

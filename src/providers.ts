@@ -190,40 +190,6 @@ export function mapThinkingLevelToOpenRouterChat(
   return {};
 }
 
-/**
- * Maps a canonical ThinkingLevel onto OpenRouter Responses `reasoning.effort`.
- * Documented efforts: minimal|low|medium|high (server default medium).
- * Wire-validated extras: `none` disables reasoning output; `xhigh`/`max` are
- * echoed but are NOT documented levels, so they clamp to `high` with a warning.
- *
- * @deprecated The Responses skin is discontinued for OpenRouter
- * (removed from core). Use
- * {@link mapThinkingLevelToOpenRouterChat} with the stable Chat Completions
- * transport instead.
- */
-export function mapThinkingLevelToOpenRouter(
-  level: ThinkingLevel | string | undefined
-): { effort?: string } {
-  if (!level) return {};
-  const norm = String(level).toLowerCase().trim();
-  if (norm === "dynamic") return {}; // server default (medium)
-  if (norm === "none") return { effort: "none" };
-  if (norm === "xhigh" || norm === "max") {
-    emitProviderWarning({
-      provider: "openrouter",
-      capability: "thinking level",
-      requested: String(level),
-      reason: "OpenRouter documents reasoning efforts up to high.",
-      fallback: "reasoning effort high",
-    });
-    return { effort: "high" };
-  }
-  if (norm === "minimal" || norm === "low" || norm === "medium" || norm === "high") {
-    return { effort: norm };
-  }
-  return {};
-}
-
 /** Maps canonical ServiceTier onto OpenRouter `service_tier` (omit = auto). */
 export function mapServiceTierToOpenRouter(tier: ServiceTier | undefined): "flex" | "priority" | undefined {
   if (tier === "flex" || tier === "priority") return tier;
@@ -284,25 +250,6 @@ export function mapToolChoiceToOpenRouterChat(
   if (choice === "none" || choice === "required") return choice;
   const name = choice.function?.name;
   if (name) return { type: "function", function: { name } };
-  return undefined;
-}
-
-/** OpenRouter Responses `tool_choice` wire values.
- * @deprecated Discontinued skin; see {@link OpenRouterChatToolChoice}. */
-export type OpenRouterToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
-
-/**
- * Maps canonical toolChoice onto OpenRouter Responses `tool_choice`.
- * `auto` is the server default (omitted); `required` is natively supported
- * (validated); a function pin passes through verbatim.
- */
-export function mapToolChoiceToOpenRouter(
-  choice: "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
-): OpenRouterToolChoice | undefined {
-  if (!choice || choice === "auto") return undefined;
-  if (choice === "none" || choice === "required") return choice;
-  const name = choice.function?.name;
-  if (name) return { type: "function", name };
   return undefined;
 }
 

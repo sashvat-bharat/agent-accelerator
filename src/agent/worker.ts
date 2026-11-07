@@ -3,11 +3,8 @@ import type { SubAgentStep } from "../types/response.ts";
 import type { AgentConfig } from "../types/agent.ts";
 import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
-import { escapeXml } from "../utils/serialization.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
 import { resolveModel } from "../providers/registry.ts";
-
-export { escapeXml };
 
 /** Minimal live-trace shape shared by fixed + dynamic workers (structural subset of `SubAgentTrace`). */
 export interface LiveWorkerTrace {

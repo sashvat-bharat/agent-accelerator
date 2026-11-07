@@ -4,7 +4,7 @@ import {
   getProvider,
   ModelProvider,
   ensureCustomProvider,
-  OpenAICompatibleProvider,
+  OpenAICompatibleChatProvider,
 } from "../src/index.ts";
 
 describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
@@ -31,7 +31,7 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
     const resolved = resolveModel("groq/llama-3.3-70b-versatile");
     expect(resolved.provider.id).toBe("groq");
     expect(resolved.modelId).toBe("llama-3.3-70b-versatile");
-    expect(resolved.provider).toBeInstanceOf(OpenAICompatibleProvider);
+    expect(resolved.provider).toBeInstanceOf(OpenAICompatibleChatProvider);
   });
 
   test("different prefixes get isolated providers (multi-provider in one process)", () => {

@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { tool } from "../tools/tool.ts";
-import { escapeXml } from "../utils/serialization.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { AgentResponse, SubAgentExecutionMetadata, SubAgentStep } from "../types/response.ts";
 import type { TokenUsage } from "../types/core.ts";
@@ -16,8 +15,6 @@ import { nowMs } from "../utils/session.ts";
 import { newRunId } from "../utils/session.ts";
 import { newTurnId } from "../utils/session.ts";
 import { sanitizeToolName, createLiveWorker } from "./worker.ts";
-
-export { escapeXml };
 
 export function createChildSessionId(parentId: string, tag: string): string {
   let rand: string;
@@ -104,13 +101,13 @@ const subagentTraces = new Map<string, SubAgentTrace>();
 const subagentListeners = new Map<string, Set<(trace: SubAgentTrace) => void>>();
 
 /** Max trace keys held (LRU, evicts oldest whole trace on insert) (Q-30). */
-export const MAX_SUBAGENT_TRACES = 500;
+const MAX_SUBAGENT_TRACES = 500;
 /** Trace TTL: 1h wall-clock, lazily expired on read (Q-30). */
-export const SUBAGENT_TRACE_TTL_MS = 60 * 60 * 1000;
+const SUBAGENT_TRACE_TTL_MS = 60 * 60 * 1000;
 /** Max steps retained per trace; oldest steps are dropped beyond this (Q-30). */
-export const MAX_SUBAGENT_STEPS_PER_TRACE = 100;
+const MAX_SUBAGENT_STEPS_PER_TRACE = 100;
 /** Live subscriptions auto-expire after 5min (Q-30). */
-export const SUBAGENT_SUBSCRIBE_TTL_MS = 5 * 60 * 1000;
+const SUBAGENT_SUBSCRIBE_TTL_MS = 5 * 60 * 1000;
 
 /** Last-write wall-clock per canonical trackingId (drives TTL; reads do not extend it). */
 const traceTouchedAt = new Map<string, number>();
@@ -138,7 +135,7 @@ function touchTrace(canonical: string, now = Date.now()): void {
  * Called on every insert. Whole-trace eviction removes both the canonical
  * key and its display-id alias.
  */
-export function pruneTraces(now = Date.now()): void {
+function pruneTraces(now = Date.now()): void {
   for (const canonical of [...new Set([...subagentTraces.values()].map((t) => t.trackingId))]) {
     if (isTraceExpired(canonical, now)) deleteTraceByCanonical(canonical);
   }
@@ -155,7 +152,7 @@ export function pruneTraces(now = Date.now()): void {
 }
 
 /** Drops oldest steps beyond {@link MAX_SUBAGENT_STEPS_PER_TRACE} (Q-30). */
-export function trimTraceSteps(trace: SubAgentTrace): void {
+function trimTraceSteps(trace: SubAgentTrace): void {
   if (trace.steps.length > MAX_SUBAGENT_STEPS_PER_TRACE) {
     trace.steps.splice(0, trace.steps.length - MAX_SUBAGENT_STEPS_PER_TRACE);
   }
@@ -224,45 +221,6 @@ function notifyTrace(trackingId: string): void {
   }
 }
 
-/**
- * Returns a snapshot of one worker's trace by tracking id
- * (`SUBAGENT-NAME-{32hex}` or the raw 32-hex suffix). Used by
- * `agent.track(id)` for realtime inspection.
- *
- * Prefer {@link getSubAgentTraceScoped} when the parent session is known:
- * this compat lookup matches any parent and can confuse sibling workers
- * whose display names collide across sessions.
- */
-export function getSubAgentTrace(id: string): SubAgentTrace | undefined {
-  const t = lookupTrace(id);
-  return t ? snapshotTrace(t) : undefined;
-}
-
-/**
- * Scoped trace lookup (Q-30, preferred): like {@link getSubAgentTrace} but
- * only matches when `trace.parentSessionId === parentSessionId`. Use this
- * from `Agent.track` (or any parent-bound caller) so truncated/aliased ids
- * cannot leak across sessions.
- */
-export function getSubAgentTraceScoped(id: string, parentSessionId: string): SubAgentTrace | undefined {
-  if (!id || !parentSessionId) return undefined;
-  const t = lookupTrace(id);
-  if (!t) return undefined;
-  if (t.parentSessionId !== parentSessionId) return undefined;
-  return snapshotTrace(t);
-}
-
-/**
- * Lists tracking ids of EVERY worker trace in the process (all agents, all
- * sessions). Diagnostics only: `Agent` never uses it, because in a
- * multi-tenant host it would expose other tenants' workers. Use
- * {@link listSubAgentTraceIdsForSessions} for agent-bound callers.
- */
-export function listSubAgentTraceIds(): string[] {
-  pruneTraces();
-  return [...subagentTraces.keys()];
-}
-
 /** Scoped lookup across a set of parent session ids (an agent's default + named sessions). */
 export function getSubAgentTraceForSessions(
   id: string,
@@ -324,21 +282,6 @@ export function subscribeToSubAgent(id: string, fn: (trace: SubAgentTrace) => vo
     try { clearTimeout(timer); } catch {}
     try { subagentListeners.get(key)?.delete(fn); } catch {}
   };
-}
-
-/** Appends a step to a worker trace and notifies live subscribers. */
-export function appendSubAgentStep(trackingId: string, step: SubAgentStep): void {
-  const t = subagentTraces.get(trackingId) ?? lookupTrace(trackingId);
-  if (!t) return;
-  if (isTraceExpired(t.trackingId)) {
-    deleteTraceByCanonical(t.trackingId);
-    return;
-  }
-  t.steps.push(step);
-  trimTraceSteps(t);
-  t.turns = Math.max(t.turns, step.turn);
-  touchTrace(t.trackingId);
-  notifyTrace(trackingId);
 }
 
 // ---------------------------------------------------------------------------
@@ -632,27 +575,6 @@ export function reserveSpawn(parentAgent: Agent, count = 1): BudgetState {
   state.spawned = next;
   checkBudget(budget, state);
   return state;
-}
-
-// ---------------------------------------------------------------------------
-// Single core loop note + streaming-loop guard (Q-44, partial).
-// The canonical run/stream loops live in `loop.ts` + `agent.ts` (other
-// owners) and are intentionally NOT duplicated here. This guard exists so
-// future consolidation can branch on streaming handles without importing
-// the loop.
-// ---------------------------------------------------------------------------
-
-/** Minimal shape of a streaming run handle (has subscribe + terminal promise). */
-export interface StreamingLoopHandle {
-  on: (...args: unknown[]) => unknown;
-  result: (...args: unknown[]) => Promise<unknown>;
-}
-
-/** Type guard for streaming-loop handles (Q-44). */
-export function isStreamingLoop(value: unknown): value is StreamingLoopHandle {
-  if (!value || typeof value !== "object") return false;
-  const r = value as Record<string, unknown>;
-  return typeof r["on"] === "function" && typeof r["result"] === "function";
 }
 
 /** Optional name/description wrapper for converting an Agent into a tool. */
