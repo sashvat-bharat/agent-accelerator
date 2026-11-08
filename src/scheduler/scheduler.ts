@@ -751,7 +751,7 @@ export class Scheduler {
       run.controller.abort(new Error("deleted"));
       await run.done;
     }
-    deleteTask(this.home, id); // the record and its saved deliveries, under the action's mutex
+    if (!deleteTask(this.home, id)) return { ok: false, reason: "not_found" }; // another process deleted it first; only the one that removed it reports it
     if (opts.purge) removeTaskFolder(this.home, id);
     emit("deleted", `"${rec.name}" (${id}) was deleted.`, { id, name: rec.name, forced: !!run, purged: !!opts.purge });
     return { ok: true };

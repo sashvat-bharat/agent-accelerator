@@ -141,6 +141,9 @@ export function clearHeartbeat(home: string, id: string): void {
   }
 }
 
+// True for the error of a folder that was removed while we waited for its lock; in: the catch blocks of the mutating helpers, out: a boolean.
+const isMissingFolder = (err: unknown): boolean => (err as { code?: string } | null)?.code === "ENOENT";
+
 // Deletes the leftover temp files of a task.json / delivery.json write that never finished (a killed process); only called while holding the action's mutex, which is what makes it safe (run files are written outside the mutex, so they are never touched); in: the three mutating helpers, out: nothing.
 function sweepShardTemps(dir: string): void {
   try {
@@ -279,14 +282,19 @@ export function updateTask<T>(home: string, id: string, fn: (rec: ScheduledActio
     return fn(undefined); // not an action id: nothing to change
   }
   if (!fs.existsSync(dir)) return fn(undefined);
-  return withFileMutex(mutexFile(dir), () => {
-    sweepShardTemps(dir);
-    const rec = readTask(home, id);
-    const before = rec ? JSON.stringify(rec) : "";
-    const result = fn(rec);
-    if (rec && JSON.stringify(rec) !== before) writeFileDurable(taskFile(dir), JSON.stringify({ version: 2, task: rec }, null, 2) + "\n");
-    return result;
-  });
+  try {
+    return withFileMutex(mutexFile(dir), () => {
+      sweepShardTemps(dir);
+      const rec = readTask(home, id);
+      const before = rec ? JSON.stringify(rec) : "";
+      const result = fn(rec);
+      if (rec && JSON.stringify(rec) !== before) writeFileDurable(taskFile(dir), JSON.stringify({ version: 2, task: rec }, null, 2) + "\n");
+      return result;
+    });
+  } catch (err) {
+    if (!isMissingFolder(err)) throw err;
+    return fn(undefined); // another process deleted the action while we waited for its lock
+  }
 }
 
 /**
@@ -318,12 +326,18 @@ export function createTask(home: string, nextId: () => string, build: (id: strin
 export function deleteTask(home: string, id: string): boolean {
   const dir = taskDir(home, id);
   if (!fs.existsSync(dir)) return false;
-  const removed = withFileMutex(mutexFile(dir), () => {
-    const had = fs.existsSync(taskFile(dir)) || fs.existsSync(deliveryFile(dir));
-    for (const f of [taskFile(dir), deliveryFile(dir)]) fs.rmSync(f, { force: true }), fs.rmSync(`${f}.bak`, { force: true });
-    fs.rmSync(heartbeatFile(dir), { force: true });
-    return had;
-  });
+  let removed: boolean;
+  try {
+    removed = withFileMutex(mutexFile(dir), () => {
+      const had = fs.existsSync(taskFile(dir)) || fs.existsSync(deliveryFile(dir));
+      for (const f of [taskFile(dir), deliveryFile(dir)]) fs.rmSync(f, { force: true }), fs.rmSync(`${f}.bak`, { force: true });
+      fs.rmSync(heartbeatFile(dir), { force: true });
+      return had;
+    });
+  } catch (err) {
+    if (isMissingFolder(err)) return false; // another process deleted it first
+    throw err;
+  }
   try {
     fs.rmdirSync(dir); // only succeeds when nothing is left in it
   } catch {
@@ -346,20 +360,26 @@ export function readDeliveries(home: string): PendingDelivery[] {
 /** Changes the saved deliveries of ONE action under its short mutex (`fn` mutates the array in place); the file is removed when the list ends up empty. */
 export function updateDeliveries<T>(home: string, id: string, fn: (pending: PendingDelivery[]) => T): T {
   const dir = taskDir(home, id);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return withFileMutex(mutexFile(dir), () => {
-    sweepShardTemps(dir);
-    const file = deliveryFile(dir);
-    const pending = (readShard(file, parsePending) ?? []) as unknown as PendingDelivery[];
-    const result = fn(pending);
-    if (pending.length === 0) {
-      fs.rmSync(file, { force: true });
-      fs.rmSync(`${file}.bak`, { force: true });
-    } else {
-      writeFileDurable(file, JSON.stringify({ version: 2, pending }, null, 2) + "\n");
+  for (let attempt = 1; ; attempt++) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      return withFileMutex(mutexFile(dir), () => {
+        sweepShardTemps(dir);
+        const file = deliveryFile(dir);
+        const pending = (readShard(file, parsePending) ?? []) as unknown as PendingDelivery[];
+        const result = fn(pending);
+        if (pending.length === 0) {
+          fs.rmSync(file, { force: true });
+          fs.rmSync(`${file}.bak`, { force: true });
+        } else {
+          writeFileDurable(file, JSON.stringify({ version: 2, pending }, null, 2) + "\n");
+        }
+        return result;
+      });
+    } catch (err) {
+      if (!isMissingFolder(err) || attempt >= 3) throw err; // the folder was removed between making it and locking it: make it again
     }
-    return result;
-  });
+  }
 }
 
 // ---------------------------------------------------------------------------

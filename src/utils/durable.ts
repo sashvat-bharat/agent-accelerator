@@ -228,12 +228,13 @@ const heldMutexes = new Set<string>();
  * Runs `fn` while holding a short mutex file (`lockFile`, created with O_EXCL, content = pid, host, time), so several
  * processes can change one shared file without losing updates. Hold it for milliseconds only: `fn` must be synchronous and
  * quick. A waiter retries every few ms; a holder whose pid is gone (same host) or whose lock is older than 30 s is taken
- * over. Not re-entrant (a nested call on the same file throws). Throws `ConfigError` after 10 s of waiting. Local disks only.
+ * over. Not re-entrant (a nested call on the same file throws). The folder of `lockFile` must exist: if it is removed meanwhile
+ * (its owner deleted it) the call throws the plain `ENOENT` error, and the caller decides what that means. Throws
+ * `ConfigError` after 10 s of waiting. Local disks only.
  */
 export function withFileMutex<T>(lockFile: string, fn: () => T): T {
   const file = path.resolve(lockFile);
   if (heldMutexes.has(file)) throw new ConfigError(`[Agent Accelerator] Mutex "${file}" is already held by this process (nested use).`);
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const mine = JSON.stringify({ pid: process.pid, host: os.hostname(), at: Date.now() });
   const deadline = Date.now() + MUTEX_WAIT_MS;
   let unreadable = 0;
