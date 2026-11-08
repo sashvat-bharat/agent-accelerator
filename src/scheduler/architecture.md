@@ -15,5 +15,8 @@ Scheduled actions: a worker that runs later (once or repeating) and saves its an
 - `startCook` advances the next times BEFORE the run starts; a run still cooking when the next is due is skipped, never stacked.
 - Runs are fresh stateless workers built by `buildDynamicWorkerConfig`; their spending guardrail is `workerBudget` only.
 - The Agent registry holds `WeakRef`s by name: keep every Agent that owns actions referenced, or its runs become `missed`.
+- Several processes may share a home (the file store is safe for it; the home lock is lifted in a later change of this release). Ownership: a process only starts, delivers or recovers actions whose Agent it registered. An action nobody here owns is left alone until its delivery time passed with no run started, then marked `missed` (`no_agent`).
+- Exactly once: a scheduled start re-checks under the action's mutex that it is still `waiting` and due; `markMissed` only changes the state the caller saw; a delivery is emitted only by the process that removed its entry from `delivery.json`.
+- A run in flight keeps `<id>/.heartbeat` (pid, host, token; mtime refreshed every 5 s, stale after 60 s), written before the record shows `cooking`. A cooking action whose owner is dead (pid gone, stale, or none) is recovered by a live process that owns its Agent, at start and every 15 s. `delete` of a run another live process is cooking is refused, even with `force`.
 - Times come from `Date`, local clock only. Tests inject `scheduler.now` / `tickMs` and call `tick()`.
 - Events: `scheduled_action.{created,updated,started,ready,failed,delivered,missed,skipped,deleted,invalid,store_corrupt,error}`.

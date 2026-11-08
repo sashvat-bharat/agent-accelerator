@@ -5,12 +5,14 @@
  *   <home>/scheduled/<id>/delivery.json         its saved results waiting for their delivery time (`{ version: 2, pending }`)
  *   <home>/scheduled/<id>/<date>.md             one file per run
  *   <home>/scheduled/<id>/.mutex                short lock held while this action's files change
+ *   <home>/scheduled/<id>/.heartbeat            written while a process is running the action (pid, host; its mtime is refreshed)
  *
  * One folder per action, so processes working on different actions never touch the same file. The files are the
  * source of truth: every change takes the action's mutex, re-reads first (never writes from a stale copy) and goes
  * through `writeFileDurable` (temp file, fsync, `.bak`, rename). Sync `fs`, like the session store.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
 import { readWithBackup, withFileMutex, writeFileDurable } from "../utils/durable.ts";
@@ -89,6 +91,55 @@ const taskFile = (dir: string): string => path.join(dir, "task.json");
 const deliveryFile = (dir: string): string => path.join(dir, "delivery.json");
 // Path of the short mutex that serialises every change to one action (record and deliveries); in: updateTask/updateDeliveries/deleteTask, out: its path.
 const mutexFile = (dir: string): string => path.join(dir, ".mutex");
+
+// Path of the file a running action's owner keeps fresh; in: the heartbeat helpers, out: its path.
+const heartbeatFile = (dir: string): string => path.join(dir, ".heartbeat");
+
+/** Who is running an action and how long ago they last said so. */
+export interface Heartbeat {
+  pid: number;
+  host: string;
+  /** Identifies the scheduler instance inside that process. */
+  token: string;
+  ageMs: number;
+}
+
+/** Marks an action as running in this process (pid, host, token); written before the record flips to `cooking`; in: startCook, out: `<id>/.heartbeat`. */
+export function writeHeartbeat(home: string, id: string, token: string): void {
+  fs.writeFileSync(heartbeatFile(taskDir(home, id)), JSON.stringify({ pid: process.pid, host: os.hostname(), token }), { mode: 0o600 });
+}
+
+/** Refreshes the heartbeat's modification time; false when the file is gone; in: the scheduler tick for each run in flight. */
+export function touchHeartbeat(home: string, id: string): boolean {
+  try {
+    const now = new Date();
+    fs.utimesSync(heartbeatFile(taskDir(home, id)), now, now);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The heartbeat of an action, or undefined when it has none or the file is unreadable; in: the dead-owner checks and `delete`. */
+export function readHeartbeat(home: string, id: string): Heartbeat | undefined {
+  try {
+    const file = heartbeatFile(taskDir(home, id));
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<Heartbeat>;
+    if (typeof raw.pid !== "number" || typeof raw.host !== "string" || typeof raw.token !== "string") return undefined;
+    return { pid: raw.pid, host: raw.host, token: raw.token, ageMs: Date.now() - fs.statSync(file).mtimeMs };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Removes the heartbeat when a run ends; in: the scheduler after a run, out: nothing. */
+export function clearHeartbeat(home: string, id: string): void {
+  try {
+    fs.rmSync(heartbeatFile(taskDir(home, id)), { force: true });
+  } catch {
+    // why: a leftover heartbeat of a finished run is harmless (it is only read for actions that are cooking).
+  }
+}
 
 /** Absolute path of a run file given its `scheduled/`-relative path. */
 export function runPath(home: string, relativeFile: string): string {
@@ -257,6 +308,7 @@ export function deleteTask(home: string, id: string): boolean {
   const removed = withFileMutex(mutexFile(dir), () => {
     const had = fs.existsSync(taskFile(dir)) || fs.existsSync(deliveryFile(dir));
     for (const f of [taskFile(dir), deliveryFile(dir)]) fs.rmSync(f, { force: true }), fs.rmSync(`${f}.bak`, { force: true });
+    fs.rmSync(heartbeatFile(dir), { force: true });
     return had;
   });
   try {

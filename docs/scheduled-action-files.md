@@ -11,6 +11,7 @@ Everything lives under one folder, `<home>/scheduled/` (`home` is `Agent({ home 
     delivery.json        its results saved but not yet delivered (only while there are any)
     27-october-2026.md   one file per run: a header, then the result
     .mutex               a short lock, present only while the SDK changes this action
+    .heartbeat           present while a process is running the action: its pid, host and a token; the file's modification time is refreshed every 5 s
 ```
 
 The SDK reads and writes these files itself; there is no database and no notification system. What happens when a result is delivered is your code (see the `scheduled_action.delivered` event).
@@ -228,7 +229,7 @@ The events on `telemetryBus` (`code`, then `data`) are part of the same contract
 
 | SDK version | Change |
 |---|---|
-| unreleased | **Format version 2: one folder per action.** `tasks.json` and `deliveries.json` are gone; each action has `<home>/scheduled/<id>/task.json` (`{ "version": 2, "task": { ... } }`, the record fields are unchanged) and, while results wait for their delivery time, `<id>/delivery.json` (`{ "version": 2, "pending": [...] }`, the entry fields are unchanged). Run files keep their path. **Nothing is converted for you:** actions saved in an old `tasks.json` are not read; create them again. |
+| unreleased | **Format version 2: one folder per action.** `tasks.json` and `deliveries.json` are gone; each action has `<home>/scheduled/<id>/task.json` (`{ "version": 2, "task": { ... } }`, the record fields are unchanged) and, while results wait for their delivery time, `<id>/delivery.json` (`{ "version": 2, "pending": [...] }`, the entry fields are unchanged). Run files keep their path. While a run is in flight its owner keeps `<id>/.heartbeat` fresh, which is how other processes tell a live run from a dead one. **Nothing is converted for you:** actions saved in an old `tasks.json` are not read; create them again. |
 | unreleased | The folder is renamed from `<home>/scheduled_actions/` to `<home>/scheduled/`. **Nothing is moved for you:** an existing folder must be renamed once by hand (`mv .agent-accel/scheduled_actions .agent-accel/scheduled`), otherwise the new folder starts empty. The automatic rename of the pre-0.5.0 `scheduled_tasks/` folder is gone. File formats, the tool name `scheduled_actions` and the `scheduled_action.*` events are unchanged. |
 | 0.5.5 | The format becomes a stable contract (this page). Added: `schedule.onMissed` (record), `late` (delivery entry, optional), the spending fields of the run header (`turns`, `inputTokens`, `freshInputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outputTokens`, `thinkingTokens`, `cacheHitRate`, `costSource`, `unpricedTurns`; `tokens` is now input + output over all attempts; `costUsd` is priced per turn). Changed: `late` is `true` for a run that replaces a missed occurrence, never for an ordinary `run_now`, and is compared in whole seconds. Event `scheduled_action.killed` became `scheduled_action.deleted`. The timeout options were reduced to `workerTimeoutMs` and the action's own `timeoutMs`. |
 | 0.5.3 | Writes became durable (fsync, `.bak` copy, atomic rename); a damaged `tasks.json` / `deliveries.json` is restored from its `.bak`. One process per home folder. |

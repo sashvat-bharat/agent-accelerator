@@ -103,8 +103,8 @@ function pause(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-// True while process `pid` exists (EPERM means it exists but belongs to someone else); in: a pid from a lock file, out: lockFolder's stale check.
-function processAlive(pid: number): boolean {
+/** True while process `pid` exists (EPERM means it exists but belongs to someone else); in: a pid from a lock or heartbeat file, out: the stale checks. */
+export function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

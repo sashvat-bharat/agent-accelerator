@@ -12,12 +12,13 @@
  *                                         |                                     |
  *                                         +--> failed (recorded, moves on)      +--> waiting (repeat) | done
  */
+import * as os from "node:os";
 import type { Agent } from "../agent/agent.ts";
 import { createChildSessionId } from "../agent/delegation.ts";
 import { buildDynamicWorkerConfig, grantWorkerTools, scheduledRunTimeoutMs } from "../agent/worker.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { readUsage, usageLine, type UsageTotals } from "../session/usage.ts";
-import { lockFolder } from "../utils/durable.ts";
+import { lockFolder, processAlive } from "../utils/durable.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { AgentResponse } from "../types/response.ts";
@@ -31,20 +32,24 @@ import type {
 } from "../types/scheduler.ts";
 import {
   TASK_ID_PATTERN,
+  clearHeartbeat,
   createTask,
   deleteTask,
   findRunFile,
   readDeliveries,
+  readHeartbeat,
   readRun,
   readTask,
   readTasks,
   removeTaskFolder,
   resolveHome,
   runPath,
+  touchHeartbeat,
   updateDeliveries,
   updateTask,
   validateDelivery,
   validateRecord,
+  writeHeartbeat,
   writeRunFile,
   type PendingDelivery,
   type RunHeader,
@@ -63,6 +68,11 @@ import {
 /** Default lead time (10 minutes) when the developer API omits `startCookingInAdvance`. */
 const DEFAULT_COOK_LEAD = "00:00:10";
 const SLUG_MAX = 48;
+/** A heartbeat older than this means its owner is gone (it is refreshed every 5 s). */
+const HEARTBEAT_STALE_MS = 60_000;
+const HEARTBEAT_EVERY_MS = 5_000;
+/** How often a live process looks for runs whose owner process died. */
+const DEAD_SWEEP_EVERY_MS = 15_000;
 const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 /** Optional `{ home }` accepted by every public function except `createScheduledAction` (the agent knows its home). */
@@ -242,6 +252,10 @@ export class Scheduler {
   tickMs = 1000;
   private timer: ReturnType<typeof setInterval> | undefined;
   private swept = false;
+  /** Names this scheduler instance in the heartbeat files of the runs it owns. */
+  private readonly token = Math.random().toString(36).slice(2, 10);
+  private lastDeadSweep = 0;
+  private lastBeat = 0;
   private readonly warned = new Set<string>();
 
   constructor(readonly home: string) {}
@@ -270,6 +284,8 @@ export class Scheduler {
         this.swept = true;
         this.startupSweep(now);
       }
+      this.keepHeartbeats(now);
+      this.sweepDeadRuns(now);
       this.deliverDue(now);
       this.startDue(now);
       if (!this.hasPending()) this.stop();
@@ -320,10 +336,41 @@ export class Scheduler {
    */
   private startupSweep(now: Date): void {
     for (const t of this.snapshot().live) {
-      if (t.state === "cooking") this.recoverCooking(t);
-      else if (t.state === "waiting" && t.nextDeliverAt && parseLocalIso(t.nextDeliverAt).getTime() <= now.getTime()) {
-        this.markMissed(t.id, "process_down", t.schedule.onMissed);
+      if (!this.ownsHere(t.agent)) continue; // another process's action (or nobody's: startDue handles that)
+      if (t.state === "waiting" && t.nextDeliverAt && parseLocalIso(t.nextDeliverAt).getTime() <= now.getTime()) {
+        this.markMissed(t.id, "process_down", "waiting", t.schedule.onMissed);
       }
+    }
+  }
+
+  // True when a live Agent with this name is registered in THIS process: only then may this process start, deliver or recover its actions; in: the sweeps, startDue and deliverDue, out: a boolean.
+  private ownsHere(agentName: string): boolean {
+    return !!this.agents.get(agentName)?.deref();
+  }
+
+  // True while the process that started a run is still running it: its heartbeat is fresh and (same host) its pid exists; this process counts only for runs in this.running; in: the dead-run sweep and delete, out: the heartbeat or undefined.
+  private liveOwner(id: string): { pid: number } | undefined {
+    if (this.running.has(id)) return { pid: process.pid };
+    const hb = readHeartbeat(this.home, id);
+    if (!hb || hb.ageMs > HEARTBEAT_STALE_MS) return undefined;
+    if (hb.pid === process.pid) return undefined; // an earlier scheduler of this very process is gone
+    if (hb.host === os.hostname() && !processAlive(hb.pid)) return undefined;
+    return { pid: hb.pid };
+  }
+
+  // Refreshes the heartbeat of every run in flight (at most every 5 s); in: tick, out: the .heartbeat files.
+  private keepHeartbeats(now: Date): void {
+    if (this.running.size === 0 || Math.abs(now.getTime() - this.lastBeat) < HEARTBEAT_EVERY_MS) return;
+    this.lastBeat = now.getTime();
+    for (const id of this.running.keys()) touchHeartbeat(this.home, id);
+  }
+
+  // Recovers the runs whose owner is gone (a killed process), but only for actions this process owns, at start and then every 15 s; in: tick, out: recoverCooking calls.
+  private sweepDeadRuns(now: Date): void {
+    if (this.lastDeadSweep !== 0 && Math.abs(now.getTime() - this.lastDeadSweep) < DEAD_SWEEP_EVERY_MS) return;
+    this.lastDeadSweep = now.getTime();
+    for (const t of this.snapshot().live) {
+      if (t.state === "cooking" && this.ownsHere(t.agent) && !this.liveOwner(t.id)) this.recoverCooking(t);
     }
   }
 
@@ -333,7 +380,7 @@ export class Scheduler {
     const file = findRunFile(this.home, t.id, parseLocalIso(current.deliverAt), current.cookStartedAt);
     const run = file ? readRun(this.home, file) : undefined;
     if (!file || !run) {
-      this.markMissed(t.id, "interrupted", t.schedule.onMissed);
+      this.markMissed(t.id, "interrupted", "cooking", t.schedule.onMissed);
       return;
     }
     updateDeliveries(this.home, t.id, (pending) => {
@@ -354,15 +401,17 @@ export class Scheduler {
     });
   }
 
-  // Marks a run whose moment passed as missed, then applies the action's onMissed policy: `skip` moves on to the next time, `run` runs it now, unset waits for run_now / skip; in: the startup sweep, out: task.json + the missed (and skipped / started) events.
-  private markMissed(id: string, reason: string, policy?: "skip" | "run"): void {
+  // Marks a run whose moment passed as missed, then applies the action's onMissed policy: `skip` moves on to the next time, `run` runs it now, unset waits for run_now / skip; only when the action is still in the state the caller saw (`from`), so two processes never both mark it; in: the sweeps, out: task.json + the missed (and skipped / started) events.
+  private markMissed(id: string, reason: string, from: "waiting" | "cooking", policy?: "skip" | "run"): void {
     let name = id;
-    updateTask(this.home, id, (t) => {
-      if (!t) return;
+    const changed = updateTask(this.home, id, (t) => {
+      if (!t || t.state !== from) return false; // another process already dealt with it
       name = t.name;
       t.state = "missed";
       delete t.current;
+      return true;
     });
+    if (!changed) return;
     const next = policy === "skip" ? "Skipping it (onMissed: skip)." : policy === "run" ? "Running it now (onMissed: run)." : "Use run_now or skip.";
     emit("missed", `"${name}" (${id}) missed its run (${reason}). ${next}`, { id, name, reason, ...(policy ? { onMissed: policy } : {}) }, "warn");
     if (policy === "skip") this.skip(id);
@@ -374,16 +423,21 @@ export class Scheduler {
   // Delivers every saved run whose delivery time has come; in: tick, out: deliver calls.
   private deliverDue(now: Date): void {
     for (const entry of this.snapshot().pending) {
-      if (parseLocalIso(entry.deliverAt).getTime() <= now.getTime()) this.deliver(entry, now);
+      if (parseLocalIso(entry.deliverAt).getTime() > now.getTime()) continue;
+      const owner = readTask(this.home, entry.id)?.agent; // the delivered event must fire in the process that owns the action
+      if (owner === undefined || this.ownsHere(owner)) this.deliver(entry, now);
     }
   }
 
-  // Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens); late = it replaced a missed occurrence, was delivered over two ticks after its time, or finished after it; in: deliverDue, out: task.json + the delivered event.
+  // Removes the entry (only the process that removed it goes on), records `lastRun`, THEN emits (whether or not anyone listens); late = it replaced a missed occurrence, was delivered over two ticks after its time, or finished after it; in: deliverDue, out: task.json + the delivered event.
   private deliver(entry: PendingDelivery, now: Date): void {
-    updateDeliveries(this.home, entry.id, (pending) => {
+    const removed = updateDeliveries(this.home, entry.id, (pending) => {
       const i = pending.findIndex((p) => p.id === entry.id && p.file === entry.file);
-      if (i >= 0) pending.splice(i, 1);
+      if (i < 0) return false;
+      pending.splice(i, 1);
+      return true;
     });
+    if (!removed) return; // another process took this delivery: exactly one process delivers it
     const deliverAt = parseLocalIso(entry.deliverAt).getTime();
     const late = entry.late === true || now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
     let name = entry.id;
@@ -409,6 +463,13 @@ export class Scheduler {
   // Starts waiting actions whose cook time has come and skips the overlap of those still cooking; in: tick, out: startCook/skipOverlap calls.
   private startDue(now: Date): void {
     for (const t of this.snapshot().live) {
+      if (!this.ownsHere(t.agent)) {
+        // Nobody here can run it. Another process may own it, so only once its delivery time has passed with no run started is it missed.
+        if (t.state === "waiting" && t.nextDeliverAt && parseLocalIso(t.nextDeliverAt).getTime() <= now.getTime()) {
+          this.markMissed(t.id, "no_agent", "waiting");
+        }
+        continue;
+      }
       if (!t.nextCookAt || parseLocalIso(t.nextCookAt).getTime() > now.getTime()) continue;
       if (t.state === "waiting") this.startCook(t.id, false);
       else if (t.state === "cooking") this.skipOverlap(t.id, now);
@@ -440,6 +501,8 @@ export class Scheduler {
         return undefined;
       }
       if (t.state === "cooking") return undefined;
+      // Another process may have started (and even finished) this run since the caller looked: a scheduled start needs the action to be waiting and due right now.
+      if (!manual && (t.state !== "waiting" || !t.nextCookAt || parseLocalIso(t.nextCookAt).getTime() > now.getTime())) return undefined;
       ctx.replacesMissed = manual && t.state === "missed";
       ctx.agent = this.agents.get(t.agent)?.deref();
       if (!ctx.agent) {
@@ -463,6 +526,7 @@ export class Scheduler {
       t.current = { cookStartedAt: toLocalIso(now), deliverAt: toLocalIso(deliverAt) };
       t.nextCookAt = next.cook;
       t.nextDeliverAt = next.deliver;
+      writeHeartbeat(this.home, id, this.token); // before the record shows `cooking`, so no process sees a cooking action without an owner
       return t;
     });
     if (ctx.noAgent) {
@@ -517,6 +581,7 @@ export class Scheduler {
       })
       .finally(() => {
         this.running.delete(task.id);
+        clearHeartbeat(this.home, task.id);
       });
     this.ensureRunning();
   }
@@ -666,6 +731,14 @@ export class Scheduler {
     const rec = readTask(this.home, id);
     if (!rec) return { ok: false, reason: "not_found" };
     const run = this.running.get(id);
+    const other = !run && rec.state === "cooking" ? this.liveOwner(id) : undefined;
+    if (other) {
+      return {
+        ok: false,
+        reason: "running",
+        message: `"${id}" is cooking in another process (pid ${other.pid}), so nothing was changed. Only that process can abort it: wait for it to finish, or delete it from there.`,
+      };
+    }
     if (run && !opts.force) {
       return {
         ok: false,

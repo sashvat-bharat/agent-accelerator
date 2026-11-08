@@ -766,7 +766,10 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.s.agents.clear(); // what happens once the Agent is garbage collected
     h.set(18, 50);
     h.s.tick();
-    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "missed" });
+    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "waiting" }); // another process may own it: not missed at cook time
+    h.set(19, 0);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "missed" }); // its delivery time passed with no run
     expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "no_agent" });
     expect(calls).toHaveLength(0);
   });
@@ -1404,5 +1407,229 @@ describe("scheduled action files (stable contract)", () => {
       expect(doc).toContain(`\`scheduled_action.${code}\``);
     }
     expect(doc).toContain('"version": 2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Several schedulers on one home (stand-ins for several processes: all state is in the files)
+// ---------------------------------------------------------------------------
+describe("several processes on one home", () => {
+  // A second scheduler on the same home with its own clock source; in: a test, out: a scheduler that has registered `agent` (or nobody).
+  function other(h: Harness, agent?: Agent): Scheduler {
+    const { Scheduler: SchedulerClass } = require("../src/scheduler/scheduler.ts") as typeof import("../src/scheduler/scheduler.ts");
+    const b = new SchedulerClass(h.home);
+    b.tickMs = 3_600_000;
+    b.now = () => new Date(h.clock);
+    if (agent) b.agents.set(agent.name, new WeakRef(agent));
+    return b;
+  }
+  // Writes the heartbeat a live OTHER process (our parent's pid) would keep; in: a test, out: the .heartbeat file.
+  function fakeOwner(h: Harness, id: string, pid = process.ppid): string {
+    const file = path.join(h.home, "scheduled", id, ".heartbeat");
+    fs.writeFileSync(file, JSON.stringify({ pid, host: os.hostname(), token: "other" }));
+    return file;
+  }
+
+  it("only a process that owns the Agent starts a run; one that does not leaves it alone until the delivery time has passed", async () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    const agent = h.agent(fn);
+    const rec = createScheduledAction(agent, input());
+    const stranger = other(h);
+    h.set(18, 50);
+    stranger.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("waiting");
+    h.s.tick();
+    await h.settle();
+    expect(calls).toHaveLength(1);
+    expect(readDeliveries(h.home)).toHaveLength(1);
+    expect(rec.id).toBeTruthy();
+  });
+
+  it("two processes that both own the Agent start the run once", async () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    const agent = h.agent(fn);
+    createScheduledAction(agent, input());
+    const b = other(h, agent);
+    h.set(18, 50);
+    h.s.tick();
+    b.tick(); // sees it cooking
+    await h.settle();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a process with a stale view cannot start the next occurrence early", async () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    const agent = h.agent(fn);
+    const rec = createScheduledAction(agent, input({ repeatEvery: "01:00:00" }));
+    const b = other(h, agent);
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle(); // finished: waiting again for tomorrow
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "waiting", nextDeliverAt: iso(19, 0, 0, 27) });
+    (b as any).startCook(rec.id, false); // what a slow process does with the snapshot it took before the run
+    expect(calls).toHaveLength(1);
+    expect(readTasks(h.home)[0]!.state).toBe("waiting");
+  });
+
+  it("a delivery is emitted once even when two processes own the Agent", async () => {
+    const h = harness();
+    const { of } = capture();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    createScheduledAction(agent, input());
+    const b = other(h, agent);
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    h.set(19, 0);
+    h.s.tick();
+    b.tick();
+    expect(of("scheduled_action.delivered")).toHaveLength(1);
+    expect(readTasks(h.home)[0]!.lastRun).toMatchObject({ status: "ok" });
+    expect(readDeliveries(h.home)).toEqual([]);
+  });
+
+  it("two processes that picked the same saved delivery at the same moment emit it once", async () => {
+    const h = harness();
+    const { of } = capture();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    createScheduledAction(agent, input());
+    const b = other(h, agent);
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    h.set(19, 0);
+    const entry = readDeliveries(h.home)[0]!; // both took this snapshot before either delivered
+    (h.s as any).deliver(entry, h.clock);
+    (b as any).deliver(entry, h.clock);
+    expect(of("scheduled_action.delivered")).toHaveLength(1);
+  });
+
+  it("a process that does not own the Agent never takes a delivery", async () => {
+    const h = harness();
+    const { of } = capture();
+    createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    h.set(19, 0);
+    other(h).tick();
+    expect(of("scheduled_action.delivered")).toHaveLength(0);
+    expect(readDeliveries(h.home)).toHaveLength(1);
+    h.s.tick();
+    expect(of("scheduled_action.delivered")).toHaveLength(1);
+  });
+
+  it("a marked-missed decision made on a stale view changes nothing and emits nothing", async () => {
+    const h = harness();
+    const { of } = capture();
+    const g = gate();
+    const agent = h.agent(mockFetch(async () => (await g.open, chatReply())).fn);
+    const rec = createScheduledAction(agent, input());
+    h.set(18, 50);
+    h.s.tick(); // now cooking
+    (other(h, agent) as any).markMissed(rec.id, "process_down", "waiting");
+    expect(readTasks(h.home)[0]!.state).toBe("cooking");
+    expect(of("scheduled_action.missed")).toHaveLength(0);
+    g.release();
+    await h.settle();
+  });
+
+  it("keeps a heartbeat while a run is in flight, refreshes it, and removes it when the run ends", async () => {
+    const h = harness();
+    const g = gate();
+    const agent = h.agent(mockFetch(async () => (await g.open, chatReply())).fn);
+    const rec = createScheduledAction(agent, input());
+    h.set(18, 50);
+    h.s.tick();
+    const file = path.join(h.home, "scheduled", rec.id, ".heartbeat");
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toMatchObject({ pid: process.pid, host: os.hostname() });
+    const old = new Date(Date.now() - 20_000);
+    fs.utimesSync(file, old, old);
+    h.set(18, 50, 10);
+    h.s.tick();
+    expect(Date.now() - fs.statSync(file).mtimeMs).toBeLessThan(5_000); // refreshed by the tick
+    g.release();
+    await h.settle();
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it("does not recover a cooking run whose owner process is alive and heartbeating", () => {
+    const h = harness();
+    const { of } = capture();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+    });
+    fakeOwner(h, rec.id);
+    const b = other(h, agent);
+    h.set(18, 55);
+    b.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("cooking");
+    expect(of("scheduled_action.missed")).toHaveLength(0);
+  });
+
+  it("recovers a cooking run whose owner is dead, or whose heartbeat went stale, or that never had one", () => {
+    for (const how of ["dead pid", "stale", "none", "own pid, not running it"] as const) {
+      const h = harness();
+      const agent = h.agent(mockFetch(() => chatReply()).fn);
+      const rec = createScheduledAction(agent, input());
+      editTask(h.home, (t) => {
+        t.state = "cooking";
+        t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+      });
+      if (how === "dead pid") fakeOwner(h, rec.id, 2 ** 22 + 4242);
+      if (how === "own pid, not running it") fakeOwner(h, rec.id, process.pid); // an earlier scheduler of this very process
+      if (how === "stale") {
+        const file = fakeOwner(h, rec.id);
+        const old = new Date(Date.now() - 120_000);
+        fs.utimesSync(file, old, old);
+      }
+      const b = other(h, agent);
+      h.set(18, 55);
+      b.tick();
+      expect(readTasks(h.home)[0]!.state, how).toBe("missed");
+    }
+  });
+
+  it("a live process notices a dead owner without restarting (every 15 s)", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    h.set(18, 40);
+    h.s.tick(); // first tick: nothing to recover
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 40), deliverAt: iso(19, 0) };
+    });
+    fakeOwner(h, rec.id, 2 ** 22 + 4242);
+    h.set(18, 40, 5);
+    h.s.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("cooking"); // looked 5 s ago: not yet
+    h.set(18, 40, 20);
+    h.s.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("missed");
+  });
+
+  it("refuses to delete a run that another live process is cooking, even with force; deletes it once the owner is dead", async () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+    });
+    const file = fakeOwner(h, rec.id);
+    const refused = await deleteScheduledAction(rec.id, { home: h.home, force: true });
+    expect(refused).toMatchObject({ ok: false, reason: "running" });
+    expect((refused as { message: string }).message).toContain(`pid ${process.ppid}`);
+    expect(readTasks(h.home)).toHaveLength(1);
+    fs.writeFileSync(file, JSON.stringify({ pid: 2 ** 22 + 4242, host: os.hostname(), token: "x" }));
+    expect(await deleteScheduledAction(rec.id, { home: h.home })).toEqual({ ok: true });
+    expect(readTasks(h.home)).toEqual([]);
   });
 });
