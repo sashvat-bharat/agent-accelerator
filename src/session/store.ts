@@ -1158,7 +1158,7 @@ function sessionLoadError(message: string): Error {
 /**
  * Manual Zod-like validation for session snapshots (Q-10, no new deps).
  * Checks `version===1`, string `sessionId`, array `messages`, and oversize
- * (>5000 messages or >10MB JSON). Throws a `SessionLoadError`-named Error
+ * (more than `MAX_SESSION_MESSAGES` = 50,000 messages or `MAX_SESSION_JSON_BYTES` = 100 MB of JSON). Throws a `SessionLoadError`-named Error
  * on failure; returns the typed session on success.
  */
 export function validateSessionData(data: unknown): PersistedAgentSession {
