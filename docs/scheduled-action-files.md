@@ -2,10 +2,10 @@
 
 > The on-disk format of scheduled actions: three kinds of plain files you can read, back up, diff and (carefully) edit. **From v0.5.5 this format is a stable contract**: it changes only by the rules at the bottom of this page, and every change is listed in the [changelog](#changelog).
 
-Everything lives under one folder, `<home>/scheduled_actions/` (`home` is `Agent({ home })`, then `setHome(dir)`, then `AGENT_ACCEL_HOME`, then `.agent-accel/` in the working directory):
+Everything lives under one folder, `<home>/scheduled/` (`home` is `Agent({ home })`, then `setHome(dir)`, then `AGENT_ACCEL_HOME`, then `.agent-accel/` in the working directory):
 
 ```text
-<home>/scheduled_actions/
+<home>/scheduled/
   tasks.json             every action (definition + schedule + state)
   deliveries.json        results saved but not yet delivered
   <action id>/
@@ -78,7 +78,7 @@ The SDK reads and writes these files itself; there is no database and no notific
 | `nextCookAt`, `nextDeliverAt` | time or `null` | When the next run starts and is delivered. `null` for a one-shot that is running or finished. |
 | `current` | object, only while `cooking` | `{ cookStartedAt, deliverAt }` of the run in flight. Required while `state` is `cooking`. |
 | `createdAt` | time | When the action was created. |
-| `lastRun` | object, optional | The last delivered run: `status` (`"ok"` \| `"failed"`), `file` (relative to `scheduled_actions/`), `deliverAt`, `deliveredAt`, `late`. |
+| `lastRun` | object, optional | The last delivered run: `status` (`"ok"` \| `"failed"`), `file` (relative to `scheduled/`), `deliverAt`, `deliveredAt`, `late`. |
 
 States: `waiting` (a future run is scheduled), `cooking` (a run is in flight), `missed` (a run's time passed and nobody ran it; use `run_now` or `skip`), `done` (a one-shot that finished).
 
@@ -101,7 +101,7 @@ Results that are saved but whose delivery time has not come yet. An entry is rem
 }
 ```
 
-`file` is relative to `scheduled_actions/`. `status` is `"ok"` or `"failed"`. An entry may carry `"late": true` (optional, a boolean): the run replaced a missed occurrence, so it is late whatever the clock says.
+`file` is relative to `scheduled/`. `status` is `"ok"` or `"failed"`. An entry may carry `"late": true` (optional, a boolean): the run replaced a missed occurrence, so it is late whatever the clock says.
 
 ## Run files
 
@@ -159,7 +159,7 @@ Plain JSON and a tiny header parser are enough; no SDK import is needed:
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const dir = join(".agent-accel", "scheduled_actions");
+const dir = join(".agent-accel", "scheduled");
 
 const { tasks } = JSON.parse(readFileSync(join(dir, "tasks.json"), "utf8")) as {
   version: 1;
@@ -221,6 +221,7 @@ The events on `telemetryBus` (`code`, then `data`) are part of the same contract
 
 | SDK version | Change |
 |---|---|
+| unreleased | The folder is renamed from `<home>/scheduled_actions/` to `<home>/scheduled/`. **Nothing is moved for you:** an existing folder must be renamed once by hand (`mv .agent-accel/scheduled_actions .agent-accel/scheduled`), otherwise the new folder starts empty. The automatic rename of the pre-0.5.0 `scheduled_tasks/` folder is gone. File formats, the tool name `scheduled_actions` and the `scheduled_action.*` events are unchanged. |
 | 0.5.5 | The format becomes a stable contract (this page). Added: `schedule.onMissed` (record), `late` (delivery entry, optional), the spending fields of the run header (`turns`, `inputTokens`, `freshInputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outputTokens`, `thinkingTokens`, `cacheHitRate`, `costSource`, `unpricedTurns`; `tokens` is now input + output over all attempts; `costUsd` is priced per turn). Changed: `late` is `true` for a run that replaces a missed occurrence, never for an ordinary `run_now`, and is compared in whole seconds. Event `scheduled_action.killed` became `scheduled_action.deleted`. The timeout options were reduced to `workerTimeoutMs` and the action's own `timeoutMs`. |
 | 0.5.3 | Writes became durable (fsync, `.bak` copy, atomic rename); a damaged `tasks.json` / `deliveries.json` is restored from its `.bak`. One process per home folder. |
 | 0.5.0 | The folder moved from `scheduled_tasks/` to `<home>/scheduled_actions/`, under the single home folder; an old `scheduled_tasks/` folder is renamed on first use. |

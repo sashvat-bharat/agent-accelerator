@@ -181,7 +181,7 @@ export class Agent {
     /** Per-run spending cap of each worker (unset = unlimited). */
     workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
   };
-  /** Home folder for everything written to disk (`sessions/`, `scheduled_actions/`, `telemetry/`). */
+  /** Home folder for everything written to disk (`sessions/`, `scheduled/`, `telemetry/`). */
   readonly home: string;
   /** Registered model-callable tools. */
   readonly tools: Record<string, ToolDefinition> = {};

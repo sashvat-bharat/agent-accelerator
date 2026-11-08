@@ -3,7 +3,7 @@ import { getEnv } from "./env.ts";
 
 /**
  * The Agent Accelerator home: ONE folder that holds everything the SDK stores
- * (`sessions/`, `scheduled_actions/`, `telemetry/`, `catalog/`), so nothing is
+ * (`sessions/`, `scheduled/`, `telemetry/`, `catalog/`), so nothing is
  * scattered across the project or the package.
  */
 let defaultHome: string | undefined;

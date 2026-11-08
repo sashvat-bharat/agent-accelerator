@@ -246,7 +246,7 @@ const input = (sa: Partial<ScheduledActionInput["scheduled_action"]> = {}, over:
   },
 });
 
-const runDir = (h: Harness, id: string) => path.join(h.home, "scheduled_actions", id);
+const runDir = (h: Harness, id: string) => path.join(h.home, "scheduled", id);
 
 // ---------------------------------------------------------------------------
 // Config
@@ -261,7 +261,7 @@ describe("scheduled actions config", () => {
     expect(agent.tools["scheduled_actions"]).toBeUndefined();
     expect(agent.tools["get_datetime"]).toBeUndefined();
     expect((h.s as any).timer).toBeUndefined();
-    expect(fs.existsSync(path.join(h.home, "scheduled_actions"))).toBe(false);
+    expect(fs.existsSync(path.join(h.home, "scheduled"))).toBe(false);
     expect(() => createScheduledAction(agent, input())).toThrow(ConfigError);
   });
 
@@ -314,7 +314,7 @@ describe("scheduled actions store", () => {
   it("an external edit survives the next write (writes re-read first)", () => {
     const h = harness();
     createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
-    const file = path.join(h.home, "scheduled_actions", "tasks.json");
+    const file = path.join(h.home, "scheduled", "tasks.json");
     const raw = JSON.parse(fs.readFileSync(file, "utf8"));
     raw.tasks[0].instructions = "EDITED BY HAND";
     raw.tasks[0].someFutureField = { keep: true };
@@ -332,7 +332,7 @@ describe("scheduled actions store", () => {
   it("quarantines a corrupt file and starts empty", () => {
     const h = harness();
     const { codes } = capture();
-    const dir = path.join(h.home, "scheduled_actions");
+    const dir = path.join(h.home, "scheduled");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "tasks.json"), "{not json");
     expect(readTasks(h.home)).toEqual([]);
@@ -366,7 +366,7 @@ describe("scheduled actions store", () => {
     expect(writeRunFile(h.home, "job-abc123", d, header(3), "three")).toBe("job-abc123/26-october-2026-3.md");
   });
 
-  it("purge refuses anything that is not an action id inside scheduled_actions/", () => {
+  it("purge refuses anything that is not an action id inside scheduled/", () => {
     const h = harness();
     const outside = path.join(h.home, "keep");
     fs.mkdirSync(outside, { recursive: true });
@@ -459,7 +459,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
 
     // Result is saved under its final name and listed before it is due.
     const file = `${rec.id}/26-october-2026.md`;
-    const text = fs.readFileSync(path.join(h.home, "scheduled_actions", file), "utf8");
+    const text = fs.readFileSync(path.join(h.home, "scheduled", file), "utf8");
     expect(text).toContain("status: ok");
     expect(text).toContain(`startedAt: ${iso(18, 50)}`);
     expect(text).toContain("costUsd: unknown");
@@ -476,7 +476,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.s.tick();
     const delivered = of("scheduled_action.delivered");
     expect(delivered).toHaveLength(1);
-    expect(delivered[0]!.data).toMatchObject({ id: rec.id, name: "Check Portfolio", status: "ok", late: false, deliverAt: iso(19, 0), file: path.join(h.home, "scheduled_actions", file) });
+    expect(delivered[0]!.data).toMatchObject({ id: rec.id, name: "Check Portfolio", status: "ok", late: false, deliverAt: iso(19, 0), file: path.join(h.home, "scheduled", file) });
     expect(readDeliveries(h.home)).toEqual([]);
     expect(readTasks(h.home)[0]!.lastRun).toEqual({ status: "ok", file, deliverAt: iso(19, 0), deliveredAt: iso(19, 0), late: false });
   });
@@ -617,7 +617,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(calls).toHaveLength(1);
     expect(codes()).toContain("scheduled_action.failed"); // at once, not at delivery
     const file = `${rec.id}/26-october-2026.md`;
-    const text = fs.readFileSync(path.join(h.home, "scheduled_actions", file), "utf8");
+    const text = fs.readFileSync(path.join(h.home, "scheduled", file), "utf8");
     expect(text).toContain("status: failed");
     expect(text).toContain("The run failed:");
     h.s.tick();
@@ -646,7 +646,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     await h.settle();
     const [pending] = readDeliveries(h.home);
     expect(pending!.status).toBe("failed");
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toContain("timed out after 20ms");
     g.release();
   });
 
@@ -665,7 +665,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.s.tick();
     await h.settle();
     const [pending] = readDeliveries(h.home);
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toContain("timed out after 20ms");
     g.release();
   });
 
@@ -685,7 +685,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     await h.settle();
     const [pending] = readDeliveries(h.home);
     expect(pending!.status).toBe("failed");
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toContain("timed out after 20ms");
     g.release();
   });
 
@@ -712,7 +712,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.s.tick();
     await h.settle();
     const [pending] = readDeliveries(h.home);
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toMatch(/no longer in the pool: gone_tool/);
+    expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toMatch(/no longer in the pool: gone_tool/);
   });
 
   // A parent whose scheduled runs use `extra` (budget / workerBudget); the pool and worker model are the harness defaults.
@@ -731,7 +731,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.set(18, 50);
     h.s.tick();
     await h.settle();
-    return fs.readFileSync(path.join(h.home, "scheduled_actions", readDeliveries(h.home)[0]!.file), "utf8");
+    return fs.readFileSync(path.join(h.home, "scheduled", readDeliveries(h.home)[0]!.file), "utf8");
   };
 
   it("a scheduled run is capped by workerBudget: going over records a failed run", async () => {
@@ -1056,7 +1056,7 @@ describe("list / update / run_now / skip / delete", () => {
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false, readyAt: iso(15, 0, 5), deliverAt: iso(15, 0, 5) });
     expect(readTasks(h.home)[0]!.lastRun).toMatchObject({ late: false, deliverAt: iso(15, 0, 5) });
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
   });
 
   it("a scheduled run that finishes inside its delivery second is not late", async () => {
@@ -1066,7 +1066,7 @@ describe("list / update / run_now / skip / delete", () => {
     h.set(18, 50);
     h.s.tick();
     await h.settle();
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false });
   });
@@ -1107,7 +1107,7 @@ describe("list / update / run_now / skip / delete", () => {
     runScheduledAction(missedRec.id, { home: h.home });
     await h.settle();
     expect(readDeliveries(h.home)[0]).toMatchObject({ id: missedRec.id, late: true }); // the flag is on the saved entry
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", readDeliveries(h.home)[0]!.file), "utf8")).toContain("late: true");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", readDeliveries(h.home)[0]!.file), "utf8")).toContain("late: true");
     const { of } = capture();
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true });
@@ -1276,18 +1276,19 @@ describe("scheduled_actions and get_datetime tools", () => {
 });
 
 describe("home folder layout", () => {
-  it("renames the pre-0.5.0 scheduled_tasks/ folder to scheduled_actions/ on first use", async () => {
-    const { migrateLegacyFolder } = await import("../src/scheduler/store.ts");
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "accel-home-"));
-    fs.mkdirSync(path.join(home, "scheduled_tasks"));
-    fs.writeFileSync(path.join(home, "scheduled_tasks", "tasks.json"), "{}");
-    migrateLegacyFolder(home);
-    expect(fs.existsSync(path.join(home, "scheduled_tasks"))).toBe(false);
-    expect(fs.existsSync(path.join(home, "scheduled_actions", "tasks.json"))).toBe(true);
-    // never overwrites an existing new folder
-    fs.mkdirSync(path.join(home, "scheduled_tasks"));
-    migrateLegacyFolder(home);
-    expect(fs.existsSync(path.join(home, "scheduled_tasks"))).toBe(true);
+  it("keeps its files in <home>/scheduled/ and leaves an old scheduled_actions/ or scheduled_tasks/ folder alone", () => {
+    const h = harness();
+    for (const old of ["scheduled_actions", "scheduled_tasks"]) {
+      fs.mkdirSync(path.join(h.home, old), { recursive: true });
+      fs.writeFileSync(path.join(h.home, old, "tasks.json"), '{"version":1,"tasks":[{"id":"old"}]}');
+    }
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    expect(fs.existsSync(path.join(h.home, "scheduled", "tasks.json"))).toBe(true);
+    expect(listScheduledActions({ home: h.home }).map((t) => t.id)).toEqual([rec.id]); // nothing from the old folders
+    for (const old of ["scheduled_actions", "scheduled_tasks"]) {
+      expect(fs.readFileSync(path.join(h.home, old, "tasks.json"), "utf8")).toContain('"old"'); // untouched, not moved
+    }
   });
 });
 
@@ -1310,7 +1311,7 @@ describe("setHome", () => {
 // The on-disk format is a stable contract: docs/scheduled-action-files.md says what is below.
 // ---------------------------------------------------------------------------
 describe("scheduled action files (stable contract)", () => {
-  const dirOf = (h: Harness): string => path.join(h.home, "scheduled_actions");
+  const dirOf = (h: Harness): string => path.join(h.home, "scheduled");
   const json = (h: Harness, name: string): any => JSON.parse(fs.readFileSync(path.join(dirOf(h), name), "utf8"));
   const sorted = (o: object): string[] => Object.keys(o).sort();
   const HEADER_ORDER = ["id", "name", "status", "startedAt", "finishedAt", "deliverAt", "late", "model", "turns", "tokens", "inputTokens", "freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "thinkingTokens", "cacheHitRate", "costUsd", "costSource", "unpricedTurns"];

@@ -26,7 +26,7 @@ console.log(res.text);
 | Subfolder | Holds |
 |---|---|
 | `sessions/` | saved conversations (`persist: {}`); with `telemetry: { persist: true }` each session folder also holds its own `telemetry.ndjson` |
-| `scheduled_actions/` | scheduled actions and their results |
+| `scheduled/` | scheduled actions and their results |
 | `telemetry/` | daily event log of the events that belong to no persisted session, only with `telemetry: { persist: true }` |
 | `catalog/` | the model catalog cache |
 

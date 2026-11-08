@@ -5,7 +5,7 @@ Scheduled actions: a worker that runs later (once or repeating) and saves its an
 | File | What it is |
 | :-- | :-- |
 | `scheduler.ts` | One `Scheduler` per home folder: a 1 s unref'd clock that runs only while something is pending, startup sweep, cook/deliver state machine, and the public functions (`createScheduledAction`, `list/update/run/skip/deleteScheduledAction`). |
-| `store.ts` | Disk layer under `<home>/scheduled_actions/`: `tasks.json`, `deliveries.json`, run files; validation of records. |
+| `store.ts` | Disk layer under `<home>/scheduled/`: `tasks.json`, `deliveries.json`, run files; validation of records. |
 | `time.ts` | Pure `DD:HH:MM` and local-clock maths. No timezone, DST or `Intl`; `now` is always passed in. |
 | `tool.ts` + `scheduled-actions.md` | The model-facing `scheduled_actions` tool and `get_datetime`; the `.md` is the tool description. |
 

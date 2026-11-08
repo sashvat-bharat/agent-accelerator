@@ -128,7 +128,7 @@ describe("recovery from the backup", () => {
       const rec = { id: "a-bcdef1" } as never;
       updateTasks(home, (tasks) => void tasks.push(rec));
       updateTasks(home, (tasks) => void tasks.push({ id: "b-bcdef2" } as never));
-      const file = path.join(home, "scheduled_actions", "tasks.json");
+      const file = path.join(home, "scheduled", "tasks.json");
       fs.writeFileSync(file, "{not json"); // hand damage after two good writes: .bak holds the first write
       const tasks = readTasks(home);
       expect(tasks.map((t) => t.id)).toEqual(["a-bcdef1"]);

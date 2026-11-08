@@ -69,7 +69,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 - **Workers are developer-configured.** The LLM never chooses a worker's model or reasoning level.
 - **Keep a scheduled action's creating `Agent` referenced**; one process per home folder.
 - Never edit the model catalog cache; use `registerModel()`.
-- **Everything the SDK stores lives in one folder** (`sessions/` with each session's own `telemetry.ndjson`, `scheduled_actions/`, `telemetry/`, `catalog/`). Move it with `setHome(dir)` or `AGENT_ACCEL_HOME`; never write SDK state elsewhere.
+- **Everything the SDK stores lives in one folder** (`sessions/` with each session's own `telemetry.ndjson`, `scheduled/`, `telemetry/`, `catalog/`). Move it with `setHome(dir)` or `AGENT_ACCEL_HOME`; never write SDK state elsewhere.
 
 ## Things that do not exist (do not generate code for them)
 

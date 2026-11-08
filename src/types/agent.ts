@@ -151,7 +151,7 @@ export interface AgentConfig {
   resume?: "automatic" | "explicit";
   /**
    * Folder for everything Agent Accelerator writes to disk (`sessions/`,
-   * `scheduled_actions/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
+   * `scheduled/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
    * An explicit `persist.dir` / `persist.file` still wins for sessions.
    */
   home?: string;
