@@ -193,8 +193,10 @@ export interface AgentConfig {
   /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   contextManagement?: unknown;
   /**
-   * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning
-   * text) to `<home>/telemetry/<date>.ndjson`. Off by default: the SDK writes nothing unless asked.
+   * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning text). An event
+   * that belongs to a persisted session (`data.sessionId`: tool events, resume and retry events) goes to
+   * `<session folder>/telemetry.ndjson`, next to the session's journal; every other event goes to
+   * `<home>/telemetry/<date>.ndjson`. Nothing is written outside the home. Off by default: the SDK writes nothing unless asked.
    */
   telemetry?: { persist?: boolean };
   /**

@@ -22,7 +22,7 @@ import {
 import * as path from "node:path";
 import { registerAgent } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../scheduler/store.ts";
-import { persistTelemetry } from "../telemetry-file.ts";
+import { persistTelemetry, registerSessionFolder, unregisterSessionFolder } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
@@ -498,6 +498,7 @@ export class Agent {
     assertNoToolCollisions(this.tools);
 
     this.context = new AgentContext(this.getFullInstructions());
+    this.registerTelemetryFolder();
     if (dyn?.allowScheduledActions) registerAgent(this);
     if (this.recoverSession() && this.resumeMode === "automatic") {
       // Synchronously, so a run() issued right after construction queues BEHIND the resumed run.
@@ -508,6 +509,17 @@ export class Agent {
   /** The persistent sub-agent workers of this agent: `spawn`, `message`, `close`, `list`, `turns` (see `WorkerRegistry`). */
   get workers(): WorkerRegistry {
     return (this.workerRegistry ??= new WorkerRegistry(this));
+  }
+
+  // Tells the telemetry sink where this Agent's session folder is (only for a session persisted to a folder), so its events are written next to its journal; in: the constructor and importSession, out: the telemetry routing map.
+  private registerTelemetryFolder(): void {
+    const root = this.persistConfig?.dir;
+    if (!root || this.stateless) return;
+    try {
+      registerSessionFolder(this.sessionId, sessionDirFor(root, this.sessionId));
+    } catch {
+      // why: not a usable session id for a folder name, so nothing is saved under it either.
+    }
   }
 
   // Loads a persisted session that a crash cut off (a run without an ending) or that still had waiting prompts, so it can be resumed; true when there is something to resume; in: the session folder of `persist.dir`, out: context, runMarks, toolRecords, pendingQueue.
@@ -698,6 +710,7 @@ export class Agent {
 
   /** Drops one named session. No-op for unknown ids. */
   disposeSession(id: string): void {
+    unregisterSessionFolder(id);
     try { this.sessions.delete(id); } catch {}
     try { clearInteractionChains(id); } catch {}
     try { clearSessionRouting(id); } catch {}
@@ -1574,6 +1587,10 @@ export class Agent {
     this.warnOnLocalMediaPaths(data.messages ?? []);
     const prevSid = this.sessionId;
     if (data.sessionId) (this as any).sessionId = data.sessionId;
+    if (this.sessionId !== prevSid) {
+      unregisterSessionFolder(prevSid);
+      this.registerTelemetryFolder();
+    }
     if ((data as any).parentSessionId) (this as any).parentSessionId = (data as any).parentSessionId;
     if ((data as any).subagents && typeof (data as any).subagents === "object") {
       try {

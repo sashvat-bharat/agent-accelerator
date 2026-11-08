@@ -10,7 +10,7 @@ Saving a conversation, its spending and its tool logs.
 | `tool-log.ts` | `ToolLogs`: one fsynced NDJSON file per tool call under `<session>/tool-logs/`. |
 
 ## Invariants
-- Layout: `<home>/sessions/<id>/{session.json, journal.ndjson, media/, tool-logs/, workers/}`.
+- Layout: `<home>/sessions/<id>/{session.json, journal.ndjson, telemetry.ndjson, media/, tool-logs/, workers/}`. `telemetry.ndjson` is written by `telemetry-file.ts` (opt-in), not by the session code; a folder holding only that file is not a session.
 - A journal whose header epoch differs from the snapshot's is ignored on load.
 - Journal record types: `base`, `msg`, `meta`, `run`, `end`, `tool`, `pending`, `usage`. Replay ignores unknown types, drops a torn last line, and stops at earlier damage with `session.journal_corrupt`.
 - Media is content-addressed (`media/<kind>-h<hash>.<ext>`), written once, never deleted.
