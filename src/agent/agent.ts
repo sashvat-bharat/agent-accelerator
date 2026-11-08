@@ -66,7 +66,7 @@ export function resolveEffectiveThinking(
 import { ConfigError, SessionLoadError, isAbortError } from "../types/errors.ts";
 
 /**
- * Disposers for the manual user-signal forward listeners (Q-21 fallback when
+ * Disposers for the manual user-signal forward listeners (fallback when
  * `AbortSignal.any` is unavailable). Keyed by run controller so no expando
  * properties are attached to AbortController instances.
  */
@@ -75,12 +75,12 @@ const mergeDisposers = new WeakMap<AbortController, () => void>();
 /** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
 export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
 
-/** Max named sessions kept per Agent (Q-19a LRU). */
+/** Max named sessions kept per Agent (LRU). */
 const SESSION_LRU_MAX = 100;
-/** Idle TTL for named sessions (Q-19a). */
+/** Idle TTL for named sessions. */
 const SESSION_TTL_MS = 60 * 60 * 1000;
 
-/** Normalized per-run limits (Q-22). Sub-agents inherit these unless overridden. */
+/** Normalized per-run limits. Sub-agents inherit these unless overridden. */
 export interface AgentRunLimits {
   maxTurns?: number;
   deadlineMs?: number;
@@ -91,7 +91,7 @@ export interface AgentRunLimits {
   streamIdleTimeoutMs: number;
 }
 
-/** Resolves `(config as any).limits` with Q-22 defaults (timeouts tolerate reasoning). */
+/** Resolves `(config as any).limits` with defaults (timeouts tolerate reasoning). */
 function resolveAgentLimits(config: { limits?: Record<string, unknown> }): AgentRunLimits {
   const raw = (config as { limits?: Record<string, unknown> }).limits ?? {};
   const num = (v: unknown): number | undefined =>
@@ -240,10 +240,10 @@ export class Agent {
   readonly persistConfig?: { dir?: string; file?: string };
   /** Mid-session queue policy for new queries arriving while a run is active. */
   readonly midSessionConfig: Required<Pick<MidSessionConfig, "mode">> & MidSessionConfig & { maxSteers?: number };
-  /** Max buffered steer entries per run (Q-20, default 20). */
+  /** Max buffered steer entries per run (default 20). */
   readonly maxSteers: number;
   /**
-   * Normalized run limits (Q-22). Read from `(config as any).limits`;
+   * Normalized run limits. Read from `(config as any).limits`;
    * sub-agents inherit these unless overridden. `maxTurns`/`deadlineMs`/
    * `maxToolCallsPerRun` default to unlimited; timeouts default to
    * request 300s / first-byte 120s / idle 300s (tolerate reasoning).
@@ -265,9 +265,9 @@ export class Agent {
     /** Put here by `interrupt(message)`: runs before every other waiting prompt. */
     urgent?: boolean;
   }> = [];
-  /** Named session contexts for `sessionId` runs (Q-19a, LRU 100 + TTL). */
+  /** Named session contexts for `sessionId` runs (LRU 100 + TTL). */
   private sessions = new Map<string, { context: AgentContext; lastAccess: number }>();
-  /** Coalesced persistence single-flight flag (Q-28). */
+  /** Coalesced persistence single-flight flag. */
   private persistScheduled = false;
   /** Step journal of the persisted session folder (dir mode only). */
   private journal?: SessionJournal;
@@ -402,9 +402,9 @@ export class Agent {
         ? { maxSteers: Math.floor(rawMaxSteers as number) }
         : { maxSteers: 20 }),
     };
-    // Q-20: bound on buffered steer entries (default 20).
+    // Bound on buffered steer entries (default 20).
     this.maxSteers = this.midSessionConfig.maxSteers ?? 20;
-    // Q-22: run limits (sub-agents inherit unless overridden).
+    // Run limits (sub-agents inherit unless overridden).
     this.runLimits = resolveAgentLimits(config as unknown as { limits?: Record<string, unknown> });
 
     // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
@@ -678,13 +678,13 @@ export class Agent {
     this.context.thoughtSignatures = [];
     this.context.systemPrompt = this.getFullInstructions();
     this.runMarks.length = 0;
-    // Q-25: reset also drops session-scoped provider chaining/routing.
+    // Reset also drops session-scoped provider chaining/routing.
     try { clearInteractionChains(sid); } catch {}
     try { clearSessionRouting(sid); } catch {}
   }
 
   /**
-   * Returns a named session handle (Q-19a). `session()` creates an isolated
+   * Returns a named session handle. `session()` creates an isolated
    * `AgentContext` bound to `id` (separate histories per id); `agent.run`
    * with `{ sessionId }` selects/creates the same entry. Sessions are
    * ephemeral in-memory (LRU 100 + 1h TTL). `agent.run`/`stream` without a
@@ -696,14 +696,14 @@ export class Agent {
     return { id: sid, context: ctx, runController: null };
   }
 
-  /** Drops one named session (Q-19a). No-op for unknown ids. */
+  /** Drops one named session. No-op for unknown ids. */
   disposeSession(id: string): void {
     try { this.sessions.delete(id); } catch {}
     try { clearInteractionChains(id); } catch {}
     try { clearSessionRouting(id); } catch {}
   }
 
-  /** Drops all named sessions except the default context (Q-19a). */
+  /** Drops all named sessions except the default context. */
   clearSessions(): void {
     try {
       for (const id of [...this.sessions.keys()]) {
@@ -753,7 +753,7 @@ export class Agent {
     return fresh;
   }
 
-  /** Rejects + drops all queued follow-ups (Q-20). Returns the cleared count. */
+  /** Rejects + drops all queued follow-ups. Returns the cleared count. */
   clearQueue(): number {
     const n = this.pendingQueue.length;
     if (n === 0) return 0;
@@ -767,7 +767,7 @@ export class Agent {
     return n;
   }
 
-  /** Throws when the steer inbox is at its Q-20 bound. */
+  /** Throws when the steer inbox is at its bound. */
   private assertSteerRoom(inbox: SteerEntry[]): void {
     const max = this.maxSteers ?? 20;
     if (inbox.length >= max) {
@@ -964,7 +964,7 @@ export class Agent {
     const next = this.pendingQueue.shift();
     if (!next) return;
     this.persistNow();
-    // Q-20: reject queued items whose signal aborted before start.
+    // Reject queued items whose signal aborted before start.
     try {
       if ((next.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
         const reason = ((next.options as { signal?: AbortSignal }).signal as unknown as { reason?: unknown })?.reason;
@@ -1016,7 +1016,7 @@ export class Agent {
 
   // Ends the active run slot: leftover steers become follow-ups at the FRONT of the queue (behind urgent ones), then the queue is pumped; in: a settled run, out: pendingQueue + persistNow.
   private finishCurrentRun(): void {
-    // Q-20: leftover steer entries become queued follow-ups instead of dropping.
+    // Leftover steer entries become queued follow-ups instead of dropping.
     let leftover: SteerEntry[] = [];
     try { leftover = this.currentRun?.steerInbox?.splice(0) ?? []; } catch { leftover = []; }
     this.currentRun = null;
@@ -1080,7 +1080,7 @@ export class Agent {
       }
       return runController.signal;
     }
-    // Q-21: prefer AbortSignal.any (no expando, no listener leak).
+    // Prefer AbortSignal.any (no expando, no listener leak).
     try {
       const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
       if (typeof anyFn === "function") {
@@ -1233,7 +1233,7 @@ export class Agent {
     const steerInbox: SteerEntry[] = [];
     const mergedSignal = this.mergeUserSignal(options?.signal, runController);
     const runOptions = this.withResolvedThinking({ ...options, signal: mergedSignal });
-    // Q-19a: route to the named session context (default = this.context).
+    // Route to the named session context (default = this.context).
     const targetContext = this.getSessionContext(runOptions?.sessionId || this.sessionId);
     const task = (async (): Promise<AgentResponse> => {
       await ensureModelCatalogFresh();
@@ -1274,7 +1274,7 @@ export class Agent {
         ...(resumeMark ? { resume: { stored: this.storedToolResults() } } : {}),
         steerInbox,
         onSteerInjected: () => this.persistNow(),
-        // Q-22: loop enforces these (plus local timeout races).
+        // Loop enforces these (plus local timeout races).
         limits: { ...this.runLimits },
         ...(this.output !== undefined ? { output: this.output } : {}),
       };
@@ -1333,7 +1333,7 @@ export class Agent {
     if (effectiveLevel) {
       validateModelThinking(resolved.provider.id, resolved.modelId, effectiveLevel);
     }
-    // Q-19a: named session routing (default session for compat).
+    // Named session routing (default session for compat).
     const targetContext = this.getSessionContext(options?.sessionId || this.sessionId);
     const mark = this.prepareTurn(prompt, options, targetContext);
     this.persistNow();
@@ -1365,7 +1365,7 @@ export class Agent {
       openToolLog: (call: { name: string }, sid: string | undefined) => this.openToolLog(call, sid),
       steerInbox,
       onSteerInjected: () => this.persistNow(),
-      // Q-22: loop enforces these (plus local timeout races).
+      // Loop enforces these (plus local timeout races).
       limits: { ...this.runLimits },
       ...(this.output !== undefined ? { output: this.output } : {}),
     };
@@ -1455,14 +1455,14 @@ export class Agent {
    * Called automatically after every step during runs; safe to call
    * manually. Never throws (failures route to `onPersistError`).
    *
-   * Q-28: stateless agents skip persistence unless
+   * Stateless agents skip persistence unless
    * `(persist as any).allowStateless` is set. Calls in the same tick are
    * coalesced via a `queueMicrotask` single flight.
    */
   persistNow(): void {
     const cfg = this.persistConfig;
     if (!cfg || (!cfg.dir && !cfg.file)) return;
-    // Q-28: no stateless persist by default.
+    // No stateless persist by default.
     try {
       if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
     } catch {}
@@ -1504,7 +1504,7 @@ export class Agent {
       if (cfg.dir) this.journalFor(cfg.dir).sync(this as any);
       else if (cfg.file) saveSessionFile(cfg.file, this as any, null);
     } catch (err) {
-      // Q-28: surface via hook instead of swallowing silently.
+      // Surface via hook instead of swallowing silently.
       try { (cfg as unknown as { onPersistError?: (e: unknown) => void }).onPersistError?.(err); } catch {}
     }
   }
@@ -1617,7 +1617,7 @@ export class Agent {
     } else {
       this.context.systemPrompt = this.getFullInstructions();
     }
-    // Q-25: importing a snapshot invalidates prior provider chaining/routing
+    // Importing a snapshot invalidates prior provider chaining/routing
     // for both the previous and the restored session.
     try { clearInteractionChains(prevSid); } catch {}
     try { clearSessionRouting(prevSid); } catch {}
@@ -1653,7 +1653,7 @@ export class Agent {
 
   // Adds the user prompt to the target context (fresh context when stateless, stable system prompt, additionalContext as a user prefix) and marks the run start for the default session; in: a run start, out: the new SessionRunMark.
   private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): SessionRunMark | undefined {
-    // Q-20: prompt validation throws synchronously in both run() and
+    // Prompt validation throws synchronously in both run() and
     // stream() (same timing; documented here).
     if (Array.isArray(prompt) && prompt.length === 0) {
       throw new Error(
@@ -1662,7 +1662,7 @@ export class Agent {
     }
     const ctx = target ?? this.getSessionContext(options?.sessionId || this.sessionId);
     if (this.stateless) {
-      // Q-19a: stateless runs use a fresh ephemeral context (never shared).
+      // Stateless runs use a fresh ephemeral context (never shared).
       ctx.messages = [];
       ctx.thoughtSignatures = [];
     }
@@ -1728,7 +1728,7 @@ export class Agent {
     prompt: string | ContentPart[],
     options?: AgentRunOptions
   ): Promise<AgentResponse> | AssistantMessageEventStream {
-    // Q-20: prompt validation throws synchronously in both run() and
+    // Prompt validation throws synchronously in both run() and
     // stream() (same timing; async work starts only after validation).
     this.assertPromptValid(prompt);
     const isStream = options?.stream === true;
@@ -1866,7 +1866,7 @@ export class Agent {
     prompt: string | ContentPart[],
     options?: AgentRunOptions
   ): AssistantMessageEventStream {
-    // Q-20: same sync validation timing as run().
+    // Same sync validation timing as run().
     this.assertPromptValid(prompt);
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
     if (this.currentRun) {

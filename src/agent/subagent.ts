@@ -9,7 +9,7 @@ import { getModel, getSubModel } from "../utils/env.ts";
 export interface SubAgentConfig extends AgentConfig {}
 
 /**
- * Canonical env-based construction (Q-56): builds an `Agent` reading
+ * Canonical env-based construction: builds an `Agent` reading
  * `MODEL`/`SUB_AGENT_MODEL` only for the fields the caller omits, via
  * `getModel()`/`getSubModel()`. Explicit config always wins; constructing an
  * `Agent` with an explicit `model` reads no env for routing. The static
@@ -36,12 +36,12 @@ export function agentFromEnv(
  * It inherits 100% of the capabilities of Agent, defaults to SUB_AGENT_MODEL,
  * and provides .asTool() and .toTool() for seamless registration into parent agents.
  *
- * Model fallback chain (Q-56, canonical): explicit `config.model` ??
+ * Model fallback chain (canonical): explicit `config.model` ??
  * `SUB_AGENT_MODEL` (`getSubModel()`) ?? `MODEL` (`getModel()`). Missing
  * everything throws. Constructing any `Agent`/`SubAgent` with an explicit
  * `model` reads no env for routing.
  *
- * Q-47 decomposition boundary: this class stays a thin wrapper. The run/stream
+ * Decomposition boundary: this class stays a thin wrapper. The run/stream
  * loops live in `agent.ts`/`loop.ts`, spawning in `delegation.ts`
  * (`agentToTool`), and model parsing in `utils/session.ts` (`parseModelRef`).
  * No loop, transport, or formatting logic is duplicated here.
@@ -104,7 +104,7 @@ export class SubAgent extends Agent {
   }
 }
 
-// Q-56: `Agent.fromEnv()` static without touching `agent.ts` (owned by
+// `Agent.fromEnv()` static without touching `agent.ts` (owned by
 // another lane). Wired at module load; typed via the declaration below so
 // `Agent.fromEnv({...})` typechecks wherever this module is imported.
 declare module "./agent.ts" {
