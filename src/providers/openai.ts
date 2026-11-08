@@ -472,7 +472,7 @@ function parseResponse(
     }
   }
 
-  // Q-23: `incomplete` -> length (content-filter truncations surface as
+  // `incomplete` -> length (content-filter truncations surface as
   // refusal when refusal text is present).
   const incompleteReason = (response as { incomplete_details?: { reason?: string } }).incomplete_details?.reason;
   const finishReason =
@@ -828,7 +828,7 @@ export class OpenAIResponsesProvider implements Provider {
           body,
         };
 
-        // Q-17: optional per-call timeout races the linked abort signal.
+        // Optional per-call timeout races the linked abort signal.
         const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
@@ -895,7 +895,7 @@ export class OpenAIResponsesProvider implements Provider {
             type === "response.refusal.delta" ||
             type === "response.output_refusal.delta"
           ) {
-            // Q-23: refusal deltas carry the filter text; surface as text and
+            // Refusal deltas carry the filter text; surface as text and
             // remember for a `refusal` finish reason.
             if (typeof msg["delta"] === "string" && msg["delta"]) {
               text += msg["delta"] as string;
@@ -955,7 +955,7 @@ export class OpenAIResponsesProvider implements Provider {
             }
             // Non-streaming maps `incomplete` → `length` (max tokens). Streaming
             // must do the same — otherwise truncated turns misreport `stop`.
-            // Q-23: content-filter incompletes surface as `refusal`.
+            // Content-filter incompletes surface as `refusal`.
             const incompleteReason = (response as { incomplete_details?: { reason?: string } }).incomplete_details?.reason;
             if (response.status === "incomplete") {
               finishReason = incompleteReason === "content_filter" ? "refusal" : "length";
@@ -1039,7 +1039,7 @@ export class OpenAIResponsesProvider implements Provider {
           sawFinishReason = true;
         }
 
-        // Q-23: terminal-state guard. Loops ending with no completed body, no
+        // Terminal-state guard. Loops ending with no completed body, no
         // finish_reason, and no usage while carrying no content must fail as
         // `incomplete_stream` (retryable) instead of resolving empty success.
         // Skipped for non-SSE payloads (e.g. JSON mocks in delegation tests)

@@ -1,5 +1,5 @@
 /**
- * Shared provider helpers (Q-45-partial).
+ * Shared provider helpers.
  *
  * Single home for the `redactedHeaders` / `readErrorPayload` /
  * `parseArguments` / `normalizeThinkingParts` helpers previously duplicated
@@ -78,7 +78,7 @@ export function readErrorPayload(
   }
 }
 
-/** Retryable incomplete-stream error for truncated SSE (Q-23). */
+/** Retryable incomplete-stream error for truncated SSE. */
 export function incompleteStreamError(provider: string, modelId: string): Error {
   const err = toConciseProviderError(
     Object.assign(new Error("Stream ended without terminal event"), {
@@ -118,7 +118,7 @@ export function isNotFoundChainError(error: unknown): boolean {
   return code === "not_found";
 }
 
-/** Per-request timeout ms from provider options (Q-22). */
+/** Per-request timeout ms from provider options. */
 export function timeoutFor(options: { timeoutMs?: number } | undefined): number | undefined {
   const t = (options as { timeoutMs?: unknown } | undefined)?.timeoutMs;
   return typeof t === "number" && Number.isFinite(t) && t > 0 ? Math.floor(t) : undefined;
@@ -149,7 +149,7 @@ export function combinedSignal(signal?: AbortSignal, timeoutMs?: number): { sign
   return { signal: ctrl.signal, cleanup };
 }
 
-/** Q-34: crypto-backed tool-call id, no Math.random primary. */
+/** Crypto-backed tool-call id, no Math.random primary. */
 export function newToolCallId(prefix = "call"): string {
   try {
     const c = (globalThis as any)?.crypto;

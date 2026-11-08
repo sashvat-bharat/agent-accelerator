@@ -77,12 +77,12 @@ function normalizeModelIdForLookup(modelId: string): string {
 
 // ---------------------------------------------------------------------------
 // Internal cache — battle-tested: avoid repeated global scans (7487 models)
-// Bound lookupCache to 1000 entries LRU (Q-33): evict oldest on overflow.
+// Bound lookupCache to 1000 entries LRU: evict oldest on overflow.
 // ---------------------------------------------------------------------------
 const lookupCache = new Map<string, ModelSpec | undefined>();
 const providerModelsCache = new Map<string, ModelSpec[]>();
 
-/** Bounded LRU set for lookupCache (Q-33): keeps at most 1000 entries. */
+/** Bounded LRU set for lookupCache: keeps at most 1000 entries. */
 function setLookupCache(key: string, value: ModelSpec | undefined): void {
   if (lookupCache.has(key)) lookupCache.delete(key);
   else if (lookupCache.size >= 1000) {
@@ -92,7 +92,7 @@ function setLookupCache(key: string, value: ModelSpec | undefined): void {
   lookupCache.set(key, value);
 }
 
-// Custom-registered models (Q-33): checked first in getModelFromCatalog.
+// Custom-registered models: checked first in getModelFromCatalog.
 const customModelRegistry = new Map<string, ModelSpec>();
 
 // Case-insensitive key of a registered custom model; in: registerModel and lookups, out: a string.
@@ -101,7 +101,7 @@ function customRegistryKey(provider: string, modelId: string): string {
 }
 
 /**
- * Registers a custom model spec that takes precedence over the catalog (Q-33).
+ * Registers a custom model spec that takes precedence over the catalog.
  * Stored in a separate map, checked first in `getModelFromCatalog`.
  */
 export function registerModel(spec: ModelSpec): void {
@@ -124,7 +124,7 @@ export function clearCustomModels(): void {
 }
 
 /**
- * Returns where a model resolves from without touching frozen types (Q-33):
+ * Returns where a model resolves from without touching frozen types:
  * `"override"` for custom-registered or MODALITY_OVERRIDES-covered models,
  * `"catalog"` for plain catalog hits, `"unknown"` when unresolvable.
  */
@@ -256,7 +256,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
   const modelId = modelIdInput.trim();
   let result: ModelSpec | undefined;
 
-  // Q-33: custom-registered models win over the catalog.
+  // Custom-registered models win over the catalog.
   const customHit =
     customModelRegistry.get(customRegistryKey(provider, modelId)) ??
     customModelRegistry.get(customRegistryKey(provider, normalizeModelIdForLookup(modelId)));
@@ -287,7 +287,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
         return result;
       }
     }
-    // Q-33: tightened fuzzy match — exact, `endsWith("/"+modelId)` boundary,
+    // Tightened fuzzy match — exact, `endsWith("/"+modelId)` boundary,
     // or normalized equality. The old loose `modelId.endsWith(key)` is removed
     // (e.g. "gpt-4o-mini-extra" must not match "mini").
     for (const [key, raw] of Object.entries(providerData.models as Record<string, any>)) {
@@ -563,7 +563,7 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
       out.push(mapModelSpec(alias as ProviderId, key, raw));
     }
   }
-  // Q-33: include custom-registered models for this provider/alias set.
+  // Include custom-registered models for this provider/alias set.
   for (const spec of customModelRegistry.values()) {
     if (aliases.includes(String(spec.provider)) || String(spec.provider) === provider) {
       if (!seen.has(spec.id)) {
@@ -573,7 +573,7 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
     }
   }
   // Also include our internal provider id mapping
-  // Q-33: return copies — cache the canonical array, hand out a fresh copy.
+  // Return copies — cache the canonical array, hand out a fresh copy.
   providerModelsCache.set(provider, out);
   return [...out];
 }
