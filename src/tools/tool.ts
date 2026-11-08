@@ -10,7 +10,7 @@ import { zodToJsonSchema } from "./schema.ts";
 import { ConfigError } from "../types/errors.ts";
 
 /**
- * Valid tool-name pattern (Q-55): 1–64 chars of letters, digits, `_`, `-`.
+ * Valid tool-name pattern: 1–64 chars of letters, digits, `_`, `-`.
  * Names are validated at registration in {@link tool} (record-key fallback
  * included); invalid names throw `ConfigError` with a fix.
  */
@@ -31,7 +31,7 @@ export function assertValidToolName(name: string): void {
 }
 
 /**
- * Normalizes the Q-52 canonical `thinking` option to a bare level.
+ * Normalizes the canonical `thinking` option to a bare level.
  * Accepts a level string or `{ level, budgetTokens }`; `budgetTokens` is
  * carried separately by providers, so only the level is returned here.
  * Resolution honors `thinking ?? thinkingLevel`.
@@ -50,7 +50,7 @@ export function normalizeThinkingV2(
 }
 
 /**
- * Resolves the Q-51 canonical busy policy. `whenBusy` wins over `mode`.
+ * Resolves the canonical busy policy. `whenBusy` wins over `mode`.
  *
  * @example `resolveWhenBusy({ whenBusy: "queue", mode: "steer" }); // "queue"`
  */
@@ -62,7 +62,7 @@ export function resolveWhenBusy(
 }
 
 /**
- * Normalizes the Q-52 `maxAttempts` alias to a `maxTries` value.
+ * Normalizes the `maxAttempts` alias to a `maxTries` value.
  * `maxTries` wins when both are set.
  *
  * @example `normalizeMaxAttempts({ maxAttempts: 3 }); // 3`
@@ -90,7 +90,7 @@ export interface CreateToolOptions<TInput = any, TOutput = any> {
   /** Maximum total attempts for transient failures. `0`/omitted means no configured limit. */
   maxTries?: number | string;
   /**
-   * Canonical alias for `maxTries` (Q-52). When both are set, `maxTries` wins.
+   * Canonical alias for `maxTries`. When both are set, `maxTries` wins.
    * Normalized by `normalizeMaxAttempts`.
    */
   maxAttempts?: number | string;
@@ -116,12 +116,12 @@ export interface CreateToolOptions<TInput = any, TOutput = any> {
   /** Optional hook to redact/replace the error message sent back to the model. */
   redactError?: (err: unknown) => string;
   /**
-   * Canonical alias for `redactError` (Q-55). When both are set,
+   * Canonical alias for `redactError`. When both are set,
    * `redactError` wins.
    */
   redact?: (err: unknown) => string;
   /**
-   * Explicit retry policy (Q-55). Preferred over bare `maxTries` for new
+   * Explicit retry policy. Preferred over bare `maxTries` for new
    * code; the executor reads via `(toolDef as any).retry`.
    */
   retry?: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number };
@@ -165,7 +165,7 @@ export interface CreateToolOptions<TInput = any, TOutput = any> {
 export function tool<TInput = any, TOutput = any>(
   options: CreateToolOptions<TInput, TOutput>
 ): ToolDefinition<TInput, TOutput> {
-  // Q-55: names are validated at registration (record-key fallback included).
+  // Names are validated at registration (record-key fallback included).
   if (options.name !== undefined) assertValidToolName(options.name);
   // ToolDefinition (src/types/tool.ts) carries the v2 policies as typed
   // optionals; the executor additionally reads them via `(toolDef as any).*`.

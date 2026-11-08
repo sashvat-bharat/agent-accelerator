@@ -1,5 +1,5 @@
 /**
- * In-process telemetry bus (Q-41). Library code routes warnings, anomalies and
+ * In-process telemetry bus. Library code routes warnings, anomalies and
  * per-turn traces here instead of `console.*`. The default has zero listeners,
  * so emission is a no-op; CLIs, tests and observability layers attach with
  * `telemetryBus.onEvent`. Intentionally dependency-free: every module in the
@@ -7,7 +7,7 @@
  * it without creating an import cycle.
  */
 
-/** Telemetry event emitted via the in-process bus (Q-41). */
+/** Telemetry event emitted via the in-process bus. */
 export interface TelemetryEvent {
   code: string;
   message: string;

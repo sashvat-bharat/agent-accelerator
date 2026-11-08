@@ -6,7 +6,7 @@ export { isAbortError };
 /**
  * Checks whether a provider error is transient and safe to retry.
  * Structured-data only: status / code / transient flag. Never message text,
- * so a 400 mentioning "512 tokens" is not retried (Q-24).
+ * so a 400 mentioning "512 tokens" is not retried.
  */
 export function isTransientError(error: unknown): boolean {
   if (!error) return false;

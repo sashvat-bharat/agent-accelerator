@@ -539,7 +539,7 @@ export async function executeToolCalls(
     let attempts = 0;
     let timedOut = false;
 
-    // Truncated streamed arguments (Q-12): the `__truncated_raw` marker means the
+    // Truncated streamed arguments: the `__truncated_raw` marker means the
     // provider's partial JSON never parsed. Never execute or overwrite wire
     // finishReason here — return a synthetic error so the model retries with
     // complete JSON.

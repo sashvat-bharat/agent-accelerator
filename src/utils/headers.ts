@@ -43,7 +43,7 @@ function getAgentAccelUserAgent(): string {
 export const AGENT_ACCEL_USER_AGENT = getAgentAccelUserAgent;
 
 // ---------------------------------------------------------------------------
-// Attribution (Q-17): configurable, default none except OpenRouter legacy.
+// Attribution: configurable, default none except OpenRouter legacy.
 // ---------------------------------------------------------------------------
 
 /** Configurable attribution headers (OpenRouter `HTTP-Referer` / `X-Title`). */
@@ -104,7 +104,7 @@ export function setHeaderCaseInsensitive(
 }
 
 // ---------------------------------------------------------------------------
-// Thought-signature namespacing (Q-18).
+// Thought-signature namespacing.
 // ---------------------------------------------------------------------------
 
 /**
@@ -140,7 +140,7 @@ function stripForBrowser(headers: Record<string, string>): Record<string, string
 /**
  * Builds provider-specific session, cache-affinity, and attribution headers.
  *
- * Q-17: attribution is configurable via `setAttribution()` (default none; no
+ * Attribution is configurable via `setAttribution()` (default none; no
  * referer/title is ever sent unless you set one). Custom (non-first-class)
  * prefixes receive minimal `x-session-id`/`x-client-request-id` affinity only
  * (no `session_id` alias, no attribution) when a session id is present.

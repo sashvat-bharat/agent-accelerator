@@ -4,7 +4,7 @@ import { telemetryBus } from "../telemetry.ts";
 /** Listener invoked for a matching stream event type or `*`. */
 export type StreamEventListener = (event: StreamEvent) => void;
 
-/** Options for AssistantMessageEventStream (Q-29). */
+/** Options for AssistantMessageEventStream. */
 export interface EventStreamOptions {
   /**
    * When false, `partialText`/`partialThinking` cumulative fields are stripped
@@ -25,9 +25,9 @@ type Resolver = {
   reject: (err: Error) => void;
 };
 
-/** Default max buffered events (Q-29). */
+/** Default max buffered events. */
 export const MAX_BUFFERED_EVENTS = 1000;
-/** Default max approx bytes per delta event (Q-29). */
+/** Default max approx bytes per delta event. */
 export const MAX_EVENT_BYTES = 1_048_576;
 
 // Approximate size of an event's text fields; in: push's oversize guard, out: a character count.
@@ -43,7 +43,7 @@ function approxEventBytes(event: StreamEvent): number {
 // Reports a dropped or overflowing event on the bus and the legacy hook, never throwing; in: push/enqueueBounded, out: telemetryBus.
 function reportStreamAnomaly(detail: { type: string; [k: string]: unknown }): void {
   // why: bus + hook only, never console — streams are hot paths and logging
-  // per-drop would spam and break no-console policy (Q-29/Q-41).
+  // per-drop would spam and break no-console policy.
   telemetryBus.emitWarning(detail.type, `[Agent Accelerator] stream anomaly: ${detail.type}`, detail);
   try {
     (globalThis as unknown as { __agentAccelAnomaly?: (d: unknown) => void }).__agentAccelAnomaly?.(detail);
@@ -68,7 +68,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
   private readonly buffered: boolean;
   private readonly maxBufferedEvents: number;
   private readonly maxEventBytes: number;
-  /** First listener exception captured for inspection (Q-29/Q-41). */
+  /** First listener exception captured for inspection. */
   private listenerError: Error | null = null;
   /** Count of events dropped by bounds (buffer cap / oversize / unbuffered). */
   private droppedEvents = 0;
@@ -107,7 +107,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     return this.listenerError;
   }
 
-  /** Number of events dropped by Q-29 bounds. */
+  /** Number of events dropped by bounds. */
   getDroppedCount(): number {
     return this.droppedEvents;
   }
@@ -116,7 +116,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
   push(event: StreamEvent): void {
     if (this.finished) return;
 
-    // Q-29: 1MB oversize guard — drop oversized deltas (no console).
+    // 1MB oversize guard — drop oversized deltas (no console).
     if (approxEventBytes(event) > this.maxEventBytes) {
       this.droppedEvents++;
       reportStreamAnomaly({ type: "stream_event_oversize", eventType: event.type });
@@ -132,7 +132,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
 
     if (out.type === "error") {
       this.error = (out.error instanceof Error ? out.error : new Error(String(out.error))) ?? new Error("Unknown error in stream");
-      // Single error semantic (Q-29): deliver the error event to listeners,
+      // Single error semantic: deliver the error event to listeners,
       // reject result(), mark finished, reject pending iterators, and queue
       // the error event so a late iterator observes it before failing.
       this.deliverToListeners(out);
@@ -156,7 +156,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
       resolver.resolve({ value: out, done: false });
     } else {
       // No waiter right now (typical between `next()` polls of a burst):
-      // buffer for the iterator with a hard cap (Q-29). Overflow drops the
+      // buffer for the iterator with a hard cap. Overflow drops the
       // oldest with an anomaly report — see `enqueueBounded`. A stream built
       // with `buffer: false` has no iterator to feed and keeps nothing.
       if (this.buffered) this.enqueueBounded(out);
@@ -194,7 +194,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
   private enqueueBounded(event: StreamEvent): void {
     this.queue.push(event);
     while (this.queue.length > this.maxBufferedEvents) {
-      // Drop oldest buffered event to bound memory (Q-29). Error events are
+      // Drop oldest buffered event to bound memory. Error events are
       // never dropped: if the oldest is an error, drop the next-oldest
       // non-error instead; if the queue is all errors, keep them.
       if (this.queue[0]?.type === "error") {
@@ -213,7 +213,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
   end(finalResponse?: AgentResponse): void {
     if (this.finished) return;
     if (!finalResponse) {
-      // Q-29: never hang result() — ending without a response is a
+      // Never hang result() — ending without a response is a
       // programming error, so fail loudly instead of leaving consumers
       // waiting forever.
       this.fail(new Error("end() requires response"));
