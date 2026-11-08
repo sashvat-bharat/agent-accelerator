@@ -67,7 +67,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 - **Unknown cost is `undefined`**, not zero.
 - **Tool names** match `^[a-zA-Z0-9_-]{1,64}$`. Pass `ctx.signal` to I/O.
 - **Workers are developer-configured.** The LLM never chooses a worker's model or reasoning level.
-- **Keep a scheduled action's creating `Agent` referenced**; one process per home folder.
+- **Keep a scheduled action's creating `Agent` referenced**; several processes may share a home, and the process that registered the Agent runs and delivers its actions.
 - Never edit the model catalog cache; use `registerModel()`.
 - **Everything the SDK stores lives in one folder** (`sessions/` with each session's own `telemetry.ndjson`, `scheduled/`, `telemetry/`, `catalog/`). Move it with `setHome(dir)` or `AGENT_ACCEL_HOME`; never write SDK state elsewhere.
 
@@ -83,7 +83,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | `temperature` / `topP` / `sampling` | Removed on every provider; do not pass them |
 | Gemini 1.x / 2.x | Rejected; minimum is Gemini 3 |
 | `cache` TTLs (`5m`, `30m`, `1h`, `12h`) | Honoured only where the provider supports them (see README Cache table); others warn and fall back |
-| Multiple processes sharing one folder you persist to | The folder is locked: the second process gets a `ConfigError`. Use one `home` per process |
+| Two processes opening the same persisted session | The session folder is locked: the second process gets a `ConfigError`. Use a different `sessionId` per process (they can share one `home`) |
 | The `SubAgent` class | Deprecated; use `Agent` + `subagents` |
 | OpenRouter Responses transport | Discontinued; OpenRouter uses Chat Completions |
 

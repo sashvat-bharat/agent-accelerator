@@ -141,6 +141,15 @@ export function clearHeartbeat(home: string, id: string): void {
   }
 }
 
+// Deletes the leftover temp files of a task.json / delivery.json write that never finished (a killed process); only called while holding the action's mutex, which is what makes it safe (run files are written outside the mutex, so they are never touched); in: the three mutating helpers, out: nothing.
+function sweepShardTemps(dir: string): void {
+  try {
+    for (const name of fs.readdirSync(dir)) if (/^(task|delivery)\.json\.tmp-\d+-[0-9a-z]+$/.test(name)) fs.rmSync(path.join(dir, name), { force: true });
+  } catch {
+    // why: an unreadable folder or an undeletable leftover is harmless.
+  }
+}
+
 /** Absolute path of a run file given its `scheduled/`-relative path. */
 export function runPath(home: string, relativeFile: string): string {
   return path.resolve(baseDir(home), relativeFile);
@@ -271,6 +280,7 @@ export function updateTask<T>(home: string, id: string, fn: (rec: ScheduledActio
   }
   if (!fs.existsSync(dir)) return fn(undefined);
   return withFileMutex(mutexFile(dir), () => {
+    sweepShardTemps(dir);
     const rec = readTask(home, id);
     const before = rec ? JSON.stringify(rec) : "";
     const result = fn(rec);
@@ -295,7 +305,10 @@ export function createTask(home: string, nextId: () => string, build: (id: strin
       throw err;
     }
     const rec = build(id);
-    withFileMutex(mutexFile(dir), () => writeFileDurable(taskFile(dir), JSON.stringify({ version: 2, task: rec }, null, 2) + "\n"));
+    withFileMutex(mutexFile(dir), () => {
+      sweepShardTemps(dir);
+      writeFileDurable(taskFile(dir), JSON.stringify({ version: 2, task: rec }, null, 2) + "\n");
+    });
     return rec;
   }
   throw new ValidationError("Could not find a free scheduled action id.");
@@ -335,6 +348,7 @@ export function updateDeliveries<T>(home: string, id: string, fn: (pending: Pend
   const dir = taskDir(home, id);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return withFileMutex(mutexFile(dir), () => {
+    sweepShardTemps(dir);
     const file = deliveryFile(dir);
     const pending = (readShard(file, parsePending) ?? []) as unknown as PendingDelivery[];
     const result = fn(pending);

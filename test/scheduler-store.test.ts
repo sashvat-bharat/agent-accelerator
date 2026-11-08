@@ -153,3 +153,17 @@ for (let i = 0; i < 20; i++) { first = true; createTask(home!, () => (first ? ((
     expect(ids).toContain("same-aaaaaa");
   }, 90_000);
 });
+
+describe("leftovers of a killed writer", () => {
+  it("an update sweeps the temp files of an unfinished task.json / delivery.json write, never a run file's", () => {
+    const h = home();
+    createTask(h, () => "a-aaaaaa", (id) => rec(id));
+    const dir = path.join(h, "scheduled", "a-aaaaaa");
+    const dead = [`task.json.tmp-4242-1a2b3c4d`, `delivery.json.tmp-4242-1a2b3c4d`];
+    const live = [`26-october-2026.md.tmp-4242-1a2b3c4d`, "notes.tmp"]; // another process may be writing a run file right now
+    for (const f of [...dead, ...live]) fs.writeFileSync(path.join(dir, f), "x");
+    updateTask(h, "a-aaaaaa", () => 1);
+    for (const f of dead) expect(fs.existsSync(path.join(dir, f))).toBe(false);
+    for (const f of live) expect(fs.existsSync(path.join(dir, f))).toBe(true);
+  });
+});

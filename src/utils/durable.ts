@@ -91,7 +91,7 @@ export function readWithBackup(file: string, isValid: (text: string) => boolean)
 }
 
 // ---------------------------------------------------------------------------
-// One process per folder
+// One process per folder (used for session folders)
 // ---------------------------------------------------------------------------
 
 /** Folders this process already holds (the lock is re-entrant: many Agents share one home). */

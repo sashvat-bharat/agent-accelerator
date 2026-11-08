@@ -4,7 +4,7 @@ Small shared helpers. Each file has one job.
 
 | File | What it does |
 | :-- | :-- |
-| `durable.ts` | The ONE disk writer (`writeFileDurable`: temp, fsync, `.bak`, rename, folder fsync), `readWithBackup`, and `lockFolder` (one process per folder, stale-lock takeover, temp sweep). |
+| `durable.ts` | The ONE disk writer (`writeFileDurable`: temp, fsync, `.bak`, rename, folder fsync), `readWithBackup`, `lockFolder` (one process per folder, used for session folders; stale-lock takeover, temp sweep) and `withFileMutex` (short per-file lock for state several processes change, e.g. one scheduled action). |
 | `home.ts` | `resolveHome` / `setHome`: the single folder everything is stored in. |
 | `env.ts` | Process-env lookups and API key resolution. No `globalThis` fallback. |
 | `headers.ts` | Session-affinity headers, opt-in attribution, browser stripping, package version fallback. |

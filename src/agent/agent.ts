@@ -384,11 +384,6 @@ export class Agent {
       config.persist && !config.persist.dir && !config.persist.file
         ? { ...config.persist, dir: path.join(this.home, "sessions") }
         : config.persist;
-    // One process per folder: fail fast here, before anything is written (the home for `persist: {}`, else the folder named).
-    if (config.persist) {
-      const { dir, file } = config.persist;
-      lockFolder(dir ?? (file ? path.dirname(path.resolve(file)) : this.home));
-    }
     // `whenBusy` (canonical) wins over legacy `mode`; anything else is "auto".
     const normalizedMode = resolveWhenBusy(config.midSession);
     const rawMaxQueued = (config.midSession as any)?.maxQueued;
@@ -463,6 +458,8 @@ export class Agent {
       ? { ...(config.fileAccess.roots ? { roots: [...config.fileAccess.roots] } : {}) }
       : undefined;
     this.stateless = config.stateless ?? false;
+    // One process per session folder: fail fast here, before anything is written (another process may use other sessions of the same home).
+    this.lockSessionFolder();
 
     // Tools registration (unified normalization shared with dynamic pool).
     if (config.tools) {
@@ -509,6 +506,23 @@ export class Agent {
   /** The persistent sub-agent workers of this agent: `spawn`, `message`, `close`, `list`, `turns` (see `WorkerRegistry`). */
   get workers(): WorkerRegistry {
     return (this.workerRegistry ??= new WorkerRegistry(this));
+  }
+
+  // Takes the one-process lock of the folder this Agent persists to: its own session folder, or the folder of a single `persist.file`; throws ConfigError when another live process holds it; in: the constructor and importSession (a new session id is a new folder), out: a `.lock` file there.
+  private lockSessionFolder(): void {
+    const cfg = this.persistConfig;
+    if (!cfg || this.stateless) return;
+    if (cfg.dir) {
+      let dir: string;
+      try {
+        dir = sessionDirFor(cfg.dir, this.sessionId);
+      } catch {
+        return; // not a usable session id for a folder name, so nothing is saved under it either
+      }
+      lockFolder(dir);
+    } else if (cfg.file) {
+      lockFolder(path.dirname(path.resolve(cfg.file)));
+    }
   }
 
   // Tells the telemetry sink where this Agent's session folder is (only for a session persisted to a folder), so its events are written next to its journal; in: the constructor and importSession, out: the telemetry routing map.
@@ -1588,6 +1602,12 @@ export class Agent {
     const prevSid = this.sessionId;
     if (data.sessionId) (this as any).sessionId = data.sessionId;
     if (this.sessionId !== prevSid) {
+      try {
+        this.lockSessionFolder();
+      } catch (err) {
+        (this as any).sessionId = prevSid; // the session belongs to another process: keep ours untouched
+        throw err;
+      }
       unregisterSessionFolder(prevSid);
       this.registerTelemetryFolder();
     }

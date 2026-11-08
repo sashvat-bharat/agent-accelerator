@@ -116,32 +116,67 @@ describe("lockFolder", () => {
 describe("what takes the lock", () => {
   const model = "google/gemini-3.5-flash-lite";
 
-  it("an Agent with persist refuses a folder another process holds", async () => {
+  it("an Agent with persist refuses the session folder another process holds, but not another session", async () => {
+    const dir = tmp();
+    await otherProcessHolding(path.join(dir, "busy"));
+    expect(() => new Agent({ model, sessionId: "busy", persist: { dir } })).toThrow(ConfigError);
+    expect(() => new Agent({ model, sessionId: "free", persist: { dir } })).not.toThrow();
+    expect(fs.existsSync(path.join(dir, "free", ".lock"))).toBe(true);
+  });
+
+  it("persist.file locks the folder of that file", async () => {
     const dir = tmp();
     await otherProcessHolding(dir);
-    expect(() => new Agent({ model, persist: { dir } })).toThrow(ConfigError);
     expect(() => new Agent({ model, persist: { file: path.join(dir, "chat.session.json") } })).toThrow(ConfigError);
   });
 
-  it("persist: {} locks the home, not the sessions folder", async () => {
+  it("persist: {} locks <home>/sessions/<id>, and a lock on the home itself blocks nothing", async () => {
     const home = tmp();
     await otherProcessHolding(home);
-    expect(() => new Agent({ model, home, persist: {} })).toThrow(ConfigError);
+    expect(() => new Agent({ model, home, persist: {} })).not.toThrow();
+    await otherProcessHolding(path.join(home, "sessions", "taken"));
+    expect(() => new Agent({ model, home, sessionId: "taken", persist: {} })).toThrow(ConfigError);
   });
 
-  it("telemetry.persist and scheduled actions lock the home", async () => {
+  it("telemetry.persist and scheduled actions need no lock on the home", async () => {
     const home = tmp();
     await otherProcessHolding(home);
-    expect(() => new Agent({ model, home, telemetry: { persist: true } })).toThrow(ConfigError);
-    expect(() => listScheduledActions({ home })).toThrow(ConfigError);
+    expect(() => new Agent({ model, home, telemetry: { persist: true } })).not.toThrow();
+    expect(() => listScheduledActions({ home })).not.toThrow();
     expect(
       () => new Agent({ model, home, subagentModel: model, dynamicSubagents: { allowScheduledActions: true } })
-    ).toThrow(ConfigError);
+    ).not.toThrow();
   });
 
-  it("an Agent that writes nothing never takes a lock", async () => {
+  it("importSession into a session another process holds is refused and keeps the current session", async () => {
     const dir = tmp();
-    await otherProcessHolding(dir);
-    expect(() => new Agent({ model, home: dir })).not.toThrow();
+    await otherProcessHolding(path.join(dir, "theirs"));
+    const agent = new Agent({ model, sessionId: "mine", persist: { dir } });
+    expect(() => agent.importSession({ sessionId: "theirs", messages: [] } as never)).toThrow(ConfigError);
+    expect(agent.sessionId).toBe("mine");
   });
+
+  it("an Agent that writes nothing, or is stateless, never takes a lock", async () => {
+    const dir = tmp();
+    await otherProcessHolding(path.join(dir, "s"));
+    expect(() => new Agent({ model, home: dir })).not.toThrow();
+    expect(() => new Agent({ model, sessionId: "s", stateless: true, persist: { dir } })).not.toThrow();
+  });
+
+  it("two real processes on one home use different sessions, the daily telemetry file and one scheduled action folder at once", async () => {
+    const home = tmp();
+    const script = path.join(home, "p.ts");
+    fs.writeFileSync(
+      script,
+      `import { Agent } from ${JSON.stringify(path.resolve("src/index.ts"))};
+const [home, sid] = process.argv.slice(2);
+const a = new Agent({ model: "google/gemini-3.5-flash-lite", home, sessionId: sid, persist: {}, telemetry: { persist: true } });
+a.importSession({ sessionId: sid, messages: [{ role: "user", content: "hi " + sid }] } as never);
+await Bun.sleep(300);
+console.log("ok");`
+    );
+    const procs = ["one", "two", "three"].map((sid) => Bun.spawn(["bun", script, home, sid], { stdout: "pipe", stderr: "pipe" }));
+    expect(await Promise.all(procs.map((p) => p.exited))).toEqual([0, 0, 0]);
+    for (const sid of ["one", "two", "three"]) expect(fs.existsSync(path.join(home, "sessions", sid, ".lock")) || fs.existsSync(path.join(home, "sessions", sid))).toBe(true);
+  }, 30_000);
 });
