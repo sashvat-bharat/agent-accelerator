@@ -26,7 +26,7 @@
  * now and delivers at least 2 minutes from now.
  *
  * Needs: MODEL + SUB_AGENT_MODEL + provider key (see .env.example). Costs live
- * tokens. Files go to ./.agent-accel/demo/ (gitignored): `scheduled_actions/` holds
+ * tokens. Files go to ./.agent-accel/demo/ (gitignored): `scheduled/` holds
  * the actions and their results (the demo removes what it creates) and `telemetry/`
  * keeps the event log (`tool.*`, `scheduled_action.*`) for you to inspect.
  *

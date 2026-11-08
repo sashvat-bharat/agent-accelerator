@@ -166,7 +166,7 @@ function specFor(modelStr: string): ReturnType<typeof getModelFromCatalog> {
 }
 
 /** Context window for telemetry display. Falls back to 1M like the chat CLI.
- * @deprecated (Q-34) Kept for compat; new code should use
+ * @deprecated Kept for compat; new code should use
  * `getSessionContextWindowOrUndefined` and handle `undefined` explicitly.
  */
 export function getSessionContextWindow(modelStr: string): number {
@@ -575,7 +575,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
   const maxBytes = limits?.maxBytes ?? MAX_SESSION_JSON_BYTES;
   const text = (raw ?? "").trim();
   if (!text) return null;
-  // Q-10: oversized payloads are rejected, but flagged as over-limit (NOT corrupt).
+  // Oversized payloads are rejected, but flagged as over-limit (NOT corrupt).
   if (text.length > maxBytes) return OVER_LIMIT;
   try {
     // Legacy JSONL: lines shaped {type: session|mainModel|subagentModel|metrics|message|...}
@@ -626,7 +626,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
         }
       }
       if (!sessionId && messages.length === 0) return null;
-      // Q-10: oversize guard — flagged as over-limit, not corrupt.
+      // Oversize guard — flagged as over-limit, not corrupt.
       if (messages.length > maxMessages) return OVER_LIMIT;
       return {
         version: 1,
@@ -645,7 +645,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
     }
     const obj: any = JSON.parse(text);
     if (!obj || typeof obj !== "object") return null;
-    // Q-10: version check — reject unknown versions, accept legacy shapes
+    // Version check — reject unknown versions, accept legacy shapes
     // that predate versioning (no version field).
     if ("version" in obj && (obj as { version?: unknown }).version !== 1) return null;
     // Very old single-JSON shape without version: {sessionId, model, context:{messages}}
@@ -978,7 +978,7 @@ export function saveSessionDir(
   agent: SessionAgentLike,
   telemetry?: SessionTelemetry | SessionTotals | null
 ): string {
-  // Q-28-partial: sessionDirFor already enforces assertValidSessionId.
+  // sessionDirFor already enforces assertValidSessionId.
   const sessionDir = sessionDirFor(rootDir, agent.sessionId);
   try {
     fs.mkdirSync(sessionDir, { recursive: true });
@@ -1139,7 +1139,7 @@ export function findLatestSessionDir(rootDir: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Q-10: session validation (append-only; deserializeSession above only gained
+// Session validation (append-only; deserializeSession above only gained
 // size/version guards, no behavior change otherwise).
 // ---------------------------------------------------------------------------
 
@@ -1156,9 +1156,9 @@ function sessionLoadError(message: string): Error {
 }
 
 /**
- * Manual Zod-like validation for session snapshots (Q-10, no new deps).
+ * Manual Zod-like validation for session snapshots (no new deps).
  * Checks `version===1`, string `sessionId`, array `messages`, and oversize
- * (>5000 messages or >10MB JSON). Throws a `SessionLoadError`-named Error
+ * (more than `MAX_SESSION_MESSAGES` = 50,000 messages or `MAX_SESSION_JSON_BYTES` = 100 MB of JSON). Throws a `SessionLoadError`-named Error
  * on failure; returns the typed session on success.
  */
 export function validateSessionData(data: unknown): PersistedAgentSession {
@@ -1191,12 +1191,12 @@ export function validateSessionData(data: unknown): PersistedAgentSession {
 }
 
 // ---------------------------------------------------------------------------
-// Q-34: context-window lookup without the legacy 1M fallback.
+// Context-window lookup without the legacy 1M fallback.
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the catalog context window for a model, or `undefined` when unknown
- * (Q-34). Prefer this over `getSessionContextWindow` for new code.
+ * Returns the catalog context window for a model, or `undefined` when unknown.
+ * Prefer this over `getSessionContextWindow` for new code.
  */
 export function getSessionContextWindowOrUndefined(modelStr: string): number | undefined {
   try {
@@ -1210,7 +1210,7 @@ export function getSessionContextWindowOrUndefined(modelStr: string): number | u
 }
 
 // ---------------------------------------------------------------------------
-// Q-41: telemetry bus lives in `../telemetry.ts` (dependency-free, so low-level
+// Telemetry bus lives in `../telemetry.ts` (dependency-free, so low-level
 // modules such as the catalog cache and event stream can emit without import
 // cycles). Re-exported here for backward compatibility.
 // ---------------------------------------------------------------------------
@@ -1218,7 +1218,7 @@ import { telemetryBus } from "../telemetry.ts";
 export { telemetryBus };
 export type { TelemetryEvent, TelemetryListener } from "../telemetry.ts";
 
-/** Reports a usage/cost anomaly via the global hook + telemetry bus (Q-35). Never logs. */
+/** Reports a usage/cost anomaly via the global hook + telemetry bus. Never logs. */
 export function reportUsageAnomaly(detail: { type: string; [k: string]: unknown }): void {
   try {
     (globalThis as unknown as { __agentAccelAnomaly?: (d: unknown) => void }).__agentAccelAnomaly?.(detail);
@@ -1233,10 +1233,10 @@ export function reportUsageAnomaly(detail: { type: string; [k: string]: unknown 
 }
 
 // ---------------------------------------------------------------------------
-// Q-35: canonical usage invariants.
+// Canonical usage invariants.
 // ---------------------------------------------------------------------------
 /**
- * Canonical usage invariants (provider-agnostic, Q-35):
+ * Canonical usage invariants (provider-agnostic):
  * - all token counts are finite integers >= 0;
  * - `cachedTokens` / `cacheReadTokens` are a SUBSET of `inputTokens`
  *   (cache hits cannot exceed input; aggregates clamp — see `accumulateUsage`
@@ -1287,13 +1287,13 @@ export function assertUsageInvariants(usage: TokenUsage): void {
 }
 
 // ---------------------------------------------------------------------------
-// Q-36: one cost model — integer micro-USD accumulation.
+// One cost model — integer micro-USD accumulation.
 // ---------------------------------------------------------------------------
 
-/** Where a priced cost came from (Q-36). Unknown stays unknown, never 0. */
+/** Where a priced cost came from. Unknown stays unknown, never 0. */
 export type CostSource = "provider" | "catalog" | "unknown";
 
-/** Integer micro-USD breakdown behind a priced cost (Q-36). */
+/** Integer micro-USD breakdown behind a priced cost. */
 export interface CostBreakdown {
   inputMicroUSD: number;
   outputMicroUSD: number;
@@ -1315,7 +1315,7 @@ export type PricedCost = NonNullable<TokenUsage["cost"]> & {
 };
 
 /**
- * Service-tier price multipliers (Q-36). Aligned with pi
+ * Service-tier price multipliers. Aligned with pi
  * (`api/openai-responses.ts:387`): `flex` trades latency for ~0.5x price,
  * `priority`/`fast` reserve capacity at ~2x (`2.5x` for `gpt-5.5`).
  * Standard/default is 1.0. Estimates because vendors do not publish exact
@@ -1347,7 +1347,7 @@ function toDollars(microUSD: number): number {
 }
 
 /**
- * Resolves effective per-1M pricing for a usage snapshot (Q-36). When
+ * Resolves effective per-1M pricing for a usage snapshot. When
  * `usage.inputTokens > 200_000` and the catalog carries `cost.tiers` or
  * `cost.context_over_200k`, the over-200k tier prices apply; otherwise base
  * `pricing.*` (falling back to legacy `cost.*`) applies.
@@ -1404,7 +1404,7 @@ function resolveEffectivePricing(
 }
 
 /**
- * Prices one usage snapshot with integer micro-USD accumulation (Q-36).
+ * Prices one usage snapshot with integer micro-USD accumulation.
  *
  * - A provider-reported `usage.cost.totalCost` (a number, 0 included: free or cached) wins (source `provider`).
  * - Else catalog pricing via `resolveEffectivePricing` (source `catalog`).
@@ -1498,7 +1498,7 @@ export function priceUsage(
 }
 
 /**
- * Computes and attaches catalog pricing to a usage snapshot (Q-36).
+ * Computes and attaches catalog pricing to a usage snapshot.
  * Keeps provider-reported costs untouched; returns the cost (or undefined
  * when unknown). Never fabricates a 0 object for unknown pricing.
  */

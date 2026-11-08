@@ -170,8 +170,8 @@ export class AgentContext {
   }
 
   /**
-   * Captures a detached snapshot of conversation state for run-level rollback
-   * (Q-19). The snapshot is a structural deep copy (NOT JSON): `Uint8Array` /
+   * Captures a detached snapshot of conversation state for run-level rollback.
+   * The snapshot is a structural deep copy (NOT JSON): `Uint8Array` /
    * `ArrayBuffer` media must survive a rollback byte-for-byte, and large
    * base64 strings are shared by reference rather than re-serialized.
    */
@@ -185,7 +185,7 @@ export class AgentContext {
   /**
    * Restores a checkpoint captured by `checkpoint()`. Malformed checkpoints
    * are ignored (current state kept). When `sessionId` is provided, also
-   * clears session-scoped provider state (Q-25) so a rollback never resumes
+   * clears session-scoped provider state so a rollback never resumes
    * a stale interaction chain.
    */
   rollback(cp: { messages: Message[]; signatures: string[] }, sessionId?: string): void {

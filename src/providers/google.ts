@@ -609,7 +609,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       const turnStart = steps.length;
       for (const part of m.content) {
         if (part.type === "thinking" && part.thinking) {
-          // Q-18: preserve namespaced signatures only — foreign-provider
+          // Preserve namespaced signatures only — foreign-provider
           // signatures never echo here; untagged legacy echoes (compat).
           // Absent signatures are omitted (never sent as empty strings).
           const partProvider = (part as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
@@ -642,7 +642,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       } else if (m.thoughtSignature && !steps.slice(turnStart).some((s) => s.type === "thought")) {
         // Preserve a signature-only thought so stateless chaining keeps
         // reasoning continuity even when no summary text was retained.
-        // Q-18: only for google/untagged signatures.
+        // Only for google/untagged signatures.
         const msgProvider = (m as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
         if (shouldEchoSignature(msgProvider, "google")) {
           steps.push({ type: "thought", signature: m.thoughtSignature });
@@ -910,7 +910,7 @@ export class GoogleInteractionsProvider implements Provider {
     signal?: AbortSignal
   ): RequestInit {
     const headers: Record<string, string> = { "Content-Type": "application/json", ...options?.headers };
-    // Q-17: key travels as the `x-goog-api-key` header (never `?key=` in the
+    // Key travels as the `x-goog-api-key` header (never `?key=` in the
     // URL, which would leak into logs). Case-insensitive merge so a custom
     // `X-Goog-Api-Key` never duplicates the canonical header. Proxy flows
     // (`apiKey === "unused"`) preserve custom auth instead of overwriting.
@@ -1392,7 +1392,7 @@ export class GoogleInteractionsProvider implements Provider {
         noteProviderTurn(sessionId, "google");
         checkTurnTokens(sessionId, usage);
 
-        // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
+        // Terminal-state guard — fail `incomplete_stream` (retryable)
         // instead of resolving empty success. Skipped for non-SSE payloads
         // (JSON mocks) where no SSE frames were ever seen.
         const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;

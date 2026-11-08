@@ -24,7 +24,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `stateless` | Clear history around every run | [Agents](guides/agents-and-models.md) |
 | `midSession` | `{ mode \| whenBusy: "steer" \| "queue" \| "auto", maxQueued }` | [Tools](guides/tools-and-streaming.md) |
 | `resume` | `"automatic"` (default) or `"explicit"`: whether a run a crash cut off continues when the Agent is constructed (needs `persist: { dir }` and the same `sessionId`). See `agent.resume()` / `agent.interrupted()` | [Data](guides/data-and-media.md) |
-| `persist`, `home` | Session saving; base folder (`setHome(dir)` / `AGENT_ACCEL_HOME` / `.agent-accel/`). Layout: `sessions/`, `scheduled_actions/`, `telemetry/` | [Data](guides/data-and-media.md) |
+| `persist`, `home` | Session saving; base folder (`setHome(dir)` / `AGENT_ACCEL_HOME` / `.agent-accel/`). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
 | `toolChoice` | `"auto"`, `"none"`, `"required"`, `{ tool }` | [Tools](guides/tools-and-streaming.md) |
 | `maxOutputTokens`, `stop`, `seed` | Generation controls (`stop`/`seed`: Chat Completions only) | [Agents](guides/agents-and-models.md) |
 | `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
@@ -33,7 +33,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `fileAccess`, `captureRaw`, `onFailure` | `{ roots }`, `"redacted"`/`true`/`false`, `"auto"`/`"rollback"`/`"keep"` | [Safety](guides/safety-and-ops.md) |
 | `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
 | `allowedModels` | `string[]` of `provider/model`, compared as written. Unset = any model. A model outside the list throws `ConfigError` when the Agent is built (also through `Agent.fromConfig`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
-| `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text) to `<home>/telemetry/<date>.ndjson`. Off by default | [Safety](guides/safety-and-ops.md) |
+| `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text): a persisted session's events (`tool.*`, resume, retry) to `<home>/sessions/<id>/telemetry.ndjson`, everything else to `<home>/telemetry/<date>.ndjson`. Never outside the home. Off by default | [Safety](guides/safety-and-ops.md) |
 | `logger`, `hooks`, `contextManagement` | **Not implemented**; emit `config.unsupported_option`. Use `telemetryBus` | |
 
 **`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each worker's own per-run cap, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).

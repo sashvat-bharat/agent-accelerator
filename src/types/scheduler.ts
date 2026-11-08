@@ -1,4 +1,4 @@
-/** Lifecycle of a scheduled action as stored in `tasks.json`. */
+/** Lifecycle of a scheduled action as stored in `task.json`. */
 export type ScheduledState = "waiting" | "cooking" | "missed" | "done";
 
 /** Outcome of one run. */
@@ -45,7 +45,7 @@ export type ScheduledActionPatch = Partial<Omit<ScheduledActionInput, "scheduled
   scheduled_action?: Partial<Omit<ScheduledActionInput["scheduled_action"], "id">>;
 };
 
-/** One entry of `tasks.json`. All times are local clock strings `YYYY-MM-DDTHH:mm:ss` (no offset). */
+/** The record inside an action's `task.json`. All times are local clock strings `YYYY-MM-DDTHH:mm:ss` (no offset). */
 export interface ScheduledActionRecord {
   id: string;
   name: string;

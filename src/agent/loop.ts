@@ -223,7 +223,7 @@ function normalizeMaxTurns(value?: number): number {
 function warnMaxTurnsHit(agentName: string | undefined, maxTurns: number, pendingTools: string[]): void {
   const who = agentName ? `"${agentName}"` : "Agent";
   const tools = pendingTools.length > 0 ? ` Pending tool calls dropped: ${pendingTools.join(", ")}.` : "";
-  // Q-41: no console.* in library code — route via the telemetry bus
+  // No console.* in library code — route via the telemetry bus
   // (default no-op; CLIs attach a pretty logger via telemetryBus.onEvent).
   try {
     telemetryBus.emitWarning(
@@ -237,11 +237,11 @@ function warnMaxTurnsHit(agentName: string | undefined, maxTurns: number, pendin
 }
 
 // ---------------------------------------------------------------------------
-// Q-19: tool-call/result pairing repair.
+// Tool-call/result pairing repair.
 // ---------------------------------------------------------------------------
 
 /**
- * Repairs tool call/result pairing before each provider request (Q-19).
+ * Repairs tool call/result pairing before each provider request.
  *
  * Providers reject a `tool_result` without its `tool_call`, a `tool_call`
  * without its result, AND (Chat-Completions style APIs) results that are not
@@ -306,7 +306,7 @@ export function ensureToolPairing(context: AgentContext): void {
 }
 
 // ---------------------------------------------------------------------------
-// Q-21/Q-22: abort + limits helpers.
+// Abort + limits helpers.
 // ---------------------------------------------------------------------------
 
 export interface LoopLimits {
@@ -319,7 +319,7 @@ export interface LoopLimits {
   streamIdleTimeoutMs: number;
 }
 
-/** Resolves `(config as any).limits` with Q-22 defaults (timeouts tolerate reasoning). */
+/** Resolves `(config as any).limits` with defaults (timeouts tolerate reasoning). */
 function resolveLoopLimits(config: AgentLoopConfig, fallbackMaxTurns: number): LoopLimits & { maxTurns: number; deadlineMs: number; maxToolCallsPerRun: number; maxTotalTokens: number } {
   const raw = ((config as unknown as { limits?: Record<string, unknown> }).limits ?? {}) as Record<string, unknown>;
   const num = (v: unknown): number | undefined =>
@@ -436,7 +436,7 @@ export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec, serv
 }
 
 // ---------------------------------------------------------------------------
-// Q-35: canonical usage accumulation (pure w.r.t. source).
+// Canonical usage accumulation (pure w.r.t. source).
 // Invariants (see assertUsageInvariants in session/store.ts):
 // - token counts are finite integers >= 0;
 // - cachedTokens/cacheReadTokens are a SUBSET of inputTokens (clamped below
@@ -444,7 +444,7 @@ export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec, serv
 // - thinkingTokens is a SUBSET of outputTokens when both are reported
 //   (reasoning is generated output; enforced in the test helper, documented
 //   here because providers vary on which side they omit).
-// This function never mutates `source` (Q-35): the priced cost is cloned
+// This function never mutates `source`: the priced cost is cloned
 // into a local before folding into the target.
 // ---------------------------------------------------------------------------
 export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpec, serviceTier?: string): void {
@@ -465,7 +465,7 @@ export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: M
   target.cachedTokens = Math.min(preCached, target.inputTokens);
   target.cacheReadTokens = Math.min(preRead, target.inputTokens);
   if ((target.cachedTokens ?? 0) < preCached || (target.cacheReadTokens ?? 0) < preRead) {
-    // Q-35: no console — report via the anomaly hook + telemetry bus.
+    // No console — report via the anomaly hook + telemetry bus.
     reportUsageAnomaly({
       type: "cache_clamp",
       inputTokens: target.inputTokens,
@@ -475,7 +475,7 @@ export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: M
   }
 
   const priced = computeCostFromPricing(source, spec, serviceTier);
-  // Q-35: pure — read `source` only; never assign back to `source.cost`.
+  // Pure — read `source` only; never assign back to `source.cost`.
   // Clone the priced cost so later target folds cannot alias source state.
   const sourceCost = priced ? { ...priced } : undefined;
 
@@ -673,11 +673,11 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   const maxTurns = limits.maxTurns;
   // Structured outputs: normalize once (throws ValidationError for bad shapes).
   const loopOutput = resolveLoopOutput(config);
-  // Q-19: pre-run checkpoint for onFailure rollback.
+  // Pre-run checkpoint for onFailure rollback.
   const preRunCp = context.checkpoint();
   const sessionIdForRollback = loopSessionId(config);
 
-  // Q-37: partial-run state hoisted outside try so the catch block can attach
+  // Partial-run state hoisted outside try so the catch block can attach
   // {usage,cost,turns,toolCalls,toolResults,text} to ANY thrown error.
   const startTime = Date.now();
   const accumulatedUsage: TokenUsage = {
@@ -717,11 +717,11 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   }
 
   while (!stoppedByTool && turns < maxTurns) {
-    // Q-21: fail fast on abort (throws AbortError with partial).
+    // Fail fast on abort (throws AbortError with partial).
     throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: finalResult?.text });
     checkDeadline(startTime, limits.deadlineMs);
     config.enforceBudget?.();
-    // Q-19: repair orphan tool pairs before every request.
+    // Repair orphan tool pairs before every request.
     ensureToolPairing(context);
     if (config.fileAccess?.roots) await enforceFileAccess(context.messages, config.fileAccess.roots);
     turns++;
@@ -737,13 +737,13 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       toolChoice: toolChoiceForTurn(options?.toolChoice, turns),
       ...(loopOutput.spec ? { output: loopOutput.spec } : {}),
     };
-    // Q-22: per-request timeout pass-through (providers honor timeoutMs).
+    // Per-request timeout pass-through (providers honor timeoutMs).
     try {
       if (Number.isFinite(limits.requestTimeoutMs) && limits.requestTimeoutMs !== Infinity) {
         (providerOptions as unknown as { timeoutMs?: number }).timeoutMs = limits.requestTimeoutMs;
       }
     } catch {}
-    // Q-25-partial: google:{store:false} opt-out pass-through (provider
+    // google:{store:false} opt-out pass-through (provider
     // already respects body.store===false for chaining).
     try {
       const gStore =
@@ -784,8 +784,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       provider.id
     );
 
-    // Thinking is exposed via events/traces and onTurn. Promoting it to answer text is gated (Q-15,
-    // default OFF): without the opt-in the run returns the provider's empty text and finishReason.
+    // Thinking is exposed via events/traces and onTurn. Promoting it to answer text is gated (default
+    // OFF): without the opt-in the run returns the provider's empty text and finishReason.
     if ((!genResult.text || genResult.text.trim() === "") && (!genResult.toolCalls || genResult.toolCalls.length === 0) && genResult.thinking) {
       if (shouldPromoteThinkingToAnswer(config, runOptions)) {
         if (genResult.thinking.includes("</think>")) {
@@ -853,11 +853,11 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     }
 
     // Execute tool calls — always parallel (model-driven, bloatfree DX7)
-    // Q-21: check abort before tools (throws AbortError with partial).
+    // Check abort before tools (throws AbortError with partial).
     throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: genResult.text });
     emitProgress(config); // the calls are on record BEFORE they run, so a crash can finish them instead of forgetting them
     allToolCalls.push(...genResult.toolCalls);
-    // Q-22: per-run tool-call budget.
+    // Per-run tool-call budget.
     if (allToolCalls.length > limits.maxToolCallsPerRun) {
       throw new Error(
         `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${limits.maxToolCallsPerRun}).`
@@ -901,7 +901,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     allToolResults.push(...sanitizedResults);
     context.addToolResults(sanitizedResults);
     checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
-    // Q-19: results are stored BEFORE the cancellation check so an abort
+    // Results are stored BEFORE the cancellation check so an abort
     // never drops executed tool work from history.
     throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: genResult.text });
     emitTurn(runOptions, {
@@ -926,7 +926,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     }
     emitProgress(config);
 
-    // Q-21: abort always throws AbortError with partial attached (never
+    // Abort always throws AbortError with partial attached (never
     // silently breaks).
     throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: finalResult?.text });
   }
@@ -963,7 +963,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     responseId: finalResult?.responseId,
     model: modelId,
     provider: provider.id,
-    // Q-04: canonical finish reason + raw vendor passthrough.
+    // Canonical finish reason + raw vendor passthrough.
     ...(stoppedByTool
       ? { finishReason: "stopped" as const, ...(finalResult?.finishReason ? { rawFinishReason: finalResult.finishReason } : {}) }
       : canonicalFinishReason(finalResult?.finishReason, truncatedByMaxTurns)),
@@ -972,7 +972,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     turns,
   });
   } catch (err) {
-    // Q-19: run-level onFailure rollback (default restores pre-run
+    // Run-level onFailure rollback (default restores pre-run
     // checkpoint; opt out with (config as any).onFailure === "keep").
     // Aborts are excluded so partial history survives interruption.
     const isAbort =
@@ -983,14 +983,14 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         // why: rollback is best-effort — the original error takes precedence.
       }
     }
-    // Q-21: ensure aborts surface as AbortError with partial attached.
+    // Ensure aborts surface as AbortError with partial attached.
     if (isAbort && (err as { name?: string } | null)?.name !== "AbortError") {
       throw makeAbortError(
         { usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, turns: 0 },
         err
       );
     }
-    // Q-37: every failure carries its partial progress for observability.
+    // Every failure carries its partial progress for observability.
     try {
       (err as unknown as { partial?: unknown }).partial ??= {
         usage: accumulatedUsage,
@@ -1042,7 +1042,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
     }
   };
 
-  // Q-19/Q-22: per-run checkpoint + limits for the streaming loop.
+  // Per-run checkpoint + limits for the streaming loop.
   const streamPreCp = config.context.checkpoint();
   const streamSessionId = loopSessionId(config);
   const streamFallbackMax = normalizeMaxTurns((config as { maxTurns?: number }).maxTurns);
@@ -1050,7 +1050,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   const streamStartTime = startTime;
 
   (async () => {
-    // Hoisted for catch-block partial reporting (Q-21/Q-37).
+    // Hoisted for catch-block partial reporting.
     let accumulatedUsage: TokenUsage = {
       inputTokens: 0,
       outputTokens: 0,
@@ -1062,7 +1062,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
     };
     let lastResponse: AgentResponse | null = null;
     let turns = 0;
-    // Q-37: tool progress hoisted so failures carry toolCalls/toolResults.
+    // Tool progress hoisted so failures carry toolCalls/toolResults.
     const allToolCalls: ToolCallRecord[] = [];
     const allToolResults: ToolResultRecord[] = [];
     const allSubagents: SubAgentExecutionMetadata[] = [];
@@ -1118,7 +1118,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         thinkingTokens: 0,
       };
 
-      // Q-37: allToolCalls/allToolResults/allSubagents are hoisted above (fresh
+      // allToolCalls/allToolResults/allSubagents are hoisted above (fresh
       // per stream run); just reset turn counters here.
       lastResponse = null;
       turns = 0;
@@ -1176,7 +1176,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         );
         currentInner = innerStream as AssistantMessageEventStream;
 
-        // Q-22: first-byte + idle timeouts around SSE (tolerate reasoning).
+        // First-byte + idle timeouts around SSE (tolerate reasoning).
         // Implemented as races on the inner iterator so a hung provider
         // surfaces as TimeoutError instead of hanging the run forever.
         {
@@ -1238,7 +1238,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         );
 
         // Thinking stays on events/traces + onTurn (default exposed). Promoting
-        // it to answer text is gated (Q-15, default OFF): without the opt-in
+        // it to answer text is gated (default OFF): without the opt-in
         // the turn keeps the provider's empty text and finishReason.
         if ((!turnResponse.text || turnResponse.text.trim() === "") && (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) && turnResponse.thinking) {
           if (shouldPromoteThinkingToAnswer(config, runOptions)) {
@@ -1315,7 +1315,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
             `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${streamLimits.maxToolCallsPerRun}).`
           );
         }
-        // Q-40: typed tool lifecycle for streaming consumers.
+        // Typed tool lifecycle for streaming consumers.
         try {
           outerStream.push({ type: "tool_start", toolCalls: turnResponse.toolCalls });
         } catch {
@@ -1379,14 +1379,14 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
             toolResult: res,
           });
         }
-        // Q-40: close the tool lifecycle opened by `tool_start` above.
+        // Close the tool lifecycle opened by `tool_start` above.
         try {
           outerStream.push({ type: "tool_end", toolResults: sanitizedResults });
         } catch {
           // why: stream push never throws, but guard anyway to protect the loop.
         }
 
-        // Q-19: store tool results BEFORE the cancellation check.
+        // Store tool results BEFORE the cancellation check.
         allToolResults.push(...sanitizedResults);
         context.addToolResults(sanitizedResults);
         throwIfCancelled({ usage: accumulatedUsage, turns, text: turnResponse.text });
@@ -1463,7 +1463,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         responseId: lastResponse?.responseId,
         model: modelId,
         provider: provider.id,
-        // Q-04: canonical finish reason + raw vendor passthrough.
+        // Canonical finish reason + raw vendor passthrough.
         ...truncatedFinish,
         durationMs: Date.now() - startTime,
         raw: applyCaptureRaw(lastResponse?.raw, config.captureRaw) as ProviderRawData,
@@ -1486,7 +1486,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         linked.signal.aborted ||
         outerStream.isCancelled() ||
         (raw as any)?.name === "AbortError";
-      // Q-19: streaming onFailure rollback (same policy as runAgentLoop;
+      // Streaming onFailure rollback (same policy as runAgentLoop;
       // aborts excluded so partial history survives).
       try {
         if (shouldRollbackOnFailure(config.onFailure, isAbort, toolsExecuted)) {
@@ -1497,7 +1497,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       } catch {
         // why: rollback policy itself must never mask the original error.
       }
-      // Q-37: every failure carries its partial progress for observability.
+      // Every failure carries its partial progress for observability.
       const partial = {
         usage: accumulatedUsage,
         cost: accumulatedUsage.cost,
@@ -1506,7 +1506,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         toolResults: allToolResults,
         text: lastResponse?.text,
       };
-      // Q-21: aborts always surface as AbortError with partial attached.
+      // Aborts always surface as AbortError with partial attached.
       if (isAbort) {
         const abortErr =
           raw.name === "AbortError" ? raw : makeAbortError(partial, raw);
@@ -1537,12 +1537,12 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 }
 
 // ---------------------------------------------------------------------------
-// Q-15: thinking-promotion policy + Q-04 canonical finish helper.
+// Thinking-promotion policy + canonical finish helper.
 // (Appended here to avoid conflicts with other loop sections.)
 // ---------------------------------------------------------------------------
 
 /**
- * Whether an empty-text turn may promote `thinking` to answer `text` (Q-15).
+ * Whether an empty-text turn may promote `thinking` to answer `text`.
  * Default false: the run returns the provider's empty text with its
  * finishReason instead of fabricating an answer from reasoning. Opt in via
  * `(runOptions as any).thinkingAsAnswerFallback === true` or
@@ -1567,7 +1567,7 @@ export function shouldPromoteThinkingToAnswer(config?: unknown, runOptions?: unk
 }
 
 /**
- * Canonicalizes a provider finish reason for AgentResponse (Q-04).
+ * Canonicalizes a provider finish reason for AgentResponse.
  * When `truncated` (maxTurns exhausted with pending tools), forces
  * `"max_turns"` and preserves the provider's reason in `rawFinishReason`.
  * Otherwise delegates to `normalizeFinishReason` (unknown vendor strings map

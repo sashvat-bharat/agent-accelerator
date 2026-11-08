@@ -3,7 +3,7 @@
  */
 /**
  * Reads an environment value. Process env only. No globalThis fallback:
- * DOM-clobberable in browsers (Q-05).
+ * DOM-clobberable in browsers.
  *
  * @example `const apiKey = getEnv("OPENAI_API_KEY");`
  */

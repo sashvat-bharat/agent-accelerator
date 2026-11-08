@@ -155,7 +155,7 @@ const off = telemetryBus.onEvent((e) => {
 // later: off();
 ```
 
-Tool calls emit `tool.*` lifecycle events (`call_started`, `progress`, `call_failed`, ...). To keep a crash-proof trace, set `telemetry: { persist: true }`: every event (except reasoning text) is appended to `<home>/telemetry/<date>.ndjson`, one line each. A `tool.call_started` with no ending event was in flight when the process died; the last `tool.progress` shows how far it got. Nothing is written unless you opt in.
+Tool calls emit `tool.*` lifecycle events (`call_started`, `progress`, `call_failed`, ...). To keep a crash-proof trace, set `telemetry: { persist: true }`: every event (except reasoning text) is appended, one line each: an event of a persisted session (the `tool.*` events, `agent.resumed`, `agent.run_retry`) to `<home>/sessions/<id>/telemetry.ndjson` next to that session's journal and tool logs (a worker's events to its own folder), everything else to `<home>/telemetry/<date>.ndjson`. Nothing is ever written outside the home: a session saved to a `persist.dir` outside it logs to the daily file. A `tool.call_started` with no ending event was in flight when the process died; the last `tool.progress` shows how far it got. Nothing is written unless you opt in.
 
 The bus is in-process, delivers synchronously, isolates listener errors and prints nothing by default. Events: provider warnings (`provider_warning`), Google chain anomalies, stream anomalies, `cache_clamp`, catalog and session notices, `config.*` warnings, `agent.max_turns_truncated`, `turn.thinking`, and `scheduled_action.*` (full list in [Reference](../reference.md)). `AgentResponse.raw` and the stream `start` event show the wire exchange according to `captureRaw`.
 
@@ -176,7 +176,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 ## Known limitations
 
 Be aware (pre-1.0):
-- **One process per home folder.** A folder you persist to is locked (`<folder>/.lock`): a second process fails fast with a `ConfigError` instead of silently losing updates; a lock left by a killed process is taken over, and local disks only. Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `tasks.json`, `deliveries.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
+- **One process per session folder.** A session you persist is locked (`<session folder>/.lock`): a second process opening the same session fails fast with a `ConfigError` instead of silently losing updates, while other sessions of the same home stay free; a lock left by a killed process is taken over, and local disks only. Scheduled actions can be shared by several processes (one folder and a short lock per action). Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `task.json`, `delivery.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
 - Scheduled actions: creating Agent held weakly; `run_now` never retries; no spending guardrail except `dynamicSubagents.workerBudget`; no timezone/DST logic; run only while the process lives.
 - Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding; `stop`/`seed` on Google/OpenAI.
 - Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.

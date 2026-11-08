@@ -6,7 +6,7 @@ The whole SDK. `index.ts` is the only public entry (`main`/`module`/`types`); ev
 | :-- | :-- |
 | `index.ts` | The public barrel. Adding or removing an export is a public API change. |
 | `telemetry.ts` | The in-process event bus (`telemetryBus`). Imports nothing from the SDK, so any module may use it. |
-| `telemetry-file.ts` | Opt-in NDJSON sink for the bus (`<home>/telemetry/<date>.ndjson`). |
+| `telemetry-file.ts` | Opt-in NDJSON sink for the bus: a persisted session's events go to `<session folder>/telemetry.ndjson`, the rest to `<home>/telemetry/<date>.ndjson`; never outside a home. |
 | `update-models.ts` | CLI behind `bun run update-models` (refreshes the model catalog cache). |
 | `providers.ts` | Provider-agnostic mappers (thinking, cache, tool choice, structured output, generation params). No HTTP. |
 | `agent/` | `Agent`, the model-to-tools loop, workers, delegation. |

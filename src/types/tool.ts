@@ -1,6 +1,6 @@
 import type { z } from "zod";
 
-/** Minimal logger surface accepted by tool contexts (Q-54/Q-55, additive). */
+/** Minimal logger surface accepted by tool contexts (additive). */
 export interface ToolLogger {
   debug?: (...args: unknown[]) => void;
   info?: (...args: unknown[]) => void;
@@ -8,7 +8,7 @@ export interface ToolLogger {
   error?: (...args: unknown[]) => void;
 }
 
-/** Live-event emitter handed to tools that stream progress (Q-55, additive). */
+/** Live-event emitter handed to tools that stream progress (additive). */
 export type ToolEmitFn = (event: { type: string; [k: string]: unknown }) => void;
 
 export interface ToolExecutionContext {
@@ -22,7 +22,7 @@ export interface ToolExecutionContext {
   sessionId?: string;
   /** Forwards live sub-agent deltas (used by the `subagents` tool for realtime tracking). */
   onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
-  // Q-55 Tool API v2 context additions (all optional, additive).
+  // Tool API v2 context additions (all optional, additive).
   /** Stable id for this run (`newRunId`). Mirrors SubAgentRunIds.runId. */
   runId?: string;
   /** Live-event emitter for tools that stream progress. */
@@ -69,7 +69,7 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
   maxConcurrency?: number | string;
   /** Function executed after validation; its result is made JSON-safe for model context. */
   execute: ToolExecuteFn<TInput, TOutput>;
-  // Q-55 Tool API v2 additions (all optional, additive; loop reads via `(toolDef as any).*`).
+  // Tool API v2 additions (all optional, additive; loop reads via `(toolDef as any).*`).
   /**
    * Canonical alias for `maxTries`. When both are set, `maxTries` wins.
    * Normalized by `normalizeMaxAttempts` (see tools/tool.ts).
@@ -101,7 +101,7 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
   redactError?: (err: unknown) => string;
   /**
    * Canonical alias for `redactError`. When both are set, `redactError` wins.
-   * Kept short for Q-55 Tool API v2 parity.
+   * Kept short for Tool API v2 parity.
    */
   redact?: (err: unknown) => string;
   /** Free-form tags for grouping/filtering tools (e.g. `["web", "readonly"]`). */

@@ -11,7 +11,7 @@ export function clampCacheKey(key?: string): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Central redaction helpers (Q-11, temporary home to avoid owner conflicts).
+// Central redaction helpers (temporary home to avoid owner conflicts).
 // Providers must call these instead of maintaining local deny-lists.
 // ---------------------------------------------------------------------------
 
@@ -45,7 +45,7 @@ function valueLooksSensitive(value: unknown): boolean {
 }
 
 /**
- * Redacts a single value: sensitive strings become "[REDACTED]" (Q-11).
+ * Redacts a single value: sensitive strings become "[REDACTED]".
  */
 export function redactValue(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -54,7 +54,7 @@ export function redactValue(value: unknown): unknown {
 }
 
 /**
- * Redacts sensitive header values (Q-11). Returns a shallow copy; input untouched.
+ * Redacts sensitive header values. Returns a shallow copy; input untouched.
  * Deny-list (name contains): *key*, *token*, *secret*, cookie, authorization.
  * Value patterns (redacted regardless of name): sk-, AIza, gsk-, xox-.
  */
@@ -71,7 +71,7 @@ export function redactHeadersCentral(
 }
 
 /**
- * Redacts secret-looking substrings inside free text (Q-11).
+ * Redacts secret-looking substrings inside free text.
  * Replaces `sk-...`, `AIza...`, `gsk-...`, `xox-...` tokens with "[REDACTED]".
  */
 export function redactText(text: string): string {

@@ -741,7 +741,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           const choice = (Array.isArray(msg["choices"]) ? (msg["choices"] as Record<string, unknown>[])[0] : undefined) ?? {};
           const delta = (choice["delta"] as Record<string, unknown>) ?? {};
           // Text delta (content-free accounting frames carry "" — ignored).
-          // Q-23: refusal deltas surface as text with a `refusal` finish.
+          // Refusal deltas surface as text with a `refusal` finish.
           const deltaRefusal = delta["refusal"];
           if (typeof deltaRefusal === "string" && deltaRefusal) {
             text += deltaRefusal;
@@ -854,7 +854,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           sawFinishReason = true;
         }
 
-        // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
+        // Terminal-state guard — fail `incomplete_stream` (retryable)
         // instead of resolving empty success. Skipped for non-SSE payloads
         // (JSON mocks) where no SSE frames were ever seen.
         const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();

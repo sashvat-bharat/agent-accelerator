@@ -66,7 +66,7 @@ export function createTrackingId(): string {
 }
 
 /**
- * Monotonic clock for measuring durations (Q-42). Uses `performance.now()`
+ * Monotonic clock for measuring durations. Uses `performance.now()`
  * when available, falling back to `Date.now()`. Differences on the same
  * clock are valid durations; never treat the value as wall-clock epoch.
  *
@@ -95,7 +95,7 @@ function random32Hex(): string {
 }
 
 /**
- * New stable run id: 32 lowercase hex chars (crypto.randomUUID, no dashes) (Q-42).
+ * New stable run id: 32 lowercase hex chars (crypto.randomUUID, no dashes).
  * Opaque lineage token attached via `(metadata as any).runId`.
  */
 export function newRunId(): string {
@@ -103,7 +103,7 @@ export function newRunId(): string {
 }
 
 /**
- * New stable turn id: 32 lowercase hex chars (crypto.randomUUID, no dashes) (Q-42).
+ * New stable turn id: 32 lowercase hex chars (crypto.randomUUID, no dashes).
  * Opaque lineage token attached via `(metadata as any).turnId`.
  */
 export function newTurnId(): string {
@@ -124,7 +124,7 @@ export function previewPrompt(prompt: string | ContentPart[]): string {
   }
 }
 
-/** Parsed model reference returned by {@link parseModelRef} (Q-48). */
+/** Parsed model reference returned by {@link parseModelRef}. */
 export interface ParsedModelRef {
   provider: string;
   modelId: string;
@@ -161,7 +161,7 @@ function isModelSpec(v: unknown): v is ModelSpec {
 }
 
 /**
- * Single model-ref parser (Q-48). Table-driven, no env sniffing:
+ * Single model-ref parser. Table-driven, no env sniffing:
  * - string `"provider/model"` → split on first `/`; bare ids default to `openrouter`.
  * - `ModelProviderInstance` (`{ model, apiKey?, baseUrl?, thinkingLevel? }`) → parse `model`, passthrough creds.
  * - `ModelSpec` (`{ provider, id }`) → direct mapping.

@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-// Q-01: §3 behavior locks must not regress.
+// Behavior locks must not regress.
 describe("audit §3 behavior locks", () => {
   it("cache invariant cached<=input", () => {
     expect(clampCacheKey("a".repeat(100))!.length).toBeLessThanOrEqual(64);

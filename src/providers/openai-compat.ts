@@ -406,7 +406,7 @@ function resultToOutput(result: unknown): string {
  * resent — except echoed Gemini thought signatures, which strict
  * OpenAI-compatible endpoints require on tool calls they generated.
  *
- * Q-18: signatures are namespaced — only echo when the stored provider is
+ * Signatures are namespaced — only echo when the stored provider is
  * `google` (or untagged legacy). Signatures minted by other providers never
  * leak onto this transport.
  */
@@ -468,7 +468,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
           // Echo provider-issued thought signatures verbatim so endpoints
           // that minted them (Gemini behind a compat proxy) keep working.
           // Only present when a previous turn captured one — other endpoints
-          // never see this field. Q-18: echo only google/untagged signatures.
+          // never see this field. Echo only google/untagged signatures.
           const storedProvider = (part as { thoughtSignatureProvider?: unknown }).thoughtSignatureProvider;
           if (part.thoughtSignature && shouldEchoSignature(storedProvider, "google")) {
             call.extra_content = { google: { thought_signature: part.thoughtSignature } };
@@ -540,7 +540,7 @@ function extractSignature(rawTc: {
   return typeof sig === "string" && sig ? sig : undefined;
 }
 
-/** Tags a captured compat signature with its issuing provider (`google`, Q-18). */
+/** Tags a captured compat signature with its issuing provider (`google`). */
 function withCompatSignature(sig: string | undefined): { thoughtSignature?: string; thoughtSignatureProvider?: string } {
   if (!sig) return {};
   return { thoughtSignature: sig, thoughtSignatureProvider: "google" };
@@ -575,7 +575,7 @@ function parseResponse(
 
   const choice = response.choices?.[0];
   const message = choice?.message;
-  // Q-23: refusal content surfaces as text with a `refusal` finish reason.
+  // Refusal content surfaces as text with a `refusal` finish reason.
   const refusal = typeof message?.refusal === "string" && message.refusal ? message.refusal : "";
   const text = typeof message?.content === "string" && message.content ? message.content : refusal;
   // Thinking tolerance: plain `reasoning` plus per-block texts (deepseek-style
@@ -789,7 +789,7 @@ export class OpenAICompatibleChatProvider implements Provider {
         // why: invalid output shapes fail fast at Agent construction/loop validation.
       }
     }
-    // Q-38: request usage on streams where supported so terminal accounting
+    // Request usage on streams where supported so terminal accounting
     // arrives on the final chunk. Strict servers that reject unknown fields
     // opt out via `COMPAT_NO_STREAM_OPTIONS=1`; an explicit per-call
     // `(options as any).streamOptions === false` also skips it.
@@ -1068,7 +1068,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           const choice = (Array.isArray(msg["choices"]) ? (msg["choices"] as Record<string, unknown>[])[0] : undefined) ?? {};
           const delta = (choice["delta"] as Record<string, unknown>) ?? {};
           // Text delta (content-free accounting frames carry "" — ignored).
-          // Q-23: refusal deltas surface as text with a `refusal` finish.
+          // Refusal deltas surface as text with a `refusal` finish.
           const deltaRefusal = delta["refusal"];
           if (typeof deltaRefusal === "string" && deltaRefusal) {
             text += deltaRefusal;
@@ -1187,7 +1187,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           sawFinishReason = true;
         }
 
-        // Q-23: terminal-state guard — fail `incomplete_stream` (retryable)
+        // Terminal-state guard — fail `incomplete_stream` (retryable)
         // instead of resolving empty success. Skipped for non-SSE payloads
         // (JSON mocks) where no SSE frames were ever seen.
         const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();

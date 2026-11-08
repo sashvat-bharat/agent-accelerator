@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { writeFileDurable, readWithBackup } from "../src/utils/durable.ts";
 import { Agent } from "../src/agent/agent.ts";
 import { loadSessionFile, loadSessionDir, saveSessionFile } from "../src/session/store.ts";
-import { readTasks, updateTasks } from "../src/scheduler/store.ts";
+import { createTask, readTasks, updateTask } from "../src/scheduler/store.ts";
 import { telemetryBus } from "../src/telemetry.ts";
 
 const roots: string[] = [];
@@ -120,20 +120,19 @@ describe("readWithBackup", () => {
 });
 
 describe("recovery from the backup", () => {
-  it("restores tasks.json from its .bak, quarantining the damaged file", () => {
+  it("restores a task.json from its .bak, quarantining the damaged file", () => {
     const home = tmp();
     const warnings: string[] = [];
     const off = telemetryBus.onEvent((e) => warnings.push(e.code));
     try {
-      const rec = { id: "a-bcdef1" } as never;
-      updateTasks(home, (tasks) => void tasks.push(rec));
-      updateTasks(home, (tasks) => void tasks.push({ id: "b-bcdef2" } as never));
-      const file = path.join(home, "scheduled_actions", "tasks.json");
+      createTask(home, () => "a-bcdef1", (id) => ({ id, name: "first" }) as never);
+      updateTask(home, "a-bcdef1", (t) => void ((t as { name: string }).name = "second"));
+      const file = path.join(home, "scheduled", "a-bcdef1", "task.json");
       fs.writeFileSync(file, "{not json"); // hand damage after two good writes: .bak holds the first write
       const tasks = readTasks(home);
-      expect(tasks.map((t) => t.id)).toEqual(["a-bcdef1"]);
-      expect(fs.readdirSync(path.dirname(file)).some((f) => f.startsWith("tasks.json.corrupt-"))).toBe(true);
-      expect(JSON.parse(fs.readFileSync(file, "utf8")).tasks).toHaveLength(1); // the file is healthy again
+      expect(tasks.map((t) => t.name)).toEqual(["first"]);
+      expect(fs.readdirSync(path.dirname(file)).some((f) => f.startsWith("task.json.corrupt-"))).toBe(true);
+      expect(JSON.parse(fs.readFileSync(file, "utf8")).task.name).toBe("first"); // the file is healthy again
       expect(warnings).toContain("scheduled_action.store_corrupt");
     } finally {
       off();

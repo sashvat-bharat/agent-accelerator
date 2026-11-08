@@ -9,13 +9,13 @@ import { writeFileDurable } from "../utils/durable.ts";
 /** Default TTL: 12 Hours (in milliseconds). */
 export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
 
-/** Max accepted models.dev payload size: 15MB (Q-16a). Larger payloads are rejected before parse. */
+/** Max accepted models.dev payload size: 15MB. Larger payloads are rejected before parse. */
 export const MAX_CATALOG_PAYLOAD_BYTES = 15 * 1024 * 1024;
 
 let globalCatalogTtlMs = DEFAULT_CATALOG_TTL_MS;
 
 /** Sets the global model catalog cache TTL in milliseconds.
- * Note (Q-16a): cache files carry their own `ttlMs`. A global `setCatalogTTL`
+ * Note: cache files carry their own `ttlMs`. A global `setCatalogTTL`
  * does not rewrite in-flight file TTLs; it takes effect on the next refresh
  * (fresh download) or when the cached file has no `ttlMs` of its own.
  */
@@ -90,7 +90,7 @@ export function getCacheDir(): string {
   return path.join(resolveHome(), "catalog");
 }
 
-/** Cache file path: `<cacheDir>/models.dev.json`, honoring AGENT_CACHE_DIR (Q-16a/Q-34). */
+/** Cache file path: `<cacheDir>/models.dev.json`, honoring AGENT_CACHE_DIR. */
 export function getCacheFilePath(): string {
   return path.join(getCacheDir(), "models.dev.json");
 }
@@ -111,7 +111,7 @@ function writeJsonFileSync(filePath: string, data: any): void {
   writeFileDurable(filePath, JSON.stringify(data), { backup: false });
 }
 
-/** Verifies optional sha256 pin from MODELS_DEV_SHA256 (Q-16a). Returns false on mismatch. */
+/** Verifies optional sha256 pin from MODELS_DEV_SHA256. Returns false on mismatch. */
 export function verifyCatalogSha256(text: string): boolean {
   const pin = getEnv("MODELS_DEV_SHA256")?.trim().toLowerCase();
   if (!pin) return true;
@@ -283,14 +283,14 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
       throw new Error(`HTTP ${res.status} ${res.statusText}`);
     }
 
-    // Q-16a: size-cap before parse (check text length, reject >15MB).
+    // Size-cap before parse (check text length, reject >15MB).
     const text = await res.text();
     if (text.length > MAX_CATALOG_PAYLOAD_BYTES) {
       clearTimeout(timer);
       fallbackToDiskCache();
       return getCatalogStatus();
     }
-    // Q-16a: optional sha256 pin via MODELS_DEV_SHA256.
+    // Optional sha256 pin via MODELS_DEV_SHA256.
     if (!verifyCatalogSha256(text)) {
       clearTimeout(timer);
       fallbackToDiskCache();
@@ -334,7 +334,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
 
   // Update in-memory state FIRST so a read-only filesystem still serves the
   // fresh catalog for this process; disk persistence below is best-effort.
-  // Q-34: a real download is NOT from cache.
+  // A real download is NOT from cache.
   activeCatalog = freshData;
   activeFetchedAt = fetchedAt;
   activeTtlMs = effectiveTtl;

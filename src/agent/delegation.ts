@@ -74,7 +74,7 @@ export function isSessionDescendant(child: string, parent: string): boolean {
   if (!child || !parent) return false;
   if (child === parent) return true;
   if (child.startsWith(parent + "-")) return true;
-  // Q-34: hash includes() is collision-prone; require delimited match to reduce spoofing. Explicit {rootSessionId,parentSessionId} lineage is Q-61 future.
+  // Hash includes() is collision-prone; require delimited match to reduce spoofing. Explicit {rootSessionId,parentSessionId} lineage is future work.
   const h = hashSessionPart(parent);
   return child.includes(`-${h}-`) || child.endsWith(`-${h}`);
 }
@@ -101,13 +101,13 @@ export interface SubAgentTrace {
 const subagentTraces = new Map<string, SubAgentTrace>();
 const subagentListeners = new Map<string, Set<(trace: SubAgentTrace) => void>>();
 
-/** Max trace keys held (LRU, evicts oldest whole trace on insert) (Q-30). */
+/** Max trace keys held (LRU, evicts oldest whole trace on insert). */
 const MAX_SUBAGENT_TRACES = 500;
-/** Trace TTL: 1h wall-clock, lazily expired on read (Q-30). */
+/** Trace TTL: 1h wall-clock, lazily expired on read. */
 const SUBAGENT_TRACE_TTL_MS = 60 * 60 * 1000;
-/** Max steps retained per trace; oldest steps are dropped beyond this (Q-30). */
+/** Max steps retained per trace; oldest steps are dropped beyond this. */
 const MAX_SUBAGENT_STEPS_PER_TRACE = 100;
-/** Live subscriptions auto-expire after 5min (Q-30). */
+/** Live subscriptions auto-expire after 5min. */
 const SUBAGENT_SUBSCRIBE_TTL_MS = 5 * 60 * 1000;
 
 /** Last-write wall-clock per canonical trackingId (drives TTL; reads do not extend it). */
@@ -135,7 +135,7 @@ function touchTrace(canonical: string, now = Date.now()): void {
 }
 
 /**
- * Evicts expired traces, then oldest whole traces while over budget (Q-30).
+ * Evicts expired traces, then oldest whole traces while over budget.
  * Called on every insert. Whole-trace eviction removes both the canonical
  * key and its display-id alias.
  */
@@ -155,7 +155,7 @@ function pruneTraces(now = Date.now()): void {
   }
 }
 
-/** Drops oldest steps beyond {@link MAX_SUBAGENT_STEPS_PER_TRACE} (Q-30). */
+/** Drops oldest steps beyond {@link MAX_SUBAGENT_STEPS_PER_TRACE}. */
 function trimTraceSteps(trace: SubAgentTrace): void {
   if (trace.steps.length > MAX_SUBAGENT_STEPS_PER_TRACE) {
     trace.steps.splice(0, trace.steps.length - MAX_SUBAGENT_STEPS_PER_TRACE);
@@ -268,7 +268,7 @@ export function subscribeToSubAgentForSessions(
 
 /**
  * Subscribes to live updates of one worker trace. Returns an unsubscribe fn.
- * Subscriptions auto-expire after 5min to avoid listener leaks (Q-30).
+ * Subscriptions auto-expire after 5min to avoid listener leaks.
  */
 export function subscribeToSubAgent(id: string, fn: (trace: SubAgentTrace) => void): () => void {
   const t = lookupTrace(id);
@@ -469,7 +469,7 @@ export function workerMetadata(a: {
 }
 
 // ---------------------------------------------------------------------------
-// Budgets (Q-39): counters + guards. The loop charges usage per turn; the
+// Budgets: counters + guards. The loop charges usage per turn; the
 // worker registry enforces `maxTotalSubagents` through `reserveSpawn`. Durations use the monotonic `nowMs()`
 // clock; TTL timestamps above use wall-clock `Date.now()`.
 // ---------------------------------------------------------------------------
@@ -552,7 +552,7 @@ export function checkBudget(
 }
 
 /**
- * Adds worker usage to the parent's budget counters (Q-39). Never throws;
+ * Adds worker usage to the parent's budget counters. Never throws;
  * call {@link checkBudget} afterwards to enforce.
  */
 export function chargeBudgetUsage(parentAgent: Agent, usage: unknown): BudgetState {
@@ -563,7 +563,7 @@ export function chargeBudgetUsage(parentAgent: Agent, usage: unknown): BudgetSta
 }
 
 /**
- * Reserves `count` spawns against `maxTotalSubagents` (Q-39). Increments the
+ * Reserves `count` spawns against `maxTotalSubagents`. Increments the
  * parent's `budgetState.spawned` and throws {@link BudgetExceededError} when
  * the reservation would exceed the budget. Call before spawning.
  */
@@ -623,7 +623,7 @@ export function agentToTool(
     }),
     execute: async ({ task }, ctx) => {
       const startTime = nowMs();
-      // Q-42 lineage for fixed-delegation calls.
+      // Lineage for fixed-delegation calls.
       const callRunId = newRunId();
       const callTurnId = newTurnId();
       const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";

@@ -67,7 +67,7 @@ export type FinishReason =
 /** Maps a vendor finish reason to canonical FinishReason + raw passthrough.
  * Known aliases collapse to the canonical set; empty/undefined stays
  * undefined; any other non-empty string maps to `"error"` with the original
- * preserved in `rawFinishReason` (Q-04). */
+ * preserved in `rawFinishReason`. */
 export function normalizeFinishReason(raw?: string): {
   finishReason?: FinishReason;
   rawFinishReason?: string;
@@ -118,7 +118,7 @@ export interface AgentResponseJSON {
   model: string;
   provider: ProviderId | string;
   finishReason?: FinishReason;
-  /** Original vendor finish string when it differs from canonical `finishReason` (Q-04). */
+  /** Original vendor finish string when it differs from canonical `finishReason`. */
   rawFinishReason?: string;
   durationMs: number;
   raw: ProviderRawData;
@@ -140,7 +140,7 @@ export class AgentResponse {
   readonly model: string;
   readonly provider: ProviderId | string;
   readonly finishReason?: FinishReason;
-  /** Original vendor finish string when it differs from canonical `finishReason` (Q-04). */
+  /** Original vendor finish string when it differs from canonical `finishReason`. */
   readonly rawFinishReason?: string;
   readonly durationMs: number;
   readonly raw: ProviderRawData;
@@ -247,15 +247,15 @@ export type StreamEventType =
 /** Payload for one streaming text, thinking, tool, usage, or lifecycle event. */
 export interface StreamEvent {
   type: StreamEventType;
-  /** Schema version for typed consumers (Q-40). Currently always 1 when present. */
+  /** Schema version for typed consumers. Currently always 1 when present. */
   schemaVersion?: 1;
   delta?: string;
   thinkingDelta?: string;
   toolCall?: ToolCallRecord;
   toolResult?: ToolResultRecord;
-  /** Batch tool calls for `tool_start` events (Q-40). */
+  /** Batch tool calls for `tool_start` events. */
   toolCalls?: ToolCallRecord[];
-  /** Batch tool results for `tool_end` events (Q-40). */
+  /** Batch tool results for `tool_end` events. */
   toolResults?: ToolResultRecord[];
   subagent?: SubAgentExecutionMetadata;
   /** Tracking id of the worker emitting a `subagent_delta` event. */
@@ -271,7 +271,7 @@ export interface StreamEvent {
   /** Canonical finish reason when known; vendor strings pass through as-is
    * for provider compat (normalize with `normalizeFinishReason`). */
   finishReason?: string;
-  /** Original vendor finish string when it differs from canonical (Q-04). */
+  /** Original vendor finish string when it differs from canonical. */
   rawFinishReason?: string;
   error?: Error | unknown;
   partialText?: string;
@@ -279,7 +279,7 @@ export interface StreamEvent {
   raw?: ProviderRawData;
 }
 
-/** Typed (discriminated) stream event schema, version 1 (Q-40).
+/** Typed (discriminated) stream event schema, version 1.
  * `StreamEvent` stays the permissive compat shape; use this union when you
  * want exhaustive switching (e.g. `tool_start`/`tool_end` lifecycle). */
 export type StreamEventV2 =

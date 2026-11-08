@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import type { ScheduledActionRecord } from "../src/types/scheduler.ts";
 import * as path from "node:path";
 import {
   Agent,
@@ -32,7 +33,7 @@ import {
   removeTaskFolder,
   resolveHome,
   updateDeliveries,
-  updateTasks,
+  updateTask,
   validateDelivery,
   validateRecord,
   writeRunFile,
@@ -55,6 +56,13 @@ import {
 // Monday 26 October 2026, local clock.
 const at = (h: number, m = 0, s = 0): Date => new Date(2026, 9, 26, h, m, s);
 const iso = (h: number, m = 0, s = 0, day = 26): string => toLocalIso(new Date(2026, 9, day, h, m, s));
+
+// Changes the first action's record on disk the way an outside editor would; in: a test, out: the rewritten task.json.
+function editTask(home: string, fn: (rec: ScheduledActionRecord) => void): void {
+  updateTask(home, readTasks(home)[0]!.id, (t) => fn(t!));
+}
+// The task.json of an action; in: a test, out: its path.
+const taskFileOf = (home: string, id: string): string => path.join(home, "scheduled", id, "task.json");
 
 // ---------------------------------------------------------------------------
 // Time (pure)
@@ -246,7 +254,7 @@ const input = (sa: Partial<ScheduledActionInput["scheduled_action"]> = {}, over:
   },
 });
 
-const runDir = (h: Harness, id: string) => path.join(h.home, "scheduled_actions", id);
+const runDir = (h: Harness, id: string) => path.join(h.home, "scheduled", id);
 
 // ---------------------------------------------------------------------------
 // Config
@@ -261,7 +269,7 @@ describe("scheduled actions config", () => {
     expect(agent.tools["scheduled_actions"]).toBeUndefined();
     expect(agent.tools["get_datetime"]).toBeUndefined();
     expect((h.s as any).timer).toBeUndefined();
-    expect(fs.existsSync(path.join(h.home, "scheduled_actions"))).toBe(false);
+    expect(fs.existsSync(path.join(h.home, "scheduled"))).toBe(false);
     expect(() => createScheduledAction(agent, input())).toThrow(ConfigError);
   });
 
@@ -314,29 +322,29 @@ describe("scheduled actions store", () => {
   it("an external edit survives the next write (writes re-read first)", () => {
     const h = harness();
     createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
-    const file = path.join(h.home, "scheduled_actions", "tasks.json");
+    const file = taskFileOf(h.home, readTasks(h.home)[0]!.id);
     const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-    raw.tasks[0].instructions = "EDITED BY HAND";
-    raw.tasks[0].someFutureField = { keep: true };
+    raw.task.instructions = "EDITED BY HAND";
+    raw.task.someFutureField = { keep: true };
     fs.writeFileSync(file, JSON.stringify(raw));
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.name = "Renamed";
+    editTask(h.home, (t) => {
+      t.name = "Renamed";
     });
     const after = JSON.parse(fs.readFileSync(file, "utf8"));
-    expect(after.tasks[0].instructions).toBe("EDITED BY HAND");
-    expect(after.tasks[0].name).toBe("Renamed");
-    expect(after.tasks[0].someFutureField).toEqual({ keep: true });
+    expect(after.task.instructions).toBe("EDITED BY HAND");
+    expect(after.task.name).toBe("Renamed");
+    expect(after.task.someFutureField).toEqual({ keep: true });
     expect(fs.readdirSync(path.dirname(file)).filter((f) => f.includes(".tmp-"))).toEqual([]);
   });
 
-  it("quarantines a corrupt file and starts empty", () => {
+  it("quarantines a corrupt task.json and ignores that action", () => {
     const h = harness();
     const { codes } = capture();
-    const dir = path.join(h.home, "scheduled_actions");
+    const dir = path.join(h.home, "scheduled", "damaged-abc123");
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "tasks.json"), "{not json");
+    fs.writeFileSync(path.join(dir, "task.json"), "{not json");
     expect(readTasks(h.home)).toEqual([]);
-    expect(fs.readdirSync(dir).some((f) => f.startsWith("tasks.json.corrupt-"))).toBe(true);
+    expect(fs.readdirSync(dir).some((f) => f.startsWith("task.json.corrupt-"))).toBe(true);
     expect(codes()).toContain("scheduled_action.store_corrupt");
   });
 
@@ -345,15 +353,15 @@ describe("scheduled actions store", () => {
     const { of } = capture();
     const agent = h.agent(mockFetch(() => chatReply()).fn);
     const good = createScheduledAction(agent, input());
-    updateTasks(h.home, (tasks) => {
-      tasks.push({ id: "Bad ID!!", name: "x" } as any);
-    });
-    expect(validateRecord(readTasks(h.home)[1])).toMatch(/id/);
+    const badDir = path.join(h.home, "scheduled", "bad-abc123");
+    fs.mkdirSync(badDir);
+    fs.writeFileSync(path.join(badDir, "task.json"), JSON.stringify({ version: 2, task: { id: "bad-abc123", name: "x" } }));
+    expect(validateRecord(readTasks(h.home).find((t) => t.id === "bad-abc123"))).toMatch(/instructions/);
     h.set(18, 50);
     h.s.tick();
     h.s.tick();
     expect(of("scheduled_action.invalid")).toHaveLength(1); // reported once, not every tick
-    expect(readTasks(h.home).map((t) => t.id)).toContain("Bad ID!!"); // left untouched in the file
+    expect(readTasks(h.home).map((t) => t.id)).toContain("bad-abc123"); // left untouched on disk
     expect(h.s.running.has(good.id)).toBe(true); // the valid one still runs
   });
 
@@ -366,7 +374,7 @@ describe("scheduled actions store", () => {
     expect(writeRunFile(h.home, "job-abc123", d, header(3), "three")).toBe("job-abc123/26-october-2026-3.md");
   });
 
-  it("purge refuses anything that is not an action id inside scheduled_actions/", () => {
+  it("purge refuses anything that is not an action id inside scheduled/", () => {
     const h = harness();
     const outside = path.join(h.home, "keep");
     fs.mkdirSync(outside, { recursive: true });
@@ -459,7 +467,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
 
     // Result is saved under its final name and listed before it is due.
     const file = `${rec.id}/26-october-2026.md`;
-    const text = fs.readFileSync(path.join(h.home, "scheduled_actions", file), "utf8");
+    const text = fs.readFileSync(path.join(h.home, "scheduled", file), "utf8");
     expect(text).toContain("status: ok");
     expect(text).toContain(`startedAt: ${iso(18, 50)}`);
     expect(text).toContain("costUsd: unknown");
@@ -476,7 +484,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.s.tick();
     const delivered = of("scheduled_action.delivered");
     expect(delivered).toHaveLength(1);
-    expect(delivered[0]!.data).toMatchObject({ id: rec.id, name: "Check Portfolio", status: "ok", late: false, deliverAt: iso(19, 0), file: path.join(h.home, "scheduled_actions", file) });
+    expect(delivered[0]!.data).toMatchObject({ id: rec.id, name: "Check Portfolio", status: "ok", late: false, deliverAt: iso(19, 0), file: path.join(h.home, "scheduled", file) });
     expect(readDeliveries(h.home)).toEqual([]);
     expect(readTasks(h.home)[0]!.lastRun).toEqual({ status: "ok", file, deliverAt: iso(19, 0), deliveredAt: iso(19, 0), late: false });
   });
@@ -617,7 +625,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(calls).toHaveLength(1);
     expect(codes()).toContain("scheduled_action.failed"); // at once, not at delivery
     const file = `${rec.id}/26-october-2026.md`;
-    const text = fs.readFileSync(path.join(h.home, "scheduled_actions", file), "utf8");
+    const text = fs.readFileSync(path.join(h.home, "scheduled", file), "utf8");
     expect(text).toContain("status: failed");
     expect(text).toContain("The run failed:");
     h.s.tick();
@@ -646,7 +654,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     await h.settle();
     const [pending] = readDeliveries(h.home);
     expect(pending!.status).toBe("failed");
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toContain("timed out after 20ms");
     g.release();
   });
 
@@ -665,7 +673,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.s.tick();
     await h.settle();
     const [pending] = readDeliveries(h.home);
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toContain("timed out after 20ms");
     g.release();
   });
 
@@ -685,7 +693,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     await h.settle();
     const [pending] = readDeliveries(h.home);
     expect(pending!.status).toBe("failed");
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toContain("timed out after 20ms");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toContain("timed out after 20ms");
     g.release();
   });
 
@@ -693,8 +701,8 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     const h = harness();
     const { fn, calls } = mockFetch(() => chatReply());
     createScheduledAction(h.agent(fn), input());
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.instructions = "REWRITTEN BY THE MAIN AGENT";
+    editTask(h.home, (t) => {
+      t.instructions = "REWRITTEN BY THE MAIN AGENT";
     });
     h.set(18, 50);
     h.s.tick();
@@ -705,14 +713,14 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
   it("fails a run whose saved tool is no longer in the pool, with a clear error", async () => {
     const h = harness();
     createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.tools = ["gone_tool"];
+    editTask(h.home, (t) => {
+      t.tools = ["gone_tool"];
     });
     h.set(18, 50);
     h.s.tick();
     await h.settle();
     const [pending] = readDeliveries(h.home);
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", pending!.file), "utf8")).toMatch(/no longer in the pool: gone_tool/);
+    expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toMatch(/no longer in the pool: gone_tool/);
   });
 
   // A parent whose scheduled runs use `extra` (budget / workerBudget); the pool and worker model are the harness defaults.
@@ -731,7 +739,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.set(18, 50);
     h.s.tick();
     await h.settle();
-    return fs.readFileSync(path.join(h.home, "scheduled_actions", readDeliveries(h.home)[0]!.file), "utf8");
+    return fs.readFileSync(path.join(h.home, "scheduled", readDeliveries(h.home)[0]!.file), "utf8");
   };
 
   it("a scheduled run is capped by workerBudget: going over records a failed run", async () => {
@@ -758,7 +766,10 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.s.agents.clear(); // what happens once the Agent is garbage collected
     h.set(18, 50);
     h.s.tick();
-    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "missed" });
+    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "waiting" }); // another process may own it: not missed at cook time
+    h.set(19, 0);
+    h.s.tick();
+    expect(readTasks(h.home)[0]).toMatchObject({ id: rec.id, state: "missed" }); // its delivery time passed with no run
     expect(of("scheduled_action.missed")[0]!.data).toMatchObject({ reason: "no_agent" });
     expect(calls).toHaveLength(0);
   });
@@ -770,12 +781,12 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(validateDelivery({ ...entry, late: "yes" })).toMatch(/late/);
   });
 
-  it("skips a damaged deliveries.json entry (warns once) instead of stalling the scheduler", async () => {
+  it("skips a damaged delivery.json entry (warns once) instead of stalling the scheduler", async () => {
     const h = harness();
     const { of } = capture();
     const { fn, calls } = mockFetch(() => chatReply());
     createScheduledAction(h.agent(fn), input());
-    updateDeliveries(h.home, (p) => void p.push({ id: "x", file: "x/y.md", status: "ok", readyAt: "garbage", deliverAt: "garbage" } as any));
+    updateDeliveries(h.home, "x", (p) => void p.push({ id: "x", file: "x/y.md", status: "ok", readyAt: "garbage", deliverAt: "garbage" } as any));
     h.set(18, 50);
     h.s.tick();
     h.s.tick();
@@ -826,9 +837,9 @@ describe("scheduler startup sweep", () => {
     const h = harness();
     const fn = mockFetch(() => chatReply()).fn;
     const rec = createScheduledAction(h.agent(fn), input());
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.state = "cooking";
-      tasks[0]!.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
     });
     h.boot();
     h.set(18, 55);
@@ -890,11 +901,11 @@ describe("scheduler startup sweep", () => {
     const h = harness();
     const { fn, calls } = mockFetch(() => chatReply());
     createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "skip" }));
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.state = "cooking";
-      tasks[0]!.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
-      tasks[0]!.nextCookAt = iso(18, 50, 0, 27); // advanced before the run, as the scheduler does
-      tasks[0]!.nextDeliverAt = iso(19, 0, 0, 27);
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+      t.nextCookAt = iso(18, 50, 0, 27); // advanced before the run, as the scheduler does
+      t.nextDeliverAt = iso(19, 0, 0, 27);
     });
     h.boot();
     h.set(18, 55);
@@ -928,10 +939,10 @@ describe("scheduler startup sweep", () => {
     h.s.tick();
     await h.settle();
     // Crash simulation: run file written, delivery entry and task update lost.
-    updateDeliveries(h.home, (p) => void p.splice(0));
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.state = "cooking";
-      tasks[0]!.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+    updateDeliveries(h.home, rec.id, (p) => void p.splice(0));
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
     });
     h.boot();
     h.set(18, 55);
@@ -951,10 +962,10 @@ describe("scheduler startup sweep", () => {
     h.agent(fn);
     h.s.tick();
     await h.settle(); // the missed run ran and wrote its file with `late: true`
-    updateDeliveries(h.home, (p) => void p.splice(0)); // crash: the delivery entry and the task update are lost
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.state = "cooking";
-      tasks[0]!.current = { cookStartedAt: iso(20, 0), deliverAt: iso(20, 0) };
+    updateDeliveries(h.home, readTasks(h.home)[0]!.id, (p) => void p.splice(0)); // crash: the delivery entry and the task update are lost
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(20, 0), deliverAt: iso(20, 0) };
     });
     h.boot();
     h.set(20, 0, 30); // 30 s later: on time by the clock, so only the saved flag can make it late
@@ -1056,7 +1067,7 @@ describe("list / update / run_now / skip / delete", () => {
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false, readyAt: iso(15, 0, 5), deliverAt: iso(15, 0, 5) });
     expect(readTasks(h.home)[0]!.lastRun).toMatchObject({ late: false, deliverAt: iso(15, 0, 5) });
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
   });
 
   it("a scheduled run that finishes inside its delivery second is not late", async () => {
@@ -1066,7 +1077,7 @@ describe("list / update / run_now / skip / delete", () => {
     h.set(18, 50);
     h.s.tick();
     await h.settle();
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", `${rec.id}/26-october-2026.md`), "utf8")).toContain("late: false");
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: false });
   });
@@ -1107,7 +1118,7 @@ describe("list / update / run_now / skip / delete", () => {
     runScheduledAction(missedRec.id, { home: h.home });
     await h.settle();
     expect(readDeliveries(h.home)[0]).toMatchObject({ id: missedRec.id, late: true }); // the flag is on the saved entry
-    expect(fs.readFileSync(path.join(h.home, "scheduled_actions", readDeliveries(h.home)[0]!.file), "utf8")).toContain("late: true");
+    expect(fs.readFileSync(path.join(h.home, "scheduled", readDeliveries(h.home)[0]!.file), "utf8")).toContain("late: true");
     const { of } = capture();
     h.s.tick();
     expect(of("scheduled_action.delivered")[0]!.data).toMatchObject({ late: true });
@@ -1276,18 +1287,19 @@ describe("scheduled_actions and get_datetime tools", () => {
 });
 
 describe("home folder layout", () => {
-  it("renames the pre-0.5.0 scheduled_tasks/ folder to scheduled_actions/ on first use", async () => {
-    const { migrateLegacyFolder } = await import("../src/scheduler/store.ts");
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "accel-home-"));
-    fs.mkdirSync(path.join(home, "scheduled_tasks"));
-    fs.writeFileSync(path.join(home, "scheduled_tasks", "tasks.json"), "{}");
-    migrateLegacyFolder(home);
-    expect(fs.existsSync(path.join(home, "scheduled_tasks"))).toBe(false);
-    expect(fs.existsSync(path.join(home, "scheduled_actions", "tasks.json"))).toBe(true);
-    // never overwrites an existing new folder
-    fs.mkdirSync(path.join(home, "scheduled_tasks"));
-    migrateLegacyFolder(home);
-    expect(fs.existsSync(path.join(home, "scheduled_tasks"))).toBe(true);
+  it("keeps its files in <home>/scheduled/ and leaves an old scheduled_actions/ or scheduled_tasks/ folder alone", () => {
+    const h = harness();
+    for (const old of ["scheduled_actions", "scheduled_tasks"]) {
+      fs.mkdirSync(path.join(h.home, old), { recursive: true });
+      fs.writeFileSync(path.join(h.home, old, "tasks.json"), '{"version":1,"tasks":[{"id":"old"}]}');
+    }
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    expect(fs.existsSync(taskFileOf(h.home, rec.id))).toBe(true);
+    expect(listScheduledActions({ home: h.home }).map((t) => t.id)).toEqual([rec.id]); // nothing from the old folders
+    for (const old of ["scheduled_actions", "scheduled_tasks"]) {
+      expect(fs.readFileSync(path.join(h.home, old, "tasks.json"), "utf8")).toContain('"old"'); // untouched, not moved
+    }
   });
 });
 
@@ -1310,7 +1322,7 @@ describe("setHome", () => {
 // The on-disk format is a stable contract: docs/scheduled-action-files.md says what is below.
 // ---------------------------------------------------------------------------
 describe("scheduled action files (stable contract)", () => {
-  const dirOf = (h: Harness): string => path.join(h.home, "scheduled_actions");
+  const dirOf = (h: Harness): string => path.join(h.home, "scheduled");
   const json = (h: Harness, name: string): any => JSON.parse(fs.readFileSync(path.join(dirOf(h), name), "utf8"));
   const sorted = (o: object): string[] => Object.keys(o).sort();
   const HEADER_ORDER = ["id", "name", "status", "startedAt", "finishedAt", "deliverAt", "late", "model", "turns", "tokens", "inputTokens", "freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "thinkingTokens", "cacheHitRate", "costUsd", "costSource", "unpricedTurns"];
@@ -1325,38 +1337,39 @@ describe("scheduled action files (stable contract)", () => {
     return { header, body: m[2]!.trimEnd() };
   }
 
-  it("tasks.json: the version, the exact fields of a minimal and of a full record, and the states", () => {
+  it("<id>/task.json: the version, the exact fields of a minimal and of a full record, and the states", () => {
     const h = harness();
     const agent = h.agent(mockFetch(() => chatReply()).fn);
-    createScheduledAction(agent, input());
-    const file = json(h, "tasks.json");
-    expect(Object.keys(file)).toEqual(["version", "tasks"]);
-    expect(file.version).toBe(1);
-    expect(sorted(file.tasks[0])).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "schedule", "state", "task", "tools"]);
-    expect(sorted(file.tasks[0].schedule)).toEqual(["meridiem", "startCookingInAdvance", "timeToDeliver"]);
-    expect(file.tasks[0].state).toBe("waiting");
+    const first = createScheduledAction(agent, input());
+    const file = json(h, `${first.id}/task.json`);
+    expect(Object.keys(file)).toEqual(["version", "task"]);
+    expect(file.version).toBe(2);
+    expect(sorted(file.task)).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "schedule", "state", "task", "tools"]);
+    expect(sorted(file.task.schedule)).toEqual(["meridiem", "startCookingInAdvance", "timeToDeliver"]);
+    expect(file.task.state).toBe("waiting");
 
-    createScheduledAction(agent, input({ id: "full-one", repeatEvery: "01:00:00", retries: 1, onMissed: "run" }, { role: "analyst", timeoutMs: 600_000 }));
-    const full = json(h, "tasks.json").tasks[1];
+    const second = createScheduledAction(agent, input({ id: "full-one", repeatEvery: "01:00:00", retries: 1, onMissed: "run" }, { role: "analyst", timeoutMs: 600_000 }));
+    const full = json(h, `${second.id}/task.json`).task;
     expect(sorted(full)).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "role", "schedule", "state", "task", "timeoutMs", "tools"]);
     expect(sorted(full.schedule)).toEqual(["meridiem", "onMissed", "repeatEvery", "retries", "startCookingInAdvance", "timeToDeliver"]);
     expect(full.id).toMatch(/^full-one-[a-z0-9]{6}$/);
     expect(full.nextDeliverAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/); // local time, no offset
   });
 
-  it("a run's files: current, deliveries.json, the run header (keys and order) and lastRun", async () => {
+  it("a run's files: current, delivery.json, the run header (keys and order) and lastRun", async () => {
     const h = harness();
     const { of } = capture();
     const rec = createScheduledAction(h.agent(mockFetch(() => chatReply("Result text.")).fn), input());
     h.set(18, 50);
     h.s.tick();
-    expect(sorted(json(h, "tasks.json").tasks[0].current)).toEqual(["cookStartedAt", "deliverAt"]); // only while cooking
+    const taskPath = `${rec.id}/task.json`;
+    expect(sorted(json(h, taskPath).task.current)).toEqual(["cookStartedAt", "deliverAt"]); // only while cooking
     await h.settle();
-    expect(json(h, "tasks.json").tasks[0].current).toBeUndefined();
+    expect(json(h, taskPath).task.current).toBeUndefined();
 
-    const deliveries = json(h, "deliveries.json");
+    const deliveries = json(h, `${rec.id}/delivery.json`);
     expect(Object.keys(deliveries)).toEqual(["version", "pending"]);
-    expect(deliveries.version).toBe(1);
+    expect(deliveries.version).toBe(2);
     expect(sorted(deliveries.pending[0])).toEqual(["deliverAt", "file", "id", "readyAt", "status"]);
     expect(deliveries.pending[0].file).toBe(`${rec.id}/26-october-2026.md`);
 
@@ -1369,8 +1382,8 @@ describe("scheduled action files (stable contract)", () => {
 
     h.set(19, 0);
     h.s.tick();
-    expect(json(h, "deliveries.json").pending).toEqual([]);
-    expect(sorted(json(h, "tasks.json").tasks[0].lastRun)).toEqual(["deliverAt", "deliveredAt", "file", "late", "status"]);
+    expect(fs.existsSync(path.join(dirOf(h), rec.id, "delivery.json"))).toBe(false); // nothing waiting: no file
+    expect(sorted(json(h, taskPath).task.lastRun)).toEqual(["deliverAt", "deliveredAt", "file", "late", "status"]);
     expect(sorted(of("scheduled_action.delivered")[0]!.data as object)).toEqual(["deliverAt", "file", "id", "late", "name", "readyAt", "status"]);
   });
 
@@ -1378,12 +1391,12 @@ describe("scheduled action files (stable contract)", () => {
     const h = harness();
     const agent = h.agent(mockFetch(() => chatReply()).fn);
     const rec = createScheduledAction(agent, input());
-    updateTasks(h.home, (tasks) => void ((tasks[0] as unknown as Record<string, unknown>)["owner"] = "ops"));
+    editTask(h.home, (t) => void ((t as unknown as Record<string, unknown>)["owner"] = "ops"));
     updateScheduledAction(rec.id, { task: "A new assignment." }, { home: h.home });
-    const kept = json(h, "tasks.json").tasks[0];
+    const kept = json(h, `${rec.id}/task.json`).task;
     expect(kept.owner).toBe("ops");
     expect(kept.task).toBe("A new assignment.");
-    expect(fs.existsSync(path.join(dirOf(h), "tasks.json.bak"))).toBe(true);
+    expect(fs.existsSync(path.join(dirOf(h), rec.id, "task.json.bak"))).toBe(true);
     expect(validateRecord(kept)).toBeUndefined(); // an extra key is not a validation problem
   });
 
@@ -1393,6 +1406,230 @@ describe("scheduled action files (stable contract)", () => {
     for (const code of ["created", "updated", "started", "ready", "failed", "delivered", "missed", "skipped", "deleted", "invalid", "store_corrupt", "error"]) {
       expect(doc).toContain(`\`scheduled_action.${code}\``);
     }
-    expect(doc).toContain('"version": 1');
+    expect(doc).toContain('"version": 2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Several schedulers on one home (stand-ins for several processes: all state is in the files)
+// ---------------------------------------------------------------------------
+describe("several processes on one home", () => {
+  // A second scheduler on the same home with its own clock source; in: a test, out: a scheduler that has registered `agent` (or nobody).
+  function other(h: Harness, agent?: Agent): Scheduler {
+    const { Scheduler: SchedulerClass } = require("../src/scheduler/scheduler.ts") as typeof import("../src/scheduler/scheduler.ts");
+    const b = new SchedulerClass(h.home);
+    b.tickMs = 3_600_000;
+    b.now = () => new Date(h.clock);
+    if (agent) b.agents.set(agent.name, new WeakRef(agent));
+    return b;
+  }
+  // Writes the heartbeat a live OTHER process (our parent's pid) would keep; in: a test, out: the .heartbeat file.
+  function fakeOwner(h: Harness, id: string, pid = process.ppid): string {
+    const file = path.join(h.home, "scheduled", id, ".heartbeat");
+    fs.writeFileSync(file, JSON.stringify({ pid, host: os.hostname(), token: "other" }));
+    return file;
+  }
+
+  it("only a process that owns the Agent starts a run; one that does not leaves it alone until the delivery time has passed", async () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    const agent = h.agent(fn);
+    const rec = createScheduledAction(agent, input());
+    const stranger = other(h);
+    h.set(18, 50);
+    stranger.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("waiting");
+    h.s.tick();
+    await h.settle();
+    expect(calls).toHaveLength(1);
+    expect(readDeliveries(h.home)).toHaveLength(1);
+    expect(rec.id).toBeTruthy();
+  });
+
+  it("two processes that both own the Agent start the run once", async () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    const agent = h.agent(fn);
+    createScheduledAction(agent, input());
+    const b = other(h, agent);
+    h.set(18, 50);
+    h.s.tick();
+    b.tick(); // sees it cooking
+    await h.settle();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a process with a stale view cannot start the next occurrence early", async () => {
+    const h = harness();
+    const { fn, calls } = mockFetch(() => chatReply());
+    const agent = h.agent(fn);
+    const rec = createScheduledAction(agent, input({ repeatEvery: "01:00:00" }));
+    const b = other(h, agent);
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle(); // finished: waiting again for tomorrow
+    expect(readTasks(h.home)[0]).toMatchObject({ state: "waiting", nextDeliverAt: iso(19, 0, 0, 27) });
+    (b as any).startCook(rec.id, false); // what a slow process does with the snapshot it took before the run
+    expect(calls).toHaveLength(1);
+    expect(readTasks(h.home)[0]!.state).toBe("waiting");
+  });
+
+  it("a delivery is emitted once even when two processes own the Agent", async () => {
+    const h = harness();
+    const { of } = capture();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    createScheduledAction(agent, input());
+    const b = other(h, agent);
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    h.set(19, 0);
+    h.s.tick();
+    b.tick();
+    expect(of("scheduled_action.delivered")).toHaveLength(1);
+    expect(readTasks(h.home)[0]!.lastRun).toMatchObject({ status: "ok" });
+    expect(readDeliveries(h.home)).toEqual([]);
+  });
+
+  it("two processes that picked the same saved delivery at the same moment emit it once", async () => {
+    const h = harness();
+    const { of } = capture();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    createScheduledAction(agent, input());
+    const b = other(h, agent);
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    h.set(19, 0);
+    const entry = readDeliveries(h.home)[0]!; // both took this snapshot before either delivered
+    (h.s as any).deliver(entry, h.clock);
+    (b as any).deliver(entry, h.clock);
+    expect(of("scheduled_action.delivered")).toHaveLength(1);
+  });
+
+  it("a process that does not own the Agent never takes a delivery", async () => {
+    const h = harness();
+    const { of } = capture();
+    createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    h.set(19, 0);
+    other(h).tick();
+    expect(of("scheduled_action.delivered")).toHaveLength(0);
+    expect(readDeliveries(h.home)).toHaveLength(1);
+    h.s.tick();
+    expect(of("scheduled_action.delivered")).toHaveLength(1);
+  });
+
+  it("a marked-missed decision made on a stale view changes nothing and emits nothing", async () => {
+    const h = harness();
+    const { of } = capture();
+    const g = gate();
+    const agent = h.agent(mockFetch(async () => (await g.open, chatReply())).fn);
+    const rec = createScheduledAction(agent, input());
+    h.set(18, 50);
+    h.s.tick(); // now cooking
+    (other(h, agent) as any).markMissed(rec.id, "process_down", "waiting");
+    expect(readTasks(h.home)[0]!.state).toBe("cooking");
+    expect(of("scheduled_action.missed")).toHaveLength(0);
+    g.release();
+    await h.settle();
+  });
+
+  it("keeps a heartbeat while a run is in flight, refreshes it, and removes it when the run ends", async () => {
+    const h = harness();
+    const g = gate();
+    const agent = h.agent(mockFetch(async () => (await g.open, chatReply())).fn);
+    const rec = createScheduledAction(agent, input());
+    h.set(18, 50);
+    h.s.tick();
+    const file = path.join(h.home, "scheduled", rec.id, ".heartbeat");
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toMatchObject({ pid: process.pid, host: os.hostname() });
+    const old = new Date(Date.now() - 20_000);
+    fs.utimesSync(file, old, old);
+    h.set(18, 50, 10);
+    h.s.tick();
+    expect(Date.now() - fs.statSync(file).mtimeMs).toBeLessThan(5_000); // refreshed by the tick
+    g.release();
+    await h.settle();
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it("does not recover a cooking run whose owner process is alive and heartbeating", () => {
+    const h = harness();
+    const { of } = capture();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+    });
+    fakeOwner(h, rec.id);
+    const b = other(h, agent);
+    h.set(18, 55);
+    b.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("cooking");
+    expect(of("scheduled_action.missed")).toHaveLength(0);
+  });
+
+  it("recovers a cooking run whose owner is dead, or whose heartbeat went stale, or that never had one", () => {
+    for (const how of ["dead pid", "stale", "none", "own pid, not running it"] as const) {
+      const h = harness();
+      const agent = h.agent(mockFetch(() => chatReply()).fn);
+      const rec = createScheduledAction(agent, input());
+      editTask(h.home, (t) => {
+        t.state = "cooking";
+        t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+      });
+      if (how === "dead pid") fakeOwner(h, rec.id, 2 ** 22 + 4242);
+      if (how === "own pid, not running it") fakeOwner(h, rec.id, process.pid); // an earlier scheduler of this very process
+      if (how === "stale") {
+        const file = fakeOwner(h, rec.id);
+        const old = new Date(Date.now() - 120_000);
+        fs.utimesSync(file, old, old);
+      }
+      const b = other(h, agent);
+      h.set(18, 55);
+      b.tick();
+      expect(readTasks(h.home)[0]!.state, how).toBe("missed");
+    }
+  });
+
+  it("a live process notices a dead owner without restarting (every 15 s)", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    h.set(18, 40);
+    h.s.tick(); // first tick: nothing to recover
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 40), deliverAt: iso(19, 0) };
+    });
+    fakeOwner(h, rec.id, 2 ** 22 + 4242);
+    h.set(18, 40, 5);
+    h.s.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("cooking"); // looked 5 s ago: not yet
+    h.set(18, 40, 20);
+    h.s.tick();
+    expect(readTasks(h.home)[0]!.state).toBe("missed");
+  });
+
+  it("refuses to delete a run that another live process is cooking, even with force; deletes it once the owner is dead", async () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const rec = createScheduledAction(agent, input());
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+    });
+    const file = fakeOwner(h, rec.id);
+    const refused = await deleteScheduledAction(rec.id, { home: h.home, force: true });
+    expect(refused).toMatchObject({ ok: false, reason: "running" });
+    expect((refused as { message: string }).message).toContain(`pid ${process.ppid}`);
+    expect(readTasks(h.home)).toHaveLength(1);
+    fs.writeFileSync(file, JSON.stringify({ pid: 2 ** 22 + 4242, host: os.hostname(), token: "x" }));
+    expect(await deleteScheduledAction(rec.id, { home: h.home })).toEqual({ ok: true });
+    expect(readTasks(h.home)).toEqual([]);
   });
 });

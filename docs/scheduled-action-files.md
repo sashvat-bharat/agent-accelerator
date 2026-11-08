@@ -1,62 +1,64 @@
 # Scheduled action files
 
-> The on-disk format of scheduled actions: three kinds of plain files you can read, back up, diff and (carefully) edit. **From v0.5.5 this format is a stable contract**: it changes only by the rules at the bottom of this page, and every change is listed in the [changelog](#changelog).
+> The on-disk format of scheduled actions: plain files you can read, back up, diff and (carefully) edit. **From v0.5.5 this format is a stable contract**: it changes only by the rules at the bottom of this page, and every change is listed in the [changelog](#changelog).
 
-Everything lives under one folder, `<home>/scheduled_actions/` (`home` is `Agent({ home })`, then `setHome(dir)`, then `AGENT_ACCEL_HOME`, then `.agent-accel/` in the working directory):
+Everything lives under one folder, `<home>/scheduled/` (`home` is `Agent({ home })`, then `setHome(dir)`, then `AGENT_ACCEL_HOME`, then `.agent-accel/` in the working directory):
 
 ```text
-<home>/scheduled_actions/
-  tasks.json             every action (definition + schedule + state)
-  deliveries.json        results saved but not yet delivered
+<home>/scheduled/
   <action id>/
+    task.json            the action (definition + schedule + state)
+    delivery.json        its results saved but not yet delivered (only while there are any)
     27-october-2026.md   one file per run: a header, then the result
+    .mutex               a short lock, present only while the SDK changes this action
+    .heartbeat           present while a process is running the action: its pid, host and a token; the file's modification time is refreshed every 5 s
 ```
 
 The SDK reads and writes these files itself; there is no database and no notification system. What happens when a result is delivered is your code (see the `scheduled_action.delivered` event).
 
 ## What you can rely on
 
-- **Reading is always safe.** Every write is atomic (temp file, fsync, rename), so a reader sees the old file or the new one, never half of one. `tasks.json` and `deliveries.json` also keep their last good version as `<file>.bak`.
+- **Reading is always safe.** Every write is atomic (temp file, fsync, rename), so a reader sees the old file or the new one, never half of one. `task.json` and `delivery.json` also keep their last good version as `<file>.bak`.
 - **Times are local clock strings** `YYYY-MM-DDTHH:mm:ss`, no offset, no timezone (the machine clock rules). Compare them as strings or parse them as local time.
-- **Unknown fields are ignored on read and kept on rewrite.** An action record may carry extra keys of yours (`"owner": "ops"`); the SDK leaves them alone. Extra top-level keys beside `version` and `tasks` / `pending` are not kept.
+- **Unknown fields are ignored on read and kept on rewrite.** An action record may carry extra keys of yours (`"owner": "ops"`); the SDK leaves them alone. Extra top-level keys beside `version` and `task` / `pending` are not kept.
 - **A damaged or invalid file never stops the clock.** A file that is not valid JSON is renamed `<file>.corrupt-<timestamp>` and restored from its `.bak` (event `scheduled_action.store_corrupt`). A record or a delivery entry that fails validation is skipped, left untouched in the file, and reported once (`scheduled_action.invalid`).
 
-## `tasks.json`
+## `<action id>/task.json`
+
+One file per action: the record sits under the `task` key.
 
 ```json
 {
-  "version": 1,
-  "tasks": [
-    {
-      "id": "daily-ai-brief-d64aj2",
-      "name": "Daily AI Research Brief",
-      "agent": "Main",
-      "role": "analyst",
-      "instructions": "You write a short, sourced AI research brief.",
-      "task": "Summarize the most important AI news of the last day in 5 bullets.",
-      "tools": ["recent_news"],
-      "timeoutMs": 600000,
-      "schedule": {
-        "timeToDeliver": "01:07:00",
-        "meridiem": "AM",
-        "startCookingInAdvance": "00:00:30",
-        "repeatEvery": "01:00:00",
-        "retries": 1,
-        "onMissed": "run"
-      },
-      "state": "waiting",
-      "nextCookAt": "2026-10-27T06:59:30",
-      "nextDeliverAt": "2026-10-27T07:00:00",
-      "createdAt": "2026-10-26T15:55:31",
-      "lastRun": {
-        "status": "ok",
-        "file": "daily-ai-brief-d64aj2/26-october-2026.md",
-        "deliverAt": "2026-10-26T07:00:00",
-        "deliveredAt": "2026-10-26T07:00:01",
-        "late": false
-      }
+  "version": 2,
+  "task": {
+    "id": "daily-ai-brief-d64aj2",
+    "name": "Daily AI Research Brief",
+    "agent": "Main",
+    "role": "analyst",
+    "instructions": "You write a short, sourced AI research brief.",
+    "task": "Summarize the most important AI news of the last day in 5 bullets.",
+    "tools": ["recent_news"],
+    "timeoutMs": 600000,
+    "schedule": {
+      "timeToDeliver": "01:07:00",
+      "meridiem": "AM",
+      "startCookingInAdvance": "00:00:30",
+      "repeatEvery": "01:00:00",
+      "retries": 1,
+      "onMissed": "run"
+    },
+    "state": "waiting",
+    "nextCookAt": "2026-10-27T06:59:30",
+    "nextDeliverAt": "2026-10-27T07:00:00",
+    "createdAt": "2026-10-26T15:55:31",
+    "lastRun": {
+      "status": "ok",
+      "file": "daily-ai-brief-d64aj2/26-october-2026.md",
+      "deliverAt": "2026-10-26T07:00:00",
+      "deliveredAt": "2026-10-26T07:00:01",
+      "late": false
     }
-  ]
+  }
 }
 ```
 
@@ -78,17 +80,17 @@ The SDK reads and writes these files itself; there is no database and no notific
 | `nextCookAt`, `nextDeliverAt` | time or `null` | When the next run starts and is delivered. `null` for a one-shot that is running or finished. |
 | `current` | object, only while `cooking` | `{ cookStartedAt, deliverAt }` of the run in flight. Required while `state` is `cooking`. |
 | `createdAt` | time | When the action was created. |
-| `lastRun` | object, optional | The last delivered run: `status` (`"ok"` \| `"failed"`), `file` (relative to `scheduled_actions/`), `deliverAt`, `deliveredAt`, `late`. |
+| `lastRun` | object, optional | The last delivered run: `status` (`"ok"` \| `"failed"`), `file` (relative to `scheduled/`), `deliverAt`, `deliveredAt`, `late`. |
 
 States: `waiting` (a future run is scheduled), `cooking` (a run is in flight), `missed` (a run's time passed and nobody ran it; use `run_now` or `skip`), `done` (a one-shot that finished).
 
-## `deliveries.json`
+## `<action id>/delivery.json`
 
-Results that are saved but whose delivery time has not come yet. An entry is removed when it is delivered.
+Results of this action that are saved but whose delivery time has not come yet. An entry is removed when it is delivered, and the file is removed when no entry is left.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "pending": [
     {
       "id": "daily-ai-brief-d64aj2",
@@ -101,7 +103,7 @@ Results that are saved but whose delivery time has not come yet. An entry is rem
 }
 ```
 
-`file` is relative to `scheduled_actions/`. `status` is `"ok"` or `"failed"`. An entry may carry `"late": true` (optional, a boolean): the run replaced a missed occurrence, so it is late whatever the clock says.
+`file` is relative to `scheduled/`. `status` is `"ok"` or `"failed"`. An entry may carry `"late": true` (optional, a boolean): the run replaced a missed occurrence, so it is late whatever the clock says.
 
 ## Run files
 
@@ -156,15 +158,21 @@ The body after the header is the worker's text, `[The worker returned no text.]`
 Plain JSON and a tiny header parser are enough; no SDK import is needed:
 
 ```ts
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const dir = join(".agent-accel", "scheduled_actions");
+const dir = join(".agent-accel", "scheduled");
 
-const { tasks } = JSON.parse(readFileSync(join(dir, "tasks.json"), "utf8")) as {
-  version: 1;
-  tasks: Array<{ id: string; state: string; nextDeliverAt: string | null; lastRun?: { file: string; status: string; late: boolean } }>;
-};
+type Task = { id: string; state: string; nextDeliverAt: string | null; lastRun?: { file: string; status: string; late: boolean } };
+const tasks: Task[] = readdirSync(dir, { withFileTypes: true })
+  .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+  .flatMap((e) => {
+    try {
+      return [(JSON.parse(readFileSync(join(dir, e.name, "task.json"), "utf8")) as { version: 2; task: Task }).task];
+    } catch {
+      return []; // a folder with only run files has no task.json
+    }
+  });
 for (const t of tasks) console.log(t.id, t.state, t.nextDeliverAt);
 
 // A run file: a header between two "---" lines, then the result.
@@ -180,7 +188,7 @@ const last = tasks.find((t) => t.lastRun)?.lastRun;
 if (last) console.log(readRun(last.file).header.costUsd);
 ```
 
-Any process may read. Only one process at a time may **write** a home folder: an `Agent` that uses it takes `<home>/.lock`, and a second process fails at once with a `ConfigError`.
+Any process may read. Several processes may also **write** the same home: every change to an action takes that action's short `.mutex`, so two processes never overwrite each other's update. Which process acts on an action: only the one that registered its `Agent` starts it, delivers it and recovers it (a process that does not own it leaves it alone until its delivery time has passed with no run started, then marks it `missed` with reason `no_agent`). A run's owner keeps `<id>/.heartbeat` fresh; a run whose owner died is recovered by another process that owns the Agent.
 
 ## Editing the files
 
@@ -188,7 +196,7 @@ Prefer the API (`createScheduledAction`, `updateScheduledAction`, `deleteSchedul
 
 - **Safe while the program is stopped:** `name`, `role`, `instructions`, `task`, `tools`, `timeoutMs`, `schedule.retries`, `schedule.onMissed`, and deleting a whole record (its run folder stays unless you remove it).
 - **Picked up by a running program** at the next run: the SDK re-reads and validates the file before every run. An edit made at the very moment the SDK writes the same file can be lost, so keep hand edits to a stopped program or to small, quick changes.
-- **Do not hand-edit** `state`, `current`, `nextCookAt`, `nextDeliverAt`, `lastRun` or `deliveries.json`: the SDK keeps them consistent with each other and repairs them after a crash. To reschedule, use `updateScheduledAction`.
+- **Do not hand-edit** `state`, `current`, `nextCookAt`, `nextDeliverAt`, `lastRun` or `delivery.json`: the SDK keeps them consistent with each other and repairs them after a crash. To reschedule, use `updateScheduledAction`.
 - A hand edit that breaks validation does not break anything: that record is skipped and reported (`scheduled_action.invalid`) until you fix it.
 
 ## Events
@@ -212,8 +220,8 @@ The events on `telemetryBus` (`code`, then `data`) are part of the same contract
 
 ## Compatibility rules and changelog
 
-- Both JSON files carry `"version": 1`.
-- **Additive changes keep version 1:** a new optional field in a record, a delivery entry or the run header, and a new key in an event's `data`. Readers must ignore what they do not know (the SDK does).
+- Both JSON files carry `"version": 2`.
+- **Additive changes keep the version:** a new optional field in a record, a delivery entry or the run header, and a new key in an event's `data`. Readers must ignore what they do not know (the SDK does).
 - **Breaking changes bump `version`:** removing or renaming a field, changing its type, unit or meaning, a new value in an enum a reader may switch on (`state`, `status`, `costSource`, `onMissed`, `reason`), a new time format, or a new file layout. A breaking change ships with a migration of existing files and is listed below and in the release notes.
 - Until v1.0 a breaking change can still happen, but never silently: it follows these rules.
 
@@ -221,12 +229,15 @@ The events on `telemetryBus` (`code`, then `data`) are part of the same contract
 
 | SDK version | Change |
 |---|---|
+| 0.5.8 | Several processes can share one home: the home-wide `.lock` is no longer taken by scheduled actions or telemetry (sessions lock only their own folder). |
+| 0.5.8 | **Format version 2: one folder per action.** `tasks.json` and `deliveries.json` are gone; each action has `<home>/scheduled/<id>/task.json` (`{ "version": 2, "task": { ... } }`, the record fields are unchanged) and, while results wait for their delivery time, `<id>/delivery.json` (`{ "version": 2, "pending": [...] }`, the entry fields are unchanged). Run files keep their path. While a run is in flight its owner keeps `<id>/.heartbeat` fresh, which is how other processes tell a live run from a dead one. **Nothing is converted for you:** actions saved in an old `tasks.json` are not read; create them again. |
+| 0.5.8 | The folder is renamed from `<home>/scheduled_actions/` to `<home>/scheduled/`. **Nothing is moved for you:** an existing folder must be renamed once by hand (`mv .agent-accel/scheduled_actions .agent-accel/scheduled`), otherwise the new folder starts empty. The automatic rename of the pre-0.5.0 `scheduled_tasks/` folder is gone. File formats, the tool name `scheduled_actions` and the `scheduled_action.*` events are unchanged. |
 | 0.5.5 | The format becomes a stable contract (this page). Added: `schedule.onMissed` (record), `late` (delivery entry, optional), the spending fields of the run header (`turns`, `inputTokens`, `freshInputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outputTokens`, `thinkingTokens`, `cacheHitRate`, `costSource`, `unpricedTurns`; `tokens` is now input + output over all attempts; `costUsd` is priced per turn). Changed: `late` is `true` for a run that replaces a missed occurrence, never for an ordinary `run_now`, and is compared in whole seconds. Event `scheduled_action.killed` became `scheduled_action.deleted`. The timeout options were reduced to `workerTimeoutMs` and the action's own `timeoutMs`. |
 | 0.5.3 | Writes became durable (fsync, `.bak` copy, atomic rename); a damaged `tasks.json` / `deliveries.json` is restored from its `.bak`. One process per home folder. |
 | 0.5.0 | The folder moved from `scheduled_tasks/` to `<home>/scheduled_actions/`, under the single home folder; an old `scheduled_tasks/` folder is renamed on first use. |
 
 ## For AI agents
 
-- Read `tasks.json` and the run files with plain JSON and the header parser above; never write `state`, `current`, `next*`, `lastRun` or `deliveries.json`.
+- Read each `<id>/task.json` and the run files with plain JSON and the header parser above; never write `state`, `current`, `next*`, `lastRun` or `delivery.json`.
 - To change an action, call `updateScheduledAction` (or the `scheduled_actions` tool, `update` command), not the file.
 - A run's cost is in its header: `costUsd` is `unknown` (never 0) when no price is known; check `unpricedTurns` before treating it as exact.

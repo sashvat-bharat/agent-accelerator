@@ -15,7 +15,7 @@ export { Agent, SubAgentModelError } from "./agent/agent.ts";
 /**
  * @deprecated Compat alias: prefer composing a plain `Agent` and exposing it
  * via `agentToTool()`/`buildAgentTools()` (or `subagents: [...]`). `SubAgent`
- * stays for compat and receives no new features (Q-56).
+ * stays for compat and receives no new features.
  */
 export { SubAgent, agentFromEnv } from "./agent/subagent.ts";
 export type { SubAgentConfig } from "./agent/subagent.ts";
@@ -33,7 +33,7 @@ export type { CreateToolOptions } from "./tools/tool.ts";
 export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
 /**
  * @deprecated Internal executor surface. Prefer `Agent` runs; for direct
- * execution import from the future `/internal` entry (Q-50).
+ * execution import from the future `/internal` entry.
  */
 export { executeToolCalls } from "./tools/executor.ts";
 
@@ -135,7 +135,7 @@ export {
 /**
  * @deprecated Internal provider mappers/routing helpers. Prefer the
  * provider-agnostic registry (`resolveModel`/`getProvider`); direct mapper
- * use moves to the future `/internal` entry (Q-50).
+ * use moves to the future `/internal` entry.
  */
 export {
   emitProviderWarning,
@@ -204,7 +204,7 @@ export type { SteerEntry } from "./agent/loop.ts";
 // Responses
 export { AgentResponse } from "./types/response.ts";
 
-// Core error taxonomy (Q-50 core surface)
+// Core error taxonomy (core surface)
 export {
   AgentAccelError,
   ConfigError,
@@ -219,7 +219,7 @@ export {
   formatErrorPlain,
 } from "./types/errors.ts";
 export type { AgentAccelErrorCode, AgentAccelErrorContext } from "./types/errors.ts";
-// Normalized run limits (Q-22; sub-agents inherit unless overridden)
+// Normalized run limits (sub-agents inherit unless overridden)
 export type { AgentRunLimits } from "./agent/agent.ts";
 
 // Telemetry bus: warnings, anomalies and per-turn thinking traces (attach with `telemetryBus.onEvent`)
@@ -256,14 +256,14 @@ export type { SessionLimits, SessionPayloadStatus, PersistedAgentSession, Sessio
 // Utilities
 /**
  * @deprecated Session-routing internals. Prefer agent-level `sessionId`;
- * direct use moves to the future `/internal` entry (Q-50).
+ * direct use moves to the future `/internal` entry.
  */
 export { createSessionId, hashSessionPart, createTrackingId, nowMs, newRunId, newTurnId, previewPrompt, parseModelRef } from "./utils/session.ts";
 export type { ParsedModelRef } from "./utils/session.ts";
 /**
  * @deprecated Raw env access. Prefer explicit `Agent` config (which wins over
  * env) and `Agent.fromEnv()`/`agentFromEnv()`; direct use moves to the future
- * `/internal` entry (Q-50).
+ * `/internal` entry.
  */
 export { getApiKey, getEnv } from "./utils/env.ts";
 export { buildSessionHeaders, setAttribution, getAttribution } from "./utils/headers.ts";

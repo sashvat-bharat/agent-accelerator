@@ -91,7 +91,7 @@ export function readWithBackup(file: string, isValid: (text: string) => boolean)
 }
 
 // ---------------------------------------------------------------------------
-// One process per folder
+// One process per folder (used for session folders)
 // ---------------------------------------------------------------------------
 
 /** Folders this process already holds (the lock is re-entrant: many Agents share one home). */
@@ -103,8 +103,8 @@ function pause(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-// True while process `pid` exists (EPERM means it exists but belongs to someone else); in: a pid from a lock file, out: lockFolder's stale check.
-function processAlive(pid: number): boolean {
+/** True while process `pid` exists (EPERM means it exists but belongs to someone else); in: a pid from a lock or heartbeat file, out: the stale checks. */
+export function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -213,6 +213,81 @@ export function lockFolder(folder: string): void {
       if (fs.readFileSync(lockFile, "utf8") === text) fs.rmSync(lockFile, { force: true });
     } catch {
       // why: it vanished: the next loop turn creates it.
+    }
+  }
+}
+
+/** Longest a short mutex may be held before it counts as stale even though its owner process is alive (a hung holder). */
+const MUTEX_MAX_AGE_MS = 30_000;
+/** Longest a caller waits for a short mutex before getting a ConfigError. */
+const MUTEX_WAIT_MS = 10_000;
+/** Mutex files this process holds right now; a second `withFileMutex` on the same file inside `fn` would deadlock, so it throws. */
+const heldMutexes = new Set<string>();
+
+/**
+ * Runs `fn` while holding a short mutex file (`lockFile`, created with O_EXCL, content = pid, host, time), so several
+ * processes can change one shared file without losing updates. Hold it for milliseconds only: `fn` must be synchronous and
+ * quick. A waiter retries every few ms; a holder whose pid is gone (same host) or whose lock is older than 30 s is taken
+ * over. Not re-entrant (a nested call on the same file throws). The folder of `lockFile` must exist: if it is removed meanwhile
+ * (its owner deleted it) the call throws the plain `ENOENT` error, and the caller decides what that means. Throws
+ * `ConfigError` after 10 s of waiting. Local disks only.
+ */
+export function withFileMutex<T>(lockFile: string, fn: () => T): T {
+  const file = path.resolve(lockFile);
+  if (heldMutexes.has(file)) throw new ConfigError(`[Agent Accelerator] Mutex "${file}" is already held by this process (nested use).`);
+  const mine = JSON.stringify({ pid: process.pid, host: os.hostname(), at: Date.now() });
+  const deadline = Date.now() + MUTEX_WAIT_MS;
+  let unreadable = 0;
+  for (;;) {
+    try {
+      const fd = fs.openSync(file, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, mine);
+      } finally {
+        fs.closeSync(fd);
+      }
+      break;
+    } catch (err) {
+      if ((err as { code?: string }).code !== "EEXIST") throw err;
+    }
+    let text = "";
+    let mtime = 0;
+    try {
+      text = fs.readFileSync(file, "utf8");
+      mtime = fs.statSync(file).mtimeMs;
+    } catch {
+      continue; // released between the open and the read: try again
+    }
+    let owner: { pid?: unknown; host?: unknown } | undefined;
+    try {
+      owner = JSON.parse(text);
+    } catch {
+      owner = undefined;
+    }
+    let stale = false;
+    if (typeof owner?.pid !== "number") stale = ++unreadable > 5; // empty or garbage: another process may be mid-write
+    else if (owner.host === os.hostname() && !processAlive(owner.pid)) stale = true;
+    else if (Date.now() - mtime > MUTEX_MAX_AGE_MS) stale = true;
+    if (stale) {
+      try {
+        if (fs.readFileSync(file, "utf8") === text) fs.rmSync(file, { force: true });
+      } catch {
+        // why: it vanished: the next loop turn creates it.
+      }
+      continue;
+    }
+    if (Date.now() > deadline) throw new ConfigError(`[Agent Accelerator] Timed out after ${MUTEX_WAIT_MS} ms waiting for the lock "${file}" (held by process ${String(owner?.pid)}).`);
+    pause(typeof owner?.pid === "number" ? 2 : 40);
+  }
+  heldMutexes.add(file);
+  try {
+    return fn();
+  } finally {
+    heldMutexes.delete(file);
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      // why: a leftover mutex is detected as stale by the next caller.
     }
   }
 }

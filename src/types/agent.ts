@@ -10,7 +10,7 @@ import type { Agent } from "../agent/agent.ts";
 import type { z } from "zod";
 
 // ---------------------------------------------------------------------------
-// Q-52/Q-53/Q-54 canonical option types (all additive; nothing renamed).
+// Canonical option types (all additive; nothing renamed).
 //
 // Canonical homes (one place per setting):
 // - Worker model: `dynamicSubagents.model` only. Top-level `subagentModel`
@@ -27,10 +27,10 @@ import type { z } from "zod";
 /** Canonical model reference: `provider/model` string, catalog spec, or provider helper result. */
 export type ModelRef = string | ModelSpec | ModelProviderInstance;
 
-/** Canonical reasoning option (Q-52): bare level, or level + explicit token budget. */
+/** Canonical reasoning option: bare level, or level + explicit token budget. */
 export type ThinkingOption = ThinkingLevel | { level?: ThinkingLevel; budgetTokens?: number };
 
-/** Canonical retry policy (Q-54). Read by the loop via `(config as any).retry`. */
+/** Canonical retry policy. Read by the loop via `(config as any).retry`. */
 export interface RetryPolicyConfig {
   maxRetries?: number;
   baseDelayMs?: number;
@@ -38,7 +38,7 @@ export interface RetryPolicyConfig {
   budgetMs?: number;
 }
 
-/** Minimal logger surface for Agent/loop telemetry (Q-54). */
+/** Minimal logger surface for Agent/loop telemetry. */
 export interface AgentLogger {
   debug?: (...args: unknown[]) => void;
   info?: (...args: unknown[]) => void;
@@ -46,17 +46,17 @@ export interface AgentLogger {
   error?: (...args: unknown[]) => void;
 }
 
-/** Canonical tool-selection control (Q-54). String form is the portable subset. */
+/** Canonical tool-selection control. String form is the portable subset. */
 export type ToolChoiceOption =
   | "auto"
   | "none"
   | "required"
   | { mode?: "auto" | "none" | "required"; tool?: string };
 
-/** Canonical stop control (Q-54): sequence(s) halting generation. */
+/** Canonical stop control: sequence(s) halting generation. */
 export type StopOption = string | string[];
 
-/** Canonical structured-output input (Q-61). Zod, JSON Schema, or explicit form. */
+/** Canonical structured-output input. Zod, JSON Schema, or explicit form. */
 export type StructuredOutputOption =
   | z.ZodType
   | Record<string, unknown>
@@ -90,7 +90,7 @@ export interface AgentConfig {
   /** Requested reasoning level, validated against the model catalog. */
   thinkingLevel?: ThinkingLevel;
   /**
-   * Canonical reasoning option (Q-52, preferred over `thinkingLevel`).
+   * Canonical reasoning option (preferred over `thinkingLevel`).
    * Accepts a bare level or `{ level, budgetTokens }`. When both are set,
    * `thinking` wins; resolution honors `thinking ?? thinkingLevel`.
    * See `normalizeThinkingV2` (re-exported from the root entry).
@@ -151,11 +151,11 @@ export interface AgentConfig {
   resume?: "automatic" | "explicit";
   /**
    * Folder for everything Agent Accelerator writes to disk (`sessions/`,
-   * `scheduled_actions/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
+   * `scheduled/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
    * An explicit `persist.dir` / `persist.file` still wins for sessions.
    */
   home?: string;
-  // Q-54 missing knobs (all optional, additive; loop reads via `(config as any).*`).
+  // Additional options (all optional, additive; loop reads via `(config as any).*`).
   /**
    * Canonical tool-selection control (`"auto"` default). `"none"` applies to
    * every turn of a run; `"required"` and a pinned tool (`{ tool: "name" }`)
@@ -193,8 +193,10 @@ export interface AgentConfig {
   /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   contextManagement?: unknown;
   /**
-   * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning
-   * text) to `<home>/telemetry/<date>.ndjson`. Off by default: the SDK writes nothing unless asked.
+   * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning text). An event
+   * that belongs to a persisted session (`data.sessionId`: tool events, resume and retry events) goes to
+   * `<session folder>/telemetry.ndjson`, next to the session's journal; every other event goes to
+   * `<home>/telemetry/<date>.ndjson`. Nothing is written outside the home. Off by default: the SDK writes nothing unless asked.
    */
   telemetry?: { persist?: boolean };
   /**
@@ -226,7 +228,7 @@ export interface AgentConfig {
    * models with unknown pricing contribute $0, never a guess.
    */
   budget?: Budget;
-  /** Run + network limits (Q-22). Turn/budget caps unlimited by default; network timeouts finite. */
+  /** Run + network limits. Turn/budget caps unlimited by default; network timeouts finite. */
   limits?: AgentRunLimits;
   /**
    * The only models this agent may use, as `provider/model` strings compared as written. Unset (default) = any model.
@@ -260,7 +262,7 @@ export interface InterruptedRun {
   pendingToolCalls: string[];
 }
 
-/** Per-request + run limits (Q-22). */
+/** Per-request + run limits. */
 export interface AgentRunLimits {
   maxTurns?: number;
   deadlineMs?: number;
@@ -275,7 +277,7 @@ export interface AgentRunLimits {
 /** Developer policy for mid-session new-query insertion while a run is active. */
 export type MidSessionMode = "steer" | "queue" | "auto";
 
-/** Q-51 canonical busy-policy alias: prefer `whenBusy`, `mode` kept for compat. */
+/** Canonical busy-policy alias: prefer `whenBusy`, `mode` kept for compat. */
 export type WhenBusyMode = MidSessionMode;
 
 /** Developer-configured policy for LLM-spawned dynamic sub-agents. */
@@ -288,7 +290,7 @@ export interface MidSessionConfig {
    */
   mode?: MidSessionMode;
   /**
-   * Canonical alias for `mode` (Q-51, preferred). When both are set,
+   * Canonical alias for `mode` (preferred). When both are set,
    * `whenBusy` wins. Accepted anywhere `mode` is read; resolution honors
    * `whenBusy ?? mode ?? "auto"`.
    */
@@ -341,7 +343,7 @@ export interface AgentRunOptions {
   /** Per-run reasoning-level override, validated against the selected model. */
   thinkingLevel?: ThinkingLevel;
   /**
-   * Canonical per-run reasoning option (Q-52, preferred over `thinkingLevel`).
+   * Canonical per-run reasoning option (preferred over `thinkingLevel`).
    * Resolution honors `thinking ?? thinkingLevel`.
    */
   thinking?: ThinkingOption;
@@ -375,7 +377,7 @@ export interface AgentRunOptions {
   wrapThinking?: boolean;
   /** Called after every model/tool turn with a turn summary (also drives sub-agent step logs + durable persistence). */
   onTurn?: (turn: AgentTurnEvent) => void;
-  // Q-54 per-run knobs (all optional, additive; `output` intentionally
+  // Per-run knobs (all optional, additive; `output` intentionally
   // omitted here — it is agent-level only, see AgentConfig.output).
   /** Per-run tool-selection override. */
   toolChoice?: ToolChoiceOption;
@@ -409,7 +411,7 @@ export interface AgentTurnEvent {
   toolResults?: Array<{ id: string; name: string; isError?: boolean }>;
 }
 
-/** Optional run budgets enforced by delegation helpers (Q-39). All fields default to unlimited. */
+/** Optional run budgets enforced by delegation helpers. All fields default to unlimited. */
 export interface Budget {
   /** Maximum total cost in USD across this agent + spawned workers. */
   maxCostUsd?: number;
@@ -433,7 +435,7 @@ export interface BudgetState {
   startedAtMs: number;
 }
 
-/** Run/turn lineage attached to sub-agent metadata via `(metadata as any)` (Q-42). */
+/** Run/turn lineage attached to sub-agent metadata via `(metadata as any)`. */
 export interface SubAgentRunIds {
   /** Stable id for this worker batch/run (`newRunId`). */
   runId?: string;
