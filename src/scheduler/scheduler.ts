@@ -31,15 +31,18 @@ import type {
 } from "../types/scheduler.ts";
 import {
   TASK_ID_PATTERN,
+  createTask,
+  deleteTask,
   findRunFile,
   readDeliveries,
   readRun,
+  readTask,
   readTasks,
   removeTaskFolder,
   resolveHome,
   runPath,
   updateDeliveries,
-  updateTasks,
+  updateTask,
   validateDelivery,
   validateRecord,
   writeRunFile,
@@ -276,7 +279,7 @@ export class Scheduler {
   }
 
   // Reports an invalid record or delivery once per file/id/problem and leaves the file untouched; in: snapshot/startCook, out: a scheduled_action.invalid warning.
-  private warnInvalid(id: string, problem: string, file = "tasks.json"): void {
+  private warnInvalid(id: string, problem: string, file = "task.json"): void {
     const key = `${file}:${id}:${problem}`;
     if (this.warned.has(key)) return;
     this.warned.add(key);
@@ -296,7 +299,7 @@ export class Scheduler {
     });
     const pending = readDeliveries(this.home).filter((p) => {
       const problem = validateDelivery(p);
-      if (problem) this.warnInvalid(String((p as { id?: unknown }).id), problem, "deliveries.json");
+      if (problem) this.warnInvalid(String((p as { id?: unknown }).id), problem, "delivery.json");
       return !problem;
     });
     return { live, pending };
@@ -333,7 +336,7 @@ export class Scheduler {
       this.markMissed(t.id, "interrupted", t.schedule.onMissed);
       return;
     }
-    updateDeliveries(this.home, (pending) => {
+    updateDeliveries(this.home, t.id, (pending) => {
       if (pending.some((p) => p.file === file)) return;
       pending.push({
         id: t.id,
@@ -344,19 +347,17 @@ export class Scheduler {
         ...(run.header["late"] === "true" ? { late: true } : {}),
       });
     });
-    updateTasks(this.home, (tasks) => {
-      const rec = tasks.find((x) => x.id === t.id);
+    updateTask(this.home, t.id, (rec) => {
       if (!rec || rec.state !== "cooking") return;
       delete rec.current;
       rec.state = rec.nextDeliverAt ? "waiting" : "done";
     });
   }
 
-  // Marks a run whose moment passed as missed, then applies the action's onMissed policy: `skip` moves on to the next time, `run` runs it now, unset waits for run_now / skip; in: the startup sweep, out: tasks.json + the missed (and skipped / started) events.
+  // Marks a run whose moment passed as missed, then applies the action's onMissed policy: `skip` moves on to the next time, `run` runs it now, unset waits for run_now / skip; in: the startup sweep, out: task.json + the missed (and skipped / started) events.
   private markMissed(id: string, reason: string, policy?: "skip" | "run"): void {
     let name = id;
-    updateTasks(this.home, (tasks) => {
-      const t = tasks.find((x) => x.id === id);
+    updateTask(this.home, id, (t) => {
       if (!t) return;
       name = t.name;
       t.state = "missed";
@@ -377,17 +378,16 @@ export class Scheduler {
     }
   }
 
-  // Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens); late = it replaced a missed occurrence, was delivered over two ticks after its time, or finished after it; in: deliverDue, out: tasks.json + the delivered event.
+  // Removes the entry, records `lastRun`, THEN emits (whether or not anyone listens); late = it replaced a missed occurrence, was delivered over two ticks after its time, or finished after it; in: deliverDue, out: task.json + the delivered event.
   private deliver(entry: PendingDelivery, now: Date): void {
-    updateDeliveries(this.home, (pending) => {
+    updateDeliveries(this.home, entry.id, (pending) => {
       const i = pending.findIndex((p) => p.id === entry.id && p.file === entry.file);
       if (i >= 0) pending.splice(i, 1);
     });
     const deliverAt = parseLocalIso(entry.deliverAt).getTime();
     const late = entry.late === true || now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
     let name = entry.id;
-    updateTasks(this.home, (tasks) => {
-      const t = tasks.find((x) => x.id === entry.id);
+    updateTask(this.home, entry.id, (t) => {
       if (!t) return;
       name = t.name;
       t.lastRun = { status: entry.status, file: entry.file, deliverAt: entry.deliverAt, deliveredAt: toLocalIso(now), late };
@@ -432,8 +432,7 @@ export class Scheduler {
   private startCook(id: string, manual: boolean): ScheduledActionRecord | undefined {
     const now = this.now();
     const ctx: { agent?: Agent; noAgent?: boolean; replacesMissed?: boolean } = {};
-    const started = updateTasks(this.home, (tasks) => {
-      const t = tasks.find((x) => x.id === id);
+    const started = updateTask(this.home, id, (t) => {
       if (!t) return undefined;
       const problem = validateRecord(t);
       if (problem) {
@@ -468,7 +467,7 @@ export class Scheduler {
     });
     if (ctx.noAgent) {
       const name = this.nameOf(id);
-      emit("missed", `"${name}" (${id}) cannot run: no live Agent named in tasks.json is registered.`, { id, name, reason: "no_agent" }, "warn");
+      emit("missed", `"${name}" (${id}) cannot run: no live Agent named in its task.json is registered.`, { id, name, reason: "no_agent" }, "warn");
     }
     if (!started || !ctx.agent) return undefined;
     emit("started", `"${started.name}" (${id}) started cooking.`, {
@@ -481,16 +480,15 @@ export class Scheduler {
     return started;
   }
 
-  // The display name of an action from tasks.json, else its id; in: startCook's no-agent message, out: event text.
+  // The display name of an action from task.json, else its id; in: startCook's no-agent message, out: event text.
   private nameOf(id: string): string {
-    return readTasks(this.home).find((t) => t.id === id)?.name ?? id;
+    return readTask(this.home, id)?.name ?? id;
   }
 
   /** The next run is due while this one still cooks: never stack. Skip that occurrence. */
   private skipOverlap(id: string, now: Date): void {
     const ctx: { skipped?: { name: string; deliverAt: string } } = {};
-    updateTasks(this.home, (tasks) => {
-      const t = tasks.find((x) => x.id === id);
+    updateTask(this.home, id, (t) => {
       if (!t || t.state !== "cooking" || !t.nextCookAt || !t.nextDeliverAt) return;
       ctx.skipped = { name: t.name, deliverAt: t.nextDeliverAt };
       if (!t.schedule.repeatEvery) {
@@ -592,7 +590,7 @@ export class Scheduler {
     }
   }
 
-  // Writes a finished run: run file, then the `deliveries.json` entry, then `tasks.json` (a crash in between is repaired on start); a manual run is due when it finishes and is late only if it replaced a missed occurrence, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
+  // Writes a finished run: run file, then the `delivery.json` entry, then `task.json` (a crash in between is repaired on start); a manual run is due when it finishes and is late only if it replaced a missed occurrence, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
   private finish(task: ScheduledActionRecord, outcome: Outcome, startedAt: string, deliverAt: Date, run: Pick<RunningEntry, "manual" | "missed">): void {
     const now = this.now();
     const ok = "res" in outcome;
@@ -613,11 +611,10 @@ export class Scheduler {
     };
     const body = ok ? outcome.res.text.trim() || "[The worker returned no text.]" : `The run failed: ${outcome.error}`;
     const file = writeRunFile(this.home, task.id, deliverAt, header, body);
-    updateDeliveries(this.home, (pending) => {
+    updateDeliveries(this.home, task.id, (pending) => {
       pending.push({ id: task.id, file, status: header.status, readyAt: finishedAt, deliverAt: header.deliverAt, ...(run.missed ? { late: true } : {}) });
     });
-    updateTasks(this.home, (tasks) => {
-      const t = tasks.find((x) => x.id === task.id);
+    updateTask(this.home, task.id, (t) => {
       if (!t || t.state !== "cooking") return;
       delete t.current;
       t.state = t.nextDeliverAt ? "waiting" : "done";
@@ -631,7 +628,7 @@ export class Scheduler {
 
   // Starts an action immediately outside its schedule (also resolves a missed one); in: runScheduledAction, out: the cooking record.
   runNow(id: string): ScheduledActionRecord {
-    const rec = readTasks(this.home).find((t) => t.id === id);
+    const rec = readTask(this.home, id);
     if (!rec) throw notFound(id);
     if (rec.state === "cooking" || this.running.has(id)) {
       throw new ValidationError(`Scheduled action "${id}" is already cooking; wait for it to finish.`);
@@ -649,8 +646,7 @@ export class Scheduler {
   // Ignores a missed occurrence and schedules the next one (a one-shot becomes done); in: skipScheduledAction and onMissed: skip, out: the updated record.
   skip(id: string): ScheduledActionRecord {
     const now = this.now();
-    const rec = updateTasks(this.home, (tasks) => {
-      const t = tasks.find((x) => x.id === id);
+    const rec = updateTask(this.home, id, (t) => {
       if (!t) throw notFound(id);
       if (t.state !== "missed") throw new ValidationError(`Scheduled action "${id}" is ${t.state}, not missed: nothing to skip.`);
       const next = this.afterMissed(t, now);
@@ -667,7 +663,7 @@ export class Scheduler {
 
   // Deletes an action (aborting a cooking run only with force) and optionally purges its run files; in: deleteScheduledAction, out: a DeleteResult.
   async delete(id: string, opts: { force?: boolean; purge?: boolean }): Promise<DeleteResult> {
-    const rec = readTasks(this.home).find((t) => t.id === id);
+    const rec = readTask(this.home, id);
     if (!rec) return { ok: false, reason: "not_found" };
     const run = this.running.get(id);
     if (run && !opts.force) {
@@ -682,13 +678,7 @@ export class Scheduler {
       run.controller.abort(new Error("deleted"));
       await run.done;
     }
-    updateTasks(this.home, (tasks) => {
-      const i = tasks.findIndex((t) => t.id === id);
-      if (i >= 0) tasks.splice(i, 1);
-    });
-    updateDeliveries(this.home, (pending) => {
-      for (let i = pending.length - 1; i >= 0; i--) if (pending[i]!.id === id) pending.splice(i, 1);
-    });
+    deleteTask(this.home, id); // the record and its saved deliveries, under the action's mutex
     if (opts.purge) removeTaskFolder(this.home, id);
     emit("deleted", `"${rec.name}" (${id}) was deleted.`, { id, name: rec.name, forced: !!run, purged: !!opts.purge });
     return { ok: true };
@@ -747,11 +737,7 @@ export function createScheduledAction(agent: Agent, input: ScheduledActionInput)
   const sa = input.scheduled_action;
   const lead = sa.startCookingInAdvance ?? DEFAULT_COOK_LEAD;
   const deliverAt = resolveDelivery(now, sa.timeToDeliver, sa.meridiem);
-  const record = updateTasks(s.home, (tasks) => {
-    const taken = new Set(tasks.map((t) => t.id));
-    let id: string;
-    do id = `${sa.id}-${randomSuffix()}`;
-    while (taken.has(id));
+  const record = createTask(s.home, () => `${sa.id}-${randomSuffix()}`, (id) => {
     const rec: ScheduledActionRecord = {
       id,
       name: sa.name.trim(),
@@ -774,7 +760,6 @@ export function createScheduledAction(agent: Agent, input: ScheduledActionInput)
       nextDeliverAt: toLocalIso(deliverAt),
       createdAt: toLocalIso(now),
     };
-    tasks.push(rec);
     return rec;
   });
   s.agents.set(agent.name, new WeakRef(agent));
@@ -805,11 +790,10 @@ export function updateScheduledAction(id: string, patch: ScheduledActionPatch, o
   const now = s.now();
   const sa = patch.scheduled_action ?? {};
   const { name, ...scheduleChange } = sa;
-  const rec = updateTasks(s.home, (tasks) => {
-    const t = tasks.find((x) => x.id === id);
+  const rec = updateTask(s.home, id, (t) => {
     if (!t) throw notFound(id);
     const stored = validateRecord(t);
-    if (stored) throw new ValidationError(`Scheduled action "${id}" is invalid in tasks.json: ${stored}`);
+    if (stored) throw new ValidationError(`Scheduled action "${id}" is invalid in its task.json: ${stored}`);
     const scheduleChanged = Object.values(scheduleChange).some((v) => v !== undefined);
     if (scheduleChanged && t.state === "cooking") {
       throw new ValidationError(`Scheduled action "${id}" is cooking right now; schedule changes are refused while it runs. Try again after it finishes.`);

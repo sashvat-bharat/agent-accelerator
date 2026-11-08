@@ -1,18 +1,19 @@
 /**
  * Disk layer for scheduled actions. Everything lives under one home folder:
  *
- *   <home>/scheduled/tasks.json                 every action, one file
- *   <home>/scheduled/deliveries.json            saved results waiting for their delivery time
+ *   <home>/scheduled/<id>/task.json             the action (`{ version: 2, task }`)
+ *   <home>/scheduled/<id>/delivery.json         its saved results waiting for their delivery time (`{ version: 2, pending }`)
  *   <home>/scheduled/<id>/<date>.md             one file per run
+ *   <home>/scheduled/<id>/.mutex                short lock held while this action's files change
  *
- * The files are the source of truth: every write re-reads first (never writes
- * from a stale copy) and goes through `writeFileDurable` (temp file, fsync, `.bak`, rename).
- * Sync `fs`, like the session store.
+ * One folder per action, so processes working on different actions never touch the same file. The files are the
+ * source of truth: every change takes the action's mutex, re-reads first (never writes from a stale copy) and goes
+ * through `writeFileDurable` (temp file, fsync, `.bak`, rename). Sync `fs`, like the session store.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
-import { readWithBackup, writeFileDurable } from "../utils/durable.ts";
+import { readWithBackup, withFileMutex, writeFileDurable } from "../utils/durable.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { resolveHome } from "../utils/home.ts";
 export { resolveHome };
@@ -26,7 +27,7 @@ export const TASK_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** 48-char slug + `-` + 6 random chars. */
 export const MAX_TASK_ID_LENGTH = 55;
 
-/** A saved run waiting for its delivery time (one entry of `deliveries.json`). */
+/** A saved run waiting for its delivery time (one entry of an action's `delivery.json`). */
 export interface PendingDelivery {
   id: string;
   /** Run file path, relative to `scheduled/`. */
@@ -74,10 +75,20 @@ export interface RunHeader {
 
 // The `scheduled` folder of a home; in: the path helpers, out: its path.
 const baseDir = (home: string): string => path.join(home, "scheduled");
-// Path of tasks.json; in: readTasks/updateTasks, out: its path.
-const tasksFile = (home: string): string => path.join(baseDir(home), "tasks.json");
-// Path of deliveries.json; in: readDeliveries/updateDeliveries, out: its path.
-const deliveriesFile = (home: string): string => path.join(baseDir(home), "deliveries.json");
+
+// The folder of one action; refuses anything that is not an action id, so a hand-edited id can never point outside `scheduled/`; in: every per-action helper, out: its path.
+function taskDir(home: string, id: string): string {
+  if (typeof id !== "string" || !TASK_ID_PATTERN.test(id) || id.length > MAX_TASK_ID_LENGTH) {
+    throw new ValidationError(`${JSON.stringify(id)} is not a scheduled action id.`);
+  }
+  return path.join(baseDir(home), id);
+}
+// Path of an action's record; in: the task helpers, out: its path.
+const taskFile = (dir: string): string => path.join(dir, "task.json");
+// Path of an action's saved deliveries; in: the delivery helpers, out: its path.
+const deliveryFile = (dir: string): string => path.join(dir, "delivery.json");
+// Path of the short mutex that serialises every change to one action (record and deliveries); in: updateTask/updateDeliveries/deleteTask, out: its path.
+const mutexFile = (dir: string): string => path.join(dir, ".mutex");
 
 /** Absolute path of a run file given its `scheduled/`-relative path. */
 export function runPath(home: string, relativeFile: string): string {
@@ -86,10 +97,20 @@ export function runPath(home: string, relativeFile: string): string {
 
 type Raw = Record<string, unknown>;
 
-// Parses a `{ version, <key>: [...] }` file into its object entries; undefined when the text is not that shape; in: raw file text, out: readList.
-function parseList(text: string, key: "tasks" | "pending"): Raw[] | undefined {
+// Parses `{ version, task: {...} }` into the record; undefined when the text is not that shape; in: readShard, out: the record.
+function parseTask(text: string): Raw | undefined {
   try {
-    const list = (JSON.parse(text) as Raw | null)?.[key];
+    const task = (JSON.parse(text) as Raw | null)?.["task"];
+    return task && typeof task === "object" && !Array.isArray(task) ? (task as Raw) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Parses `{ version, pending: [...] }` into its object entries; undefined when the text is not that shape; in: readShard, out: the entries.
+function parsePending(text: string): Raw[] | undefined {
+  try {
+    const list = (JSON.parse(text) as Raw | null)?.["pending"];
     if (!Array.isArray(list)) return undefined;
     return list.filter((x): x is Raw => !!x && typeof x === "object" && !Array.isArray(x));
   } catch {
@@ -98,21 +119,21 @@ function parseList(text: string, key: "tasks" | "pending"): Raw[] | undefined {
 }
 
 /**
- * Reads a `{ version, <key>: [...] }` file. Missing = empty. A damaged file is renamed `*.corrupt-<ts>`; if its `.bak`
- * (the last good version) is valid it is restored, else the list starts empty.
+ * Reads one JSON file of an action. Missing = undefined. A damaged file is renamed `*.corrupt-<ts>`; if its `.bak`
+ * (the last good version) is valid it is restored and returned, else undefined (the action is treated as absent).
  */
-function readList(file: string, key: "tasks" | "pending"): Raw[] {
-  const read = readWithBackup(file, (t) => parseList(t, key) !== undefined);
-  if (!read) return [];
-  const list = parseList(read.text, key);
-  if (list && !read.fromBackup) return list;
+function readShard<T>(file: string, parse: (text: string) => T | undefined): T | undefined {
+  const read = readWithBackup(file, (t) => parse(t) !== undefined);
+  if (!read) return undefined;
+  const value = parse(read.text);
+  if (value !== undefined && !read.fromBackup) return value;
   const moved = `${file}.corrupt-${Date.now()}`;
   try {
     fs.renameSync(file, moved);
   } catch {
     // why: quarantine is best-effort; the file is ignored either way.
   }
-  if (list) {
+  if (value !== undefined) {
     try {
       writeFileDurable(file, read.text, { backup: false }); // keep the good .bak where it is
     } catch {
@@ -121,41 +142,158 @@ function readList(file: string, key: "tasks" | "pending"): Raw[] {
   }
   telemetryBus.emitWarning(
     "scheduled_action.store_corrupt",
-    `[Agent Accelerator] ${path.basename(file)} is not valid; moved to ${path.basename(moved)} and ${list ? "restored from its backup" : "starting empty"}.`,
-    { file: moved, restored: !!list }
+    `[Agent Accelerator] ${path.relative(baseDir(path.dirname(path.dirname(file))), file)} is not valid; moved to ${path.basename(moved)} and ${value !== undefined ? "restored from its backup" : "ignored"}.`,
+    { file: moved, restored: value !== undefined }
   );
-  return list ?? [];
+  return value;
 }
 
-// Writes `{ version, <key>: [...] }` durably (with a .bak); in: updateTasks/updateDeliveries, out: the file.
-function writeList(file: string, key: "tasks" | "pending", list: Raw[]): void {
-  writeFileDurable(file, JSON.stringify({ version: 1, [key]: list }, null, 2) + "\n");
+// Names of the action folders of a home (every folder not starting with a dot), sorted; in: readTasks/readDeliveries, out: folder names.
+function actionFolders(home: string): string[] {
+  try {
+    return fs
+      .readdirSync(baseDir(home), { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return [];
+  }
 }
 
-/** Every record as stored. Records may be invalid: check with {@link validateRecord} before acting on one. */
+/** Folder/id mismatches already reported, so a bad hand edit warns once per process. */
+const reportedMismatch = new Set<string>();
+// True when a record or delivery names the folder it sits in; otherwise warns once and says no; in: readTasks/readDeliveries, out: a boolean.
+function inOwnFolder(file: string, folder: string, id: unknown): boolean {
+  if (id === folder) return true;
+  const key = `${file}:${String(id)}`;
+  if (!reportedMismatch.has(key)) {
+    reportedMismatch.add(key);
+    telemetryBus.emitWarning(
+      "scheduled_action.invalid",
+      `[Agent Accelerator] ${folder}/${path.basename(file)} names the id ${JSON.stringify(id)} but sits in the folder "${folder}" and is skipped.`,
+      { id: String(id), problem: "id: does not match its folder", file: path.basename(file) }
+    );
+  }
+  return false;
+}
+
+// Orders records by creation time, then id, so listings are stable; in: readTasks, out: a comparison number.
+function byCreation(a: ScheduledActionRecord, b: ScheduledActionRecord): number {
+  return (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id);
+}
+
+/** One action as stored (`task.json`), or undefined when it does not exist or `id` is not an action id. May be invalid: check with {@link validateRecord}. */
+export function readTask(home: string, id: string): ScheduledActionRecord | undefined {
+  let dir: string;
+  try {
+    dir = taskDir(home, id);
+  } catch {
+    return undefined;
+  }
+  const raw = readShard(taskFile(dir), parseTask);
+  return raw && inOwnFolder(taskFile(dir), id, raw["id"]) ? (raw as unknown as ScheduledActionRecord) : undefined;
+}
+
+/** Every record as stored, oldest first. Records may be invalid: check with {@link validateRecord} before acting on one. */
 export function readTasks(home: string): ScheduledActionRecord[] {
-  return readList(tasksFile(home), "tasks") as unknown as ScheduledActionRecord[];
+  const out: ScheduledActionRecord[] = [];
+  for (const folder of actionFolders(home)) {
+    if (!TASK_ID_PATTERN.test(folder) || folder.length > MAX_TASK_ID_LENGTH) continue; // not an action folder
+    const rec = readTask(home, folder);
+    if (rec) out.push(rec);
+  }
+  return out.sort(byCreation);
 }
 
-/** Re-reads `tasks.json`, applies `fn` (mutating the array/records in place) and writes it back. */
-export function updateTasks<T>(home: string, fn: (tasks: ScheduledActionRecord[]) => T): T {
-  const tasks = readTasks(home);
-  const result = fn(tasks);
-  writeList(tasksFile(home), "tasks", tasks as unknown as Raw[]);
-  return result;
+/**
+ * Changes one action under its own short mutex: re-reads `task.json`, calls `fn` (which may mutate the record in place;
+ * it gets `undefined` when the action does not exist) and writes the record back if it changed. If `fn` throws nothing
+ * is written. Other actions are never locked, so processes working on different actions do not wait for each other.
+ */
+export function updateTask<T>(home: string, id: string, fn: (rec: ScheduledActionRecord | undefined) => T): T {
+  let dir: string;
+  try {
+    dir = taskDir(home, id);
+  } catch {
+    return fn(undefined); // not an action id: nothing to change
+  }
+  if (!fs.existsSync(dir)) return fn(undefined);
+  return withFileMutex(mutexFile(dir), () => {
+    const rec = readTask(home, id);
+    const before = rec ? JSON.stringify(rec) : "";
+    const result = fn(rec);
+    if (rec && JSON.stringify(rec) !== before) writeFileDurable(taskFile(dir), JSON.stringify({ version: 2, task: rec }, null, 2) + "\n");
+    return result;
+  });
 }
 
-/** Every saved delivery as stored (entries may be invalid: check with validateDelivery); in: the scheduler, out: PendingDelivery[]. */
+/**
+ * Creates an action in a new folder. The folder is made with a create-only `mkdir`, so two processes can never take the
+ * same id; `nextId` is called again until a free one is found, then `build` makes the record for it.
+ */
+export function createTask(home: string, nextId: () => string, build: (id: string) => ScheduledActionRecord): ScheduledActionRecord {
+  fs.mkdirSync(baseDir(home), { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const id = nextId();
+    const dir = taskDir(home, id);
+    try {
+      fs.mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      if ((err as { code?: string }).code === "EEXIST") continue;
+      throw err;
+    }
+    const rec = build(id);
+    withFileMutex(mutexFile(dir), () => writeFileDurable(taskFile(dir), JSON.stringify({ version: 2, task: rec }, null, 2) + "\n"));
+    return rec;
+  }
+  throw new ValidationError("Could not find a free scheduled action id.");
+}
+
+/** Removes an action's record and saved deliveries (run files stay); true when there was something to remove. An emptied folder is removed too. */
+export function deleteTask(home: string, id: string): boolean {
+  const dir = taskDir(home, id);
+  if (!fs.existsSync(dir)) return false;
+  const removed = withFileMutex(mutexFile(dir), () => {
+    const had = fs.existsSync(taskFile(dir)) || fs.existsSync(deliveryFile(dir));
+    for (const f of [taskFile(dir), deliveryFile(dir)]) fs.rmSync(f, { force: true }), fs.rmSync(`${f}.bak`, { force: true });
+    return had;
+  });
+  try {
+    fs.rmdirSync(dir); // only succeeds when nothing is left in it
+  } catch {
+    // why: run files (or another process's new action) keep the folder.
+  }
+  return removed;
+}
+
+/** Every saved delivery of every action as stored, soonest first (entries may be invalid: check with validateDelivery). */
 export function readDeliveries(home: string): PendingDelivery[] {
-  return readList(deliveriesFile(home), "pending") as unknown as PendingDelivery[];
+  const out: PendingDelivery[] = [];
+  for (const folder of actionFolders(home)) {
+    if (!TASK_ID_PATTERN.test(folder) || folder.length > MAX_TASK_ID_LENGTH) continue;
+    const file = deliveryFile(taskDir(home, folder));
+    for (const entry of readShard(file, parsePending) ?? []) if (inOwnFolder(file, folder, entry["id"])) out.push(entry as unknown as PendingDelivery);
+  }
+  return out.sort((a, b) => String(a.deliverAt).localeCompare(String(b.deliverAt)));
 }
 
-/** Re-reads `deliveries.json`, applies `fn` (mutating in place) and writes it back. */
-export function updateDeliveries<T>(home: string, fn: (pending: PendingDelivery[]) => T): T {
-  const pending = readDeliveries(home);
-  const result = fn(pending);
-  writeList(deliveriesFile(home), "pending", pending as unknown as Raw[]);
-  return result;
+/** Changes the saved deliveries of ONE action under its short mutex (`fn` mutates the array in place); the file is removed when the list ends up empty. */
+export function updateDeliveries<T>(home: string, id: string, fn: (pending: PendingDelivery[]) => T): T {
+  const dir = taskDir(home, id);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return withFileMutex(mutexFile(dir), () => {
+    const file = deliveryFile(dir);
+    const pending = (readShard(file, parsePending) ?? []) as unknown as PendingDelivery[];
+    const result = fn(pending);
+    if (pending.length === 0) {
+      fs.rmSync(file, { force: true });
+      fs.rmSync(`${file}.bak`, { force: true });
+    } else {
+      writeFileDurable(file, JSON.stringify({ version: 2, pending }, null, 2) + "\n");
+    }
+    return result;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +352,7 @@ const deliverySchema = z.object({
   late: z.boolean().optional(),
 });
 
-/** `undefined` when a `deliveries.json` entry is usable, else a one-line reason. Never throws. */
+/** `undefined` when a `delivery.json` entry is usable, else a one-line reason. Never throws. */
 export function validateDelivery(raw: unknown): string | undefined {
   const parsed = deliverySchema.safeParse(raw);
   return parsed.success ? undefined : parsed.error.issues.map((i) => `${i.path.join(".") || "entry"}: ${i.message}`).join("; ");

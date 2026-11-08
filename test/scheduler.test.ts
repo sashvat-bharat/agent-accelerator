@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import type { ScheduledActionRecord } from "../src/types/scheduler.ts";
 import * as path from "node:path";
 import {
   Agent,
@@ -32,7 +33,7 @@ import {
   removeTaskFolder,
   resolveHome,
   updateDeliveries,
-  updateTasks,
+  updateTask,
   validateDelivery,
   validateRecord,
   writeRunFile,
@@ -55,6 +56,13 @@ import {
 // Monday 26 October 2026, local clock.
 const at = (h: number, m = 0, s = 0): Date => new Date(2026, 9, 26, h, m, s);
 const iso = (h: number, m = 0, s = 0, day = 26): string => toLocalIso(new Date(2026, 9, day, h, m, s));
+
+// Changes the first action's record on disk the way an outside editor would; in: a test, out: the rewritten task.json.
+function editTask(home: string, fn: (rec: ScheduledActionRecord) => void): void {
+  updateTask(home, readTasks(home)[0]!.id, (t) => fn(t!));
+}
+// The task.json of an action; in: a test, out: its path.
+const taskFileOf = (home: string, id: string): string => path.join(home, "scheduled", id, "task.json");
 
 // ---------------------------------------------------------------------------
 // Time (pure)
@@ -314,29 +322,29 @@ describe("scheduled actions store", () => {
   it("an external edit survives the next write (writes re-read first)", () => {
     const h = harness();
     createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
-    const file = path.join(h.home, "scheduled", "tasks.json");
+    const file = taskFileOf(h.home, readTasks(h.home)[0]!.id);
     const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-    raw.tasks[0].instructions = "EDITED BY HAND";
-    raw.tasks[0].someFutureField = { keep: true };
+    raw.task.instructions = "EDITED BY HAND";
+    raw.task.someFutureField = { keep: true };
     fs.writeFileSync(file, JSON.stringify(raw));
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.name = "Renamed";
+    editTask(h.home, (t) => {
+      t.name = "Renamed";
     });
     const after = JSON.parse(fs.readFileSync(file, "utf8"));
-    expect(after.tasks[0].instructions).toBe("EDITED BY HAND");
-    expect(after.tasks[0].name).toBe("Renamed");
-    expect(after.tasks[0].someFutureField).toEqual({ keep: true });
+    expect(after.task.instructions).toBe("EDITED BY HAND");
+    expect(after.task.name).toBe("Renamed");
+    expect(after.task.someFutureField).toEqual({ keep: true });
     expect(fs.readdirSync(path.dirname(file)).filter((f) => f.includes(".tmp-"))).toEqual([]);
   });
 
-  it("quarantines a corrupt file and starts empty", () => {
+  it("quarantines a corrupt task.json and ignores that action", () => {
     const h = harness();
     const { codes } = capture();
-    const dir = path.join(h.home, "scheduled");
+    const dir = path.join(h.home, "scheduled", "damaged-abc123");
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "tasks.json"), "{not json");
+    fs.writeFileSync(path.join(dir, "task.json"), "{not json");
     expect(readTasks(h.home)).toEqual([]);
-    expect(fs.readdirSync(dir).some((f) => f.startsWith("tasks.json.corrupt-"))).toBe(true);
+    expect(fs.readdirSync(dir).some((f) => f.startsWith("task.json.corrupt-"))).toBe(true);
     expect(codes()).toContain("scheduled_action.store_corrupt");
   });
 
@@ -345,15 +353,15 @@ describe("scheduled actions store", () => {
     const { of } = capture();
     const agent = h.agent(mockFetch(() => chatReply()).fn);
     const good = createScheduledAction(agent, input());
-    updateTasks(h.home, (tasks) => {
-      tasks.push({ id: "Bad ID!!", name: "x" } as any);
-    });
-    expect(validateRecord(readTasks(h.home)[1])).toMatch(/id/);
+    const badDir = path.join(h.home, "scheduled", "bad-abc123");
+    fs.mkdirSync(badDir);
+    fs.writeFileSync(path.join(badDir, "task.json"), JSON.stringify({ version: 2, task: { id: "bad-abc123", name: "x" } }));
+    expect(validateRecord(readTasks(h.home).find((t) => t.id === "bad-abc123"))).toMatch(/instructions/);
     h.set(18, 50);
     h.s.tick();
     h.s.tick();
     expect(of("scheduled_action.invalid")).toHaveLength(1); // reported once, not every tick
-    expect(readTasks(h.home).map((t) => t.id)).toContain("Bad ID!!"); // left untouched in the file
+    expect(readTasks(h.home).map((t) => t.id)).toContain("bad-abc123"); // left untouched on disk
     expect(h.s.running.has(good.id)).toBe(true); // the valid one still runs
   });
 
@@ -693,8 +701,8 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     const h = harness();
     const { fn, calls } = mockFetch(() => chatReply());
     createScheduledAction(h.agent(fn), input());
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.instructions = "REWRITTEN BY THE MAIN AGENT";
+    editTask(h.home, (t) => {
+      t.instructions = "REWRITTEN BY THE MAIN AGENT";
     });
     h.set(18, 50);
     h.s.tick();
@@ -705,8 +713,8 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
   it("fails a run whose saved tool is no longer in the pool, with a clear error", async () => {
     const h = harness();
     createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input());
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.tools = ["gone_tool"];
+    editTask(h.home, (t) => {
+      t.tools = ["gone_tool"];
     });
     h.set(18, 50);
     h.s.tick();
@@ -770,12 +778,12 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(validateDelivery({ ...entry, late: "yes" })).toMatch(/late/);
   });
 
-  it("skips a damaged deliveries.json entry (warns once) instead of stalling the scheduler", async () => {
+  it("skips a damaged delivery.json entry (warns once) instead of stalling the scheduler", async () => {
     const h = harness();
     const { of } = capture();
     const { fn, calls } = mockFetch(() => chatReply());
     createScheduledAction(h.agent(fn), input());
-    updateDeliveries(h.home, (p) => void p.push({ id: "x", file: "x/y.md", status: "ok", readyAt: "garbage", deliverAt: "garbage" } as any));
+    updateDeliveries(h.home, "x", (p) => void p.push({ id: "x", file: "x/y.md", status: "ok", readyAt: "garbage", deliverAt: "garbage" } as any));
     h.set(18, 50);
     h.s.tick();
     h.s.tick();
@@ -826,9 +834,9 @@ describe("scheduler startup sweep", () => {
     const h = harness();
     const fn = mockFetch(() => chatReply()).fn;
     const rec = createScheduledAction(h.agent(fn), input());
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.state = "cooking";
-      tasks[0]!.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
     });
     h.boot();
     h.set(18, 55);
@@ -890,11 +898,11 @@ describe("scheduler startup sweep", () => {
     const h = harness();
     const { fn, calls } = mockFetch(() => chatReply());
     createScheduledAction(h.agent(fn), input({ repeatEvery: "01:00:00", onMissed: "skip" }));
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.state = "cooking";
-      tasks[0]!.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
-      tasks[0]!.nextCookAt = iso(18, 50, 0, 27); // advanced before the run, as the scheduler does
-      tasks[0]!.nextDeliverAt = iso(19, 0, 0, 27);
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+      t.nextCookAt = iso(18, 50, 0, 27); // advanced before the run, as the scheduler does
+      t.nextDeliverAt = iso(19, 0, 0, 27);
     });
     h.boot();
     h.set(18, 55);
@@ -928,10 +936,10 @@ describe("scheduler startup sweep", () => {
     h.s.tick();
     await h.settle();
     // Crash simulation: run file written, delivery entry and task update lost.
-    updateDeliveries(h.home, (p) => void p.splice(0));
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.state = "cooking";
-      tasks[0]!.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
+    updateDeliveries(h.home, rec.id, (p) => void p.splice(0));
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(18, 50), deliverAt: iso(19, 0) };
     });
     h.boot();
     h.set(18, 55);
@@ -951,10 +959,10 @@ describe("scheduler startup sweep", () => {
     h.agent(fn);
     h.s.tick();
     await h.settle(); // the missed run ran and wrote its file with `late: true`
-    updateDeliveries(h.home, (p) => void p.splice(0)); // crash: the delivery entry and the task update are lost
-    updateTasks(h.home, (tasks) => {
-      tasks[0]!.state = "cooking";
-      tasks[0]!.current = { cookStartedAt: iso(20, 0), deliverAt: iso(20, 0) };
+    updateDeliveries(h.home, readTasks(h.home)[0]!.id, (p) => void p.splice(0)); // crash: the delivery entry and the task update are lost
+    editTask(h.home, (t) => {
+      t.state = "cooking";
+      t.current = { cookStartedAt: iso(20, 0), deliverAt: iso(20, 0) };
     });
     h.boot();
     h.set(20, 0, 30); // 30 s later: on time by the clock, so only the saved flag can make it late
@@ -1284,7 +1292,7 @@ describe("home folder layout", () => {
     }
     const agent = h.agent(mockFetch(() => chatReply()).fn);
     const rec = createScheduledAction(agent, input());
-    expect(fs.existsSync(path.join(h.home, "scheduled", "tasks.json"))).toBe(true);
+    expect(fs.existsSync(taskFileOf(h.home, rec.id))).toBe(true);
     expect(listScheduledActions({ home: h.home }).map((t) => t.id)).toEqual([rec.id]); // nothing from the old folders
     for (const old of ["scheduled_actions", "scheduled_tasks"]) {
       expect(fs.readFileSync(path.join(h.home, old, "tasks.json"), "utf8")).toContain('"old"'); // untouched, not moved
@@ -1326,38 +1334,39 @@ describe("scheduled action files (stable contract)", () => {
     return { header, body: m[2]!.trimEnd() };
   }
 
-  it("tasks.json: the version, the exact fields of a minimal and of a full record, and the states", () => {
+  it("<id>/task.json: the version, the exact fields of a minimal and of a full record, and the states", () => {
     const h = harness();
     const agent = h.agent(mockFetch(() => chatReply()).fn);
-    createScheduledAction(agent, input());
-    const file = json(h, "tasks.json");
-    expect(Object.keys(file)).toEqual(["version", "tasks"]);
-    expect(file.version).toBe(1);
-    expect(sorted(file.tasks[0])).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "schedule", "state", "task", "tools"]);
-    expect(sorted(file.tasks[0].schedule)).toEqual(["meridiem", "startCookingInAdvance", "timeToDeliver"]);
-    expect(file.tasks[0].state).toBe("waiting");
+    const first = createScheduledAction(agent, input());
+    const file = json(h, `${first.id}/task.json`);
+    expect(Object.keys(file)).toEqual(["version", "task"]);
+    expect(file.version).toBe(2);
+    expect(sorted(file.task)).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "schedule", "state", "task", "tools"]);
+    expect(sorted(file.task.schedule)).toEqual(["meridiem", "startCookingInAdvance", "timeToDeliver"]);
+    expect(file.task.state).toBe("waiting");
 
-    createScheduledAction(agent, input({ id: "full-one", repeatEvery: "01:00:00", retries: 1, onMissed: "run" }, { role: "analyst", timeoutMs: 600_000 }));
-    const full = json(h, "tasks.json").tasks[1];
+    const second = createScheduledAction(agent, input({ id: "full-one", repeatEvery: "01:00:00", retries: 1, onMissed: "run" }, { role: "analyst", timeoutMs: 600_000 }));
+    const full = json(h, `${second.id}/task.json`).task;
     expect(sorted(full)).toEqual(["agent", "createdAt", "id", "instructions", "name", "nextCookAt", "nextDeliverAt", "role", "schedule", "state", "task", "timeoutMs", "tools"]);
     expect(sorted(full.schedule)).toEqual(["meridiem", "onMissed", "repeatEvery", "retries", "startCookingInAdvance", "timeToDeliver"]);
     expect(full.id).toMatch(/^full-one-[a-z0-9]{6}$/);
     expect(full.nextDeliverAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/); // local time, no offset
   });
 
-  it("a run's files: current, deliveries.json, the run header (keys and order) and lastRun", async () => {
+  it("a run's files: current, delivery.json, the run header (keys and order) and lastRun", async () => {
     const h = harness();
     const { of } = capture();
     const rec = createScheduledAction(h.agent(mockFetch(() => chatReply("Result text.")).fn), input());
     h.set(18, 50);
     h.s.tick();
-    expect(sorted(json(h, "tasks.json").tasks[0].current)).toEqual(["cookStartedAt", "deliverAt"]); // only while cooking
+    const taskPath = `${rec.id}/task.json`;
+    expect(sorted(json(h, taskPath).task.current)).toEqual(["cookStartedAt", "deliverAt"]); // only while cooking
     await h.settle();
-    expect(json(h, "tasks.json").tasks[0].current).toBeUndefined();
+    expect(json(h, taskPath).task.current).toBeUndefined();
 
-    const deliveries = json(h, "deliveries.json");
+    const deliveries = json(h, `${rec.id}/delivery.json`);
     expect(Object.keys(deliveries)).toEqual(["version", "pending"]);
-    expect(deliveries.version).toBe(1);
+    expect(deliveries.version).toBe(2);
     expect(sorted(deliveries.pending[0])).toEqual(["deliverAt", "file", "id", "readyAt", "status"]);
     expect(deliveries.pending[0].file).toBe(`${rec.id}/26-october-2026.md`);
 
@@ -1370,8 +1379,8 @@ describe("scheduled action files (stable contract)", () => {
 
     h.set(19, 0);
     h.s.tick();
-    expect(json(h, "deliveries.json").pending).toEqual([]);
-    expect(sorted(json(h, "tasks.json").tasks[0].lastRun)).toEqual(["deliverAt", "deliveredAt", "file", "late", "status"]);
+    expect(fs.existsSync(path.join(dirOf(h), rec.id, "delivery.json"))).toBe(false); // nothing waiting: no file
+    expect(sorted(json(h, taskPath).task.lastRun)).toEqual(["deliverAt", "deliveredAt", "file", "late", "status"]);
     expect(sorted(of("scheduled_action.delivered")[0]!.data as object)).toEqual(["deliverAt", "file", "id", "late", "name", "readyAt", "status"]);
   });
 
@@ -1379,12 +1388,12 @@ describe("scheduled action files (stable contract)", () => {
     const h = harness();
     const agent = h.agent(mockFetch(() => chatReply()).fn);
     const rec = createScheduledAction(agent, input());
-    updateTasks(h.home, (tasks) => void ((tasks[0] as unknown as Record<string, unknown>)["owner"] = "ops"));
+    editTask(h.home, (t) => void ((t as unknown as Record<string, unknown>)["owner"] = "ops"));
     updateScheduledAction(rec.id, { task: "A new assignment." }, { home: h.home });
-    const kept = json(h, "tasks.json").tasks[0];
+    const kept = json(h, `${rec.id}/task.json`).task;
     expect(kept.owner).toBe("ops");
     expect(kept.task).toBe("A new assignment.");
-    expect(fs.existsSync(path.join(dirOf(h), "tasks.json.bak"))).toBe(true);
+    expect(fs.existsSync(path.join(dirOf(h), rec.id, "task.json.bak"))).toBe(true);
     expect(validateRecord(kept)).toBeUndefined(); // an extra key is not a validation problem
   });
 
@@ -1394,6 +1403,6 @@ describe("scheduled action files (stable contract)", () => {
     for (const code of ["created", "updated", "started", "ready", "failed", "delivered", "missed", "skipped", "deleted", "invalid", "store_corrupt", "error"]) {
       expect(doc).toContain(`\`scheduled_action.${code}\``);
     }
-    expect(doc).toContain('"version": 1');
+    expect(doc).toContain('"version": 2');
   });
 });
