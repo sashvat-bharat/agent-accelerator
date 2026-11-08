@@ -1,8 +1,8 @@
 /**
- * Model catalog — battle-tested single source of truth (models.dev)
- * Dynamically loaded and synchronized via ~/.cache with ~12h TTL.
- * All context length, pricing, limits, reasoning, modalities come from here.
- * Providers' hardcoded GOOGLE_MODELS etc. are DEPRECATED fallbacks only.
+ * Model catalog: the single source of truth (models.dev) for context limits, prices, modalities and reasoning options.
+ * The data is cached in `<home>/catalog/models.dev.json` (or `AGENT_CACHE_DIR`) with a 12 hour TTL and refreshed in the
+ * background (see `catalog-cache.ts`). `GOOGLE_MODELS`, `OPENAI_MODELS` and `OPENROUTER_MODELS` are views of it,
+ * rebuilt in place whenever it changes.
  */
 
 import {
