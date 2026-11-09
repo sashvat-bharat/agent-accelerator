@@ -2,6 +2,8 @@ import { describe, it, expect } from "bun:test";
 import { resolveEffectiveThinking } from "../src/agent/agent.ts";
 import { withRetries, isTransientError } from "../src/utils/retry.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../src/utils/errors.ts";
+import { ProviderError, ValidationError, AgentAccelError } from "../src/types/errors.ts";
+import { isNotFoundChainError } from "../src/providers/shared.ts";
 
 describe("per-run thinking override", () => {
   it("resolves per-run thinking override without mutating base", () => {
@@ -46,7 +48,7 @@ describe("concise provider errors", () => {
 
   it("collapses the wire dump to one line and strips secrets", () => {
     const err = toConciseProviderError(bigErr, "openrouter", "nvidia/nemotron-3.5-lightning:free");
-    expect(err.name).toBe("AgentAccelProviderError");
+    expect(err.name).toBe("ProviderError");
     expect(err.message).toBe(
       "[openrouter/nvidia/nemotron-3.5-lightning:free] request failed (404): No endpoints found that support input video"
     );
@@ -64,7 +66,7 @@ describe("concise provider errors", () => {
       });
       throw new Error("should have thrown");
     } catch (e: any) {
-      expect(e.name).toBe("AgentAccelProviderError");
+      expect(e.name).toBe("ProviderError");
       expect(String(e.message)).toContain("(404)");
     }
   });
@@ -167,5 +169,40 @@ describe("createSessionId", () => {
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(a).not.toBe(createSessionId());
     expect(createSessionId("checkout")).toMatch(/^checkout-[0-9a-f-]{36}$/);
+  });
+});
+
+describe("provider errors are typed", () => {
+  const raw = (status: number, code?: string) => Object.assign(new Error(`http ${status}`), { statusCode: status, ...(code ? { code } : {}) });
+
+  it("is a ProviderError: instanceof works, code is the SDK kind, the provider's own code is providerCode", () => {
+    const err = toConciseProviderError(raw(404, "not_found"), "google", "gemini-3-flash") as ProviderError;
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toBeInstanceOf(AgentAccelError);
+    expect(err.code).toBe("provider");
+    expect((err as any).providerCode).toBe("not_found");
+    expect(err.status).toBe(404);
+    expect(err.context.provider).toBe("google");
+    expect(Object.keys(err)).not.toContain("providerCode"); // details stay non-enumerable
+    expect(isNotFoundChainError(toConciseProviderError(raw(500, "not_found"), "google", "m"))).toBe(true);
+  });
+
+  it("retryable follows the status and network code", () => {
+    for (const s of [408, 425, 429, 500, 502, 503, 504]) expect((toConciseProviderError(raw(s), "openai", "m") as ProviderError).retryable).toBe(true);
+    for (const s of [400, 401, 403, 404]) expect((toConciseProviderError(raw(s), "openai", "m") as ProviderError).retryable).toBe(false);
+    const network = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+    expect((toConciseProviderError(network, "openai", "m") as ProviderError).retryable).toBe(true);
+  });
+
+  it("passes an SDK error through unchanged", () => {
+    const original = new ValidationError("bad input");
+    expect(toConciseProviderError(original, "openai", "m")).toBe(original);
+  });
+
+  it("a modality the catalog says the model lacks is a ValidationError", () => {
+    const ctx = { messages: [{ role: "user" as const, content: [{ type: "video" as const, video: "data:video/mp4;base64,AAAA" }] }] };
+    let err: unknown;
+    try { assertModalitiesSupported(ctx, "openai", "gpt-4o-mini"); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(ValidationError);
   });
 });

@@ -1,33 +1,7 @@
-import { toConciseProviderError } from "./errors.ts";
+import { toConciseProviderError, isTransientError } from "./errors.ts";
 import { isAbortError } from "../types/errors.ts";
 
-export { isAbortError };
-
-/**
- * Checks whether a provider error is transient and safe to retry.
- * Structured-data only: status / code / transient flag. Never message text,
- * so a 400 mentioning "512 tokens" is not retried.
- */
-export function isTransientError(error: unknown): boolean {
-  if (!error) return false;
-  if (isAbortError(error)) return false;
-  const err = error as Record<string, unknown>;
-  if (err["transient"] === true) return true;
-  if ((err as { retryable?: unknown }).retryable === true) return true;
-  const status = Number(
-    (err["status"] as number | undefined) ??
-      (err["statusCode"] as number | undefined) ??
-      ((err["response"] as Record<string, unknown> | undefined)?.["status"] as number | undefined) ??
-      ((err["lastError"] as Record<string, unknown> | undefined)?.["status"] as number | undefined) ??
-      NaN
-  );
-  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
-  const code = String((err["code"] as string | undefined) ?? "").toUpperCase();
-  if (["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT", "EPIPE", "ETIMEDOUT"].includes(code)) {
-    return true;
-  }
-  return false;
-}
+export { isAbortError, isTransientError };
 
 /**
  * Whether a FAILED RUN (the provider layer already retried the call) is worth trying again: the failure is transient

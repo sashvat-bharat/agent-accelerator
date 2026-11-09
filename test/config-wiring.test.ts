@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { Agent, tool, telemetryBus, clearInteractionChains, clearSessionRouting, clearEmittedWarnings } from "../src/index.ts";
+import { Agent, tool, telemetryBus, clearInteractionChains, clearSessionRouting, clearEmittedWarnings, TimeoutError } from "../src/index.ts";
 import { z } from "zod";
 
 const ORIGINAL_WARN = console.warn;
@@ -331,6 +331,16 @@ describe("network timeouts: defaults, changing them, turning them off", () => {
   it("limits.requestTimeoutMs changes how long one provider call may take", async () => {
     await expect(agentWith(slow(200), { requestTimeoutMs: 30 }).run("hi")).rejects.toMatchObject({ name: "TimeoutError" });
     expect((await agentWith(slow(60), { requestTimeoutMs: 5_000 }).run("hi")).text).toBe("ok");
+  });
+
+  it("the loop's request and first-byte timeouts are real TimeoutErrors (instanceof works, retryable, code \"timeout\")", async () => {
+    const request = await agentWith(slow(200), { requestTimeoutMs: 30 }).run("hi").catch((e) => e);
+    const firstByte = await agentWith(slow(200, true), { firstByteTimeoutMs: 30 }).stream("hi").result().catch((e) => e);
+    for (const err of [request, firstByte]) {
+      expect(err).toBeInstanceOf(TimeoutError);
+      expect(err.retryable).toBe(true);
+      expect(err.code).toBe("timeout");
+    }
   });
 
   it("0 and Infinity both turn the request timeout off", async () => {

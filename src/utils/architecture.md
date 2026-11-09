@@ -12,8 +12,8 @@ Small shared helpers. Each file has one job.
 | `safe-io.ts` | `fileAccess.roots` containment and the guarded remote fetch (private hosts refused, redirects re-checked, size cap). |
 | `raw-capture.ts` | The `captureRaw` policy for `AgentResponse.raw`. |
 | `cache.ts` | Cache-key clamp (64 chars) and the central secret redaction. |
-| `errors.ts` | `toConciseProviderError` and pre-network modality guards. |
-| `retry.ts` | `withRetries`, `isTransientError`, `isRetryableRun`, `sleep`. Structured data only (status, code, flags), never message text. |
+| `errors.ts` | `toConciseProviderError` (any raw provider failure becomes one-line `ProviderError`: `code` `"provider"`, `retryable` from status/code, the provider's code as `providerCode`; SDK errors pass through), `isTransientError`, and the pre-network modality guards (`ValidationError`). |
+| `retry.ts` | `withRetries`, `isTransientError` (re-exported from `errors.ts`), `isRetryableRun`, `sleep`. Structured data only (status, code, flags), never message text. |
 | `session.ts` | Id helpers (`createSessionId`, `hashSessionPart`, `createTrackingId`, run/turn ids), `parseModelRef`, `previewPrompt`. |
 | `serialization.ts` | `toJsonSafe`, `safeStringify`, `escapeXml`. |
 | `base64.ts`, `thought-signature.ts` | Runtime-agnostic base64; Gemini thought-signature helpers. |

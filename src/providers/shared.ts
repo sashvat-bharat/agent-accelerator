@@ -78,7 +78,7 @@ export function readErrorPayload(
   }
 }
 
-/** Retryable incomplete-stream error for truncated SSE. */
+/** Retryable incomplete-stream error for truncated SSE: a `ProviderError` whose `code` is `incomplete_stream`. */
 export function incompleteStreamError(provider: string, modelId: string): Error {
   const err = toConciseProviderError(
     Object.assign(new Error("Stream ended without terminal event"), {
@@ -110,12 +110,8 @@ export function isNotFoundChainError(error: unknown): boolean {
       NaN
   );
   if (status === 404) return true;
-  const code = String(
-    (err["code"] as string | undefined) ??
-      (err["errorType"] as string | undefined) ??
-      ""
-  ).toLowerCase();
-  return code === "not_found";
+  // `providerCode` on a wrapped ProviderError (its `code` is the SDK kind), `code` on a raw error.
+  return [err["providerCode"], err["code"], err["errorType"]].some((c) => String(c ?? "").toLowerCase() === "not_found");
 }
 
 /** Per-request timeout ms from provider options. */

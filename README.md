@@ -1089,16 +1089,35 @@ Credential headers are always redacted (`Authorization`, `x-goog-api-key`, anyth
 ---
 ## Errors
 
-Provider failures throw `AgentAccelProviderError` — one actionable line,
+Provider failures throw a `ProviderError` — one actionable line,
 never a wire dump:
 
 ```text
 [openrouter/nvidia/nemotron-3.5-lightning:free] request failed (404): No endpoints found that support input video
 ```
 
-Raw details (`statusCode`, `url`, truncated body) stay attached as
+Branch on the class and `err.retryable` (true for HTTP 408/425/429/5xx,
+network errors and a cut stream), never on the message:
+
+```ts
+import { ProviderError, TimeoutError } from "agent-accelerator";
+
+try {
+  await agent.run("...");
+} catch (err) {
+  if (err instanceof ProviderError && err.retryable) retryLater(); // e.g. a 429 or 503
+  else if (err instanceof TimeoutError) retryLater(); // a request / first-byte / idle timeout
+  else throw err;
+}
+```
+
+`err.code` is the SDK kind (`"provider"`, `"incomplete_stream"` for a cut
+stream; `"timeout"`, `"config"`, ... on the other classes); the provider's own
+error code (e.g. `"not_found"`, `"rate_limit_exceeded"`) is `err.providerCode`.
+Raw details (`statusCode`, `url`, truncated body, `providerCode`) stay attached as
 non-enumerable properties: available programmatically, invisible in runtime
-dumps. URL query strings are stripped (keys sometimes live there); headers
+dumps. Input a model cannot take (a modality the catalog says it lacks, video on
+the OpenAI Responses wire) fails before the network with a `ValidationError`. URL query strings are stripped (keys sometimes live there); headers
 and cookies are never attached. Helpers:
 
 * `toConciseProviderError(err, providerId, modelId)` — collapse any provider error.

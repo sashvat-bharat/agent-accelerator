@@ -1,5 +1,32 @@
 import type { ProviderContext } from "../types/message.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
+import { AgentAccelError, ProviderError, ValidationError, isAbortError } from "../types/errors.ts";
+
+/**
+ * Checks whether a provider error is transient and safe to retry.
+ * Structured-data only: status / code / transient flag. Never message text,
+ * so a 400 mentioning "512 tokens" is not retried.
+ */
+export function isTransientError(error: unknown): boolean {
+  if (!error) return false;
+  if (isAbortError(error)) return false;
+  const err = error as Record<string, unknown>;
+  if (err["transient"] === true) return true;
+  if ((err as { retryable?: unknown }).retryable === true) return true;
+  const status = Number(
+    (err["status"] as number | undefined) ??
+      (err["statusCode"] as number | undefined) ??
+      ((err["response"] as Record<string, unknown> | undefined)?.["status"] as number | undefined) ??
+      ((err["lastError"] as Record<string, unknown> | undefined)?.["status"] as number | undefined) ??
+      NaN
+  );
+  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+  const code = String((err["providerCode"] as string | undefined) ?? (err["code"] as string | undefined) ?? "").toUpperCase();
+  if (["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT", "EPIPE", "ETIMEDOUT"].includes(code)) {
+    return true;
+  }
+  return false;
+}
 
 const CONCISE = "__agentAccelConcise";
 
@@ -49,12 +76,12 @@ function displayModel(providerId: string, modelId: string): string {
 }
 
 /**
- * Collapses a raw provider error (which carries the full request/response
- * dump as enumerable props) into a one-line actionable error. Raw details stay
- * available but non-enumerable, so runtime dumps stay small.
+ * Collapses a raw provider error (which carries the full request/response dump as enumerable props) into a one-line
+ * `ProviderError` with `retryable` set from its status/code; the provider's own error code is `providerCode`. Raw
+ * details stay available but non-enumerable, so runtime dumps stay small. An SDK error (already typed) passes through.
  */
 export function toConciseProviderError(error: unknown, providerId: string, modelId: string): Error {
-  if (error instanceof Error && (error as any)[CONCISE]) return error;
+  if (error instanceof AgentAccelError || (error instanceof Error && (error as any)[CONCISE])) return error;
   const err = error as any;
   const status = readStatus(err);
   const url = readUrl(err);
@@ -70,10 +97,10 @@ export function toConciseProviderError(error: unknown, providerId: string, model
   if (rawMeta && !detail.includes(rawMeta.slice(0, 80))) {
     detail = `${detail}\n${rawMeta.slice(0, 500)}`.slice(0, 800);
   }
-  const concise = new Error(
-    `[${displayModel(providerId, modelId)}] request failed${status ? ` (${status})` : ""}: ${detail}`
+  const concise = new ProviderError(
+    `[${displayModel(providerId, modelId)}] request failed${status ? ` (${status})` : ""}: ${detail}`,
+    { status, provider: providerId, model: modelId, retryable: isTransientError(err) }
   );
-  concise.name = "AgentAccelProviderError";
   Object.defineProperties(concise, {
     [CONCISE]: { value: true, enumerable: false },
     statusCode: { value: status, enumerable: false },
@@ -90,11 +117,10 @@ export function toConciseProviderError(error: unknown, providerId: string, model
     ...(typeof err?.errorType === "string"
       ? { errorType: { value: err.errorType, enumerable: false } }
       : {}),
-    // Forwarded when present (e.g. Google's `not_found` chain-eviction code,
-    // which carries no HTTP status on SSE error frames). Survives re-wraps
-    // so chain-expiry detectors never lose it.
+    // The provider's own error code (e.g. Google's `not_found` chain-eviction code, which carries no HTTP status on
+    // SSE error frames); `code` itself is the SDK kind (`"provider"`). Survives re-wraps so chain detectors never lose it.
     ...((typeof err?.code === "string" || typeof err?.code === "number") && err.code !== ""
-      ? { code: { value: err.code, enumerable: false } }
+      ? { providerCode: { value: err.code, enumerable: false } }
       : {}),
     // Server rate-limit hint in ms (from Retry-After); survives re-wraps so
     // `withRetries` can honor it instead of hammering a 429.
@@ -120,7 +146,7 @@ const PART_TO_MODALITY: Record<string, "image" | "audio" | "video" | "pdf"> = {
  * lacks a requested input modality (image/audio/video/document; files are
  * not checked on OpenRouter, which parses them for any model). Unknown
  * models (custom providers, dynamic routers) are skipped: the provider
- * verdict stands and surfaces via toConciseProviderError instead.
+ * verdict stands and surfaces via toConciseProviderError instead. Throws a `ValidationError`.
  */
 export function assertModalitiesSupported(
   context: ProviderContext,
@@ -147,16 +173,10 @@ export function assertModalitiesSupported(
   if (!supported) return;
   const missing = [...needed].filter((k) => !supported.includes(k));
   if (missing.length === 0) return;
-  const err = new Error(
-    `[${displayModel(providerId, modelId)}] unsupported ${missing.join("+")} input (supports: ${supported.join(", ") || "text"}). Use a capable model or drop the ${missing.join("+")} part.`
+  throw new ValidationError(
+    `[${displayModel(providerId, modelId)}] unsupported ${missing.join("+")} input (supports: ${supported.join(", ") || "text"}). Use a capable model or drop the ${missing.join("+")} part.`,
+    { provider: providerId, model: modelId }
   );
-  err.name = "AgentAccelProviderError";
-  Object.defineProperties(err, {
-    [CONCISE]: { value: true, enumerable: false },
-    provider: { value: providerId, enumerable: false },
-    model: { value: modelId, enumerable: false },
-  });
-  throw err;
 }
 
 /**
@@ -169,7 +189,7 @@ export function assertModalitiesSupported(
  * `openrouter/stealth/space-bunny-alpha` under the old Responses skin despite
  * its catalog `video` flag, which is chat-transport oriented). Fail fast with
  * a clear one-liner instead; video stays Gemini-only, and OpenRouter Chat
- * Completions carries `video_url` natively (no guard there).
+ * Completions carries `video_url` natively (no guard there). Throws a `ValidationError`.
  */
 export function assertNoVideoPartsOnResponses(
   context: ProviderContext,
@@ -197,14 +217,8 @@ export function assertNoVideoPartsOnResponses(
     // contradict the rejection).
     if (known && known.length > 0) supported = known.filter((m) => m !== "video").join(", ") || "text";
   } catch {}
-  const err = new Error(
-    `[${displayModel(providerId, modelId)}] unsupported video input (the Responses API accepts text/image/file only; supports: ${supported}). Use a video-capable model (e.g. google/gemini-*) or drop the video part.`
+  throw new ValidationError(
+    `[${displayModel(providerId, modelId)}] unsupported video input (the Responses API accepts text/image/file only; supports: ${supported}). Use a video-capable model (e.g. google/gemini-*) or drop the video part.`,
+    { provider: providerId, model: modelId }
   );
-  err.name = "AgentAccelProviderError";
-  Object.defineProperties(err, {
-    [CONCISE]: { value: true, enumerable: false },
-    provider: { value: providerId, enumerable: false },
-    model: { value: modelId, enumerable: false },
-  });
-  throw err;
 }

@@ -23,7 +23,7 @@ import {
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
 import { enforceFileAccess } from "../utils/safe-io.ts";
 import { isSubagentResult, normalizeSubagentMetadata } from "../tools/subagent-result.ts";
-import { BudgetExceededError } from "../types/errors.ts";
+import { BudgetExceededError, TimeoutError } from "../types/errors.ts";
 import { applyCaptureRaw, type CaptureRawMode } from "../utils/raw-capture.ts";
 import { previewPrompt } from "../utils/session.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
@@ -400,9 +400,7 @@ async function generateWithTimeout<T>(task: () => Promise<T>, timeoutMs: number)
   try {
     const timeoutP = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        const e = new Error(`[Agent Accelerator] Request timed out after ${timeoutMs}ms.`);
-        e.name = "TimeoutError";
-        reject(e);
+        reject(new TimeoutError(`[Agent Accelerator] Request timed out after ${timeoutMs}ms.`));
       }, timeoutMs);
       try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
     });
@@ -1192,11 +1190,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
               Number.isFinite(waitMs) && waitMs !== Infinity && waitMs > 0
                 ? new Promise<never>((_, reject) => {
                     timer = setTimeout(() => {
-                      const e = new Error(
-                        `[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`
-                      );
-                      e.name = "TimeoutError";
-                      reject(e);
+                      reject(new TimeoutError(`[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`));
                     }, waitMs);
                     try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
                   })
