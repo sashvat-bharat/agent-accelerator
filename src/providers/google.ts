@@ -383,7 +383,7 @@ function cleanModelId(model: string | ModelSpec): string {
 function assertSupportedGeneration(clean: string): void {
   const match = clean.match(/^gemini-(\d+)(?:[.\-]|$)/i);
   if (match && Number(match[1]) < 3) {
-    throw new Error(
+    throw new ConfigError(
       `[Agent Accelerator] [google/${clean}] Unsupported generation: Gemini ${match[1]}.x and older are strictly rejected by this SDK. ` +
         `Use a Gemini 3 or later model for full support and feature coverage.`
     );
@@ -1022,7 +1022,7 @@ export class GoogleInteractionsProvider implements Provider {
     assertSupportedGeneration(clean);
     const apiKey = resolveApiKey(options);
     if (!apiKey) {
-      throw new Error(
+      throw new ConfigError(
         "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
       );
     }
@@ -1133,7 +1133,7 @@ export class GoogleInteractionsProvider implements Provider {
         assertSupportedGeneration(clean);
         const apiKey = resolveApiKey(options);
         if (!apiKey) {
-          throw new Error(
+          throw new ConfigError(
             "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
           );
         }

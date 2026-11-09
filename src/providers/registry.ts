@@ -1,3 +1,4 @@
+import { ConfigError } from "../types/errors.ts";
 import type { Provider, ProviderId, ModelSpec } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
 import { OpenAICompatibleChatProvider } from "./openai-compat.ts";
@@ -54,7 +55,7 @@ function removedProviderMessage(id: string): string {
 /** Throws for removed provider prefixes. */
 function assertProviderNotRemoved(id: string): void {
   if (REMOVED_PROVIDERS.has(id.trim().toLowerCase())) {
-    throw new Error(removedProviderMessage(id.trim()));
+    throw new ConfigError(removedProviderMessage(id.trim()));
   }
 }
 
@@ -83,7 +84,7 @@ export function ensureCustomProvider(
   const id = normalizeProviderPrefix(prefix) as ProviderId;
   if (FIRST_CLASS.has(id.toLowerCase())) {
     if (opts?.baseUrl !== undefined || opts?.apiKey !== undefined) {
-      throw new Error(
+      throw new ConfigError(
         `[Agent Accelerator] Provider "${id}" is first-class and cannot be replaced with custom baseUrl/apiKey. Pass baseUrl/apiKey per-Agent instead.`
       );
     }
@@ -93,7 +94,7 @@ export function ensureCustomProvider(
   if (existing) {
     const prevBase = (existing as { configuredBaseUrl?: string }).configuredBaseUrl;
     if (opts?.baseUrl !== undefined && prevBase !== undefined && prevBase !== opts.baseUrl) {
-      throw new Error(
+      throw new ConfigError(
         `[Agent Accelerator] Conflicting re-registration for provider "${id}". Registry is immutable after creation.`
       );
     }
@@ -120,7 +121,7 @@ export function getProvider(id: ProviderId | string): Provider {
   const provider = providerRegistry.get(key);
   if (provider) return provider;
   if (!key) {
-    throw new Error(
+    throw new ConfigError(
       `Provider '' is not supported or not registered. Available first-support providers: google, openrouter, openai — or any custom prefix via {PREFIX}_API_KEY + {PREFIX}_BASE_URL.`
     );
   }
@@ -146,7 +147,7 @@ export interface ResolvedModel {
  */
 export function resolveModel(model: string | ModelSpec): ResolvedModel {
   if (!model || (typeof model === "string" && !model.trim())) {
-    throw new Error(
+    throw new ConfigError(
       "[Agent Accelerator] No model specified. Please specify 'model' in Agent configuration or set the MODEL environment variable."
     );
   }

@@ -31,7 +31,7 @@ console.log((await agent.run("Hello")).finishReason);
 | Setting | What happens when hit |
 |---|---|
 | `maxTurns` | Run stops with `finishReason: "max_turns"` and a bus warning (`agent.max_turns_truncated`) if tools were still pending. |
-| `limits.*` | Deadline/tool-count: error with partial results; timeouts raise a retryable `TimeoutError`. |
+| `limits.*` | Deadline/tool-count: `BudgetExceededError` with partial results; timeouts raise a retryable `TimeoutError`. |
 | `budget.*` | Throws `BudgetExceededError` with partial usage. Unknown pricing counts as $0 toward `maxCostUsd`. |
 | `retry` | Transient failures (HTTP 408/425/429/500/502/503/504, network codes, `transient`/`retryable` flags; never message text). `Retry-After` is honored within `budgetMs`; streams retry only before the first byte. On OpenRouter a 402 from the in-flight spending budget (`limit_source: openrouter_in_flight_budget`) is retried too; a 402 for missing credits is not. |
 | `runRetries` | A whole run that failed for a transient reason (after `retry` gave up: provider down, timeouts, a cut stream) is tried again from where it stopped, after 5 s, 15 s, 45 s, then 60 s; each retry emits `agent.run_retry`. The prompt is not re-added and finished tool calls are not repeated; the final response includes the failed attempts' tool calls and usage. The agent stays busy meanwhile (queued prompts wait); `interrupt()` or a signal ends the wait. Never retried: aborts, 400/401/403/404, bad config or input, budgets and limits. `run()` and queued runs only, not `stream()`. |
@@ -141,7 +141,7 @@ try {
 }
 ```
 
-All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError`, `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError`, `SubAgentModelError`. Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line `ProviderError`s: `err.code` is `"provider"` (`"incomplete_stream"` for a cut stream) and `err.retryable` is true for HTTP 408/425/429/5xx, network errors and a cut stream; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `providerCode` (the provider's own error code), `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
+All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError`, `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError` and `SubAgentModelError` (both `ConfigError`s). Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line `ProviderError`s: `err.code` is `"provider"` (`"incomplete_stream"` for a cut stream) and `err.retryable` is true for HTTP 408/425/429/5xx, network errors and a cut stream; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `providerCode` (the provider's own error code), `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
 
 ## Telemetry
 

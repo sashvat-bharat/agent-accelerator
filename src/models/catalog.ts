@@ -19,6 +19,7 @@ import {
 } from "./catalog-cache.ts";
 import type { ModelSpec, ProviderId, ModelLimit, ModelCost, ModelModalities } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
+import { ConfigError } from "../types/errors.ts";
 
 // ---------------------------------------------------------------------------
 // Provider aliases — maps our internal ids to models.dev keys
@@ -421,8 +422,8 @@ export function getModelThinkingInfo(provider: string, modelId: string): ModelTh
   };
 }
 
-/** Thrown when a requested ThinkingLevel is unsupported by the selected model. */
-export class ThinkingLevelError extends Error {
+/** Thrown when a requested ThinkingLevel is unsupported by the selected model: a `ConfigError` (one line, never retried) with `allowedLevels`. */
+export class ThinkingLevelError extends ConfigError {
   readonly provider: string;
   readonly modelId: string;
   readonly requestedLevel: string;
@@ -443,31 +444,18 @@ export class ThinkingLevelError extends Error {
     reason: string;
     remedy?: string;
   }) {
-    const remedyLines = opts.remedy
-      ? `\n\n  How to fix:\n    ${opts.remedy}`
-      : "";
-    const allowedLine = opts.allowedLevels.length > 0
-      ? `\n  Allowed Levels:  [${opts.allowedLevels.map((l) => `"${l}"`).join(", ")}]`
-      : "";
-
-    const formattedMessage =
-      `[Agent Accelerator] ThinkingLevel Mismatch for "${opts.provider}/${opts.modelId}":\n` +
-      `  Requested Level: "${opts.requestedLevel}"\n` +
-      `  Issue:           ${opts.reason}` +
-      allowedLine +
-      remedyLines;
-
-    super(formattedMessage);
+    const allowed = opts.allowedLevels.length > 0 ? ` Allowed levels: ${opts.allowedLevels.map((l) => `"${l}"`).join(", ")}.` : "";
+    const remedy = opts.remedy ? ` How to fix: ${opts.remedy}` : "";
+    super(
+      `[Agent Accelerator] Thinking level "${opts.requestedLevel}" does not fit "${opts.provider}/${opts.modelId}": ${opts.reason}${allowed}${remedy}`,
+      { provider: opts.provider, model: opts.modelId }
+    );
     this.name = "ThinkingLevelError";
     this.provider = opts.provider;
     this.modelId = opts.modelId;
     this.requestedLevel = opts.requestedLevel;
     this.allowedLevels = opts.allowedLevels;
     this.supportsThinking = opts.supportsThinking;
-
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, ThinkingLevelError);
-    }
   }
 }
 

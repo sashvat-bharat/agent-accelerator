@@ -5,6 +5,7 @@ import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
 import { resolveModel } from "../providers/registry.ts";
+import { ConfigError } from "../types/errors.ts";
 
 /** Minimal live-trace shape shared by fixed + dynamic workers (structural subset of `SubAgentTrace`). */
 export interface LiveWorkerTrace {
@@ -134,7 +135,7 @@ export function resolveDynamicModelInput(
 export function resolveSubAgentModel(config: { name?: string; model?: AgentConfig["model"] }): NonNullable<AgentConfig["model"]> {
   const resolvedModel = config.model ?? getSubModel() ?? getModel();
   if (!resolvedModel) {
-    throw new Error(
+    throw new ConfigError(
       `[Agent Accelerator] SubAgent '${config.name || "subagent"}' requires a model. ` +
         `Specify 'model' in SubAgent config, or set SUB_AGENT_MODEL or MODEL in environment variables.`
     );

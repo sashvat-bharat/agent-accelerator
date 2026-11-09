@@ -389,7 +389,7 @@ function checkTokenLimit(usage: TokenUsage, maxTotalTokens: number): void {
 // Throws when the run has been going longer than limits.deadlineMs; in: both loops each turn, out: nothing or a thrown error.
 function checkDeadline(startTime: number, deadlineMs: number): void {
   if (Number.isFinite(deadlineMs) && deadlineMs !== Infinity && Date.now() - startTime > deadlineMs) {
-    throw new Error(`[Agent Accelerator] Run deadline exceeded after ${deadlineMs}ms.`);
+    throw new BudgetExceededError(`[Agent Accelerator] Run deadline exceeded after ${deadlineMs}ms.`);
   }
 }
 
@@ -857,7 +857,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     allToolCalls.push(...genResult.toolCalls);
     // Per-run tool-call budget.
     if (allToolCalls.length > limits.maxToolCallsPerRun) {
-      throw new Error(
+      throw new BudgetExceededError(
         `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${limits.maxToolCallsPerRun}).`
       );
     }
@@ -1306,7 +1306,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         emitProgress(config); // the calls are on record BEFORE they run, so a crash can finish them instead of forgetting them
         allToolCalls.push(...turnResponse.toolCalls);
         if (allToolCalls.length > streamLimits.maxToolCallsPerRun) {
-          throw new Error(
+          throw new BudgetExceededError(
             `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${streamLimits.maxToolCallsPerRun}).`
           );
         }

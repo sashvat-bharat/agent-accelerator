@@ -63,7 +63,7 @@ export function resolveEffectiveThinking(
   return { enabled: true, level: overrideLevel as ThinkingConfig["level"] };
 }
 
-import { ConfigError, SessionLoadError, isAbortError } from "../types/errors.ts";
+import { ConfigError, SessionLoadError, ValidationError, isAbortError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (fallback when
@@ -839,7 +839,7 @@ export class Agent {
   // Throws synchronously on an empty content-part array so run() and stream() fail at the same moment; in: any prompt entry point, out: nothing.
   private assertPromptValid(prompt: string | ContentPart[]): void {
     if (Array.isArray(prompt) && prompt.length === 0) {
-      throw new Error(
+      throw new ValidationError(
         "[Agent Accelerator] Prompt cannot be empty: pass a non-empty string or at least one content part."
       );
     }
@@ -1695,7 +1695,7 @@ export class Agent {
     // Prompt validation throws synchronously in both run() and
     // stream() (same timing; documented here).
     if (Array.isArray(prompt) && prompt.length === 0) {
-      throw new Error(
+      throw new ValidationError(
         "[Agent Accelerator] Prompt cannot be empty: pass a non-empty string or at least one content part."
       );
     }

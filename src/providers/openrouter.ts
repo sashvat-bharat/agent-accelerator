@@ -46,7 +46,7 @@ import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.
 import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
-import { isAbortError } from "../types/errors.ts";
+import { ConfigError, isAbortError } from "../types/errors.ts";
 import {
   newToolCallId,
   redactedHeaders,
@@ -648,7 +648,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       try {
         const apiKey = resolveApiKey(options);
         if (!apiKey) {
-          throw new Error(
+          throw new ConfigError(
             "[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey."
           );
         }

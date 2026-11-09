@@ -695,7 +695,7 @@ export class OpenAICompatibleChatProvider implements Provider {
   private requireApiKey(baseUrl: string, options?: ProviderRequestOptions): string | undefined {
     const key = this.apiKey(options);
     if (!key && !isLocalEndpoint(baseUrl)) {
-      throw new Error(
+      throw new ConfigError(
         `[Agent Accelerator] Missing API key for "${this.prefix}". Set ${envPrefixOf(this.prefix)}_API_KEY or pass apiKey. (Local endpoints may omit the key.)`
       );
     }
