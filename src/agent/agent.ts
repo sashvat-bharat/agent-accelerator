@@ -63,7 +63,7 @@ export function resolveEffectiveThinking(
   return { enabled: true, level: overrideLevel as ThinkingConfig["level"] };
 }
 
-import { ConfigError, SessionLoadError, isAbortError } from "../types/errors.ts";
+import { ConfigError, SessionLoadError, ValidationError, isAbortError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (fallback when
@@ -697,13 +697,15 @@ export class Agent {
     return out || undefined;
   }
 
-  /** Clears conversation messages and provider thought signatures while keeping configuration. */
+  /** Starts a fresh conversation: clears messages, signatures, run marks and the run's saved tool results, keeps config and spending totals. */
   reset(): void {
     const sid = this.sessionId;
     this.context.messages = [];
     this.context.thoughtSignatures = [];
     this.context.systemPrompt = this.getFullInstructions();
     this.runMarks.length = 0;
+    this.toolRecords.length = 0; // a cleared conversation has no run to resume, so its finished tool results go too
+    this.activeMark = undefined;
     // Reset also drops session-scoped provider chaining/routing.
     try { clearInteractionChains(sid); } catch {}
     try { clearSessionRouting(sid); } catch {}
@@ -837,7 +839,7 @@ export class Agent {
   // Throws synchronously on an empty content-part array so run() and stream() fail at the same moment; in: any prompt entry point, out: nothing.
   private assertPromptValid(prompt: string | ContentPart[]): void {
     if (Array.isArray(prompt) && prompt.length === 0) {
-      throw new Error(
+      throw new ValidationError(
         "[Agent Accelerator] Prompt cannot be empty: pass a non-empty string or at least one content part."
       );
     }
@@ -1693,7 +1695,7 @@ export class Agent {
     // Prompt validation throws synchronously in both run() and
     // stream() (same timing; documented here).
     if (Array.isArray(prompt) && prompt.length === 0) {
-      throw new Error(
+      throw new ValidationError(
         "[Agent Accelerator] Prompt cannot be empty: pass a non-empty string or at least one content part."
       );
     }
@@ -2254,7 +2256,7 @@ export class Agent {
 /** What a failed run attempt got done before it failed (the `partial` the loop attaches to its error). */
 type FailedAttempt = Partial<AgentResponse> & { usage: TokenUsage };
 
-// Adds what failed attempts already did (tool calls, results, turns, token usage) to the response of the attempt that finally worked, so a retry never hides side effects or cost; in: the final response + each failed attempt's `err.partial`, out: the run's AgentResponse.
+// Adds what failed attempts already did (tool calls, results, workers, turns, token usage) to the response of the attempt that finally worked, so a retry never hides side effects or cost; in: the final response + each failed attempt's `err.partial`, out: the run's AgentResponse.
 function withFailedAttempts(res: AgentResponse, failed: FailedAttempt[]): AgentResponse {
   const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   for (const f of failed) accumulateUsage(usage, f.usage);
@@ -2266,7 +2268,7 @@ function withFailedAttempts(res: AgentResponse, failed: FailedAttempt[]): AgentR
     thoughtSignature: res.thoughtSignature,
     toolCalls: [...failed.flatMap((f) => f.toolCalls ?? []), ...res.toolCalls],
     toolResults: [...failed.flatMap((f) => f.toolResults ?? []), ...res.toolResults],
-    subagents: res.subagents,
+    subagents: [...failed.flatMap((f) => f.subagents ?? []), ...res.subagents],
     usage,
     responseId: res.responseId,
     model: res.model,

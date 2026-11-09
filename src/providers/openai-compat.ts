@@ -59,7 +59,7 @@ import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
-import { ConfigError } from "../types/errors.ts";
+import { ConfigError, ValidationError } from "../types/errors.ts";
 import {
   parseArguments,
   normalizeThinkingParts,
@@ -350,13 +350,7 @@ function assertNoVideoOrFileParts(
     kind === "video"
       ? `[${prefix}/${modelId}] unsupported video input (generic OpenAI-compatible endpoints carry text/image/audio only). Use a video-capable model (e.g. google/gemini-*) or drop the video part.`
       : `[${prefix}/${modelId}] unsupported file input (generic OpenAI-compatible endpoints carry text/image/audio only). Use a file-capable model (e.g. google/gemini-*) or convert the document to text before sending it.`;
-  const err = new Error(message);
-  err.name = "AgentAccelProviderError";
-  Object.defineProperties(err, {
-    provider: { value: prefix, enumerable: false },
-    model: { value: modelId, enumerable: false },
-  });
-  throw err;
+  throw new ValidationError(message, { provider: prefix, model: modelId });
 }
 
 // Text, image (link or data URL) and audio parts as Chat content blocks; in: a user message's parts, out: fullHistoryMessages.
@@ -701,7 +695,7 @@ export class OpenAICompatibleChatProvider implements Provider {
   private requireApiKey(baseUrl: string, options?: ProviderRequestOptions): string | undefined {
     const key = this.apiKey(options);
     if (!key && !isLocalEndpoint(baseUrl)) {
-      throw new Error(
+      throw new ConfigError(
         `[Agent Accelerator] Missing API key for "${this.prefix}". Set ${envPrefixOf(this.prefix)}_API_KEY or pass apiKey. (Local endpoints may omit the key.)`
       );
     }

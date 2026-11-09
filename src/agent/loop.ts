@@ -23,7 +23,7 @@ import {
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
 import { enforceFileAccess } from "../utils/safe-io.ts";
 import { isSubagentResult, normalizeSubagentMetadata } from "../tools/subagent-result.ts";
-import { BudgetExceededError } from "../types/errors.ts";
+import { BudgetExceededError, TimeoutError } from "../types/errors.ts";
 import { applyCaptureRaw, type CaptureRawMode } from "../utils/raw-capture.ts";
 import { previewPrompt } from "../utils/session.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
@@ -389,7 +389,7 @@ function checkTokenLimit(usage: TokenUsage, maxTotalTokens: number): void {
 // Throws when the run has been going longer than limits.deadlineMs; in: both loops each turn, out: nothing or a thrown error.
 function checkDeadline(startTime: number, deadlineMs: number): void {
   if (Number.isFinite(deadlineMs) && deadlineMs !== Infinity && Date.now() - startTime > deadlineMs) {
-    throw new Error(`[Agent Accelerator] Run deadline exceeded after ${deadlineMs}ms.`);
+    throw new BudgetExceededError(`[Agent Accelerator] Run deadline exceeded after ${deadlineMs}ms.`);
   }
 }
 
@@ -400,9 +400,7 @@ async function generateWithTimeout<T>(task: () => Promise<T>, timeoutMs: number)
   try {
     const timeoutP = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        const e = new Error(`[Agent Accelerator] Request timed out after ${timeoutMs}ms.`);
-        e.name = "TimeoutError";
-        reject(e);
+        reject(new TimeoutError(`[Agent Accelerator] Request timed out after ${timeoutMs}ms.`));
       }, timeoutMs);
       try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
     });
@@ -859,7 +857,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     allToolCalls.push(...genResult.toolCalls);
     // Per-run tool-call budget.
     if (allToolCalls.length > limits.maxToolCallsPerRun) {
-      throw new Error(
+      throw new BudgetExceededError(
         `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${limits.maxToolCallsPerRun}).`
       );
     }
@@ -998,6 +996,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         turns,
         toolCalls: allToolCalls,
         toolResults: allToolResults,
+        subagents: allSubagents,
         text: finalResult?.text,
       };
     } catch {
@@ -1191,11 +1190,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
               Number.isFinite(waitMs) && waitMs !== Infinity && waitMs > 0
                 ? new Promise<never>((_, reject) => {
                     timer = setTimeout(() => {
-                      const e = new Error(
-                        `[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`
-                      );
-                      e.name = "TimeoutError";
-                      reject(e);
+                      reject(new TimeoutError(`[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`));
                     }, waitMs);
                     try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
                   })
@@ -1311,7 +1306,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         emitProgress(config); // the calls are on record BEFORE they run, so a crash can finish them instead of forgetting them
         allToolCalls.push(...turnResponse.toolCalls);
         if (allToolCalls.length > streamLimits.maxToolCallsPerRun) {
-          throw new Error(
+          throw new BudgetExceededError(
             `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${streamLimits.maxToolCallsPerRun}).`
           );
         }
@@ -1444,6 +1439,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
             turns,
             toolCalls: allToolCalls,
             toolResults: allToolResults,
+            subagents: allSubagents,
             text: lastResponse?.text,
           }; } catch {}
           outerStream.fail(raw);
@@ -1504,6 +1500,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         turns,
         toolCalls: allToolCalls,
         toolResults: allToolResults,
+        subagents: allSubagents,
         text: lastResponse?.text,
       };
       // Aborts always surface as AbortError with partial attached.

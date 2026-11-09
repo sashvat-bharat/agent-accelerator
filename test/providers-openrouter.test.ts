@@ -795,7 +795,7 @@ describe("402 from the in-flight spending budget", () => {
     const err = await generate().then(() => null, (e) => e);
     expect(calls).toBe(1);
     expect(err.statusCode).toBe(402);
-    expect(err.retryable).toBeUndefined();
+    expect(err.retryable).toBe(false); // a typed ProviderError always says whether a retry can help
   });
 });
 

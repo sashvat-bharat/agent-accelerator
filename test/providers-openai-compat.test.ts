@@ -259,7 +259,7 @@ describe("OpenAICompatibleChatProvider (native REST, mocked)", () => {
       .generate("nope", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" })
       .then(() => null)
       .catch((e) => e);
-    expect(err.name).toBe("AgentAccelProviderError");
+    expect(err.name).toBe("ProviderError");
     expect(String(err.message)).toContain("[groq/nope] request failed (404): model not found");
   });
 

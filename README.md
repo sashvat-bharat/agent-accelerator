@@ -126,7 +126,7 @@ An `Agent` holds:
 | `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Infinite by default (`0` or omitted = no limit). Hitting a finite limit with pending tool calls warns and sets `finishReason: "max_turns"`. |
-| `limits`          | `AgentRunLimits`                                     | `{ maxTurns?, deadlineMs?, maxToolCallsPerRun?, maxTotalTokens?, requestTimeoutMs?, firstByteTimeoutMs?, streamIdleTimeoutMs? }`. The first four are unlimited by default. The three network timeouts default to 300 s / 120 s / 300 s so a silent connection fails instead of hanging; set one to `0` or `Infinity` to turn it off. A timeout raises a retryable `TimeoutError`. See [Safety and operations](docs/guides/safety-and-ops.md#network-timeouts). |
+| `limits`          | `AgentRunLimits`                                     | `{ maxTurns?, deadlineMs?, maxToolCallsPerRun?, maxTotalTokens?, requestTimeoutMs?, firstByteTimeoutMs?, streamIdleTimeoutMs? }`. The first four are unlimited by default; hitting `maxTurns` ends the run with `finishReason: "max_turns"`, the other three throw a `BudgetExceededError`. The three network timeouts default to 300 s / 120 s / 300 s so a silent connection fails instead of hanging; set one to `0` or `Infinity` to turn it off. A timeout raises a retryable `TimeoutError`. See [Safety and operations](docs/guides/safety-and-ops.md#network-timeouts). |
 | `budget`          | `Budget`                                             | `{ maxCostUsd?, maxTotalTokens?, maxDurationMs?, maxTotalSubagents? }`, per run, workers included. Unlimited by default; exceeding it throws `BudgetExceededError` with partial usage. |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
@@ -1089,16 +1089,35 @@ Credential headers are always redacted (`Authorization`, `x-goog-api-key`, anyth
 ---
 ## Errors
 
-Provider failures throw `AgentAccelProviderError` — one actionable line,
+Provider failures throw a `ProviderError` — one actionable line,
 never a wire dump:
 
 ```text
 [openrouter/nvidia/nemotron-3.5-lightning:free] request failed (404): No endpoints found that support input video
 ```
 
-Raw details (`statusCode`, `url`, truncated body) stay attached as
+Branch on the class and `err.retryable` (true for HTTP 408/425/429/5xx,
+network errors and a cut stream), never on the message:
+
+```ts
+import { ProviderError, TimeoutError } from "agent-accelerator";
+
+try {
+  await agent.run("...");
+} catch (err) {
+  if (err instanceof ProviderError && err.retryable) retryLater(); // e.g. a 429 or 503
+  else if (err instanceof TimeoutError) retryLater(); // a request / first-byte / idle timeout
+  else throw err;
+}
+```
+
+`err.code` is the SDK kind (`"provider"`, `"incomplete_stream"` for a cut
+stream; `"timeout"`, `"config"`, ... on the other classes); the provider's own
+error code (e.g. `"not_found"`, `"rate_limit_exceeded"`) is `err.providerCode`.
+Raw details (`statusCode`, `url`, truncated body, `providerCode`) stay attached as
 non-enumerable properties: available programmatically, invisible in runtime
-dumps. URL query strings are stripped (keys sometimes live there); headers
+dumps. Input a model cannot take (a modality the catalog says it lacks, video on
+the OpenAI Responses wire) fails before the network with a `ValidationError`. URL query strings are stripped (keys sometimes live there); headers
 and cookies are never attached. Helpers:
 
 * `toConciseProviderError(err, providerId, modelId)` — collapse any provider error.

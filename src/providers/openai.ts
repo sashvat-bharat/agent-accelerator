@@ -51,6 +51,7 @@ import { clampCacheKey } from "../utils/cache.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOnResponses } from "../utils/errors.ts";
+import { ConfigError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import {
   parseArguments,
@@ -716,7 +717,7 @@ export class OpenAIResponsesProvider implements Provider {
     const clean = cleanModelId(model);
     const apiKey = resolveApiKey(options);
     if (!apiKey) {
-      throw new Error(
+      throw new ConfigError(
         "[Agent Accelerator] Missing OpenAI API key. Set OPENAI_API_KEY (or OPENAI_BASE_API_KEY) or pass apiKey."
       );
     }
@@ -804,7 +805,7 @@ export class OpenAIResponsesProvider implements Provider {
       try {
         const apiKey = resolveApiKey(options);
         if (!apiKey) {
-          throw new Error(
+          throw new ConfigError(
             "[Agent Accelerator] Missing OpenAI API key. Set OPENAI_API_KEY (or OPENAI_BASE_API_KEY) or pass apiKey."
           );
         }

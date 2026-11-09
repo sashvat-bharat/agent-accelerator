@@ -131,13 +131,13 @@ All extend `AgentAccelError` (`code`, `retryable`, `context`).
 
 | Class | Raised when |
 |---|---|
-| `ConfigError` | Missing key/base URL, bad model string, invalid config (before any network call) |
-| `ProviderError` | The API failed; `statusCode`, `provider`, `model`, `retryAfterMs` (non-enumerable) |
-| `TimeoutError` | A request, first-byte, idle or deadline limit hit (retryable) |
-| `BudgetExceededError` | `budget` / `limits.maxTotalTokens` exceeded; partial usage attached |
+| `ConfigError` | Missing key/base URL, no or bad model string, a removed provider, Gemini 1.x/2.x, invalid config (before any network call) |
+| `ProviderError` | The API failed; `code` is `"provider"` (`"incomplete_stream"` for a cut stream), `retryable` says whether a retry can help; `statusCode`, `provider`, `model`, `providerCode` (the provider's own code), `retryAfterMs` (non-enumerable) |
+| `TimeoutError` | A request, first-byte or idle timeout (retryable) |
+| `BudgetExceededError` | `budget` or `limits.maxTotalTokens` / `deadlineMs` / `maxToolCallsPerRun` exceeded; partial usage attached |
 | `ToolError` | A tool failed in a way surfaced to the caller |
-| `ValidationError` | Structured output or scheduled-action input did not validate |
-| `ThinkingLevelError` | Level not supported by the model; `allowedLevels` lists valid ones |
+| `ValidationError` | Structured output or scheduled-action input did not validate; input the model cannot take (an unsupported modality), before any network call; an empty prompt |
+| `ThinkingLevelError` | Level not supported by the model (a `ConfigError`); `allowedLevels` lists valid ones |
 | `SubAgentModelError` | Dynamic workers or scheduling without a worker model |
 | `SessionLoadError` | A valid session file exceeds limits (never quarantined) |
 | `SecurityPolicyError`, `RemoteFetchError` | File root or private-host policy refused a path or URL |
