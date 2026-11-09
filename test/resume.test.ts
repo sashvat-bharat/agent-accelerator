@@ -248,3 +248,28 @@ describe("a real kill -9", () => {
     expect(bodies[0].messages.filter((m: any) => m.role === "tool").map((m: any) => m.content)).toEqual(["A-result", "B-result"]);
   });
 });
+
+describe("reset()", () => {
+  it("clears the run's saved tool results and run marks but keeps the spending totals", async () => {
+    const root = tmp();
+    const replies = [() => callsReply(["ping"]), () => textReply("done")];
+    const agent = mk(root, async () => replies.shift()!(), {
+      tools: { ping: tool({ description: "ping", input: z.object({}), execute: () => "pong" }) },
+    });
+    await agent.run("go");
+    expect(agent.toolRecords).toHaveLength(1);
+    const turns = agent.usageTotals.turns;
+    expect(turns).toBe(2);
+
+    agent.reset();
+    expect(agent.toolRecords).toHaveLength(0);
+    expect(agent.runMarks).toHaveLength(0);
+    expect(agent.usageTotals.turns).toBe(turns); // spending is not conversation
+    expect(agent.usageReport().agent.turns).toBe(turns);
+
+    agent.persistNow();
+    await settle();
+    const journal = fs.readFileSync(path.join(sessionDirFor(root, "s1"), JOURNAL_FILE), "utf8");
+    expect(journal).not.toContain('"t":"tool"'); // the fresh snapshot carries no tool results of the cleared run
+  });
+});

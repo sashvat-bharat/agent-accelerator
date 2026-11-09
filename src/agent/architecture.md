@@ -23,3 +23,4 @@ The agent and everything that runs under it.
 - Exactly-once worker calls rest on the call key (parent run mark id + tool call id) and `meta.last`.
 - Only results branded by `makeSubagentResult` have their usage metadata trusted.
 - Each Agent records only its own model turns; never sum `AgentResponse.usage` for totals.
+- `reset()` clears the conversation (messages, run marks, the run's saved tool results) but never the spending totals.

@@ -697,13 +697,15 @@ export class Agent {
     return out || undefined;
   }
 
-  /** Clears conversation messages and provider thought signatures while keeping configuration. */
+  /** Starts a fresh conversation: clears messages, signatures, run marks and the run's saved tool results, keeps config and spending totals. */
   reset(): void {
     const sid = this.sessionId;
     this.context.messages = [];
     this.context.thoughtSignatures = [];
     this.context.systemPrompt = this.getFullInstructions();
     this.runMarks.length = 0;
+    this.toolRecords.length = 0; // a cleared conversation has no run to resume, so its finished tool results go too
+    this.activeMark = undefined;
     // Reset also drops session-scoped provider chaining/routing.
     try { clearInteractionChains(sid); } catch {}
     try { clearSessionRouting(sid); } catch {}
