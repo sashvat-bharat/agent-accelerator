@@ -91,6 +91,30 @@ describe("failed-run retry", () => {
     expect(res.usage.totalTokens).toBe(8); // the tool turn (4) + the final turn (4)
   });
 
+  it("reports the workers of a failed attempt in the final response", async () => {
+    fastRetries();
+    const sse = (t: string) =>
+      new Response(`data: ${JSON.stringify({ id: "w", choices: [{ delta: { content: t }, finish_reason: "stop" }], usage })}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    const helper = new Agent({
+      name: "helper",
+      model: "groq/test-model",
+      apiKey: "k",
+      baseUrl: "https://example.test/v1",
+      fetch: (async () => sse("worker answer")) as unknown as typeof fetch,
+    });
+    const callHelper = () =>
+      json({ id: "r", choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "helper", arguments: '{"task":"look it up"}' } }] } }], usage });
+    const { agent, bodies } = agentWith([callHelper, () => fail(503), () => text("done")], { subagents: [helper] });
+    const res = await agent.run("go");
+    expect(res.text).toBe("done");
+    expect(bodies).toHaveLength(3);
+    expect(res.subagents.map((s) => [s.name, s.text])).toEqual([["helper", "worker answer"]]); // attempt 1's worker is not lost
+    expect(res.usage.totalTokens).toBe(12); // tool turn (4) + worker (4) + final turn (4), nothing counted twice
+  });
+
   it("keeps the agent busy while it waits, so a new run() queues behind the retry", async () => {
     RUN_RETRY_DELAYS_MS.splice(0, RUN_RETRY_DELAYS_MS.length, 60, 60, 60, 60);
     const { agent, bodies } = agentWith([() => fail(503), () => text("one"), () => text("two")]);

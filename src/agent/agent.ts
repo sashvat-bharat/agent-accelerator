@@ -2256,7 +2256,7 @@ export class Agent {
 /** What a failed run attempt got done before it failed (the `partial` the loop attaches to its error). */
 type FailedAttempt = Partial<AgentResponse> & { usage: TokenUsage };
 
-// Adds what failed attempts already did (tool calls, results, turns, token usage) to the response of the attempt that finally worked, so a retry never hides side effects or cost; in: the final response + each failed attempt's `err.partial`, out: the run's AgentResponse.
+// Adds what failed attempts already did (tool calls, results, workers, turns, token usage) to the response of the attempt that finally worked, so a retry never hides side effects or cost; in: the final response + each failed attempt's `err.partial`, out: the run's AgentResponse.
 function withFailedAttempts(res: AgentResponse, failed: FailedAttempt[]): AgentResponse {
   const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   for (const f of failed) accumulateUsage(usage, f.usage);
@@ -2268,7 +2268,7 @@ function withFailedAttempts(res: AgentResponse, failed: FailedAttempt[]): AgentR
     thoughtSignature: res.thoughtSignature,
     toolCalls: [...failed.flatMap((f) => f.toolCalls ?? []), ...res.toolCalls],
     toolResults: [...failed.flatMap((f) => f.toolResults ?? []), ...res.toolResults],
-    subagents: res.subagents,
+    subagents: [...failed.flatMap((f) => f.subagents ?? []), ...res.subagents],
     usage,
     responseId: res.responseId,
     model: res.model,

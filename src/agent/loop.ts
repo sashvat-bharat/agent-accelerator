@@ -998,6 +998,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         turns,
         toolCalls: allToolCalls,
         toolResults: allToolResults,
+        subagents: allSubagents,
         text: finalResult?.text,
       };
     } catch {
@@ -1444,6 +1445,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
             turns,
             toolCalls: allToolCalls,
             toolResults: allToolResults,
+            subagents: allSubagents,
             text: lastResponse?.text,
           }; } catch {}
           outerStream.fail(raw);
@@ -1504,6 +1506,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         turns,
         toolCalls: allToolCalls,
         toolResults: allToolResults,
+        subagents: allSubagents,
         text: lastResponse?.text,
       };
       // Aborts always surface as AbortError with partial attached.
