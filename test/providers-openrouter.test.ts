@@ -920,6 +920,37 @@ describe("reasoning_details replay", () => {
     expect(assistant.reasoning_details).toEqual(first.providerSteps!.steps);
   });
 
+  it("keeps parsed-PDF file annotations once per hash and sends them back as annotations", async () => {
+    const ann = { type: "file", file: { hash: "h1", name: "a.pdf", content: [{ type: "text", text: "parsed" }] } };
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return stream([
+        frame({ annotations: [ann] }),
+        frame({ annotations: [ann, { type: "url_citation", url_citation: { url: "x" } }] }),
+        frame({ content: "ok" }),
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`,
+      ]);
+    };
+    const provider = new OpenRouterChatCompletionsProvider();
+    const first = await provider.generate("acme/test-model", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    expect(first.providerSteps?.steps).toEqual([ann]);
+    await provider.generate(
+      "acme/test-model",
+      {
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "ok", providerSteps: first.providerSteps },
+          { role: "user", content: "again" },
+        ],
+      },
+      { apiKey: "k" }
+    );
+    const assistant = bodies[1].messages.find((m: any) => m.role === "assistant");
+    expect(assistant.annotations).toEqual([ann]);
+    expect(assistant.reasoning_details).toBeUndefined();
+  });
+
   it("never sends reasoning_details taken from another provider's steps", async () => {
     let body: any;
     (globalThis as any).fetch = async (_u: unknown, req: any) => {

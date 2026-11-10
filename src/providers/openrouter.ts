@@ -26,7 +26,8 @@
  *   parsers is a local canonical correlation id only; it is never sent.
  * - Prior-turn reasoning is resent as `reasoning_details` exactly as returned (kept on the assistant message as
  *   `providerSteps`), which tool turns need (reasoning-tokens.md, "Preserving Reasoning"). Plain `reasoning` text alone is
- *   never resent.
+ *   never resent. Parsed-PDF `file` annotations ride the same way and go back as `annotations`, so the router does not parse
+ *   the same PDF again (pdf-inputs.md, "Skip Parsing Costs").
  */
 import type {
   Provider,
@@ -109,6 +110,7 @@ type ChatMessage =
         function: { name: string; arguments: string };
       }>;
       reasoning_details?: unknown[];
+      annotations?: unknown[];
       name?: string;
     }
   | { role: "tool"; content: string; tool_call_id: string; name?: string }
@@ -336,11 +338,27 @@ function mergeReasoningDetails(blocks: Array<Record<string, unknown>>, chunk: un
   }
 }
 
-// The reasoning blocks of an assistant turn as OpenRouter returned them, or undefined; in: a stored assistant message, out: fullHistoryMessages.
-function storedReasoningDetails(m: { providerSteps?: { provider: string; steps: unknown[] } }): unknown[] | undefined {
-  return m.providerSteps?.provider === "openrouter" && m.providerSteps.steps.length > 0
-    ? m.providerSteps.steps
-    : undefined;
+// Adds a streamed `file` annotation (a parsed PDF) once per `file.hash`; in: the stream handler, out: the annotations replayed on the next request.
+function mergeAnnotation(blocks: Array<Record<string, unknown>>, chunk: unknown): void {
+  if (!chunk || typeof chunk !== "object" || (chunk as { type?: unknown }).type !== "file") return;
+  const hash = (chunk as { file?: { hash?: unknown } }).file?.hash;
+  if (typeof hash === "string" && blocks.some((b) => (b as { file?: { hash?: unknown } }).file?.hash === hash)) return;
+  blocks.push(chunk as Record<string, unknown>);
+}
+
+// The reasoning blocks and the parsed-PDF annotations of an assistant turn as OpenRouter returned them (both live in `providerSteps`, told apart by `type: "file"`); in: a stored assistant message, out: fullHistoryMessages.
+function storedReplay(m: { providerSteps?: { provider: string; steps: unknown[] } }): {
+  reasoning_details?: unknown[];
+  annotations?: unknown[];
+} {
+  if (m.providerSteps?.provider !== "openrouter") return {};
+  const isFile = (x: unknown): boolean => (x as { type?: unknown } | null)?.type === "file";
+  const annotations = m.providerSteps.steps.filter(isFile);
+  const details = m.providerSteps.steps.filter((x) => !isFile(x));
+  return {
+    ...(details.length > 0 ? { reasoning_details: details } : {}),
+    ...(annotations.length > 0 ? { annotations } : {}),
+  };
 }
 
 // A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
@@ -401,10 +419,10 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         }
       }
     } else if (m.role === "assistant") {
-      const details = storedReasoningDetails(m);
+      const replay = storedReplay(m);
       if (typeof m.content === "string") {
         if (m.content) {
-          messages.push({ role: "assistant", content: m.content, ...(details ? { reasoning_details: details } : {}) });
+          messages.push({ role: "assistant", content: m.content, ...replay });
         }
         continue;
       }
@@ -429,7 +447,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         role: "assistant",
         content: texts.length > 0 ? texts.join("\n") : null,
         ...(calls.length > 0 ? { tool_calls: calls } : {}),
-        ...(details ? { reasoning_details: details } : {}),
+        ...replay,
       });
       lastRole = "assistant";
     } else if (m.role === "tool") {
@@ -803,6 +821,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         let lastToolIndex = 0;
         // The turn's reasoning blocks exactly as returned, replayed on the next request (tool turns need them).
         const reasoningBlocks: Array<Record<string, unknown>> = [];
+        // Parsed PDFs (`file` annotations) of the turn: sent back so OpenRouter does not parse the same file again.
+        const annotationBlocks: Array<Record<string, unknown>> = [];
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
         let sawFinishReason = false;
@@ -889,6 +909,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
               partialThinking: thinking,
             });
           }
+          if (Array.isArray(delta["annotations"]))
+            for (const a of delta["annotations"]) mergeAnnotation(annotationBlocks, a);
           // Tool-call deltas accumulate per choice index.
           const deltaCalls = delta["tool_calls"];
           if (Array.isArray(deltaCalls)) {
@@ -998,7 +1020,9 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
           },
           durationMs: Date.now() - startTime,
-          ...(reasoningBlocks.length > 0 ? { providerSteps: { provider: "openrouter", steps: reasoningBlocks } } : {}),
+          ...(reasoningBlocks.length + annotationBlocks.length > 0
+            ? { providerSteps: { provider: "openrouter", steps: [...reasoningBlocks, ...annotationBlocks] } }
+            : {}),
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);
