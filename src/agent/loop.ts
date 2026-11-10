@@ -797,24 +797,6 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
           (providerOptions as unknown as { timeoutMs?: number }).timeoutMs = limits.requestTimeoutMs;
         }
       } catch {}
-      // google:{store:false} opt-out pass-through (provider
-      // already respects body.store===false for chaining).
-      try {
-        const gStore =
-          (runOptions as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
-          (options as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
-          (config as unknown as { googleStore?: unknown }).googleStore;
-        if (gStore === false) (providerOptions as unknown as { store?: boolean }).store = false;
-      } catch {}
-      // Google interaction storage tier for the chain-TTL gate
-      // (`free`: 23h local gate; `paid`: 54d). Defaults to `free` in adapter.
-      try {
-        const gTier =
-          (runOptions as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
-          (options as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
-          (config as unknown as { googleTier?: unknown }).googleTier;
-        if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
-      } catch {}
 
       // A long-running call (e.g. Google long decode) times each HTTP request itself: no whole-call race.
       const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
@@ -1217,20 +1199,6 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           if (Number.isFinite(streamLimits.requestTimeoutMs) && streamLimits.requestTimeoutMs !== Infinity) {
             (providerOptions as unknown as { timeoutMs?: number }).timeoutMs = streamLimits.requestTimeoutMs;
           }
-        } catch {}
-        try {
-          const gStore =
-            (runOptions as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
-            (options as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
-            (config as unknown as { googleStore?: unknown }).googleStore;
-          if (gStore === false) (providerOptions as unknown as { store?: boolean }).store = false;
-        } catch {}
-        try {
-          const gTier =
-            (runOptions as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
-            (options as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
-            (config as unknown as { googleTier?: unknown }).googleTier;
-          if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
         } catch {}
 
         const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
