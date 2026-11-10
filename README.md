@@ -1452,6 +1452,8 @@ saveSessionFile(".session.json", agent, telemetry);
 
 ```bash
 bun run typecheck     # tsc --noEmit
+bun run lint          # Biome: unused code is an error, `any` a warning
+bun run format        # Biome formatter (120 columns); `biome format src examples` only checks
 bun test              # bun test test/
 bun run update-models # refresh model catalog cache (supports --force, --ttl=24h)
 ```
