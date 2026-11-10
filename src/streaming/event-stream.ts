@@ -1,5 +1,6 @@
 import type { StreamEvent, AgentResponse } from "../types/response.ts";
 import { telemetryBus } from "../telemetry.ts";
+import { ValidationError } from "../types/errors.ts";
 
 /** Listener invoked for a matching stream event type or `*`. */
 export type StreamEventListener = (event: StreamEvent) => void;
@@ -225,7 +226,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
       // Never hang result() — ending without a response is a
       // programming error, so fail loudly instead of leaving consumers
       // waiting forever.
-      this.fail(new Error("end() requires response"));
+      this.fail(new ValidationError("end() requires response"));
       return;
     }
     this.finished = true;

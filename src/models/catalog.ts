@@ -8,7 +8,7 @@
 import { getActiveCatalog, registerCatalogUpdateListener } from "./catalog-cache.ts";
 import type { ModelSpec, ProviderId, ModelLimit, ModelCost, ModelModalities } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
-import { ConfigError } from "../types/errors.ts";
+import { ConfigError, ValidationError } from "../types/errors.ts";
 
 // ---------------------------------------------------------------------------
 // Provider aliases — maps our internal ids to models.dev keys
@@ -96,7 +96,7 @@ function customRegistryKey(provider: string, modelId: string): string {
  */
 export function registerModel(spec: ModelSpec): void {
   if (!spec || typeof spec.id !== "string" || typeof spec.provider !== "string") {
-    throw new Error("[Agent Accelerator] registerModel requires spec.id and spec.provider strings");
+    throw new ValidationError("[Agent Accelerator] registerModel requires spec.id and spec.provider strings");
   }
   customModelRegistry.set(customRegistryKey(String(spec.provider), String(spec.id)), { ...spec });
   // Invalidate derived caches so the custom model is visible immediately.

@@ -2,6 +2,7 @@
 // paths are loaded via a lazy dynamic import so browsers never resolve it.
 import { bytesToBase64, base64ToBytes } from "./base64.ts";
 import { fetchRemoteBytes } from "./safe-io.ts";
+import { ValidationError } from "../types/errors.ts";
 
 export interface NormalizedMedia {
   mimeType: string;
@@ -141,7 +142,7 @@ export async function normalizeMediaInput(
     // but redirects are re-checked and the download is size-capped.
     const response = await fetchRemoteBytes(input, { allowPrivateNetwork: true });
     if (!response.ok) {
-      throw new Error(`Failed to fetch media from URL: ${input} (${response.statusText})`);
+      throw new ValidationError(`Failed to fetch media from URL: ${input} (${response.statusText})`);
     }
     const buffer = response.bytes;
     const mimeType = resolveMime(explicitMimeType, response.contentType, buffer, inferMimeType(input));
@@ -199,11 +200,11 @@ export async function normalizeMediaInput(
           dataUrl: `data:${mimeType};base64,${trimmed}`,
         };
       }
-      throw new Error(
+      throw new ValidationError(
         `Failed to normalize media input: not a valid file path, data URL, http URL, or base64 string: ${input.slice(0, 80)}`
       );
     }
   }
 
-  throw new Error(`Unsupported media input type: ${typeof input}`);
+  throw new ValidationError(`Unsupported media input type: ${typeof input}`);
 }

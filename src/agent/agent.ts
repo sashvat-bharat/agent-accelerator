@@ -698,7 +698,8 @@ export class Agent {
    */
   resume(): Promise<AgentResponse | undefined> {
     if (this.resuming) return this.resuming;
-    if (this.currentRun) throw new Error("[Agent Accelerator] resume() needs an idle agent: a run is already active.");
+    if (this.currentRun)
+      throw new ValidationError("[Agent Accelerator] resume() needs an idle agent: a run is already active.");
     const mark = this.runMarks.filter((m) => !m.end && m !== this.activeMark).pop();
     const last = this.context.messages[this.context.messages.length - 1];
     const nothingOpen = unfinishedToolCalls(this.context.messages).length === 0;
@@ -911,7 +912,7 @@ export class Agent {
   private assertSteerRoom(inbox: SteerEntry[]): void {
     const max = this.maxSteers ?? 20;
     if (inbox.length >= max) {
-      throw new Error(
+      throw new ValidationError(
         `[Agent Accelerator] Steer inbox is full (${inbox.length}/${max}). Wait for the active run to drain or increase midSession.maxSteers.`
       );
     }
@@ -969,7 +970,7 @@ export class Agent {
   interrupt(arg?: Error | string | ContentPart[], options?: AgentRunOptions): void | Promise<AgentResponse> {
     if (typeof arg === "string" || Array.isArray(arg)) {
       if (options?.stream === true) {
-        throw new Error(
+        throw new ValidationError(
           '[Agent Accelerator] interrupt(message) is non-streaming. Use stream(prompt, { enqueue: "interrupt" }) for a streaming interrupt.'
         );
       }
@@ -1013,12 +1014,12 @@ export class Agent {
   steer(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse> {
     this.assertPromptValid(prompt);
     if (options?.stream === true) {
-      throw new Error(
+      throw new ValidationError(
         '[Agent Accelerator] steer() is non-streaming. Use stream(prompt, { enqueue: "steer" }) for a streaming steer.'
       );
     }
     if (this.midSessionConfig.mode === "queue") {
-      throw new Error(
+      throw new ConfigError(
         '[Agent Accelerator] steer() is disabled by midSession.mode "queue". Use queue() or set mode to "auto"/"steer".'
       );
     }
@@ -1071,19 +1072,19 @@ export class Agent {
   queue(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse> {
     this.assertPromptValid(prompt);
     if (options?.stream === true) {
-      throw new Error(
+      throw new ValidationError(
         '[Agent Accelerator] queue() is non-streaming. Use stream(prompt, { enqueue: "queue" }) for a streaming follow-up.'
       );
     }
     if (this.midSessionConfig.mode === "steer") {
-      throw new Error(
+      throw new ConfigError(
         '[Agent Accelerator] queue() is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
       );
     }
     if (!this.currentRun) return this.run(prompt, options) as Promise<AgentResponse>;
     const max = this.midSessionConfig.maxQueued ?? 20;
     if (this.pendingQueue.length >= max) {
-      throw new Error(
+      throw new ValidationError(
         `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
       );
     }
@@ -1205,7 +1206,9 @@ export class Agent {
             continue;
           }
           if (this.pendingQueue.length + lateSteers.length >= max) {
-            entry.settle?.reject(new Error("[Agent Accelerator] Steer dropped: the follow-up queue is full."));
+            entry.settle?.reject(
+              new ValidationError("[Agent Accelerator] Steer dropped: the follow-up queue is full.")
+            );
             continue;
           }
           // The steer was never injected: it now runs as a follow-up, and the
@@ -1978,7 +1981,7 @@ export class Agent {
       const enforced = this.midSessionConfig.mode;
       const requested = options?.enqueue;
       if (requested && (enforced === "steer" || enforced === "queue") && requested !== enforced) {
-        throw new Error(
+        throw new ConfigError(
           `[Agent Accelerator] enqueue "${requested}" is disabled by midSession.mode "${enforced}". Use ${enforced}() or set mode to "auto"/"${requested}".`
         );
       }
@@ -1988,14 +1991,14 @@ export class Agent {
         return this.steerInto(this.currentRun, prompt, options);
       } else {
         if (this.midSessionConfig.mode === "steer") {
-          throw new Error(
+          throw new ConfigError(
             '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
           );
         }
         this.assertPromptValid(prompt);
         const max = this.midSessionConfig.maxQueued ?? 20;
         if (this.pendingQueue.length >= max) {
-          throw new Error(
+          throw new ValidationError(
             `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
           );
         }
@@ -2089,7 +2092,7 @@ export class Agent {
         (enforcedStream === "steer" || enforcedStream === "queue") &&
         requestedStream !== enforcedStream
       ) {
-        throw new Error(
+        throw new ConfigError(
           `[Agent Accelerator] enqueue "${requestedStream}" is disabled by midSession.mode "${enforcedStream}". Use ${enforcedStream}() or set mode to "auto"/"${requestedStream}".`
         );
       }
@@ -2133,20 +2136,20 @@ export class Agent {
           );
         } else {
           try {
-            stub.fail(new Error("[Agent Accelerator] No active run to steer."));
+            stub.fail(new ValidationError("[Agent Accelerator] No active run to steer."));
           } catch {}
         }
         return stub;
       }
       if (!urgent && this.midSessionConfig.mode === "steer") {
-        throw new Error(
+        throw new ConfigError(
           '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
         );
       }
       this.assertPromptValid(prompt);
       const max = this.midSessionConfig.maxQueued ?? 20;
       if (!urgent && this.pendingQueue.length >= max) {
-        throw new Error(
+        throw new ValidationError(
           `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
         );
       }

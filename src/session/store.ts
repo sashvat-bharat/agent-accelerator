@@ -30,7 +30,7 @@ import type { AgentResponse } from "../types/response.ts";
 import { base64ToBytes, bytesToBase64 } from "../utils/base64.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
 import type { SubAgentStep } from "../types/response.ts";
-import { SessionLoadError } from "../types/errors.ts";
+import { SecurityPolicyError, SessionLoadError, ValidationError } from "../types/errors.ts";
 import { createSessionId } from "../utils/session.ts";
 import { writeFileDurable, readWithBackup } from "../utils/durable.ts";
 import type { UsageTotals } from "./usage.ts";
@@ -754,7 +754,7 @@ export const writeFileAtomic = writeFileDurable;
 /** Session id grammar: no traversal, no slashes, no hidden files. */
 export function assertValidSessionId(sessionId: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sessionId)) {
-    throw new Error(
+    throw new ValidationError(
       `[Agent Accelerator] Invalid sessionId "${sessionId}": must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`
     );
   }
@@ -896,7 +896,7 @@ export function extractMediaToDir(messages: Message[], sessionDir: string): { me
   const root = path.resolve(sessionDir);
   const mediaDir = path.resolve(root, "media");
   if (!mediaDir.startsWith(root + path.sep) && mediaDir !== root) {
-    throw new Error("[Agent Accelerator] Media dir escapes session dir");
+    throw new SecurityPolicyError("[Agent Accelerator] Media dir escapes session dir");
   }
   try {
     fs.mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
@@ -976,7 +976,7 @@ export function sessionDirFor(rootDir: string, sessionId: string): string {
   const dir = path.resolve(root, sessionId);
   const rel = path.relative(root, dir);
   if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new Error(`[Agent Accelerator] Session dir escapes root: ${sessionId}`);
+    throw new SecurityPolicyError(`[Agent Accelerator] Session dir escapes root: ${sessionId}`);
   }
   return dir;
 }
@@ -1200,11 +1200,9 @@ export const MAX_SESSION_MESSAGES = 50_000;
 /** Default max raw JSON size accepted when loading a session snapshot (override via `SessionLimits`). */
 export const MAX_SESSION_JSON_BYTES = 100 * 1024 * 1024;
 
-// A SessionLoadError-named Error with the SDK prefix; in: validateSessionData, out: the error.
-function sessionLoadError(message: string): Error {
-  const e = new Error(`[Agent Accelerator] Invalid session: ${message}`);
-  e.name = "SessionLoadError";
-  return e;
+// A SessionLoadError with the SDK prefix; in: validateSessionData, out: the error.
+function sessionLoadError(message: string): SessionLoadError {
+  return new SessionLoadError(`[Agent Accelerator] Invalid session: ${message}`);
 }
 
 /**
@@ -1297,12 +1295,12 @@ export function reportUsageAnomaly(detail: { type: string; [k: string]: unknown 
  *   (reasoning is generated output); providers that omit one side are
  *   accepted, only impossible `thinking > output` with both present fails.
  *
- * Test helper: throws an Error describing the first violation, returns void
+ * Test helper: throws a ValidationError describing the first violation, returns void
  * when invariants hold. Not called in hot paths (validation only).
  */
 export function assertUsageInvariants(usage: TokenUsage): void {
   const fail = (msg: string): never => {
-    throw new Error(`[Agent Accelerator] Invalid usage: ${msg}`);
+    throw new ValidationError(`[Agent Accelerator] Invalid usage: ${msg}`);
   };
   const ints: Array<[string, unknown]> = [
     ["inputTokens", usage.inputTokens],

@@ -131,12 +131,12 @@ All extend `AgentAccelError` (`code`, `retryable`, `context`).
 
 | Class | Raised when |
 |---|---|
-| `ConfigError` | Missing key/base URL, no or bad model string, a removed provider, Gemini 1.x/2.x, invalid config (before any network call) |
+| `ConfigError` | Missing key/base URL, no or bad model string, a removed provider, Gemini 1.x/2.x, invalid config, a `steer`/`queue`/`enqueue` call the `midSession.mode` forbids (before any network call) |
 | `ProviderError` | The API failed; `code` is `"provider"` (`"incomplete_stream"` for a cut stream), `retryable` says whether a retry can help; `statusCode`, `provider`, `model`, `providerCode` (the provider's own code), `retryAfterMs` (non-enumerable) |
 | `TimeoutError` | A request, first-byte or idle timeout (retryable) |
 | `BudgetExceededError` | `budget` or `limits.maxTotalTokens` / `deadlineMs` / `maxToolCallsPerRun` exceeded; partial usage attached |
 | `ToolError` | A tool failed in a way surfaced to the caller |
-| `ValidationError` | Structured output or scheduled-action input did not validate; input the model cannot take (an unsupported modality), before any network call; an empty prompt |
+| `ValidationError` | Structured output or scheduled-action input did not validate; input the model cannot take (an unsupported modality), before any network call; an empty prompt; a call made the wrong way (a streaming option on `steer`/`queue`/`interrupt(message)`, `resume()` while busy, a full queue or steer inbox); a bad session id, `registerModel` spec or media input |
 | `ThinkingLevelError` | Level not supported by the model (a `ConfigError`); `allowedLevels` lists valid ones |
 | `SubAgentModelError` | Dynamic workers or scheduling without a worker model |
 | `SessionLoadError` | A valid session file exceeds limits (never quarantined) |
