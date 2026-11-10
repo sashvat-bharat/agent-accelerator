@@ -217,7 +217,8 @@ const INLINE_MIME: Record<MediaBlockType, readonly string[]> = {
   document: GOOGLE_DOCUMENT_MIME,
 };
 
-const FILES_API_PREFIX = "https://generativelanguage.googleapis.com/v1beta/files/";
+// A Google Files API link on either API version (`/v1/files/<id>` or `/v1beta/files/<id>`); the host is exact, so no other URL counts.
+const FILES_API_URL = /^https:\/\/generativelanguage\.googleapis\.com\/v1(?:beta)?\/files\/[^/\s]+/;
 const YOUTUBE_URL = /^https:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
 
 // ---------------------------------------------------------------------------
@@ -499,7 +500,7 @@ function uriBlock(type: MediaBlockType, value: string, mimeType?: string): Media
   const withMime = (mime?: string): MediaBlock => ({ type, uri: value, ...(mime ? { mime_type: mime } : {}) });
   if (type === "video" && YOUTUBE_URL.test(value)) return withMime(explicit);
   const mime = explicit ?? bareMime(inferMimeType(value, ""));
-  if (value.startsWith(FILES_API_PREFIX) || value.startsWith("gs://")) return withMime(mime);
+  if (FILES_API_URL.test(value) || value.startsWith("gs://")) return withMime(mime);
   return value.startsWith("https://") && mime && (GOOGLE_URL_MIME as readonly string[]).includes(mime)
     ? withMime(mime)
     : undefined;

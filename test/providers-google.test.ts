@@ -1091,6 +1091,26 @@ describe("Google media inputs (documented MIME types, URLs, YouTube)", () => {
     ]);
   });
 
+  it("recognises Files API links on /v1 and /v1beta, but not look-alike hosts or other paths", async () => {
+    // Audio is never fetched by Google, so only a real Files API link can travel as a uri; anything else is downloaded and inlined.
+    const seen = captureInput({
+      "https://generativelanguage.googleapis.com.evil.example/v1beta/files/x": { body: "ID3abc", type: "audio/mpeg" },
+      "https://generativelanguage.googleapis.com/v1beta/models/x": { body: "ID3abc", type: "audio/mpeg" },
+    });
+    await send([
+      { type: "audio", audio: "https://generativelanguage.googleapis.com/v1/files/abc123", mimeType: "audio/wav" },
+      { type: "audio", audio: "https://generativelanguage.googleapis.com/v1beta/files/def456", mimeType: "audio/wav" },
+      { type: "audio", audio: "https://generativelanguage.googleapis.com.evil.example/v1beta/files/x" },
+      { type: "audio", audio: "https://generativelanguage.googleapis.com/v1beta/models/x" },
+    ]);
+    const [a, b, c, d] = seen.body.input as Array<Record<string, unknown>>;
+    expect(a).toEqual({ type: "audio", uri: "https://generativelanguage.googleapis.com/v1/files/abc123", mime_type: "audio/wav" });
+    expect(b).toEqual({ type: "audio", uri: "https://generativelanguage.googleapis.com/v1beta/files/def456", mime_type: "audio/wav" });
+    expect(c!["data"]).toBeDefined();
+    expect(c!["uri"]).toBeUndefined();
+    expect(d!["data"]).toBeDefined();
+  });
+
   it("downloads and inlines audio URLs (Google never fetches audio) and bare MIME parameters", async () => {
     const seen = captureInput({
       "https://example.com/talk.mp3": { body: "ID3abc", type: "audio/mpeg" },
