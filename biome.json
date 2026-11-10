@@ -1,0 +1,29 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.6/schema.json",
+  "files": {
+    "includes": ["src/**", "examples/**", "!**/node_modules"]
+  },
+  "formatter": { "enabled": false },
+  "assist": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "none",
+      "correctness": {
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
+        "noUnusedFunctionParameters": "error"
+      },
+      "suspicious": {
+        "noExplicitAny": "warn",
+        "noConsole": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["src/update-models.ts", "src/providers.ts", "examples/**"],
+      "linter": { "rules": { "suspicious": { "noConsole": "off" } } }
+    }
+  ]
+}

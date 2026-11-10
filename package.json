@@ -41,6 +41,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "biome lint src examples",
     "test": "bun test test/",
     "update-models": "bun src/update-models.ts",
     "fetch-latest-provider-docs": "bun references/documentations/fetch-latest.ts"
@@ -49,6 +50,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.6",
     "@types/bun": "latest",
     "typescript": "^7.0.0",
     "zod": "^4.4.3"
