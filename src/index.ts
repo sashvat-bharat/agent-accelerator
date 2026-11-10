@@ -369,7 +369,6 @@ export type {
   RetryPolicyConfig,
   AgentLogger,
   ToolChoiceOption,
-  StopOption,
   Budget,
   BudgetState,
   SubAgentRunIds,

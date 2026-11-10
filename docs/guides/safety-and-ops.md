@@ -178,7 +178,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 Be aware (pre-1.0):
 - **One process per session folder.** A session you persist is locked (`<session folder>/.lock`): a second process opening the same session fails fast with a `ConfigError` instead of silently losing updates, while other sessions of the same home stay free; a lock left by a killed process is taken over, and local disks only. Scheduled actions can be shared by several processes (one folder and a short lock per action). Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `task.json`, `delivery.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
 - Scheduled actions: creating Agent held weakly; `run_now` never retries; no spending guardrail except `dynamicSubagents.workerBudget`; no timezone/DST logic; run only while the process lives.
-- Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding; `stop` on Google/OpenAI.
+- Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding.
 - Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.
 - The model catalog uses about 18 MB of memory when loaded; the SDK as a whole is not yet tuned for tiny-memory hosts.
 - The SSRF guard resolves DNS before `fetch` (a DNS-rebinding window remains). Local disk only; no network drives.

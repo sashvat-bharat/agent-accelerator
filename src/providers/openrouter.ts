@@ -546,7 +546,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (serviceTier) body.service_tier = serviceTier;
     if (cache === "5m" || cache === "1h") body.cache_control = { type: "ephemeral", ttl: cache };
     // Documented Chat Completions generation controls (only those the caller set).
-    Object.assign(body, mapGenerationParamsToChat(options, "openrouter", `openrouter/${modelId}`));
+    Object.assign(body, mapGenerationParamsToChat(options));
     // Structured outputs: Chat Completions `response_format{type:json_schema,json_schema}`.
     // Skipped when emulated (unsupported model): instruction already in messages.
     if (outputSpec && !outputEmulated) {

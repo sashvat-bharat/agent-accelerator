@@ -185,8 +185,6 @@ export interface ProviderRequestOptions {
   googleTier?: "free" | "paid";
   /** Upper bound on generated tokens for one model call. */
   maxOutputTokens?: number;
-  /** Stop sequence(s). Chat Completions only; other wires warn+drop. */
-  stop?: string[];
   /** `fetch` implementation used for the provider request (defaults to global `fetch`). */
   fetch?: typeof fetch;
   /** Base backoff delay in ms for provider retries (default 250). */

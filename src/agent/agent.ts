@@ -82,7 +82,7 @@ import {
 import { SessionJournal } from "../session/journal.ts";
 import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
-import { clearSessionRouting, normalizeStructuredOutput, normalizeStop } from "../providers.ts";
+import { clearSessionRouting, normalizeStructuredOutput } from "../providers.ts";
 import type { StructuredOutputSpec } from "../types/model.ts";
 import { clearInteractionChains } from "../providers/google.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
@@ -253,7 +253,6 @@ export class Agent {
   private readonly callDefaults: {
     toolChoice?: ToolChoiceOption;
     maxOutputTokens?: number;
-    stop?: string | string[];
     retry?: RetryPolicyConfig;
     env?: Record<string, string>;
     fetch?: typeof fetch;
@@ -503,7 +502,6 @@ export class Agent {
     this.callDefaults = {
       toolChoice: config.toolChoice,
       maxOutputTokens: config.maxOutputTokens,
-      stop: config.stop,
       retry: config.retry,
       env: config.env,
       fetch: config.fetch,
@@ -1378,7 +1376,6 @@ export class Agent {
     const toolChoice = normalizeToolChoiceOption(runOptions?.toolChoice ?? d.toolChoice);
     const retry = { ...d.retry, ...runOptions?.retry };
     const env = { ...d.env, ...runOptions?.env };
-    const stop = normalizeStop(runOptions?.stop ?? d.stop);
     const maxOutputTokens = runOptions?.maxOutputTokens ?? d.maxOutputTokens;
     const fetchImpl = runOptions?.fetch ?? d.fetch;
     return {
@@ -1393,7 +1390,6 @@ export class Agent {
       ...(this.googleTier ? { googleTier: this.googleTier } : {}),
       ...(toolChoice !== undefined ? { toolChoice } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-      ...(stop ? { stop } : {}),
       ...(Object.keys(env).length > 0 ? { env } : {}),
       ...(fetchImpl ? { fetch: fetchImpl } : {}),
       ...(retry.maxRetries !== undefined ? { maxRetries: retry.maxRetries } : {}),

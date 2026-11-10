@@ -13,7 +13,7 @@
  * Strictness contract (differs from the old lenient passthrough on purpose):
  * - Requests carry ONLY standard Chat Completions fields (`model`, `messages`,
  *   `tools`, `tool_choice`, `stream`, plus `max_tokens`/
- *   `stop` when explicitly set). No `reasoning`, `service_tier`,
+ *   when explicitly set). No `reasoning`, `service_tier`,
  *   `session_id`, `prompt_cache_key`, or other extras: strict endpoints
  *   (groq, ollama, …) fail unknown body properties, so anything unsupported
  *   is warn+drop, never sent.
@@ -761,7 +761,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     const compatTools = toCompatTools(tools);
     if (compatTools) body.tools = compatTools;
     // Standard Chat Completions generation fields, only when the caller set them.
-    Object.assign(body, mapGenerationParamsToChat(options, this.prefix, `${this.prefix}/${modelId}`));
+    Object.assign(body, mapGenerationParamsToChat(options));
     const toolChoice = mapToolChoiceToOpenAI(
       options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
     );

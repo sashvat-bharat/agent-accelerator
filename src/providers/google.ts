@@ -877,8 +877,8 @@ export class GoogleInteractionsProvider implements Provider {
       const thinkingActive = options?.thinking?.enabled !== false && (options?.thinking?.level ?? "dynamic") !== "none";
       if (thinkingActive) generationConfig["thinking_summaries"] = "auto";
       if (toolChoice) generationConfig["tool_choice"] = toolChoice;
-      // max_output_tokens only; stop warns and is dropped.
-      Object.assign(generationConfig, mapGenerationParamsToGoogle(options, `google/${modelId}`));
+      // max_output_tokens only.
+      Object.assign(generationConfig, mapGenerationParamsToGoogle(options));
 
       const body: InteractionRequestBody = {
         model: modelId,

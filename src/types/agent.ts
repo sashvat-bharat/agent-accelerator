@@ -45,9 +45,6 @@ export interface AgentLogger {
 /** Canonical tool-selection control. String form is the portable subset. */
 export type ToolChoiceOption = "auto" | "none" | "required" | { mode?: "auto" | "none" | "required"; tool?: string };
 
-/** Canonical stop control: sequence(s) halting generation. */
-export type StopOption = string | string[];
-
 /** Canonical structured-output input. Zod, JSON Schema, or explicit form. */
 export type StructuredOutputOption =
   | z.ZodType
@@ -159,8 +156,6 @@ export interface AgentConfig {
   googleTier?: "free" | "paid";
   /** Maximum output tokens for one model call. */
   maxOutputTokens?: number;
-  /** Stop sequence(s). */
-  stop?: StopOption;
   /**
    * Optional output schema (Zod, JSON Schema, or `{ name, schema, strict }`,
    * see `StructuredOutputOption`, stored as `unknown` so `zod`
@@ -373,8 +368,6 @@ export interface AgentRunOptions {
   toolChoice?: ToolChoiceOption;
   /** Per-run output-token cap. */
   maxOutputTokens?: number;
-  /** Per-run stop sequence(s). */
-  stop?: StopOption;
   /** Per-run retry override. */
   retry?: RetryPolicyConfig;
   /** Per-run fetch override. */
