@@ -125,13 +125,13 @@ describe("modality guard (catalog-driven)", () => {
     ).not.toThrow();
   });
 
-  it("accepts pdf on space-bunny-alpha via user-registered override", async () => {
+  it("accepts pdf on test-model via user-registered override", async () => {
     const { assertNoVideoPartsOnResponses, registerModel, clearCustomModels } = await import("../src/index.ts");
     clearCustomModels();
     registerModel({
-      id: "stealth/space-bunny-alpha",
+      id: "acme/test-model",
       provider: "openrouter",
-      name: "space-bunny-alpha",
+      name: "test-model",
       contextWindow: 128000,
       maxOutputTokens: 8192,
       modalities: { input: ["text", "image", "video", "pdf"], output: ["text"] },
@@ -142,13 +142,13 @@ describe("modality guard (catalog-driven)", () => {
       assertModalitiesSupported(
         ctx({ type: "file", file: "https://example.com/d.pdf", mimeType: "application/pdf" }),
         "openrouter",
-        "stealth/space-bunny-alpha"
+        "acme/test-model"
       )
     ).not.toThrow();
     // ...but video still fails fast on Responses transports (no wire shape),
     // even though the catalog flag is set.
     expect(() =>
-      assertNoVideoPartsOnResponses(ctx({ type: "video", video: "https://x/y.mp4" }), "openrouter", "stealth/space-bunny-alpha")
+      assertNoVideoPartsOnResponses(ctx({ type: "video", video: "https://x/y.mp4" }), "openrouter", "acme/test-model")
     ).toThrow(/unsupported video input.*Responses API accepts text\/image\/file only/);
     expect(() =>
       assertNoVideoPartsOnResponses(ctx({ type: "video", video: "https://x/y.mp4" }), "openai", "gpt-4o")

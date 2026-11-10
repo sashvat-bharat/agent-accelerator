@@ -6,7 +6,7 @@
  * never in the canonical layer (`src/providers.ts`).
  *
  * Wire contract: `references/testings/openrouter/CONTRACT.md` (docs + live
- * captures on `stealth/space-bunny-alpha`, 2026-09-24). Capability matrix:
+ * captures, 2026-09-24). Capability matrix:
  * `references/testings/openrouter/CAPABILITY-MATRIX.md`.
  *
  * This is the STABLE transport. The beta Responses skin
@@ -24,9 +24,9 @@
  * - IDs are provider-generated (`gen-…` generations, `call_…`/uuid tool ids)
  *   and echoed verbatim (`tool_call_id`). The `call_${random}` fallback in
  *   parsers is a local canonical correlation id only; it is never sent.
- * - Prior-turn reasoning is NOT resent (chat history is messages + tool
- *   calls only). This matches the Responses adapter behavior and avoids 400s
- *   on strict routes; documented in the capability matrix.
+ * - Prior-turn reasoning is resent as `reasoning_details` exactly as returned (kept on the assistant message as
+ *   `providerSteps`), which tool turns need (reasoning-tokens.md, "Preserving Reasoning"). Plain `reasoning` text alone is
+ *   never resent.
  */
 import type {
   Provider,
@@ -108,6 +108,7 @@ type ChatMessage =
         type: "function";
         function: { name: string; arguments: string };
       }>;
+      reasoning_details?: unknown[];
       name?: string;
     }
   | { role: "tool"; content: string; tool_call_id: string; name?: string }
@@ -311,6 +312,32 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
   return blocks;
 }
 
+// Folds one streamed `reasoning_details` chunk into the turn's blocks: chunks with the same index (else id) are one block whose text, summary, data and signature are concatenated or filled in, in order; in: the stream handler, out: the blocks replayed on the next request.
+function mergeReasoningDetails(blocks: Array<Record<string, unknown>>, chunk: unknown): void {
+  if (!chunk || typeof chunk !== "object" || Array.isArray(chunk)) return;
+  const c = chunk as Record<string, unknown>;
+  const same = blocks.find((b) =>
+    typeof c["index"] === "number" ? b["index"] === c["index"] : c["id"] != null && b["id"] === c["id"]
+  );
+  if (!same) {
+    blocks.push({ ...c });
+    return;
+  }
+  for (const [k, v] of Object.entries(c)) {
+    if (v === null || v === undefined) continue;
+    if ((k === "text" || k === "summary" || k === "data") && typeof v === "string" && typeof same[k] === "string")
+      same[k] = (same[k] as string) + v;
+    else same[k] = v;
+  }
+}
+
+// The reasoning blocks of an assistant turn as OpenRouter returned them, or undefined; in: a stored assistant message, out: fullHistoryMessages.
+function storedReasoningDetails(m: { providerSteps?: { provider: string; steps: unknown[] } }): unknown[] | undefined {
+  return m.providerSteps?.provider === "openrouter" && m.providerSteps.steps.length > 0
+    ? m.providerSteps.steps
+    : undefined;
+}
+
 // A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
 function resultToOutput(result: unknown): string {
   if (typeof result === "string") return result;
@@ -369,9 +396,10 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         }
       }
     } else if (m.role === "assistant") {
+      const details = storedReasoningDetails(m);
       if (typeof m.content === "string") {
         if (m.content) {
-          messages.push({ role: "assistant", content: m.content });
+          messages.push({ role: "assistant", content: m.content, ...(details ? { reasoning_details: details } : {}) });
         }
         continue;
       }
@@ -387,8 +415,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         } else if (part.type === "text" && part.text) {
           texts.push(part.text);
         }
-        // Prior-turn reasoning is NOT resent: chat history is messages +
-        // tool calls only (documented decision; avoids strict-route 400s).
+        // Reasoning is not rebuilt from text: the stored `reasoning_details` blocks are replayed verbatim below.
       }
       // Skip empty assistant turns (no text + no tool calls): strict
       // routes reject them, and they carry no signal (pi drop rule).
@@ -397,6 +424,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         role: "assistant",
         content: texts.length > 0 ? texts.join("\n") : null,
         ...(calls.length > 0 ? { tool_calls: calls } : {}),
+        ...(details ? { reasoning_details: details } : {}),
       });
       lastRole = "assistant";
     } else if (m.role === "tool") {
@@ -653,6 +681,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         provider: "openrouter",
         raw: res.raw,
         durationMs: res.durationMs,
+        providerSteps: res.providerSteps,
       };
     } catch (err) {
       // A stream reports its own generic abort; the caller's reason (`interrupt(new Error("..."))`) is what the run should carry.
@@ -748,6 +777,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         // Index of the most recent tool-call delta: unindexed chunks continue
         // it (falling back to calls.size would fork a phantom call per chunk).
         let lastToolIndex = 0;
+        // The turn's reasoning blocks exactly as returned, replayed on the next request (tool turns need them).
+        const reasoningBlocks: Array<Record<string, unknown>> = [];
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
         let sawFinishReason = false;
@@ -812,6 +843,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           const details = delta["reasoning_details"];
           if (Array.isArray(details)) {
             for (const block of details) {
+              mergeReasoningDetails(reasoningBlocks, block);
               const t = (block as { text?: string })?.text;
               if (typeof t === "string" && t) {
                 thinking += t;
@@ -942,6 +974,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
           },
           durationMs: Date.now() - startTime,
+          ...(reasoningBlocks.length > 0 ? { providerSteps: { provider: "openrouter", steps: reasoningBlocks } } : {}),
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);

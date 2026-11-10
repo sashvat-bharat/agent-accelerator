@@ -57,7 +57,7 @@ const TEXT_RESPONSE = {
   id: "gen-test123",
   object: "chat.completion",
   created: 1790243814,
-  model: "stealth/space-bunny-alpha",
+  model: "acme/test-model",
   choices: [
     {
       index: 0,
@@ -871,5 +871,72 @@ describe("hint for the opaque 400 of a bad media link", () => {
     expect(await ask(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]))).not.toContain("remote image or video link");
     (globalThis as any).fetch = bad("max_tokens is too large");
     expect(await ask("https://example.com/a.png")).not.toContain("remote image or video link");
+  });
+});
+
+describe("reasoning_details replay", () => {
+  const frame = (delta: unknown, extra: Record<string, unknown> = {}) =>
+    `data: ${JSON.stringify({ id: "gen-r", choices: [{ index: 0, delta, finish_reason: null }], ...extra })}\n\n`;
+  const stream = (frames: string[]) =>
+    new Response(frames.join("") + "data: [DONE]\n\n", { status: 200, headers: { "Content-Type": "text/event-stream" } });
+
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  it("merges streamed chunks by index, keeps the signature, and sends the blocks back on the next request", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return stream([
+        frame({ reasoning_details: [{ type: "reasoning.text", text: "step ", index: 0, format: "anthropic-claude-v1" }] }),
+        frame({ reasoning_details: [{ type: "reasoning.text", text: "one", signature: "sig1", index: 0 }] }),
+        frame({ reasoning_details: [{ type: "reasoning.encrypted", data: "abc", index: 1, id: "e1" }] }),
+        frame({ content: "ok" }),
+        `data: ${JSON.stringify({ id: "gen-r", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`,
+      ]);
+    };
+    const provider = new OpenRouterChatCompletionsProvider();
+    const first = await provider.generate("acme/test-model", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    expect(first.providerSteps).toEqual({
+      provider: "openrouter",
+      steps: [
+        { type: "reasoning.text", text: "step one", index: 0, format: "anthropic-claude-v1", signature: "sig1" },
+        { type: "reasoning.encrypted", data: "abc", index: 1, id: "e1" },
+      ],
+    });
+    await provider.generate(
+      "acme/test-model",
+      {
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: [{ type: "text", text: "ok" }], providerSteps: first.providerSteps },
+          { role: "user", content: "again" },
+        ],
+      },
+      { apiKey: "k" }
+    );
+    const assistant = bodies[1].messages.find((m: any) => m.role === "assistant");
+    expect(assistant.reasoning_details).toEqual(first.providerSteps!.steps);
+  });
+
+  it("never sends reasoning_details taken from another provider's steps", async () => {
+    let body: any;
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      body = JSON.parse(req.body);
+      return stream([frame({ content: "ok" }), `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`]);
+    };
+    await new OpenRouterChatCompletionsProvider().generate(
+      "acme/test-model",
+      {
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "yo", providerSteps: { provider: "google", steps: [{ type: "thought" }] } },
+          { role: "user", content: "again" },
+        ],
+      },
+      { apiKey: "k" }
+    );
+    expect(body.messages.find((m: any) => m.role === "assistant").reasoning_details).toBeUndefined();
   });
 });
