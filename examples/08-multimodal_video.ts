@@ -12,10 +12,12 @@ const agent = new Agent({
   fileAccess: { roots: ["./examples/files"] },
 });
 
-const res = await agent.run([
-  { type: "text", text: "What happens in this clip? One paragraph." },
-  { type: "video", video: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4" },
-]).catch(fail);
+const res = await agent
+  .run([
+    { type: "text", text: "What happens in this clip? One paragraph." },
+    { type: "video", video: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4" },
+  ])
+  .catch(fail);
 
 console.log(res.text);
 console.log(`[${res.usage.totalTokens} tok]`);

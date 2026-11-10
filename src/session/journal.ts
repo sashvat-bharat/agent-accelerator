@@ -32,7 +32,14 @@ const EMPTY_PENDING = JSON.stringify({ steer: [], queue: [] });
 
 // One `tool` journal line; the result is saved as given (tool results are JSON-safe by the time the executor returns them); in: a finished tool call, out: the journal.
 function toolLine(t: SessionToolRecord): string {
-  return JSON.stringify({ t: "tool", call: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}), ...(t.stopped ? { stopped: true } : {}) });
+  return JSON.stringify({
+    t: "tool",
+    call: t.id,
+    name: t.name,
+    result: t.result,
+    ...(t.isError ? { isError: true } : {}),
+    ...(t.stopped ? { stopped: true } : {}),
+  });
 }
 
 /** Persists one session folder (`sessions/<id>/`) step by step. */
@@ -80,10 +87,13 @@ export class SessionJournal {
       return;
     }
     const records: string[] = [];
-    for (let i = this.count; i < messages.length; i++) records.push(JSON.stringify({ t: "msg", i, m: this.toDisk(messages[i]!) }));
-    for (let r = this.runCount; r < runs.length; r++) records.push(JSON.stringify({ t: "run", id: runs[r]!.id, i: runs[r]!.i, at: runs[r]!.at }));
+    for (let i = this.count; i < messages.length; i++)
+      records.push(JSON.stringify({ t: "msg", i, m: this.toDisk(messages[i]!) }));
+    for (let r = this.runCount; r < runs.length; r++)
+      records.push(JSON.stringify({ t: "run", id: runs[r]!.id, i: runs[r]!.i, at: runs[r]!.at }));
     for (const mark of runs) {
-      if (mark.end && !this.endsOnDisk.has(mark.id)) records.push(JSON.stringify({ t: "end", id: mark.id, status: mark.end }));
+      if (mark.end && !this.endsOnDisk.has(mark.id))
+        records.push(JSON.stringify({ t: "end", id: mark.id, status: mark.end }));
     }
     const tools = agent.toolRecords ?? [];
     const firstNewTool = this.toolCount > 0 && tools[this.toolCount - 1] === this.lastTool ? this.toolCount : 0; // a new run starts the list over
@@ -129,13 +139,19 @@ export class SessionJournal {
     const epoch = randomUUID();
     const target = path.join(this.dir, "session.json");
     if (this.epoch === undefined) quarantineIfCorrupt(target);
-    const data = buildSessionData({ ...agent, context: { ...agent.context, messages: messages.map((m) => this.toDisk(m)) } }, null);
+    const data = buildSessionData(
+      { ...agent, context: { ...agent.context, messages: messages.map((m) => this.toDisk(m)) } },
+      null
+    );
     writeFileDurable(target, serializeSession({ ...data, epoch }) + "\n");
     const pending = this.pendingOf(agent);
     const tools = agent.toolRecords ?? [];
     // Waiting prompts and the current run's finished tool results live only in the journal, so a new journal starts with them.
     const header =
-      JSON.stringify({ t: "base", e: epoch }) + "\n" + (pending === EMPTY_PENDING ? "" : `{"t":"pending","p":${pending}}\n`) + tools.map((t) => toolLine(t) + "\n").join("");
+      JSON.stringify({ t: "base", e: epoch }) +
+      "\n" +
+      (pending === EMPTY_PENDING ? "" : `{"t":"pending","p":${pending}}\n`) +
+      tools.map((t) => toolLine(t) + "\n").join("");
     writeFileDurable(path.join(this.dir, JOURNAL_FILE), header, { backup: false });
     this.epoch = epoch;
     this.pending = pending;
@@ -165,7 +181,8 @@ export class SessionJournal {
     if (!waiting || waiting.steer.length + waiting.queue.length === 0) return EMPTY_PENDING;
     const parts = (prompt: ContentPart[]): ContentPart[] => {
       let disk = this.promptOnDisk.get(prompt);
-      if (!disk) this.promptOnDisk.set(prompt, (disk = this.toDisk({ role: "user", content: prompt }).content as ContentPart[]));
+      if (!disk)
+        this.promptOnDisk.set(prompt, (disk = this.toDisk({ role: "user", content: prompt }).content as ContentPart[]));
       return disk;
     };
     const slim = (list: SessionPendingPrompt[]): SessionPendingPrompt[] =>
@@ -180,10 +197,15 @@ export class SessionJournal {
 
   // JSON of everything in the snapshot that is not a message, identity or totals; in: the live agent, out: change detection + the `meta` record.
   private metaOf(agent: SessionAgentLike): string {
-    const { version: _v, sessionId: _s, messages: _m, totals: _t, runs: _r, usage: _u, ...rest } = buildSessionData(
-      { ...agent, context: { ...agent.context, messages: [] } },
-      null
-    );
+    const {
+      version: _v,
+      sessionId: _s,
+      messages: _m,
+      totals: _t,
+      runs: _r,
+      usage: _u,
+      ...rest
+    } = buildSessionData({ ...agent, context: { ...agent.context, messages: [] } }, null);
     return JSON.stringify(rest);
   }
 
@@ -202,7 +224,11 @@ export class SessionJournal {
         const dest = path.join(this.dir, "media", file);
         if (!fs.existsSync(dest)) writeFileDurable(dest, found.bytes, { backup: false });
         changed = true;
-        return { ...(part as unknown as Record<string, unknown>), [found.key]: `media/${file}`, ...(found.mimeType ? { mimeType: found.mimeType } : {}) } as unknown as ContentPart;
+        return {
+          ...(part as unknown as Record<string, unknown>),
+          [found.key]: `media/${file}`,
+          ...(found.mimeType ? { mimeType: found.mimeType } : {}),
+        } as unknown as ContentPart;
       });
       if (changed) out = { ...slim, content };
     }

@@ -22,7 +22,9 @@ function loadManual(): string {
 
 // One worker reply as the model sees it: a header line naming the worker, then its text; in: a WorkerReply, out: the branded result.
 function asResult(reply: WorkerReply): ReturnType<typeof makeSubagentResult> {
-  const text = reply.error ? `[worker ${reply.id}] failed: ${reply.error}` : `[worker ${reply.id}] replied:\n${reply.text}`;
+  const text = reply.error
+    ? `[worker ${reply.id}] failed: ${reply.error}`
+    : `[worker ${reply.id}] replied:\n${reply.text}`;
   return makeSubagentResult(text, [reply.metadata]);
 }
 
@@ -33,7 +35,12 @@ export function createSubagentsTool(agent: Agent): ToolDefinition {
   return tool({
     name: "subagents",
     description: loadManual()
-      .replace("{{LIMIT}}", Number.isFinite(max) ? `You can have at most ${max} open workers. Close the ones you are done with.` : "There is no limit on open workers. Close the ones you are done with: each one keeps its whole conversation.")
+      .replace(
+        "{{LIMIT}}",
+        Number.isFinite(max)
+          ? `You can have at most ${max} open workers. Close the ones you are done with.`
+          : "There is no limit on open workers. Close the ones you are done with: each one keeps its whole conversation."
+      )
       .replace("{{TOOLS}}", poolNames.length > 0 ? poolNames.join(", ") : "none (omit tools)"),
     input: z.object({
       command: z.enum(COMMANDS),
@@ -42,15 +49,28 @@ export function createSubagentsTool(agent: Agent): ToolDefinition {
       role: z.string().optional().describe("Short persona for the worker (spawn)."),
       instructions: z.string().optional().describe("The worker's own system prompt (spawn)."),
       task: z.string().optional().describe("The assignment (spawn) or the next message to the worker (message)."),
-      tools: z.array(z.string()).optional().describe(`Worker tools to grant, from: ${poolNames.join(", ") || "none"} (spawn).`),
-      history: z.number().int().min(0).optional().describe("How many of the first finished turns of this conversation to copy into the worker; 0 or omitted = none (spawn)."),
+      tools: z
+        .array(z.string())
+        .optional()
+        .describe(`Worker tools to grant, from: ${poolNames.join(", ") || "none"} (spawn).`),
+      history: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe(
+          "How many of the first finished turns of this conversation to copy into the worker; 0 or omitted = none (spawn)."
+        ),
     }),
     execute: async (a, ctx) => {
       const opts = { signal: ctx.signal, callId: ctx.toolCallId, onSubagentEvent: ctx.onSubagentEvent };
       const need = (field: "id" | "name" | "task"): string => {
         const value = a[field];
         if (!value?.trim()) {
-          const example = a.command === "spawn" ? { command: "spawn", name: "researcher", task: "Do the work." } : { command: a.command, id: "researcher-1a2b3c4d", task: "Next question." };
+          const example =
+            a.command === "spawn"
+              ? { command: "spawn", name: "researcher", task: "Do the work." }
+              : { command: a.command, id: "researcher-1a2b3c4d", task: "Next question." };
           throw new ValidationError(`${a.command} needs "${field}". Example: ${JSON.stringify(example)}`);
         }
         return value;
@@ -59,7 +79,17 @@ export function createSubagentsTool(agent: Agent): ToolDefinition {
         switch (a.command) {
           case "spawn":
             return asResult(
-              await agent.workers.spawn({ name: need("name"), role: a.role, instructions: a.instructions, task: need("task"), tools: a.tools, history: a.history }, opts)
+              await agent.workers.spawn(
+                {
+                  name: need("name"),
+                  role: a.role,
+                  instructions: a.instructions,
+                  task: need("task"),
+                  tools: a.tools,
+                  history: a.history,
+                },
+                opts
+              )
             );
           case "message":
             return asResult(await agent.workers.message(need("id"), need("task"), opts));
@@ -81,7 +111,15 @@ export function createSubagentsTool(agent: Agent): ToolDefinition {
 function describeWorkers(agent: Agent): string {
   const workers = agent.workers.list();
   const turns = agent.workers.turns();
-  const open = workers.length === 0 ? "none" : workers.map((w) => `- ${w.id} (${w.name}${w.role ? `, ${w.role}` : ""}) tools: ${w.tools.join(", ") || "none"}${w.busy ? " [busy]" : ""}`).join("\n");
+  const open =
+    workers.length === 0
+      ? "none"
+      : workers
+          .map(
+            (w) =>
+              `- ${w.id} (${w.name}${w.role ? `, ${w.role}` : ""}) tools: ${w.tools.join(", ") || "none"}${w.busy ? " [busy]" : ""}`
+          )
+          .join("\n");
   const copyable = turns.length === 0 ? "none yet" : turns.map((t) => `${t.n}. ${t.prompt}`).join("\n");
   return `Open workers:\n${open}\n\nFinished turns of this conversation (history: N copies turns 1 to N):\n${copyable}`;
 }

@@ -28,7 +28,9 @@ for (const arg of args) {
     }
     // Reject non-numeric TTLs (e.g. --ttl=abc) instead of silently caching NaN.
     if (!Number.isFinite(customTtlMs)) {
-      throw new ConfigError(`Invalid --ttl value "${val}": expected a number with optional h/m suffix (e.g. --ttl=24h).`);
+      throw new ConfigError(
+        `Invalid --ttl value "${val}": expected a number with optional h/m suffix (e.g. --ttl=24h).`
+      );
     }
   }
 }
@@ -42,13 +44,11 @@ try {
   const ttlHours = (result.ttlMs / (1000 * 60 * 60)).toFixed(1);
 
   if (result.fromCache) {
-    console.log(
-      `\x1b[32m✓\x1b[0m Models catalog is already fresh (within ${ttlHours}h TTL).`
-    );
+    console.log(`\x1b[32m✓\x1b[0m Models catalog is already fresh (within ${ttlHours}h TTL).`);
   } else {
     console.log(
       `\x1b[32m✓\x1b[0m Successfully downloaded and cached \x1b[1m${result.modelCount.toLocaleString()}\x1b[0m models ` +
-      `across \x1b[1m${result.providerCount}\x1b[0m providers in ${duration}s.`
+        `across \x1b[1m${result.providerCount}\x1b[0m providers in ${duration}s.`
     );
   }
   console.log(`  \x1b[90mCache location: ${result.cachePath}\x1b[0m`);

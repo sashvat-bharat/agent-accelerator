@@ -37,7 +37,14 @@ export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
  */
 export { executeToolCalls } from "./tools/executor.ts";
 
-export { assertPathAllowed, enforceFileAccess, fetchRemoteBytes, isPrivateAddress, RemoteFetchError, MAX_REMOTE_FETCH_BYTES } from "./utils/safe-io.ts";
+export {
+  assertPathAllowed,
+  enforceFileAccess,
+  fetchRemoteBytes,
+  isPrivateAddress,
+  RemoteFetchError,
+  MAX_REMOTE_FETCH_BYTES,
+} from "./utils/safe-io.ts";
 
 // Multi-Agent Delegation & Tools
 export {
@@ -126,12 +133,8 @@ export {
   GoogleInteractionsProvider,
   clearInteractionChains,
 } from "./providers/google.ts";
-export {
-  OpenRouterChatCompletionsProvider,
-} from "./providers/openrouter.ts";
-export {
-  OpenAIResponsesProvider,
-} from "./providers/openai.ts";
+export { OpenRouterChatCompletionsProvider } from "./providers/openrouter.ts";
+export { OpenAIResponsesProvider } from "./providers/openai.ts";
 /**
  * @deprecated Internal provider mappers/routing helpers. Prefer the
  * provider-agnostic registry (`resolveModel`/`getProvider`); direct mapper
@@ -251,14 +254,36 @@ export {
   emptyTotals,
 } from "./session/store.ts";
 export type { UsageReport, UsageLine, UsageTotals, AgentUsage, WorkerUsage, CostSource } from "./session/usage.ts";
-export type { SessionLimits, SessionPayloadStatus, PersistedAgentSession, SessionTotals, SessionAgentLike, LoadedSessionDir, PersistedSubAgentTrace, SessionRunMark, SessionRunEnd, SessionPending, SessionPendingPrompt, SessionToolRecord } from "./session/store.ts";
+export type {
+  SessionLimits,
+  SessionPayloadStatus,
+  PersistedAgentSession,
+  SessionTotals,
+  SessionAgentLike,
+  LoadedSessionDir,
+  PersistedSubAgentTrace,
+  SessionRunMark,
+  SessionRunEnd,
+  SessionPending,
+  SessionPendingPrompt,
+  SessionToolRecord,
+} from "./session/store.ts";
 
 // Utilities
 /**
  * @deprecated Session-routing internals. Prefer agent-level `sessionId`;
  * direct use moves to the future `/internal` entry.
  */
-export { createSessionId, hashSessionPart, createTrackingId, nowMs, newRunId, newTurnId, previewPrompt, parseModelRef } from "./utils/session.ts";
+export {
+  createSessionId,
+  hashSessionPart,
+  createTrackingId,
+  nowMs,
+  newRunId,
+  newTurnId,
+  previewPrompt,
+  parseModelRef,
+} from "./utils/session.ts";
 export type { ParsedModelRef } from "./utils/session.ts";
 /**
  * @deprecated Raw env access. Prefer explicit `Agent` config (which wins over

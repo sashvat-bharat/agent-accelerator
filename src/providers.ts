@@ -18,12 +18,7 @@ import { TRUNCATED_ARGS_KEY } from "./types/tool.ts";
 import { telemetryBus } from "./telemetry.ts";
 
 /** Classification of a canonical capability on a given provider. */
-export type ProviderCapabilityStatus =
-  | "NATIVE"
-  | "TRANSLATED"
-  | "AUTOMATIC"
-  | "EMULATED"
-  | "UNSUPPORTED";
+export type ProviderCapabilityStatus = "NATIVE" | "TRANSLATED" | "AUTOMATIC" | "EMULATED" | "UNSUPPORTED";
 
 /**
  * Single warning mechanism for provider capability differences.
@@ -65,8 +60,12 @@ export function emitProviderWarning(options: {
     reason: options.reason,
     fallback: options.fallback,
   });
-  try { (globalThis as any).__agentAccelWarnSink?.(msg, options); } catch {}
-  try { console.warn(msg); } catch {}
+  try {
+    (globalThis as any).__agentAccelWarnSink?.(msg, options);
+  } catch {}
+  try {
+    console.warn(msg);
+  } catch {}
 }
 
 /** Clears deduped-warning state (mainly for tests). */
@@ -124,9 +123,7 @@ export function clearSessionRouting(sessionId?: string): void {
  * Maps a canonical ThinkingLevel onto Google Interactions `thinking_level`.
  * Google values: minimal|low|medium|high (no off switch, no xhigh/max).
  */
-export function mapThinkingLevelToGoogle(
-  level: ThinkingLevel | string | undefined
-): { thinkingLevel?: string } {
+export function mapThinkingLevelToGoogle(level: ThinkingLevel | string | undefined): { thinkingLevel?: string } {
   if (!level) return {};
   const norm = String(level).toLowerCase().trim();
   if (norm === "dynamic") return {}; // server dynamic default (NATIVE)
@@ -171,9 +168,7 @@ export function mapServiceTierToGoogle(tier: ServiceTier | undefined): "flex" | 
  * the discontinued Responses skin, which clamped `xhigh` — everything passes
  * through. `max` rides the same verbatim path. `dynamic` omits (server default).
  */
-export function mapThinkingLevelToOpenRouterChat(
-  level: ThinkingLevel | string | undefined
-): { effort?: string } {
+export function mapThinkingLevelToOpenRouterChat(level: ThinkingLevel | string | undefined): { effort?: string } {
   if (!level) return {};
   const norm = String(level).toLowerCase().trim();
   if (norm === "dynamic") return {}; // server default
@@ -216,9 +211,16 @@ export function resolveCache(
 }
 
 /** Warns once per provider/model that per-media `resolution` is ignored (no such control on that wire for the given kinds of media); in: an adapter's request messages, out: telemetry bus only. */
-export function warnIgnoredMediaResolution(provider: string, messages: Message[], modelRef: string, kinds: Array<"image" | "video"> = ["image", "video"]): void {
+export function warnIgnoredMediaResolution(
+  provider: string,
+  messages: Message[],
+  modelRef: string,
+  kinds: Array<"image" | "video"> = ["image", "video"]
+): void {
   const used = messages.some(
-    (m) => Array.isArray(m.content) && m.content.some((p) => (p.type === "image" || p.type === "video") && kinds.includes(p.type) && p.resolution)
+    (m) =>
+      Array.isArray(m.content) &&
+      m.content.some((p) => (p.type === "image" || p.type === "video") && kinds.includes(p.type) && p.resolution)
   );
   if (!used) return;
   emitProviderWarning({
@@ -231,11 +233,7 @@ export function warnIgnoredMediaResolution(provider: string, messages: Message[]
 }
 
 /** OpenRouter Chat Completions `tool_choice` wire values. */
-export type OpenRouterChatToolChoice =
-  | "auto"
-  | "none"
-  | "required"
-  | { type: "function"; function: { name: string } };
+export type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 
 /**
  * Maps canonical toolChoice onto Chat Completions `tool_choice`.
@@ -260,9 +258,7 @@ export function mapToolChoiceToOpenRouterChat(
  * medium). Unlike OpenRouter (which clamps xhigh), OpenAI documents xhigh
  * and max natively so they pass through verbatim. `dynamic` omits (server default).
  */
-export function mapThinkingLevelToOpenAI(
-  level: ThinkingLevel | string | undefined
-): { effort?: string } {
+export function mapThinkingLevelToOpenAI(level: ThinkingLevel | string | undefined): { effort?: string } {
   if (!level) return {};
   const norm = String(level).toLowerCase().trim();
   if (norm === "dynamic") return {}; // server default
@@ -414,10 +410,15 @@ export function normalizeStop(stop: string | string[] | undefined): string[] | u
  * `max_tokens`, `stop`, `seed`. Only set values are
  * emitted, so strict endpoints never see anything the caller did not ask for.
  */
-export function mapGenerationParamsToChat(params: GenerationParams | undefined, provider = "chat", modelRef = ""): Record<string, unknown> {
+export function mapGenerationParamsToChat(
+  params: GenerationParams | undefined,
+  provider = "chat",
+  modelRef = ""
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (!params) return out;
-  if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0) out["max_tokens"] = Math.floor(params.maxOutputTokens);
+  if (finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0)
+    out["max_tokens"] = Math.floor(params.maxOutputTokens);
   if (params.stop && params.stop.length > 0) {
     out["stop"] = params.stop.slice(0, MAX_CHAT_STOP);
     if (params.stop.length > MAX_CHAT_STOP) {
@@ -435,7 +436,12 @@ export function mapGenerationParamsToChat(params: GenerationParams | undefined, 
 }
 
 // Warns that `stop`/`seed` have no parameter on this wire and are dropped; in: the OpenAI and Google mappers, out: provider_warning events.
-function warnUnsupportedStopSeed(provider: string, modelRef: string, params: GenerationParams, reasonSuffix: string): void {
+function warnUnsupportedStopSeed(
+  provider: string,
+  modelRef: string,
+  params: GenerationParams,
+  reasonSuffix: string
+): void {
   if (params.stop && params.stop.length > 0) {
     emitProviderWarning({
       provider,
@@ -488,12 +494,7 @@ export function mapGenerationParamsToGoogle(
 function isZodLike(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
-  return (
-    typeof v["safeParse"] === "function" ||
-    typeof v["parse"] === "function" ||
-    "_def" in v ||
-    "~standard" in v
-  );
+  return typeof v["safeParse"] === "function" || typeof v["parse"] === "function" || "_def" in v || "~standard" in v;
 }
 
 // True when a plain object has JSON Schema keywords; in: structured-output normalization, out: a boolean.
@@ -575,7 +576,9 @@ export function normalizeStructuredOutput(output: unknown): StructuredOutputSpec
  * present (bare Zod schema or `{ schema: Zod }`). Used by the loop for
  * post-parse validation; `undefined` means JSON-parse only.
  */
-export function extractOutputValidator(output: unknown): { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } } | undefined {
+export function extractOutputValidator(
+  output: unknown
+): { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } } | undefined {
   if (!output) return undefined;
   if (isZodLike(output) && typeof (output as { safeParse?: unknown }).safeParse === "function") {
     return output as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } };
@@ -639,7 +642,17 @@ export function parseStructuredOutput(text: string, output: unknown): unknown {
  */
 export function mapOutputToOpenAI(
   spec: StructuredOutputSpec | undefined
-): { format: { type: "json_schema"; name: string; schema: Record<string, unknown>; strict: boolean; description?: string } } | undefined {
+):
+  | {
+      format: {
+        type: "json_schema";
+        name: string;
+        schema: Record<string, unknown>;
+        strict: boolean;
+        description?: string;
+      };
+    }
+  | undefined {
   if (!spec) return undefined;
   return {
     format: {
@@ -670,8 +683,10 @@ export function mapOutputToGoogle(
 }
 
 /** Chat Completions `response_format` wire shape (OpenRouter + compat). */
-export type ChatCompletionsResponseFormat =
-  | { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
+export type ChatCompletionsResponseFormat = {
+  type: "json_schema";
+  json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string };
+};
 
 /**
  * Maps a normalized spec onto Chat Completions `response_format`.

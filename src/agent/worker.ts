@@ -30,14 +30,23 @@ export interface LiveWorkerTrace {
 export function sanitizeXmlTag(raw: string): string {
   let s = raw.toUpperCase().replace(/[^A-Z0-9.-]/g, "-");
   if (!/^[A-Z]/.test(s)) s = `AGENT-${s}`;
-  s = s.replace(/[.]/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
+  s = s
+    .replace(/[.]/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
   return s.slice(0, 64) || "SUBAGENT";
 }
 
 /** Sanitizes a worker name into a tool name (`lower-kebab`, 64 chars). */
 export function sanitizeToolName(raw: string): string {
   const tag = sanitizeXmlTag(raw);
-  return tag.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-{2,}/g, "-").slice(0, 64) || "sub-agent";
+  return (
+    tag
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-")
+      .replace(/-{2,}/g, "-")
+      .slice(0, 64) || "sub-agent"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -91,13 +100,8 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
  * `dynamicSubagents.model ?? subagentModel ?? SUB_AGENT_MODEL`.
  * Unwraps `ModelProviderInstance` / `ModelSpec` the same way.
  */
-export function resolveDynamicWorkerModel(
-  dynModelRawInput: unknown
-): string | Record<string, unknown> | undefined {
-  const dynModelRaw = dynModelRawInput as
-    | { model?: unknown; id?: unknown; provider?: unknown }
-    | string
-    | undefined;
+export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | Record<string, unknown> | undefined {
+  const dynModelRaw = dynModelRawInput as { model?: unknown; id?: unknown; provider?: unknown } | string | undefined;
   let dynModel: string | Record<string, unknown> | undefined;
   if (dynModelRaw && typeof dynModelRaw === "object" && "model" in (dynModelRaw as Record<string, unknown>)) {
     dynModel = (dynModelRaw as { model: string }).model as unknown as string | Record<string, unknown>;
@@ -109,7 +113,7 @@ export function resolveDynamicWorkerModel(
   ) {
     dynModel = dynModelRaw as Record<string, unknown>;
   } else {
-    dynModel = (dynModelRaw as string | undefined) || getSubModel() as string | undefined;
+    dynModel = (dynModelRaw as string | undefined) || (getSubModel() as string | undefined);
   }
   return dynModel;
 }
@@ -132,7 +136,10 @@ export function resolveDynamicModelInput(
  * `config.model ?? SUB_AGENT_MODEL ?? MODEL`, throwing with the same message
  * when nothing resolves. Kept here so `Agent` / `SubAgent` share one chain.
  */
-export function resolveSubAgentModel(config: { name?: string; model?: AgentConfig["model"] }): NonNullable<AgentConfig["model"]> {
+export function resolveSubAgentModel(config: {
+  name?: string;
+  model?: AgentConfig["model"];
+}): NonNullable<AgentConfig["model"]> {
   const resolvedModel = config.model ?? getSubModel() ?? getModel();
   if (!resolvedModel) {
     throw new ConfigError(
@@ -191,8 +198,10 @@ export function grantWorkerTools(
     if (declared) poolByNormalized.set(normalizeToolName(declared), def);
   }
   const grantedTools: Record<string, ToolDefinition> = {};
-  for (const toolName of ((requested as string[] | undefined) ?? [])) {
-    const pooled = (toolPool as Record<string, ToolDefinition>)[toolName] ?? poolByNormalized.get(normalizeToolName(String(toolName)));
+  for (const toolName of (requested as string[] | undefined) ?? []) {
+    const pooled =
+      (toolPool as Record<string, ToolDefinition>)[toolName] ??
+      poolByNormalized.get(normalizeToolName(String(toolName)));
     if (pooled) grantedTools[(pooled as ToolDefinition).name || toolName] = pooled;
   }
   return grantedTools;
@@ -205,9 +214,9 @@ function providerOf(modelStr: string | unknown | undefined): string | undefined 
     const m =
       typeof modelStr === "string"
         ? modelStr
-        : (modelStr as { model?: unknown; id?: unknown })?.model ??
+        : ((modelStr as { model?: unknown; id?: unknown })?.model ??
           (modelStr as { id?: unknown })?.id ??
-          String(modelStr);
+          String(modelStr));
     return resolveModel(m as string).provider.id;
   } catch {
     return undefined;
@@ -225,9 +234,9 @@ export function resolveWorkerCredentials(
   const chosenModelStrForProvider =
     typeof chosenModel === "string"
       ? chosenModel
-      : (chosenModel as { model?: unknown; id?: unknown })?.model ??
+      : ((chosenModel as { model?: unknown; id?: unknown })?.model ??
         (chosenModel as { id?: unknown })?.id ??
-        String(chosenModel);
+        String(chosenModel));
   const attemptedProvider = providerOf(chosenModelStrForProvider);
   const parentProvider = providerOf(parentAgent.modelStringOrSpec as string);
   const targetProviderFinal = providerOf(chosenModelStrForProvider);
@@ -380,10 +389,18 @@ export function createLiveWorker(
         trace.steps.push({ turn: turn.turns, type: "tool_result", name: tr.name, isError: tr.isError, timestamp });
       }
       trace.turns = Math.max(trace.turns, turn.turns);
-      try { hooks.trim?.(trace); } catch {}
-      try { hooks.touch?.(trace.trackingId); } catch {}
-      try { hooks.notify?.(trackingId); } catch {}
-      try { hooks.persist?.(); } catch {}
+      try {
+        hooks.trim?.(trace);
+      } catch {}
+      try {
+        hooks.touch?.(trace.trackingId);
+      } catch {}
+      try {
+        hooks.notify?.(trackingId);
+      } catch {}
+      try {
+        hooks.persist?.();
+      } catch {}
     } catch {}
   };
 
@@ -409,8 +426,12 @@ export function createLiveWorker(
         entry.thinking = partialThinking;
         entry.timestamp = Date.now();
       }
-      try { hooks.trim?.(trace); } catch {}
-      try { hooks.notify?.(trackingId); } catch {}
+      try {
+        hooks.trim?.(trace);
+      } catch {}
+      try {
+        hooks.notify?.(trackingId);
+      } catch {}
       try {
         hooks.emit?.({
           trackingId: displayId,
@@ -429,11 +450,19 @@ export function createLiveWorker(
   }): (() => void) => {
     const textListener = (e: { delta?: string }): void => onWorkerDelta(e.delta, undefined);
     const thinkingListener = (e: { thinkingDelta?: string }): void => onWorkerDelta(undefined, e.thinkingDelta);
-    try { workerStream.on("text_delta", textListener as (e: { delta?: string; thinkingDelta?: string }) => void); } catch {}
-    try { workerStream.on("thinking_delta", thinkingListener as (e: { delta?: string; thinkingDelta?: string }) => void); } catch {}
+    try {
+      workerStream.on("text_delta", textListener as (e: { delta?: string; thinkingDelta?: string }) => void);
+    } catch {}
+    try {
+      workerStream.on("thinking_delta", thinkingListener as (e: { delta?: string; thinkingDelta?: string }) => void);
+    } catch {}
     return () => {
-      try { workerStream.off("text_delta", textListener as (e: { delta?: string; thinkingDelta?: string }) => void); } catch {}
-      try { workerStream.off("thinking_delta", thinkingListener as (e: { delta?: string; thinkingDelta?: string }) => void); } catch {}
+      try {
+        workerStream.off("text_delta", textListener as (e: { delta?: string; thinkingDelta?: string }) => void);
+      } catch {}
+      try {
+        workerStream.off("thinking_delta", thinkingListener as (e: { delta?: string; thinkingDelta?: string }) => void);
+      } catch {}
     };
   };
 

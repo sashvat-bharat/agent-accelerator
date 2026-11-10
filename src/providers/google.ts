@@ -84,19 +84,70 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Image MIME types Google accepts inline. */
-export const GOOGLE_IMAGE_MIME = ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp", "image/tiff"] as const;
+export const GOOGLE_IMAGE_MIME = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+  "image/gif",
+  "image/bmp",
+  "image/tiff",
+] as const;
 /** Audio MIME types Google accepts inline (audio is never fetched by URL). */
-export const GOOGLE_AUDIO_MIME = ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm"] as const;
+export const GOOGLE_AUDIO_MIME = [
+  "audio/wav",
+  "audio/mp3",
+  "audio/aiff",
+  "audio/aac",
+  "audio/ogg",
+  "audio/flac",
+  "audio/mpeg",
+  "audio/m4a",
+  "audio/l16",
+  "audio/opus",
+  "audio/alaw",
+  "audio/mulaw",
+  "audio/webm",
+] as const;
 /** Video MIME types Google accepts inline. */
-export const GOOGLE_VIDEO_MIME = ["video/mp4", "video/mpeg", "video/mpg", "video/mov", "video/avi", "video/x-flv", "video/webm", "video/wmv", "video/3gpp"] as const;
+export const GOOGLE_VIDEO_MIME = [
+  "video/mp4",
+  "video/mpeg",
+  "video/mpg",
+  "video/mov",
+  "video/avi",
+  "video/x-flv",
+  "video/webm",
+  "video/wmv",
+  "video/3gpp",
+] as const;
 /** Document MIME types Google accepts (the only two). */
 export const GOOGLE_DOCUMENT_MIME = ["application/pdf", "text/csv"] as const;
 /** MIME types Google fetches itself from a public `https://` URL. */
 export const GOOGLE_URL_MIME = [
-  "text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf", "text/javascript",
-  "application/json", "application/pdf",
-  "image/bmp", "image/jpeg", "image/png", "image/webp",
-  "video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp",
+  "text/html",
+  "text/css",
+  "text/plain",
+  "text/xml",
+  "text/csv",
+  "text/rtf",
+  "text/javascript",
+  "application/json",
+  "application/pdf",
+  "image/bmp",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "video/mp4",
+  "video/mpeg",
+  "video/quicktime",
+  "video/avi",
+  "video/x-flv",
+  "video/mpg",
+  "video/webm",
+  "video/wmv",
+  "video/3gpp",
 ] as const;
 /** Common MIME spellings mapped to Google's inline names. */
 export const GOOGLE_INLINE_MIME_ALIASES: Readonly<Record<string, string>> = {
@@ -173,7 +224,13 @@ const YOUTUBE_URL = /^https:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
 // Interactions wire shapes (subset used by this adapter)
 // ---------------------------------------------------------------------------
 
-type MediaBlock = { type: MediaBlockType; mime_type?: string; data?: string; uri?: string; resolution?: MediaResolution };
+type MediaBlock = {
+  type: MediaBlockType;
+  mime_type?: string;
+  data?: string;
+  uri?: string;
+  resolution?: MediaResolution;
+};
 type InteractionContentBlock = { type: "text"; text: string } | MediaBlock;
 
 type InteractionInputStep =
@@ -316,7 +373,10 @@ function liveChainFor(sessionId: string | undefined, options?: ProviderRequestOp
  * below the previous turn's total (Rule 3: a caller dropped the chain without
  * rehydrating history). Never throws; observability-only.
  */
-function checkTurnTokens(sessionId: string | undefined, usage: { inputTokens: number; outputTokens: number; cachedTokens?: number }): void {
+function checkTurnTokens(
+  sessionId: string | undefined,
+  usage: { inputTokens: number; outputTokens: number; cachedTokens?: number }
+): void {
   try {
     if (!sessionId) return;
     const total = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
@@ -408,9 +468,7 @@ function toGoogleTools(tools?: StandardToolDeclaration[]): Array<Record<string, 
     type: "function",
     name: t.name,
     description: t.description,
-    parameters: stripSchemaForGoogle(
-      (t.parameters || { type: "object", properties: {} }) as Record<string, unknown>
-    ),
+    parameters: stripSchemaForGoogle((t.parameters || { type: "object", properties: {} }) as Record<string, unknown>),
   }));
 }
 
@@ -442,7 +500,9 @@ function uriBlock(type: MediaBlockType, value: string, mimeType?: string): Media
   if (type === "video" && YOUTUBE_URL.test(value)) return withMime(explicit);
   const mime = explicit ?? bareMime(inferMimeType(value, ""));
   if (value.startsWith(FILES_API_PREFIX) || value.startsWith("gs://")) return withMime(mime);
-  return value.startsWith("https://") && mime && (GOOGLE_URL_MIME as readonly string[]).includes(mime) ? withMime(mime) : undefined;
+  return value.startsWith("https://") && mime && (GOOGLE_URL_MIME as readonly string[]).includes(mime)
+    ? withMime(mime)
+    : undefined;
 }
 
 // Inlines a media part as base64 under Google's MIME name, failing before the network on an unsupported type; in: any media value (bytes, data URL, path, http URL), out: contentPartsToBlocks.
@@ -451,7 +511,8 @@ async function inlineBlock(type: MediaBlockType, value: MediaValue, mimeType?: s
   const raw = bareMime(norm.mimeType) ?? "";
   const mime = GOOGLE_INLINE_MIME_ALIASES[raw] ?? raw;
   if (!INLINE_MIME[type].includes(mime)) {
-    const what = type === "document" ? "Google reads only PDF and CSV documents" : `Google does not accept ${type} type "${mime}"`;
+    const what =
+      type === "document" ? "Google reads only PDF and CSV documents" : `Google does not accept ${type} type "${mime}"`;
     throw new ValidationError(
       `[Agent Accelerator] ${what} (got "${mime}"; supported: ${INLINE_MIME[type].join(", ")}). Convert the file or pass the correct mimeType.`
     );
@@ -533,7 +594,9 @@ function functionResultStep(part: ToolResultPart): InteractionInputStep {
  * behind them. Sending only the last message would drop the tool results and
  * leave the chained interaction waiting on its function calls.
  */
-async function latestTurnInput(context: ProviderContext): Promise<string | InteractionContentBlock[] | InteractionInputStep[]> {
+async function latestTurnInput(
+  context: ProviderContext
+): Promise<string | InteractionContentBlock[] | InteractionInputStep[]> {
   const messages = context.messages;
   let lastAssistant = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -616,10 +679,11 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
           const sig = shouldEchoSignature(partProvider ?? msgProvider, "google")
             ? part.thoughtSignature || m.thoughtSignature || ""
             : "";
-          const thoughtStep: { type: "thought"; signature?: string; summary: Array<{ type: string; text?: string }> } = {
-            type: "thought",
-            summary: [{ type: "text", text: part.thinking }],
-          };
+          const thoughtStep: { type: "thought"; signature?: string; summary: Array<{ type: string; text?: string }> } =
+            {
+              type: "thought",
+              summary: [{ type: "text", text: part.thinking }],
+            };
           if (sig) thoughtStep.signature = sig;
           steps.push(thoughtStep);
         } else if (part.type === "tool_call") {
@@ -732,11 +796,7 @@ function parseInteraction(
       // truncated marker); absent args mean a zero-argument call.
       const rawArgs: unknown = step.arguments;
       const args =
-        rawArgs && typeof rawArgs === "object"
-          ? rawArgs
-          : typeof rawArgs === "string"
-            ? parseArguments(rawArgs)
-            : {};
+        rawArgs && typeof rawArgs === "object" ? rawArgs : typeof rawArgs === "string" ? parseArguments(rawArgs) : {};
       toolCalls.push({
         id: step.id || newToolCallId(),
         name: step.name || "unknown",
@@ -814,8 +874,7 @@ export class GoogleInteractionsProvider implements Provider {
       // only signatures return and canonical `thinking` would always be empty.
       // Enabled whenever thinking is active — including the default/dynamic
       // case where no explicit level is sent — and off only when disabled.
-      const thinkingActive =
-        options?.thinking?.enabled !== false && (options?.thinking?.level ?? "dynamic") !== "none";
+      const thinkingActive = options?.thinking?.enabled !== false && (options?.thinking?.level ?? "dynamic") !== "none";
       if (thinkingActive) generationConfig["thinking_summaries"] = "auto";
       if (toolChoice) generationConfig["tool_choice"] = toolChoice;
       // max_output_tokens only; stop and seed warn+drop.
@@ -833,7 +892,9 @@ export class GoogleInteractionsProvider implements Provider {
       let outputEmulated = false;
       let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
       try {
-        outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+        outputSpec = normalizeStructuredOutput(
+          options?.output ?? (options as { outputSchema?: unknown })?.outputSchema
+        );
       } catch {
         outputSpec = undefined;
       }
@@ -845,7 +906,8 @@ export class GoogleInteractionsProvider implements Provider {
           provider: "google",
           capability: "structured output",
           requested: `${outputSpec.name} (google/${modelId})`,
-          reason: "the catalog reports structured_output: false for this model, so native response_format is unsupported.",
+          reason:
+            "the catalog reports structured_output: false for this model, so native response_format is unsupported.",
           fallback: "emulated JSON instruction + client validation (no response_format is sent)",
         });
       }
@@ -926,7 +988,10 @@ export class GoogleInteractionsProvider implements Provider {
     apiKey: string,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
+    const { signal: effective, cleanup } = combinedSignal(
+      signal,
+      timeoutFor(options as { timeoutMs?: number } | undefined)
+    );
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(method, body, options, apiKey, effective));
       const text = await res.text();
@@ -989,7 +1054,12 @@ export class GoogleInteractionsProvider implements Provider {
     const res = await this.doFetch(url, method, body, options, apiKey, options?.signal);
     this.throwIfError(res.status, url, res.text, modelId, res.headers);
     try {
-      return { status: res.status, statusText: res.statusText, headers: res.headers, interaction: JSON.parse(res.text) as InteractionObject };
+      return {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+        interaction: JSON.parse(res.text) as InteractionObject,
+      };
     } catch {
       throw toConciseProviderError(
         Object.assign(new Error("Invalid JSON response from Google Interactions API"), {
@@ -1004,7 +1074,12 @@ export class GoogleInteractionsProvider implements Provider {
   }
 
   // Fire-and-forget cancel so an aborted background run stops billing; in: an aborted generate/stream, out: POST {id}/cancel.
-  private cancelInteraction(baseUrl: string, id: string, options: ProviderRequestOptions | undefined, apiKey: string): void {
+  private cancelInteraction(
+    baseUrl: string,
+    id: string,
+    options: ProviderRequestOptions | undefined,
+    apiKey: string
+  ): void {
     void this.doFetch(`${baseUrl}/interactions/${id}/cancel`, "POST", undefined, options, apiKey).catch(() => {});
   }
 
@@ -1058,7 +1133,10 @@ export class GoogleInteractionsProvider implements Provider {
       try {
         for (let poll = 0; isRunning(reply.interaction.status); poll++) {
           await sleep(this.pollDelaysMs[poll === 0 ? 0 : 1], options?.signal);
-          reply = await withRetries(() => this.fetchInteraction(`${url}/${id}`, "GET", undefined, options, apiKey, clean), retryOptions);
+          reply = await withRetries(
+            () => this.fetchInteraction(`${url}/${id}`, "GET", undefined, options, apiKey, clean),
+            retryOptions
+          );
         }
         return reply;
       } catch (err) {
@@ -1069,7 +1147,10 @@ export class GoogleInteractionsProvider implements Provider {
 
     // Create (retried as a whole), wait if it runs in the background, then record the chain and map the result.
     const run = async (): Promise<ProviderGenerateResult> => {
-      let reply = await withRetries(() => this.fetchInteraction(url, "POST", body, options, apiKey, clean), retryOptions);
+      let reply = await withRetries(
+        () => this.fetchInteraction(url, "POST", body, options, apiKey, clean),
+        retryOptions
+      );
       if (body.background) reply = await waitForCompletion(reply);
       const { interaction } = reply;
       if (interaction.id && sessionId && body.store !== false) {
@@ -1079,12 +1160,10 @@ export class GoogleInteractionsProvider implements Provider {
         lastTurnTotals.delete(sessionId);
       }
       noteProviderTurn(sessionId, "google");
-      const parsed = parseInteraction(
-        interaction,
-        clean,
-        Date.now() - startTime,
-        { request: rawRequest, response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: interaction } }
-      );
+      const parsed = parseInteraction(interaction, clean, Date.now() - startTime, {
+        request: rawRequest,
+        response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: interaction },
+      });
       checkTurnTokens(sessionId, parsed.usage);
       return parsed;
     };
@@ -1163,9 +1242,16 @@ export class GoogleInteractionsProvider implements Provider {
         // (429/5xx/network) are retried before the first byte; a live stream is never retried.
         const open = (target: string, method: "POST" | "GET"): Promise<Response> =>
           openStreamResponse({
-            fetchOnce: () => withAbortTimer(linked, streamTimeoutMs, () => (options?.fetch ?? fetch)(target, this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, linked.signal))),
+            fetchOnce: () =>
+              withAbortTimer(linked, streamTimeoutMs, () =>
+                (options?.fetch ?? fetch)(
+                  target,
+                  this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, linked.signal)
+                )
+              ),
             onHttpError: (r, text) => this.throwIfError(r.status, target, text, clean, headersToRecord(r.headers)),
-            noBodyError: () => toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
+            noBodyError: () =>
+              toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
             retry: retryOptionsFrom(options),
             signal: linked.signal,
             label: { providerId: "google", modelId: clean },
@@ -1175,7 +1261,11 @@ export class GoogleInteractionsProvider implements Provider {
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
         });
-        const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
+        const responseMeta: Record<string, unknown> & {
+          status: number;
+          statusText: string;
+          headers: Record<string, string>;
+        } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         let reader: StreamReader | undefined;
@@ -1284,7 +1374,8 @@ export class GoogleInteractionsProvider implements Provider {
                 thinking += t;
                 eventStream.push({ type: "thinking_delta", thinkingDelta: t, partialThinking: thinking });
               }
-              if (!signature && typeof step["signature"] === "string" && step["signature"]) signature = step["signature"];
+              if (!signature && typeof step["signature"] === "string" && step["signature"])
+                signature = step["signature"];
             } else if (step["type"] === "function_call") {
               const args = step["arguments"];
               const startArgs = typeof args === "string" ? args : args ? JSON.stringify(args) : "";
@@ -1341,7 +1432,8 @@ export class GoogleInteractionsProvider implements Provider {
                 break;
               }
               if (chunk.done) break;
-              for (const m of parser.feed(decoder.decode(chunk.value, { stream: true }))) handleMessage(m.event, m.data);
+              for (const m of parser.feed(decoder.decode(chunk.value, { stream: true })))
+                handleMessage(m.event, m.data);
             }
             for (const m of parser.flush()) handleMessage(m.event, m.data);
           } finally {
@@ -1381,7 +1473,8 @@ export class GoogleInteractionsProvider implements Provider {
         }
 
         if (sessionId) {
-          if (responseId && body.store !== false) setChain(sessionId, { interactionId: responseId, model: clean, at: Date.now() });
+          if (responseId && body.store !== false)
+            setChain(sessionId, { interactionId: responseId, model: clean, at: Date.now() });
           else if (body.store === false) {
             interactionChains.delete(sessionId);
             lastTurnTotals.delete(sessionId);
@@ -1400,7 +1493,8 @@ export class GoogleInteractionsProvider implements Provider {
         const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
         const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
         const isSSEPayload =
-          (typeof ctEntry?.[1] === "string" && ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
+          (typeof ctEntry?.[1] === "string" &&
+            ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
           framesSeen > 0 ||
           badFrames > 0;
         if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
@@ -1431,14 +1525,10 @@ export class GoogleInteractionsProvider implements Provider {
       } catch (err: unknown) {
         const raw = err instanceof Error ? err : new Error(String(err));
         const isAbort =
-          linked.signal.aborted ||
-          eventStream.isCancelled() ||
-          (raw as { name?: string }).name === "AbortError";
+          linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
         if (isAbort) {
           cancelBackground();
-          eventStream.fail(
-            Object.assign(new Error("Stream aborted"), { name: "AbortError" })
-          );
+          eventStream.fail(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
         } else if (evictSessionId && usedChain && isNotFoundChainError(raw)) {
           // Reactive self-heal, fail-clean variant (Rule 2): the `start`
           // event is already delivered, so a transparent in-stream retry

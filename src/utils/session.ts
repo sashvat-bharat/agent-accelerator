@@ -15,8 +15,7 @@ export function createSessionId(prefix?: string): string {
   const head = prefix ? `${prefix}-` : "";
   let id: string;
   try {
-    const webCrypto =
-      (globalThis as any)?.crypto ?? (typeof crypto !== "undefined" ? crypto : undefined);
+    const webCrypto = (globalThis as any)?.crypto ?? (typeof crypto !== "undefined" ? crypto : undefined);
     if (webCrypto && typeof webCrypto.randomUUID === "function") {
       id = `${head}${webCrypto.randomUUID()}`;
     } else {

@@ -1,10 +1,6 @@
 import type { ModelSpec } from "./model.ts";
 import type { ToolDefinition } from "./tool.ts";
-import type {
-  ThinkingLevel,
-  CacheOption,
-  ServiceTier,
-} from "./core.ts";
+import type { ThinkingLevel, CacheOption, ServiceTier } from "./core.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
 import type { Agent } from "../agent/agent.ts";
 import type { z } from "zod";
@@ -47,11 +43,7 @@ export interface AgentLogger {
 }
 
 /** Canonical tool-selection control. String form is the portable subset. */
-export type ToolChoiceOption =
-  | "auto"
-  | "none"
-  | "required"
-  | { mode?: "auto" | "none" | "required"; tool?: string };
+export type ToolChoiceOption = "auto" | "none" | "required" | { mode?: "auto" | "none" | "required"; tool?: string };
 
 /** Canonical stop control: sequence(s) halting generation. */
 export type StopOption = string | string[];

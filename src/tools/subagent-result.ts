@@ -49,7 +49,12 @@ export function normalizeSubagentMetadata(metas: unknown): SubAgentExecutionMeta
     if (!raw || typeof raw !== "object") continue;
     const m = raw as Record<string, unknown>;
     const u = (m.usage && typeof m.usage === "object" ? m.usage : {}) as Record<string, unknown>;
-    const usage = { ...u, inputTokens: num(u.inputTokens), outputTokens: num(u.outputTokens), totalTokens: num(u.totalTokens) };
+    const usage = {
+      ...u,
+      inputTokens: num(u.inputTokens),
+      outputTokens: num(u.outputTokens),
+      totalTokens: num(u.totalTokens),
+    };
     out.push({
       ...(m as unknown as SubAgentExecutionMetadata),
       model: typeof m.model === "string" ? m.model : "unknown",

@@ -1,10 +1,26 @@
-import type { AgentConfig, EditableAgentConfig, AgentRunOptions, MidSessionConfig, ToolChoiceOption, RetryPolicyConfig, Budget, BudgetState, InterruptedRun } from "../types/agent.ts";
+import type {
+  AgentConfig,
+  EditableAgentConfig,
+  AgentRunOptions,
+  MidSessionConfig,
+  ToolChoiceOption,
+  RetryPolicyConfig,
+  Budget,
+  BudgetState,
+  InterruptedRun,
+} from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
 import { normalizeThinkingV2, resolveWhenBusy } from "../tools/tool.ts";
 import type { ToolDefinition, ToolResultRecord } from "../types/tool.ts";
 import { isSubagentResult } from "../tools/subagent-result.ts";
-import { CACHE_OPTIONS, type ThinkingLevel, type ThinkingConfig, type CacheOption, type ServiceTier } from "../types/core.ts";
+import {
+  CACHE_OPTIONS,
+  type ThinkingLevel,
+  type ThinkingConfig,
+  type CacheOption,
+  type ServiceTier,
+} from "../types/core.ts";
 import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -13,12 +29,7 @@ import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry } from "./workers.ts";
-import {
-  DEFAULT_MAX_DEPTH,
-  normalizeToolMap,
-  resolveDynamicModelInput,
-  resolveMainModel,
-} from "./worker.ts";
+import { DEFAULT_MAX_DEPTH, normalizeToolMap, resolveDynamicModelInput, resolveMainModel } from "./worker.ts";
 import * as path from "node:path";
 import { registerAgent } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../scheduler/store.ts";
@@ -27,7 +38,14 @@ import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
-import { runAgentLoop, streamAgentLoop, unfinishedToolCalls, endsWithStop, accumulateUsage, type SteerEntry } from "./loop.ts";
+import {
+  runAgentLoop,
+  streamAgentLoop,
+  unfinishedToolCalls,
+  endsWithStop,
+  accumulateUsage,
+  type SteerEntry,
+} from "./loop.ts";
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
 import { createSessionId, nowMs, newRunId, previewPrompt } from "../utils/session.ts";
 import {
@@ -38,8 +56,29 @@ import {
   listSubAgentTraceIdsForSessions,
   type SubAgentTrace,
 } from "./delegation.ts";
-import { addTurn, buildUsageReport, emptyUsage, mergeUsage, modelName, readUsage, type UsageNode, type UsageReport, type UsageTotals } from "../session/usage.ts";
-import { saveSessionFile, sessionDirFor, loadSessionDir, findInvalidMessage, priceUsage, telemetryBus, type SessionRunMark, type SessionRunEnd, type SessionPending, type SessionToolRecord } from "../session/store.ts";
+import {
+  addTurn,
+  buildUsageReport,
+  emptyUsage,
+  mergeUsage,
+  modelName,
+  readUsage,
+  type UsageNode,
+  type UsageReport,
+  type UsageTotals,
+} from "../session/usage.ts";
+import {
+  saveSessionFile,
+  sessionDirFor,
+  loadSessionDir,
+  findInvalidMessage,
+  priceUsage,
+  telemetryBus,
+  type SessionRunMark,
+  type SessionRunEnd,
+  type SessionPending,
+  type SessionToolRecord,
+} from "../session/store.ts";
 import { SessionJournal } from "../session/journal.ts";
 import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
@@ -47,16 +86,13 @@ import { clearSessionRouting, normalizeStructuredOutput, normalizeStop } from ".
 import type { StructuredOutputSpec } from "../types/model.ts";
 import { clearInteractionChains } from "../providers/google.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
-import { buildSessionData, type PersistedAgentSession, type SessionTotals,} from "../session/store.ts";
+import { buildSessionData, type PersistedAgentSession, type SessionTotals } from "../session/store.ts";
 import { SessionTelemetry } from "../session/store.ts";
 
 /**
  * Resolves a per-run thinking override without mutating agent config.
  */
-export function resolveEffectiveThinking(
-  base?: ThinkingConfig,
-  overrideLevel?: string
-): ThinkingConfig | undefined {
+export function resolveEffectiveThinking(base?: ThinkingConfig, overrideLevel?: string): ThinkingConfig | undefined {
   if (!overrideLevel) return base;
   if (overrideLevel === "none") return { enabled: false, level: "none", budgetTokens: 0 };
   if (overrideLevel === "dynamic") return { enabled: true, level: "dynamic", budgetTokens: -1 };
@@ -94,8 +130,7 @@ export interface AgentRunLimits {
 /** Resolves `(config as any).limits` with defaults (timeouts tolerate reasoning). */
 function resolveAgentLimits(config: { limits?: Record<string, unknown> }): AgentRunLimits {
   const raw = (config as { limits?: Record<string, unknown> }).limits ?? {};
-  const num = (v: unknown): number | undefined =>
-    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
   const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
   return {
@@ -104,7 +139,9 @@ function resolveAgentLimits(config: { limits?: Record<string, unknown> }): Agent
     ...(num(raw.maxToolCallsPerRun) !== undefined
       ? { maxToolCallsPerRun: Math.max(1, Math.floor(num(raw.maxToolCallsPerRun)!)) }
       : {}),
-    ...(num(raw.maxTotalTokens) !== undefined ? { maxTotalTokens: Math.max(1, Math.floor(num(raw.maxTotalTokens)!)) } : {}),
+    ...(num(raw.maxTotalTokens) !== undefined
+      ? { maxTotalTokens: Math.max(1, Math.floor(num(raw.maxTotalTokens)!)) }
+      : {}),
     requestTimeoutMs: timeout(raw.requestTimeoutMs) ?? 300_000,
     firstByteTimeoutMs: timeout(raw.firstByteTimeoutMs) ?? 120_000,
     streamIdleTimeoutMs: timeout(raw.streamIdleTimeoutMs) ?? 300_000,
@@ -325,34 +362,50 @@ export class Agent {
     this.subagentModel = dynModel as string | any | undefined;
     const dynEnabled = dynRaw ? (dynRaw.enabled ?? true) : false;
     if (dynRaw) {
-      const dynTools = normalizeToolMap((dynRaw as { tools?: Record<string, ToolDefinition> | ToolDefinition[] }).tools);
+      const dynTools = normalizeToolMap(
+        (dynRaw as { tools?: Record<string, ToolDefinition> | ToolDefinition[] }).tools
+      );
       const rawDepth = (dynRaw as { maxDepth?: unknown }).maxDepth;
       // Depth is unlimited unless the developer sets a cap (a whole number >= 1; Infinity also means unlimited).
-      if (rawDepth !== undefined && rawDepth !== Infinity && !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)) {
-        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1, or omit it for no limit; set dynamicSubagents.enabled: false to turn workers off.`);
+      if (
+        rawDepth !== undefined &&
+        rawDepth !== Infinity &&
+        !(Number.isInteger(rawDepth) && (rawDepth as number) >= 1)
+      ) {
+        throw new ConfigError(
+          `[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1, or omit it for no limit; set dynamicSubagents.enabled: false to turn workers off.`
+        );
       }
       const rawBudget = (dynRaw as { workerBudget?: { maxCostUsd?: unknown; maxTotalTokens?: unknown } }).workerBudget;
       for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
         const v = rawBudget?.[key];
         if (v !== undefined && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
-          throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.workerBudget.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`);
+          throw new ConfigError(
+            `[Agent Accelerator] Invalid dynamicSubagents.workerBudget.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`
+          );
         }
       }
       // Open workers are unlimited unless the developer sets a cap (a number >= 1; Infinity also means unlimited).
       const rawMax = (dynRaw as { maxSpawn?: unknown }).maxSpawn;
       if (rawMax !== undefined && (typeof rawMax !== "number" || Number.isNaN(rawMax))) {
-        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.maxSpawn ${JSON.stringify(rawMax)}: expected a whole number >= 1, or omit it for no limit.`);
+        throw new ConfigError(
+          `[Agent Accelerator] Invalid dynamicSubagents.maxSpawn ${JSON.stringify(rawMax)}: expected a whole number >= 1, or omit it for no limit.`
+        );
       }
       const maxSpawn = rawMax === undefined || rawMax === Infinity ? Infinity : Math.max(1, Math.floor(rawMax));
       // Only scheduled actions are timed: no limit unless the developer sets one (0 and Infinity mean none).
       for (const removed of ["timeout", "modelMaySetTimeout"]) {
         if ((dynRaw as Record<string, unknown>)[removed] !== undefined) {
-          throw new ConfigError(`[Agent Accelerator] dynamicSubagents.${removed} was removed: set dynamicSubagents.workerTimeoutMs (the longest a scheduled run may take, optional) and let each scheduled action carry its own timeoutMs.`);
+          throw new ConfigError(
+            `[Agent Accelerator] dynamicSubagents.${removed} was removed: set dynamicSubagents.workerTimeoutMs (the longest a scheduled run may take, optional) and let each scheduled action carry its own timeoutMs.`
+          );
         }
       }
       const rawTimeout = (dynRaw as { workerTimeoutMs?: unknown }).workerTimeoutMs;
       if (rawTimeout !== undefined && (typeof rawTimeout !== "number" || Number.isNaN(rawTimeout) || rawTimeout < 0)) {
-        throw new ConfigError(`[Agent Accelerator] Invalid dynamicSubagents.workerTimeoutMs ${JSON.stringify(rawTimeout)}: expected a number of milliseconds > 0, or omit it (0 and Infinity mean no limit).`);
+        throw new ConfigError(
+          `[Agent Accelerator] Invalid dynamicSubagents.workerTimeoutMs ${JSON.stringify(rawTimeout)}: expected a number of milliseconds > 0, or omit it (0 and Infinity mean no limit).`
+        );
       }
       const workerTimeoutMs = !rawTimeout ? Infinity : Math.max(1, Math.floor(rawTimeout));
       this.dynamicSubagents = {
@@ -419,17 +472,20 @@ export class Agent {
     }
     this.cache = config.cache;
     if (config.resume !== undefined && config.resume !== "automatic" && config.resume !== "explicit") {
-      throw new ConfigError(`[Agent Accelerator] Invalid resume ${JSON.stringify(config.resume)}: expected "automatic" (default) or "explicit".`);
+      throw new ConfigError(
+        `[Agent Accelerator] Invalid resume ${JSON.stringify(config.resume)}: expected "automatic" (default) or "explicit".`
+      );
     }
     this.resumeMode = config.resume ?? "automatic";
     if (config.runRetries !== undefined && !(Number.isInteger(config.runRetries) && config.runRetries >= 0)) {
-      throw new ConfigError(`[Agent Accelerator] Invalid runRetries ${JSON.stringify(config.runRetries)}: expected a whole number >= 0 (default 3, 0 turns it off).`);
+      throw new ConfigError(
+        `[Agent Accelerator] Invalid runRetries ${JSON.stringify(config.runRetries)}: expected a whole number >= 0 (default 3, 0 turns it off).`
+      );
     }
     this.runRetries = config.runRetries ?? 3;
 
     this.serviceTier = config.serviceTier;
-    this.onFailure =
-      config.onFailure === "rollback" || config.onFailure === "keep" ? config.onFailure : "auto";
+    this.onFailure = config.onFailure === "rollback" || config.onFailure === "keep" ? config.onFailure : "auto";
     this.forkConfig = { ...config };
     this.captureRaw = config.captureRaw;
     this.budget = config.budget ? { ...config.budget } : undefined;
@@ -465,7 +521,6 @@ export class Agent {
     if (config.tools) {
       Object.assign(this.tools, normalizeToolMap(config.tools));
     }
-
 
     if (Array.isArray(config.subagents)) {
       const subagentTools = buildAgentTools(config.subagents);
@@ -574,7 +629,11 @@ export class Agent {
 
   // Records one model call of THIS agent (priced per turn, with the service tier); in: the loop's onTurnUsage, out: this.usageTotals (saved by the next persist).
   private recordTurnUsage(usage: TokenUsage, spec: Parameters<typeof priceUsage>[1]): void {
-    addTurn(this.usageTotals, usage, priceUsage(usage, spec, this.serviceTier ? { serviceTier: this.serviceTier } : undefined));
+    addTurn(
+      this.usageTotals,
+      usage,
+      priceUsage(usage, spec, this.serviceTier ? { serviceTier: this.serviceTier } : undefined)
+    );
   }
 
   /** Adds another agent's spending to this one (a fixed worker's per-call copy into its template). @internal */
@@ -589,7 +648,10 @@ export class Agent {
    * below it. Spending of one-shot scheduled-action workers is in their run files, not here.
    */
   usageReport(): UsageReport {
-    return buildUsageReport({ id: this.sessionId, name: this.name, model: modelName(this.modelStringOrSpec), totals: this.usageTotals }, [...this.workers.usageNodes(), ...this.fixedWorkerNodes()]);
+    return buildUsageReport(
+      { id: this.sessionId, name: this.name, model: modelName(this.modelStringOrSpec), totals: this.usageTotals },
+      [...this.workers.usageNodes(), ...this.fixedWorkerNodes()]
+    );
   }
 
   // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is merged into them); in: the constructor config, out: usageReport.
@@ -598,14 +660,25 @@ export class Agent {
     for (const entry of this.forkConfig.subagents ?? []) {
       const worker = "agent" in entry ? entry.agent : entry;
       const name = "agent" in entry ? entry.name : worker.name;
-      nodes.push({ id: name, name, model: modelName(worker.modelStringOrSpec), status: "fixed", totals: worker.usageTotals, workers: [] });
+      nodes.push({
+        id: name,
+        name,
+        model: modelName(worker.modelStringOrSpec),
+        status: "fixed",
+        totals: worker.usageTotals,
+        workers: [],
+      });
     }
     return nodes;
   }
 
   // Says on the telemetry bus that resuming (or a prompt that was waiting) failed; in: a rejected resume, out: telemetryBus.
   private reportResumeFailure(err: unknown): void {
-    telemetryBus.emitWarning("agent.resume_failed", `[Agent Accelerator] Resuming session ${this.sessionId} failed: ${err instanceof Error ? err.message : String(err)}`, { sessionId: this.sessionId });
+    telemetryBus.emitWarning(
+      "agent.resume_failed",
+      `[Agent Accelerator] Resuming session ${this.sessionId} failed: ${err instanceof Error ? err.message : String(err)}`,
+      { sessionId: this.sessionId }
+    );
   }
 
   /** Runs that a crash cut off (they began, never ended and are not running now), oldest first. Needs `persist: { dir }` and the same `sessionId` as before the restart. */
@@ -642,7 +715,11 @@ export class Agent {
     telemetryBus.emit({
       code: "agent.resumed",
       message: `[Agent Accelerator] resuming run ${mark.id} of session ${this.sessionId}`,
-      data: { sessionId: this.sessionId, runId: mark.id, pendingToolCalls: unfinishedToolCalls(this.context.messages).map((c) => c.name) },
+      data: {
+        sessionId: this.sessionId,
+        runId: mark.id,
+        pendingToolCalls: unfinishedToolCalls(this.context.messages).map((c) => c.name),
+      },
     });
     const run = this.startNonStreamingRun("", undefined, mark);
     const clear = (): void => {
@@ -655,7 +732,18 @@ export class Agent {
 
   // The finished tool calls of the current run as results the loop can reuse; in: toolRecords, out: loopConfig.resume.stored.
   private storedToolResults(): Map<string, ToolResultRecord> {
-    return new Map(this.toolRecords.map((t) => [t.id, { id: t.id, name: t.name, result: t.result, ...(t.isError ? { isError: true } : {}), ...(t.stopped ? { stopped: true } : {}) } as ToolResultRecord]));
+    return new Map(
+      this.toolRecords.map((t) => [
+        t.id,
+        {
+          id: t.id,
+          name: t.name,
+          result: t.result,
+          ...(t.isError ? { isError: true } : {}),
+          ...(t.stopped ? { stopped: true } : {}),
+        } as ToolResultRecord,
+      ])
+    );
   }
 
   // Closes a run's mark with how it ended and saves that at once (not on the next tick), so the disk is up to date when `await run()` returns; in: the run's promise handlers, out: runMarks + journal.
@@ -683,9 +771,7 @@ export class Agent {
     const base = this.instructions || "";
     let out = base;
     const isThinkingEnabled =
-      this.thinkingConfig?.enabled !== false &&
-      this.thinkingConfig?.level &&
-      this.thinkingConfig?.level !== "none";
+      this.thinkingConfig?.enabled !== false && this.thinkingConfig?.level && this.thinkingConfig?.level !== "none";
     if (isThinkingEnabled && !out.includes("[Reasoning Directive]")) {
       const guidance =
         "[Reasoning Directive]\n" +
@@ -707,8 +793,12 @@ export class Agent {
     this.toolRecords.length = 0; // a cleared conversation has no run to resume, so its finished tool results go too
     this.activeMark = undefined;
     // Reset also drops session-scoped provider chaining/routing.
-    try { clearInteractionChains(sid); } catch {}
-    try { clearSessionRouting(sid); } catch {}
+    try {
+      clearInteractionChains(sid);
+    } catch {}
+    try {
+      clearSessionRouting(sid);
+    } catch {}
   }
 
   /**
@@ -727,17 +817,27 @@ export class Agent {
   /** Drops one named session. No-op for unknown ids. */
   disposeSession(id: string): void {
     unregisterSessionFolder(id);
-    try { this.sessions.delete(id); } catch {}
-    try { clearInteractionChains(id); } catch {}
-    try { clearSessionRouting(id); } catch {}
+    try {
+      this.sessions.delete(id);
+    } catch {}
+    try {
+      clearInteractionChains(id);
+    } catch {}
+    try {
+      clearSessionRouting(id);
+    } catch {}
   }
 
   /** Drops all named sessions except the default context. */
   clearSessions(): void {
     try {
       for (const id of [...this.sessions.keys()]) {
-        try { clearInteractionChains(id); } catch {}
-        try { clearSessionRouting(id); } catch {}
+        try {
+          clearInteractionChains(id);
+        } catch {}
+        try {
+          clearSessionRouting(id);
+        } catch {}
       }
       this.sessions.clear();
     } catch {}
@@ -753,8 +853,12 @@ export class Agent {
       for (const [key, entry] of [...this.sessions.entries()]) {
         if (now - entry.lastAccess > SESSION_TTL_MS) {
           this.sessions.delete(key);
-          try { clearInteractionChains(key); } catch {}
-          try { clearSessionRouting(key); } catch {}
+          try {
+            clearInteractionChains(key);
+          } catch {}
+          try {
+            clearSessionRouting(key);
+          } catch {}
         }
       }
     } catch {}
@@ -771,12 +875,19 @@ export class Agent {
         let oldest: string | undefined;
         let oldestTs = Infinity;
         for (const [key, entry] of this.sessions) {
-          if (entry.lastAccess < oldestTs) { oldestTs = entry.lastAccess; oldest = key; }
+          if (entry.lastAccess < oldestTs) {
+            oldestTs = entry.lastAccess;
+            oldest = key;
+          }
         }
         if (!oldest) break;
         this.sessions.delete(oldest);
-        try { clearInteractionChains(oldest); } catch {}
-        try { clearSessionRouting(oldest); } catch {}
+        try {
+          clearInteractionChains(oldest);
+        } catch {}
+        try {
+          clearSessionRouting(oldest);
+        } catch {}
       }
     } catch {}
     return fresh;
@@ -789,8 +900,12 @@ export class Agent {
     const err = Object.assign(new Error("Queue cleared"), { name: "AbortError" });
     const pending = this.pendingQueue.splice(0);
     for (const entry of pending) {
-      try { entry.reject(err); } catch {}
-      try { entry.deferredStream?.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
+      try {
+        entry.reject(err);
+      } catch {}
+      try {
+        entry.deferredStream?.fail(err instanceof Error ? err : new Error(String(err)));
+      } catch {}
     }
     this.persistNow();
     return n;
@@ -858,7 +973,9 @@ export class Agent {
   interrupt(arg?: Error | string | ContentPart[], options?: AgentRunOptions): void | Promise<AgentResponse> {
     if (typeof arg === "string" || Array.isArray(arg)) {
       if (options?.stream === true) {
-        throw new Error('[Agent Accelerator] interrupt(message) is non-streaming. Use stream(prompt, { enqueue: "interrupt" }) for a streaming interrupt.');
+        throw new Error(
+          '[Agent Accelerator] interrupt(message) is non-streaming. Use stream(prompt, { enqueue: "interrupt" }) for a streaming interrupt.'
+        );
       }
       return this.run(arg, { ...options, enqueue: "interrupt" });
     }
@@ -1001,8 +1118,12 @@ export class Agent {
           reason instanceof Error ? reason : new Error("Queued run aborted before start"),
           { name: "AbortError" }
         );
-        try { next.reject(abortErr); } catch {}
-        try { next.deferredStream?.fail(abortErr instanceof Error ? abortErr : new Error(String(abortErr))); } catch {}
+        try {
+          next.reject(abortErr);
+        } catch {}
+        try {
+          next.deferredStream?.fail(abortErr instanceof Error ? abortErr : new Error(String(abortErr)));
+        } catch {}
         queueMicrotask(() => this.pumpQueue());
         return;
       }
@@ -1011,30 +1132,48 @@ export class Agent {
       const deferred = next.deferredStream;
       try {
         const real = this.startStreamingRun(next.prompt, next.options);
-        try { (deferred as any).__piped = true; } catch {}
+        try {
+          (deferred as any).__piped = true;
+        } catch {}
         const forward = (e: StreamEvent) => {
-          try { deferred.push(e); } catch {}
+          try {
+            deferred.push(e);
+          } catch {}
         };
         real.on("*", forward as any);
         try {
           deferred.onCancel(() => {
-            try { real.cancel(); } catch {}
+            try {
+              real.cancel();
+            } catch {}
           });
         } catch {}
         real.result().then(
           (res) => {
-            try { next.resolve(res); } catch {}
-            try { deferred.end(res); } catch {}
+            try {
+              next.resolve(res);
+            } catch {}
+            try {
+              deferred.end(res);
+            } catch {}
           },
           (err) => {
-            try { next.reject(err); } catch {}
+            try {
+              next.reject(err);
+            } catch {}
             // Pipe failures into the deferred stream so for-await sees them.
-            try { deferred.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
+            try {
+              deferred.fail(err instanceof Error ? err : new Error(String(err)));
+            } catch {}
           }
         );
       } catch (err) {
-        try { next.reject(err); } catch {}
-        try { deferred.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
+        try {
+          next.reject(err);
+        } catch {}
+        try {
+          deferred.fail(err instanceof Error ? err : new Error(String(err)));
+        } catch {}
         // Keep draining even if starting failed.
         queueMicrotask(() => this.pumpQueue());
       }
@@ -1047,7 +1186,11 @@ export class Agent {
   private finishCurrentRun(): void {
     // Leftover steer entries become queued follow-ups instead of dropping.
     let leftover: SteerEntry[] = [];
-    try { leftover = this.currentRun?.steerInbox?.splice(0) ?? []; } catch { leftover = []; }
+    try {
+      leftover = this.currentRun?.steerInbox?.splice(0) ?? [];
+    } catch {
+      leftover = [];
+    }
     this.currentRun = null;
     if (leftover.length > 0) {
       try {
@@ -1057,10 +1200,14 @@ export class Agent {
         for (const entry of leftover) {
           try {
             if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
-              entry.settle?.reject(Object.assign(new Error("Steer aborted before it could run"), { name: "AbortError" }));
+              entry.settle?.reject(
+                Object.assign(new Error("Steer aborted before it could run"), { name: "AbortError" })
+              );
               continue;
             }
-          } catch { continue; }
+          } catch {
+            continue;
+          }
           if (this.pendingQueue.length + lateSteers.length >= max) {
             entry.settle?.reject(new Error("[Agent Accelerator] Steer dropped: the follow-up queue is full."));
             continue;
@@ -1091,7 +1238,9 @@ export class Agent {
     try {
       const dispose = mergeDisposers.get(runController);
       if (dispose) {
-        try { dispose(); } catch {}
+        try {
+          dispose();
+        } catch {}
         mergeDisposers.delete(runController);
       }
     } catch {}
@@ -1105,7 +1254,9 @@ export class Agent {
       try {
         runController.abort((userSignal as any).reason);
       } catch {
-        try { runController.abort(); } catch {}
+        try {
+          runController.abort();
+        } catch {}
       }
       return runController.signal;
     }
@@ -1121,13 +1272,19 @@ export class Agent {
       try {
         runController.abort((userSignal as any).reason);
       } catch {
-        try { runController.abort(); } catch {}
+        try {
+          runController.abort();
+        } catch {}
       }
     };
-    try { userSignal.addEventListener("abort", forward, { once: true }); } catch {}
+    try {
+      userSignal.addEventListener("abort", forward, { once: true });
+    } catch {}
     try {
       mergeDisposers.set(runController, () => {
-        try { userSignal.removeEventListener("abort", forward); } catch {}
+        try {
+          userSignal.removeEventListener("abort", forward);
+        } catch {}
       });
     } catch {}
     return runController.signal;
@@ -1314,13 +1471,18 @@ export class Agent {
       const failedAttempts: FailedAttempt[] = [];
       for (let attempt = 0; ; attempt++) {
         try {
-          res = await runAgentLoop(attempt === 0 ? loopConfig : { ...loopConfig, resume: { stored: this.storedToolResults() } });
+          res = await runAgentLoop(
+            attempt === 0 ? loopConfig : { ...loopConfig, resume: { stored: this.storedToolResults() } }
+          );
           break;
         } catch (err) {
           if (attempt >= this.runRetries || runOptions?.signal?.aborted || !isRetryableRun(err)) throw err;
           const partial = (err as { partial?: FailedAttempt }).partial;
           if (partial?.usage) failedAttempts.push(partial);
-          const delayMs = Math.max(RUN_RETRY_DELAYS_MS[Math.min(attempt, RUN_RETRY_DELAYS_MS.length - 1)]!, readRetryAfterMs(err) ?? 0);
+          const delayMs = Math.max(
+            RUN_RETRY_DELAYS_MS[Math.min(attempt, RUN_RETRY_DELAYS_MS.length - 1)]!,
+            readRetryAfterMs(err) ?? 0
+          );
           telemetryBus.emitWarning(
             "agent.run_retry",
             `[Agent Accelerator] Run failed (${err instanceof Error ? err.message : String(err)}); retry ${attempt + 1} of ${this.runRetries} in ${delayMs} ms.`,
@@ -1345,7 +1507,9 @@ export class Agent {
       (err) => this.endRun(mark, isAbortError(err) ? "aborted" : "failed")
     );
     const cleanup = () => {
-      try { this.cleanupMerge(runController); } catch {}
+      try {
+        this.cleanupMerge(runController);
+      } catch {}
       if (this.currentRun?.runPromise === task) this.finishCurrentRun();
     };
     task.then(cleanup, cleanup);
@@ -1353,10 +1517,7 @@ export class Agent {
   }
 
   // Starts one streaming run: validates the model and thinking level synchronously, adds the prompt, builds the loop config and returns the loop's event stream, recording the run ending when it settles; in: stream()/pumpQueue, out: an AssistantMessageEventStream.
-  private startStreamingRun(
-    prompt: string | ContentPart[],
-    options?: AgentRunOptions
-  ): AssistantMessageEventStream {
+  private startStreamingRun(prompt: string | ContentPart[], options?: AgentRunOptions): AssistantMessageEventStream {
     const resolved = resolveModel(this.modelStringOrSpec);
     const effectiveLevel = normalizeThinkingV2(options?.thinking, options?.thinkingLevel) || this.thinkingConfig?.level;
     if (effectiveLevel) {
@@ -1408,7 +1569,9 @@ export class Agent {
           this.mergeSubagentTraces(res.subagents as any);
           this.persistNow();
         } catch {}
-        try { this.cleanupMerge(runController); } catch {}
+        try {
+          this.cleanupMerge(runController);
+        } catch {}
         if (this.stateless) {
           targetContext.messages = [];
           targetContext.thoughtSignatures = [];
@@ -1417,7 +1580,9 @@ export class Agent {
       },
       (err) => {
         this.endRun(mark, isAbortError(err) ? "aborted" : "failed");
-        try { this.cleanupMerge(runController); } catch {}
+        try {
+          this.cleanupMerge(runController);
+        } catch {}
         if (this.currentRun?.outerStream === s) this.finishCurrentRun();
       }
     );
@@ -1534,12 +1699,24 @@ export class Agent {
       else if (cfg.file) saveSessionFile(cfg.file, this as any, null);
     } catch (err) {
       // Surface via hook instead of swallowing silently.
-      try { (cfg as unknown as { onPersistError?: (e: unknown) => void }).onPersistError?.(err); } catch {}
+      try {
+        (cfg as unknown as { onPersistError?: (e: unknown) => void }).onPersistError?.(err);
+      } catch {}
     }
   }
 
   /** Merges completed worker metadata (incl. steps) into this agent's trace registry. */
-  private mergeSubagentTraces(subagents: Array<{ trackingId?: string; name: string; sessionId?: string; parentSessionId?: string; task: string; steps?: SubAgentTrace["steps"]; [k: string]: unknown }>): void {
+  private mergeSubagentTraces(
+    subagents: Array<{
+      trackingId?: string;
+      name: string;
+      sessionId?: string;
+      parentSessionId?: string;
+      task: string;
+      steps?: SubAgentTrace["steps"];
+      [k: string]: unknown;
+    }>
+  ): void {
     if (!subagents || subagents.length === 0) return;
     const rawOf = (id?: string): string | undefined => {
       if (!id) return undefined;
@@ -1641,15 +1818,19 @@ export class Agent {
     try {
       const g: any = globalThis as any;
       this.context.messages = Array.isArray(data.messages)
-        ? (typeof g.structuredClone === "function"
-            ? g.structuredClone(data.messages)
-            : JSON.parse(JSON.stringify(data.messages)))
+        ? typeof g.structuredClone === "function"
+          ? g.structuredClone(data.messages)
+          : JSON.parse(JSON.stringify(data.messages))
         : [];
     } catch {
       this.context.messages = Array.isArray(data.messages) ? [...data.messages] : [];
     }
     this.context.thoughtSignatures = [];
-    this.runMarks.splice(0, this.runMarks.length, ...(data.runs ?? []).filter((r) => r.i < this.context.messages.length));
+    this.runMarks.splice(
+      0,
+      this.runMarks.length,
+      ...(data.runs ?? []).filter((r) => r.i < this.context.messages.length)
+    );
     this.restoreUsage(data.usage);
     if (data.systemPrompt) {
       this.context.systemPrompt = data.systemPrompt;
@@ -1658,10 +1839,18 @@ export class Agent {
     }
     // Importing a snapshot invalidates prior provider chaining/routing
     // for both the previous and the restored session.
-    try { clearInteractionChains(prevSid); } catch {}
-    try { clearSessionRouting(prevSid); } catch {}
-    try { clearInteractionChains(this.sessionId); } catch {}
-    try { clearSessionRouting(this.sessionId); } catch {}
+    try {
+      clearInteractionChains(prevSid);
+    } catch {}
+    try {
+      clearSessionRouting(prevSid);
+    } catch {}
+    try {
+      clearInteractionChains(this.sessionId);
+    } catch {}
+    try {
+      clearSessionRouting(this.sessionId);
+    } catch {}
   }
 
   /**
@@ -1691,7 +1880,11 @@ export class Agent {
   }
 
   // Adds the user prompt to the target context (fresh context when stateless, stable system prompt, additionalContext as a user prefix) and marks the run start for the default session; in: a run start, out: the new SessionRunMark.
-  private prepareTurn(prompt: string | ContentPart[], options?: AgentRunOptions, target?: AgentContext): SessionRunMark | undefined {
+  private prepareTurn(
+    prompt: string | ContentPart[],
+    options?: AgentRunOptions,
+    target?: AgentContext
+  ): SessionRunMark | undefined {
     // Prompt validation throws synchronously in both run() and
     // stream() (same timing; documented here).
     if (Array.isArray(prompt) && prompt.length === 0) {
@@ -1750,23 +1943,14 @@ export class Agent {
   run(
     prompt: string | ContentPart[],
     options: AgentRunOptions & { stream: true } & (
-      | { onDelta: NonNullable<AgentRunOptions["onDelta"]> }
-      | { onThinkingDelta: NonNullable<AgentRunOptions["onThinkingDelta"]> }
-      | { onEvent: NonNullable<AgentRunOptions["onEvent"]> }
-    )
+        | { onDelta: NonNullable<AgentRunOptions["onDelta"]> }
+        | { onThinkingDelta: NonNullable<AgentRunOptions["onThinkingDelta"]> }
+        | { onEvent: NonNullable<AgentRunOptions["onEvent"]> }
+      )
   ): Promise<AgentResponse> & AsyncIterable<StreamEvent>;
-  run(
-    prompt: string | ContentPart[],
-    options: AgentRunOptions & { stream: true }
-  ): AssistantMessageEventStream;
-  run(
-    prompt: string | ContentPart[],
-    options?: AgentRunOptions
-  ): Promise<AgentResponse>;
-  run(
-    prompt: string | ContentPart[],
-    options?: AgentRunOptions
-  ): Promise<AgentResponse> | AssistantMessageEventStream {
+  run(prompt: string | ContentPart[], options: AgentRunOptions & { stream: true }): AssistantMessageEventStream;
+  run(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse>;
+  run(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse> | AssistantMessageEventStream {
     // Prompt validation throws synchronously in both run() and
     // stream() (same timing; async work starts only after validation).
     this.assertPromptValid(prompt);
@@ -1795,7 +1979,9 @@ export class Agent {
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn), or stops the active run and starts this prompt (interrupt).
     if (this.currentRun) {
       if (options?.enqueue === "interrupt") {
-        return new Promise<AgentResponse>((resolve, reject) => this.queueUrgent({ prompt, options, isStream: false, resolve, reject }));
+        return new Promise<AgentResponse>((resolve, reject) =>
+          this.queueUrgent({ prompt, options, isStream: false, resolve, reject })
+        );
       }
       const enforced = this.midSessionConfig.mode;
       const requested = options?.enqueue;
@@ -1846,13 +2032,9 @@ export class Agent {
     prompt: string | ContentPart[],
     optionsOrStream?: boolean | AgentRunOptions
   ): Promise<AgentResponse> & AsyncIterable<string | StreamEvent> {
-    const isStream =
-      typeof optionsOrStream === "boolean"
-        ? optionsOrStream
-        : optionsOrStream?.stream === true;
+    const isStream = typeof optionsOrStream === "boolean" ? optionsOrStream : optionsOrStream?.stream === true;
 
-    const runOpts: AgentRunOptions =
-      typeof optionsOrStream === "object" ? optionsOrStream : { stream: isStream };
+    const runOpts: AgentRunOptions = typeof optionsOrStream === "object" ? optionsOrStream : { stream: isStream };
 
     if (isStream) {
       const stream = this.stream(prompt, runOpts);
@@ -1860,7 +2042,8 @@ export class Agent {
       if (runOpts.onDelta || runOpts.onThinkingDelta || runOpts.onEvent) {
         if (runOpts.onEvent) stream.on("*", runOpts.onEvent as any);
         if (runOpts.onDelta) stream.on("text_delta", (e: any) => runOpts.onDelta!(e.delta!, e));
-        if (runOpts.onThinkingDelta) stream.on("thinking_delta", (e: any) => runOpts.onThinkingDelta!(e.thinkingDelta!, e));
+        if (runOpts.onThinkingDelta)
+          stream.on("thinking_delta", (e: any) => runOpts.onThinkingDelta!(e.thinkingDelta!, e));
       }
       const stringStream: any = {
         [Symbol.asyncIterator]: async function* () {
@@ -1901,10 +2084,7 @@ export class Agent {
    * }
    * ```
    */
-  stream(
-    prompt: string | ContentPart[],
-    options?: AgentRunOptions
-  ): AssistantMessageEventStream {
+  stream(prompt: string | ContentPart[], options?: AgentRunOptions): AssistantMessageEventStream {
     // Same sync validation timing as run().
     this.assertPromptValid(prompt);
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
@@ -1912,7 +2092,11 @@ export class Agent {
       const enforcedStream = this.midSessionConfig.mode;
       const urgent = options?.enqueue === "interrupt"; // stops the active run and goes first, in every mode and whatever the queue holds
       const requestedStream = options?.enqueue === "interrupt" ? undefined : options?.enqueue;
-      if (requestedStream && (enforcedStream === "steer" || enforcedStream === "queue") && requestedStream !== enforcedStream) {
+      if (
+        requestedStream &&
+        (enforcedStream === "steer" || enforcedStream === "queue") &&
+        requestedStream !== enforcedStream
+      ) {
         throw new Error(
           `[Agent Accelerator] enqueue "${requestedStream}" is disabled by midSession.mode "${enforcedStream}". Use ${enforcedStream}() or set mode to "auto"/"${requestedStream}".`
         );
@@ -1937,16 +2121,28 @@ export class Agent {
           activePromise.then(
             (res) => {
               try {
-                stub.push({ type: "done", delta: "", usage: res.usage, finishReason: res.finishReason, responseId: res.responseId } as any);
+                stub.push({
+                  type: "done",
+                  delta: "",
+                  usage: res.usage,
+                  finishReason: res.finishReason,
+                  responseId: res.responseId,
+                } as any);
               } catch {}
-              try { stub.end(res); } catch {}
+              try {
+                stub.end(res);
+              } catch {}
             },
             (err) => {
-              try { stub.fail(err instanceof Error ? err : new Error(String(err))); } catch {}
+              try {
+                stub.fail(err instanceof Error ? err : new Error(String(err)));
+              } catch {}
             }
           );
         } else {
-          try { stub.fail(new Error("[Agent Accelerator] No active run to steer.")); } catch {}
+          try {
+            stub.fail(new Error("[Agent Accelerator] No active run to steer."));
+          } catch {}
         }
         return stub;
       }
@@ -2005,7 +2201,9 @@ export class Agent {
           if (idx >= 0) {
             this.pendingQueue.splice(idx, 1);
             queuedEntry.reject(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
-            try { deferred.fail(Object.assign(new Error("Stream aborted"), { name: "AbortError" })); } catch {}
+            try {
+              deferred.fail(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
+            } catch {}
           }
         } catch {}
       });
@@ -2023,7 +2221,13 @@ export class Agent {
           // Otherwise (edge), end it here.
           try {
             if ((deferred as any).__piped !== true) {
-              deferred.push({ type: "done", delta: "", usage: res.usage, finishReason: res.finishReason, responseId: res.responseId } as any);
+              deferred.push({
+                type: "done",
+                delta: "",
+                usage: res.usage,
+                finishReason: res.finishReason,
+                responseId: res.responseId,
+              } as any);
               deferred.end(res);
             }
           } catch {}
@@ -2045,10 +2249,7 @@ export class Agent {
   }
 
   // Attaches onEvent/onDelta/onThinkingDelta to a stream and, with wrapThinking, adds display-only <think> tags and whitespace hygiene on the outer events; in: stream()/pumpQueue, out: listeners on the stream.
-  private wireStreamCallbacks(
-    s: AssistantMessageEventStream,
-    options?: AgentRunOptions
-  ): void {
+  private wireStreamCallbacks(s: AssistantMessageEventStream, options?: AgentRunOptions): void {
     // Wire one-liner callbacks so `stream:true` + onDelta is enough — no manual for-await needed
     if (options?.wrapThinking) {
       // Auto-wrap reasoning as <think>…</think> per-turn — clean boundaries across multi-turn agent runs.
@@ -2125,7 +2326,9 @@ export class Agent {
         const raw: string = e.delta ?? "";
         if (!justClosedThink) return raw;
         const stripped = raw.replace(/^\n+/, "");
-        try { e.delta = stripped; } catch {}
+        try {
+          e.delta = stripped;
+        } catch {}
         if (!stripped) return "";
         justClosedThink = false;
         return stripped;
@@ -2222,11 +2425,13 @@ export class Agent {
           closeSynthetic();
           if (justClosedThink) {
             const stripped: string = (e.delta ?? "").replace(/^\n+/, "");
-            try { e.delta = stripped; } catch {}
+            try {
+              e.delta = stripped;
+            } catch {}
             if (!stripped) return;
             justClosedThink = false;
           }
-          needThinkNewline = !((e.delta ?? "").endsWith("\n"));
+          needThinkNewline = !(e.delta ?? "").endsWith("\n");
         });
         s.on("tool_call_start" as any, () => {
           closeSynthetic();
@@ -2304,7 +2509,12 @@ export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): 
     try {
       const rawModel: any = (config.model as any)?.model ? (config.model as any).model : config.model;
       const modelStr = typeof rawModel === "string" ? rawModel : rawModel?.id || "";
-      const provStr = typeof rawModel === "object" && rawModel?.provider ? rawModel.provider : modelStr.includes("/") ? modelStr.split("/")[0] : "";
+      const provStr =
+        typeof rawModel === "object" && rawModel?.provider
+          ? rawModel.provider
+          : modelStr.includes("/")
+            ? modelStr.split("/")[0]
+            : "";
       const actualModelId = modelStr.includes("/") ? modelStr.split("/").slice(1).join("/") : modelStr;
       if (actualModelId) {
         validateModelThinking(provStr || "openrouter", actualModelId, level);

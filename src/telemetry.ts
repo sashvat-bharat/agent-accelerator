@@ -35,7 +35,9 @@ export const telemetryBus: TelemetryBus = (() => {
   const listeners = new Set<TelemetryListener>();
   const deliver = (event: TelemetryEvent): void => {
     for (const l of [...listeners]) {
-      try { l(event); } catch {
+      try {
+        l(event);
+      } catch {
         // why: a faulty telemetry listener must not break the emitting run.
       }
     }
@@ -43,7 +45,9 @@ export const telemetryBus: TelemetryBus = (() => {
   return {
     onEvent(listener: TelemetryListener): () => void {
       listeners.add(listener);
-      return () => { listeners.delete(listener); };
+      return () => {
+        listeners.delete(listener);
+      };
     },
     emitWarning(code: string, message: string, data?: unknown): void {
       try {

@@ -50,7 +50,12 @@ const scheduledActionSchema = z.object({
   startCookingInAdvance: z.string().optional().describe('Duration "DD:HH:MM" before delivery when the run starts.'),
   repeatEvery: z.string().optional().describe('Duration "DD:HH:MM" between deliveries. Omit to run once.'),
   retries: z.number().optional().describe("Extra attempts if a run fails."),
-  onMissed: z.enum(["skip", "run"]).optional().describe('If the host program was not running at delivery time: "skip" = move on to the next time, "run" = run when it is back. Omit to decide later.'),
+  onMissed: z
+    .enum(["skip", "run"])
+    .optional()
+    .describe(
+      'If the host program was not running at delivery time: "skip" = move on to the next time, "run" = run when it is back. Omit to decide later.'
+    ),
 });
 
 const describedId = "Full action id including its 6-character suffix (get, update, delete, run_now, skip).";
@@ -85,8 +90,16 @@ export function createScheduledActionsTool(agent: Agent): ToolDefinition {
       role: z.string().optional().describe("Short persona for the worker."),
       instructions: z.string().optional().describe("The worker's system prompt (create, update)."),
       task: z.string().optional().describe("The concrete assignment for every run (create, update)."),
-      tools: z.array(z.string()).optional().describe(`Worker tools to grant, from: ${poolNames.join(", ") || "none"}.`),
-      timeoutMs: z.number().optional().describe("Stop a run that takes longer than this many ms (> 0). Omit it for no limit of your own; the host program may cap it."),
+      tools: z
+        .array(z.string())
+        .optional()
+        .describe(`Worker tools to grant, from: ${poolNames.join(", ") || "none"}.`),
+      timeoutMs: z
+        .number()
+        .optional()
+        .describe(
+          "Stop a run that takes longer than this many ms (> 0). Omit it for no limit of your own; the host program may cap it."
+        ),
       scheduled_action: scheduledActionSchema.optional(),
       force: z.boolean().optional().describe("delete: abort a run that is cooking. Ask the user first."),
       purge: z.boolean().optional().describe("delete: also delete past run files."),
@@ -96,14 +109,23 @@ export function createScheduledActionsTool(agent: Agent): ToolDefinition {
       const needId = (): string => {
         const id = a.id ?? sa.id;
         if (!id) {
-          throw new ToolError(`${a.command} needs "id" (the full id including its 6-character suffix; see list). Example: ${JSON.stringify({ command: a.command, id: "daily-ai-brief-d64aj2" })}`);
+          throw new ToolError(
+            `${a.command} needs "id" (the full id including its 6-character suffix; see list). Example: ${JSON.stringify({ command: a.command, id: "daily-ai-brief-d64aj2" })}`
+          );
         }
         return id;
       };
 
       switch (a.command) {
         case "create": {
-          const input = { role: a.role, instructions: a.instructions, task: a.task, tools: a.tools, timeoutMs: a.timeoutMs, scheduled_action: sa } as ScheduledActionInput;
+          const input = {
+            role: a.role,
+            instructions: a.instructions,
+            task: a.task,
+            tools: a.tools,
+            timeoutMs: a.timeoutMs,
+            scheduled_action: sa,
+          } as ScheduledActionInput;
           const problems = validateInput(input, poolTools, getScheduler(home).now(), { requireLead: true });
           if (problems.length > 0) {
             throw new ToolError(
@@ -134,7 +156,9 @@ export function createScheduledActionsTool(agent: Agent): ToolDefinition {
           };
           const changes = [a.role, a.instructions, a.task, a.tools, a.timeoutMs, ...Object.values(schedule)];
           if (changes.every((v) => v === undefined)) {
-            throw new ToolError(`update needs at least one field to change. Example: ${JSON.stringify({ command: "update", id, task: "The new assignment." })}`);
+            throw new ToolError(
+              `update needs at least one field to change. Example: ${JSON.stringify({ command: "update", id, task: "The new assignment." })}`
+            );
           }
           return updateScheduledAction(id, patch, { home });
         }
@@ -145,7 +169,9 @@ export function createScheduledActionsTool(agent: Agent): ToolDefinition {
         case "skip":
           return skipScheduledAction(needId(), { home });
         default:
-          throw new ToolError(`Unknown command ${JSON.stringify((a as { command?: unknown }).command)}. Use one of: ${COMMANDS.join(", ")}.`);
+          throw new ToolError(
+            `Unknown command ${JSON.stringify((a as { command?: unknown }).command)}. Use one of: ${COMMANDS.join(", ")}.`
+          );
       }
     },
   });

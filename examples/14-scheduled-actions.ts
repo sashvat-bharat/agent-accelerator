@@ -104,7 +104,9 @@ const t0 = Date.now();
 telemetryBus.onEvent((e) => {
   if (!e.code.startsWith("scheduled_action.")) return;
   const secs = ((Date.now() - t0) / 1000).toFixed(1).padStart(5);
-  console.log(`${DIM}+${secs}s${R} ${Y}${e.code.slice("scheduled_action.".length).padEnd(9)}${R} ${DIM}${e.message.replace("[Agent Accelerator] ", "")}${R}`);
+  console.log(
+    `${DIM}+${secs}s${R} ${Y}${e.code.slice("scheduled_action.".length).padEnd(9)}${R} ${DIM}${e.message.replace("[Agent Accelerator] ", "")}${R}`
+  );
 });
 
 type Delivery = { id: string; file: string; status: string; late: boolean };
@@ -134,7 +136,8 @@ async function removeDemoActions(say: (t: string) => void): Promise<void> {
   }
 }
 
-const showResult = (file: string) => console.log(`${DIM}${fs.readFileSync(file, "utf8").trim().replace(/^/gm, "  │ ")}${R}`);
+const showResult = (file: string) =>
+  console.log(`${DIM}${fs.readFileSync(file, "utf8").trim().replace(/^/gm, "  │ ")}${R}`);
 
 async function main(): Promise<void> {
   // 1. Turn it on ----------------------------------------------------------
@@ -142,7 +145,8 @@ async function main(): Promise<void> {
   const agent = new Agent({
     name: "Planner",
     model: MODEL,
-    instructions: "You are a planning assistant. When the user wants something done later or on a schedule, use the scheduling tools.",
+    instructions:
+      "You are a planning assistant. When the user wants something done later or on a schedule, use the scheduling tools.",
     home: HOME,
     telemetry: { persist: true }, // opt in: every event is also appended to <home>/telemetry/<date>.ndjson
     dynamicSubagents: {
@@ -181,7 +185,9 @@ async function main(): Promise<void> {
   });
   const secsFromNow = (d: Date) => Math.round((d.getTime() - Date.now()) / 1000);
   ok(`Scheduled ${action.id}`);
-  info(`  starts working at ${clock(new Date(slot.when.getTime() - LEAD_MS))} (in ${secsFromNow(new Date(slot.when.getTime() - LEAD_MS))}s)`);
+  info(
+    `  starts working at ${clock(new Date(slot.when.getTime() - LEAD_MS))} (in ${secsFromNow(new Date(slot.when.getTime() - LEAD_MS))}s)`
+  );
   info(`  delivers at       ${clock(slot.when)} (in ${secsFromNow(slot.when)}s)`);
 
   // 3. Look at it, run it now -------------------------------------------------
@@ -200,7 +206,8 @@ async function main(): Promise<void> {
 
   // The REAL scheduled delivery of this same action is still ahead. Start listening now.
   const waiting: Array<{ name: string; delivery: Promise<Delivery> }> = [];
-  if (!QUICK) waiting.push({ name: "Demo AI Brief (scheduled from code)", delivery: nextDelivery(action.id, 6 * 60_000) });
+  if (!QUICK)
+    waiting.push({ name: "Demo AI Brief (scheduled from code)", delivery: nextDelivery(action.id, 6 * 60_000) });
 
   // 4. Let the model schedule, using the clock ---------------------------------
   head("4. Ask the model to schedule one (it reads the clock itself)");
@@ -214,25 +221,32 @@ async function main(): Promise<void> {
     onEvent: (e) => {
       if (e.type === "tool_start") console.log(`\n${Y}→ model calls ${e.toolCalls?.map((c) => c.name).join(", ")}${R}`);
       if (e.type === "tool_result" && e.toolResult) {
-        console.log(`${DIM}  ${e.toolResult.name} ${e.toolResult.isError ? "ERROR" : "ok"}: ${String(JSON.stringify(e.toolResult.result)).slice(0, 160)}${R}`);
+        console.log(
+          `${DIM}  ${e.toolResult.name} ${e.toolResult.isError ? "ERROR" : "ok"}: ${String(JSON.stringify(e.toolResult.result)).slice(0, 160)}${R}`
+        );
       }
     },
   });
   console.log(`\n${DIM}(${res.turns} turns, ${res.usage.inputTokens} in / ${res.usage.outputTokens} out)${R}`);
   const mine = listScheduledActions({ home: HOME }).filter((a) => a.id !== action.id);
-  if (mine.length === 0) info("The model did not schedule anything this time. Try running again or rephrase the request.");
+  if (mine.length === 0)
+    info("The model did not schedule anything this time. Try running again or rephrase the request.");
   for (const a of mine) {
     ok(`The model scheduled "${a.name}" (${a.id}), delivery at ${a.nextDeliverAt}`);
     // Only wait for deliveries that are near (the model could have picked any time).
     const inMs = a.nextDeliverAt ? new Date(a.nextDeliverAt).getTime() - Date.now() : Infinity;
-    if (!QUICK && inMs < 5 * 60_000) waiting.push({ name: `${a.name} (scheduled by the model)`, delivery: nextDelivery(a.id, 6 * 60_000) });
+    if (!QUICK && inMs < 5 * 60_000)
+      waiting.push({ name: `${a.name} (scheduled by the model)`, delivery: nextDelivery(a.id, 6 * 60_000) });
     else if (!QUICK) info("  (too far away to wait for; it is removed in the clean-up step)");
   }
 
   // 5. Watch the real deliveries ---------------------------------------------
   head("5. The real scheduled deliveries");
   if (QUICK) info("--quick: not waiting for the clock.");
-  else info(`Waiting for ${waiting.length} scheduled ${waiting.length === 1 ? "delivery" : "deliveries"} (about 2-3 minutes from the start)...`);
+  else
+    info(
+      `Waiting for ${waiting.length} scheduled ${waiting.length === 1 ? "delivery" : "deliveries"} (about 2-3 minutes from the start)...`
+    );
   for (const w of waiting) {
     const d = await w.delivery;
     ok(`${w.name} arrived (${d.status}${d.late ? ", late" : ""}) -> ${d.file}`);

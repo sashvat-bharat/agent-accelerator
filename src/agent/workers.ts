@@ -15,7 +15,13 @@ import { sessionDirFor, loadSessionDir } from "../session/store.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { hashSessionPart, newRunId, newTurnId, nowMs } from "../utils/session.ts";
 import { buildDynamicWorkerConfig, grantWorkerTools, sanitizeToolName } from "./worker.ts";
-import { createFixedChildSessionId, openWorkerTrace, reserveSpawn, workerMetadata, type WorkerRunResult } from "./delegation.ts";
+import {
+  createFixedChildSessionId,
+  openWorkerTrace,
+  reserveSpawn,
+  workerMetadata,
+  type WorkerRunResult,
+} from "./delegation.ts";
 import { finishedTurns, historyUpTo, type Turn } from "./turns.ts";
 import { modelName, readUsage, type UsageNode } from "../session/usage.ts";
 
@@ -59,7 +65,13 @@ export interface WorkerCallOptions {
   /** The calling tool call's id: makes the call exactly-once across a crash and replay (the `subagents` tool passes it). */
   callId?: string;
   /** Receives the worker's live text and thinking deltas. */
-  onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
+  onSubagentEvent?: (event: {
+    trackingId: string;
+    delta?: string;
+    thinkingDelta?: string;
+    partialText?: string;
+    partialThinking?: string;
+  }) => void;
 }
 
 // Saved in `worker.json`: everything needed to rebuild a worker after a restart.
@@ -104,7 +116,11 @@ function lastAssistantText(messages: Message[]): string | undefined {
 }
 
 // Reads a worker that is not in memory from its folder: its saved spending, model, and the workers saved inside it; in: a worker's session folder, out: usageNodes.
-function readSavedWorker(dir: string | undefined): { model: string; totals: ReturnType<typeof readUsage>; workers: UsageNode[] } {
+function readSavedWorker(dir: string | undefined): {
+  model: string;
+  totals: ReturnType<typeof readUsage>;
+  workers: UsageNode[];
+} {
   if (!dir) return { model: "unknown", totals: readUsage(undefined), workers: [] };
   let session: ReturnType<typeof loadSessionDir>;
   try {
@@ -125,7 +141,15 @@ function readSavedWorker(dir: string | undefined): { model: string; totals: Retu
     try {
       const meta = JSON.parse(fs.readFileSync(path.join(root, d.name, META_FILE), "utf8")) as WorkerMeta;
       const inner = readSavedWorker(path.join(root, d.name));
-      workers.push({ id: meta.id, name: meta.name, ...(meta.role ? { role: meta.role } : {}), model: inner.model, status: meta.status, totals: inner.totals, workers: inner.workers });
+      workers.push({
+        id: meta.id,
+        name: meta.name,
+        ...(meta.role ? { role: meta.role } : {}),
+        model: inner.model,
+        status: meta.status,
+        totals: inner.totals,
+        workers: inner.workers,
+      });
     } catch {
       // a damaged worker.json is skipped, as in load()
     }
@@ -167,10 +191,15 @@ export class WorkerRegistry {
       const dir = path.join(root, d.name);
       try {
         const meta = JSON.parse(fs.readFileSync(path.join(dir, META_FILE), "utf8")) as WorkerMeta;
-        if (typeof meta.id !== "string" || typeof meta.sessionId !== "string" || !Array.isArray(meta.tools)) throw new Error("missing fields");
+        if (typeof meta.id !== "string" || typeof meta.sessionId !== "string" || !Array.isArray(meta.tools))
+          throw new Error("missing fields");
         this.entries.set(meta.id, { meta, dir, busy: false });
       } catch (err) {
-        telemetryBus.emitWarning("worker.invalid", `[Agent Accelerator] ${path.join(dir, META_FILE)} is not a valid worker and is skipped: ${err instanceof Error ? err.message : String(err)}`, { dir });
+        telemetryBus.emitWarning(
+          "worker.invalid",
+          `[Agent Accelerator] ${path.join(dir, META_FILE)} is not a valid worker and is skipped: ${err instanceof Error ? err.message : String(err)}`,
+          { dir }
+        );
       }
     }
   }
@@ -219,11 +248,17 @@ export class WorkerRegistry {
   /** Closes a worker: it can no longer be messaged, its session stays on disk (and in `usageReport`). */
   close(id: string): WorkerInfo {
     const entry = this.open(id);
-    if (entry.busy) throw new ValidationError(`Worker "${id}" is busy with a call; wait for it to finish before closing it.`);
+    if (entry.busy)
+      throw new ValidationError(`Worker "${id}" is busy with a call; wait for it to finish before closing it.`);
     entry.meta.status = "closed";
     entry.meta.closedAt = Date.now();
     this.save(entry);
-    if (entry.agent) entry.kept = { model: modelName(entry.agent.modelStringOrSpec), totals: readUsage(entry.agent.usageTotals), workers: entry.agent.workers.usageNodes() };
+    if (entry.agent)
+      entry.kept = {
+        model: modelName(entry.agent.modelStringOrSpec),
+        totals: readUsage(entry.agent.usageTotals),
+        workers: entry.agent.workers.usageNodes(),
+      };
     entry.agent?.disposeSession(entry.meta.sessionId); // frees its provider chain; never reset(): that could rewrite the saved history
     entry.agent = undefined;
     return this.info(entry);
@@ -244,7 +279,13 @@ export class WorkerRegistry {
     return [...this.entries.values()].map((entry) => {
       const { id, name, role, status } = entry.meta;
       const base = { id, name, ...(role ? { role } : {}), status };
-      if (entry.agent) return { ...base, model: modelName(entry.agent.modelStringOrSpec), totals: entry.agent.usageTotals, workers: entry.agent.workers.usageNodes() };
+      if (entry.agent)
+        return {
+          ...base,
+          model: modelName(entry.agent.modelStringOrSpec),
+          totals: entry.agent.usageTotals,
+          workers: entry.agent.workers.usageNodes(),
+        };
       return { ...base, ...(entry.kept ?? readSavedWorker(entry.dir)) };
     });
   }
@@ -253,7 +294,8 @@ export class WorkerRegistry {
   private open(id: string): Entry {
     const entry = this.entries.get(id);
     if (!entry) throw new ValidationError(`No worker with id "${id}". Use list to see the open workers.`);
-    if (entry.meta.status === "closed") throw new ValidationError(`Worker "${id}" is closed. Spawn a new worker instead.`);
+    if (entry.meta.status === "closed")
+      throw new ValidationError(`Worker "${id}" is closed. Spawn a new worker instead.`);
     return entry;
   }
 
@@ -264,7 +306,13 @@ export class WorkerRegistry {
   }
 
   // Checks a new worker's request, builds its Agent (seeded with the copied history) and saves `worker.json`; in: spawn, out: a new open entry.
-  private async create(id: string, name: string, task: string, key: string | undefined, spec: WorkerSpec): Promise<Entry> {
+  private async create(
+    id: string,
+    name: string,
+    task: string,
+    key: string | undefined,
+    spec: WorkerSpec
+  ): Promise<Entry> {
     const parent = this.parent;
     if (!parent.subagentModel) {
       throw new ConfigError(
@@ -273,7 +321,11 @@ export class WorkerRegistry {
     }
     const maxOpen = parent.dynamicSubagents?.maxSpawn ?? Infinity;
     if (this.list().length >= maxOpen) {
-      throw new ValidationError(`Too many open workers (${maxOpen} is the limit). Close one first; open workers: ${this.list().map((w) => w.id).join(", ")}.`);
+      throw new ValidationError(
+        `Too many open workers (${maxOpen} is the limit). Close one first; open workers: ${this.list()
+          .map((w) => w.id)
+          .join(", ")}.`
+      );
     }
     const pool = parent.dynamicSubagents?.tools ?? {};
     const requested = spec.tools ?? [];
@@ -281,7 +333,8 @@ export class WorkerRegistry {
     if (unknown.length > 0) {
       const names = Object.keys(pool);
       throw new ValidationError(
-        `tools: unknown worker tool(s) ${unknown.map((n) => `"${n}"`).join(", ")}; ` + (names.length > 0 ? `the pool is [${names.join(", ")}].` : "no worker tools are available, omit tools.")
+        `tools: unknown worker tool(s) ${unknown.map((n) => `"${n}"`).join(", ")}; ` +
+          (names.length > 0 ? `the pool is [${names.join(", ")}].` : "no worker tools are available, omit tools.")
       );
     }
     const history = spec.history ?? "none";
@@ -338,8 +391,16 @@ export class WorkerRegistry {
   }
 
   // Sends one text to a worker and turns what happens into a reply: runs it, or after a crash continues the cut-off run or returns the answer it had already given; in: spawn and message, out: a WorkerReply.
-  private async deliver(entry: Entry, text: string, key: string | undefined, opts: WorkerCallOptions): Promise<WorkerReply> {
-    if (entry.busy) throw new ValidationError(`Worker "${entry.meta.id}" is busy with another call; wait for it, or message another worker.`);
+  private async deliver(
+    entry: Entry,
+    text: string,
+    key: string | undefined,
+    opts: WorkerCallOptions
+  ): Promise<WorkerReply> {
+    if (entry.busy)
+      throw new ValidationError(
+        `Worker "${entry.meta.id}" is busy with another call; wait for it, or message another worker.`
+      );
     entry.busy = true;
     const { meta } = entry;
     const startTime = nowMs();
@@ -354,14 +415,24 @@ export class WorkerRegistry {
         parent: this.parent,
         emit: opts.onSubagentEvent,
       });
-      const lineage = { name: meta.name, displayId: live.displayId, sessionId: meta.sessionId, parentSessionId: this.parent.sessionId, role: meta.role, task: text, runId: newRunId(), turnId: newTurnId() };
+      const lineage = {
+        name: meta.name,
+        displayId: live.displayId,
+        sessionId: meta.sessionId,
+        parentSessionId: this.parent.sessionId,
+        role: meta.role,
+        task: text,
+        runId: newRunId(),
+        turnId: newTurnId(),
+      };
       const replayed = this.isReplay(entry, key, text) && agent.runMarks.length > meta.last!.marks;
       if (!replayed) {
         if (key) meta.last = { key, text: hashSessionPart(text), marks: agent.runMarks.length };
         else delete meta.last;
         this.save(entry);
       }
-      const onAbort = (): void => agent.interrupt(opts.signal?.reason instanceof Error ? opts.signal.reason : undefined);
+      const onAbort = (): void =>
+        agent.interrupt(opts.signal?.reason instanceof Error ? opts.signal.reason : undefined);
       try {
         if (opts.signal?.aborted) throw new Error("aborted before the worker started");
         opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -387,14 +458,36 @@ export class WorkerRegistry {
           if (!response) throw new Error("the worker had nothing to resume");
           result = response;
         }
-        const reply = result.text.trim() ? result.text : `(the worker produced no text${result.finishReason ? `; finish reason: ${result.finishReason}` : ""})`;
+        const reply = result.text.trim()
+          ? result.text
+          : `(the worker produced no text${result.finishReason ? `; finish reason: ${result.finishReason}` : ""})`;
         live.finish(result);
-        return { id: meta.id, text: reply, metadata: workerMetadata({ ...lineage, durationMs: Math.max(0, nowMs() - startTime), result, steps: live.steps() }) };
+        return {
+          id: meta.id,
+          text: reply,
+          metadata: workerMetadata({
+            ...lineage,
+            durationMs: Math.max(0, nowMs() - startTime),
+            result,
+            steps: live.steps(),
+          }),
+        };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         live.fail(message);
         const errorText = `Error in worker ${meta.id}: ${message}`;
-        return { id: meta.id, text: errorText, error: message, metadata: workerMetadata({ ...lineage, durationMs: Math.max(0, nowMs() - startTime), error: message, errorText, steps: live.steps() }) };
+        return {
+          id: meta.id,
+          text: errorText,
+          error: message,
+          metadata: workerMetadata({
+            ...lineage,
+            durationMs: Math.max(0, nowMs() - startTime),
+            error: message,
+            errorText,
+            steps: live.steps(),
+          }),
+        };
       } finally {
         opts.signal?.removeEventListener("abort", onAbort);
       }

@@ -39,9 +39,7 @@ const agent = new Agent({
 
 const live = () => ({
   stream: true as const,
-  ...(SHOW_THINKING
-    ? { onThinkingDelta: (d: string) => process.stdout.write(`${DIM}${d}${R}`) }
-    : {}),
+  ...(SHOW_THINKING ? { onThinkingDelta: (d: string) => process.stdout.write(`${DIM}${d}${R}`) } : {}),
   onDelta: (d: string) => process.stdout.write(d),
   onEvent: (e: any) => {
     if (e.type === "steer_injected") console.log(`\n${Y}↳ steered into this turn${R}`);

@@ -63,7 +63,12 @@ export function sniffMimeType(bytes: Uint8Array): string | undefined {
   if (ascii(bytes, 0, "FORM") && ascii(bytes, 8, "AIF")) return "audio/aiff";
   if (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xf6) === 0xf0) return "audio/aac"; // ADTS: sync bits plus layer 00 (MP3 frames have a non-zero layer)
   if (ascii(bytes, 0, "ID3") || (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xe0) === 0xe0)) return "audio/mp3";
-  if (ascii(bytes, 4, "ftyp")) return ascii(bytes, 8, "M4A") || ascii(bytes, 8, "M4B") ? "audio/m4a" : ascii(bytes, 8, "qt") ? "video/quicktime" : "video/mp4";
+  if (ascii(bytes, 4, "ftyp"))
+    return ascii(bytes, 8, "M4A") || ascii(bytes, 8, "M4B")
+      ? "audio/m4a"
+      : ascii(bytes, 8, "qt")
+        ? "video/quicktime"
+        : "video/mp4";
   if (bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 1 && bytes[3] === 0xba) return "video/mpeg"; // MPEG program stream
   if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return "video/webm";
   return undefined;
@@ -72,9 +77,15 @@ export function sniffMimeType(bytes: Uint8Array): string | undefined {
 const GENERIC_MIME = new Set(["", "application/octet-stream", "binary/octet-stream"]);
 
 /** Picks the best MIME type: explicit hint, then a specific candidate, then magic bytes, then the fallback. */
-function resolveMime(explicit: string | undefined, candidate: string | null | undefined, bytes: Uint8Array, fallback: string): string {
+function resolveMime(
+  explicit: string | undefined,
+  candidate: string | null | undefined,
+  bytes: Uint8Array,
+  fallback: string
+): string {
   if (explicit) return explicit;
-  const specific = candidate && !GENERIC_MIME.has(candidate.split(";")[0]!.trim().toLowerCase()) ? candidate : undefined;
+  const specific =
+    candidate && !GENERIC_MIME.has(candidate.split(";")[0]!.trim().toLowerCase()) ? candidate : undefined;
   return specific || sniffMimeType(bytes) || candidate || fallback;
 }
 
@@ -178,7 +189,8 @@ export async function normalizeMediaInput(
     } catch {
       // S11: don't silently return path string as base64 (would 400). Re-check if it's actually base64 with "/"
       const trimmed = input.replace(/\s/g, "");
-      const isMaybeBase64 = trimmed.length > 100 && /^[A-Za-z0-9+/=\n\r]+$/.test(trimmed.slice(0, 500)) && trimmed.length % 4 === 0;
+      const isMaybeBase64 =
+        trimmed.length > 100 && /^[A-Za-z0-9+/=\n\r]+$/.test(trimmed.slice(0, 500)) && trimmed.length % 4 === 0;
       if (isMaybeBase64) {
         const mimeType = explicitMimeType || sniffBase64(trimmed) || "image/jpeg";
         return {
@@ -187,7 +199,9 @@ export async function normalizeMediaInput(
           dataUrl: `data:${mimeType};base64,${trimmed}`,
         };
       }
-      throw new Error(`Failed to normalize media input: not a valid file path, data URL, http URL, or base64 string: ${input.slice(0, 80)}`);
+      throw new Error(
+        `Failed to normalize media input: not a valid file path, data URL, http URL, or base64 string: ${input.slice(0, 80)}`
+      );
     }
   }
 

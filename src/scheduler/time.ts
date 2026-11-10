@@ -7,8 +7,18 @@
 import { ValidationError } from "../types/errors.ts";
 
 const MONTHS = [
-  "january", "february", "march", "april", "may", "june",
-  "july", "august", "september", "october", "november", "december",
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
 ];
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -21,7 +31,11 @@ const pad2 = (n: number): string => String(n).padStart(2, "0");
 const show = (v: unknown): string => JSON.stringify(v) ?? String(v);
 
 /** Parses `DD:HH:MM` (DD >= 2 digits, MM < 60). HH is range-checked by the caller. */
-export function parseDDHHMM(value: unknown, field: string, example = "00:07:00"): { dd: number; hh: number; mm: number } {
+export function parseDDHHMM(
+  value: unknown,
+  field: string,
+  example = "00:07:00"
+): { dd: number; hh: number; mm: number } {
   const m = typeof value === "string" ? DDHHMM.exec(value) : null;
   if (!m || Number(m[3]) > 59) {
     throw new ValidationError(

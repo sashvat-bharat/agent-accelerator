@@ -61,7 +61,7 @@ export function createFixedChildSessionId(parentId: string, name: string): strin
     return `${parentId.slice(0, maxParent - 9)}-${parentHash}${suffix}`;
   }
   if (maxParent > 0) return parentId.slice(0, maxParent) + suffix;
-  return (`${parentId}-sub-${name}`).slice(0, 64);
+  return `${parentId}-sub-${name}`.slice(0, 64);
 }
 
 /**
@@ -225,7 +225,9 @@ function notifyTrace(trackingId: string): void {
   if (!listeners || listeners.size === 0) return;
   const snap = snapshotTrace(t);
   for (const fn of [...listeners]) {
-    try { fn(snap); } catch {}
+    try {
+      fn(snap);
+    } catch {}
   }
 }
 
@@ -280,15 +282,23 @@ export function subscribeToSubAgent(id: string, fn: (trace: SubAgentTrace) => vo
   }
   set.add(fn);
   const timer = setTimeout(() => {
-    try { subagentListeners.get(key)?.delete(fn); } catch {}
+    try {
+      subagentListeners.get(key)?.delete(fn);
+    } catch {}
   }, SUBAGENT_SUBSCRIBE_TTL_MS);
-  try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
+  try {
+    (timer as unknown as { unref?: () => void }).unref?.();
+  } catch {}
   let done = false;
   return () => {
     if (done) return;
     done = true;
-    try { clearTimeout(timer); } catch {}
-    try { subagentListeners.get(key)?.delete(fn); } catch {}
+    try {
+      clearTimeout(timer);
+    } catch {}
+    try {
+      subagentListeners.get(key)?.delete(fn);
+    } catch {}
   };
 }
 
@@ -334,7 +344,13 @@ export function openWorkerTrace(a: {
   role?: string;
   /** When given, the trace is also kept in this agent's own registry and saved with its session. */
   parent?: Agent;
-  emit?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
+  emit?: (event: {
+    trackingId: string;
+    delta?: string;
+    thinkingDelta?: string;
+    partialText?: string;
+    partialThinking?: string;
+  }) => void;
 }): WorkerTraceHandle {
   const trackingId = createTrackingId();
   const displayId = `${a.name}-${trackingId}`;
@@ -360,9 +376,19 @@ export function openWorkerTrace(a: {
     trim: (t) => trimTraceSteps(t),
     touch: (id) => touchTrace(id),
     notify: (id) => notifyTrace(id),
-    ...(a.parent ? { persist: () => { try { a.parent!.persistNow(); } catch {} } } : {}),
+    ...(a.parent
+      ? {
+          persist: () => {
+            try {
+              a.parent!.persistNow();
+            } catch {}
+          },
+        }
+      : {}),
     emit: (ev) => {
-      try { a.emit?.(ev); } catch {}
+      try {
+        a.emit?.(ev);
+      } catch {}
     },
   });
   const settle = (): void => {
@@ -386,7 +412,11 @@ export function openWorkerTrace(a: {
         t.turns = result.turns ?? t.turns;
         t.text = result.text;
         if (result.usage) {
-          t.usage = { inputTokens: result.usage.inputTokens ?? 0, outputTokens: result.usage.outputTokens ?? 0, totalTokens: result.usage.totalTokens ?? 0 };
+          t.usage = {
+            inputTokens: result.usage.inputTokens ?? 0,
+            outputTokens: result.usage.outputTokens ?? 0,
+            totalTokens: result.usage.totalTokens ?? 0,
+          };
         }
       }
       settle();
@@ -492,7 +522,8 @@ function ensureBudgetState(parentAgent: Agent): BudgetState {
 function usageTokens(usage: unknown): number {
   const u = usage as { totalTokens?: unknown; inputTokens?: unknown; outputTokens?: unknown } | undefined;
   if (!u || typeof u !== "object") return 0;
-  if (typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens)) return Math.max(0, Math.floor(u.totalTokens));
+  if (typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens))
+    return Math.max(0, Math.floor(u.totalTokens));
   const inp = typeof u.inputTokens === "number" && Number.isFinite(u.inputTokens) ? u.inputTokens : 0;
   const out = typeof u.outputTokens === "number" && Number.isFinite(u.outputTokens) ? u.outputTokens : 0;
   return Math.max(0, Math.floor(inp + out));
@@ -532,10 +563,9 @@ export function checkBudget(
     );
   }
   if (budget.maxTotalTokens !== undefined && totalTokens > budget.maxTotalTokens) {
-    throw new BudgetExceededError(
-      `Token budget exceeded: ${totalTokens} > maxTotalTokens ${budget.maxTotalTokens}.`,
-      { context: { partial } }
-    );
+    throw new BudgetExceededError(`Token budget exceeded: ${totalTokens} > maxTotalTokens ${budget.maxTotalTokens}.`, {
+      context: { partial },
+    });
   }
   if (budget.maxCostUsd !== undefined && totalCostUsd > budget.maxCostUsd) {
     throw new BudgetExceededError(
@@ -601,9 +631,7 @@ export interface AgentAsToolTarget {
  *
  * @example `const researchTool = researcher.asTool("research");`
  */
-export function agentToTool(
-  input: Agent | AgentAsToolTarget
-): ToolDefinition {
+export function agentToTool(input: Agent | AgentAsToolTarget): ToolDefinition {
   const agentInstance = "agent" in input ? input.agent : input;
   const rawName =
     ("name" in input && (input as any).name) ||
@@ -635,28 +663,55 @@ export function agentToTool(
         task,
         emit: (ev) => ctx?.onSubagentEvent?.(ev),
       });
-      const lineage = { name, displayId: live.displayId, sessionId: subSessionId, parentSessionId, task, runId: callRunId, turnId: callTurnId };
+      const lineage = {
+        name,
+        displayId: live.displayId,
+        sessionId: subSessionId,
+        parentSessionId,
+        task,
+        runId: callRunId,
+        turnId: callTurnId,
+      };
       try {
         // One isolated copy per call: the shared instance is single-flight, so
         // calling it directly would serialize (or steer) parallel tool calls.
         const worker: Agent =
-          typeof (agentInstance as Agent).fork === "function" ? agentInstance.fork(subSessionId, parentSessionId) : agentInstance;
-        const workerStream = worker.stream(task, { signal: ctx?.signal, sessionId: subSessionId, onTurn: live.onWorkerTurn } as any);
-        const detachWorkerListeners = live.attachToStream(workerStream as unknown as Parameters<typeof live.attachToStream>[0]);
+          typeof (agentInstance as Agent).fork === "function"
+            ? agentInstance.fork(subSessionId, parentSessionId)
+            : agentInstance;
+        const workerStream = worker.stream(task, {
+          signal: ctx?.signal,
+          sessionId: subSessionId,
+          onTurn: live.onWorkerTurn,
+        } as any);
+        const detachWorkerListeners = live.attachToStream(
+          workerStream as unknown as Parameters<typeof live.attachToStream>[0]
+        );
         let response: AgentResponse;
         try {
           response = await workerStream.result();
         } finally {
-          try { detachWorkerListeners(); } catch {}
+          try {
+            detachWorkerListeners();
+          } catch {}
           // The per-call session id is never reused: drop its provider chain/routing state.
           if (worker !== agentInstance) {
-            try { agentInstance.absorbUsage(worker.usageTotals); } catch {} // the template keeps what its copies spent
-            try { worker.reset(); } catch {}
+            try {
+              agentInstance.absorbUsage(worker.usageTotals);
+            } catch {} // the template keeps what its copies spent
+            try {
+              worker.reset();
+            } catch {}
           }
         }
         live.finish(response);
         return makeSubagentResult(response.text, [
-          workerMetadata({ ...lineage, durationMs: Math.max(0, nowMs() - startTime), result: response, steps: live.steps() }),
+          workerMetadata({
+            ...lineage,
+            durationMs: Math.max(0, nowMs() - startTime),
+            result: response,
+            steps: live.steps(),
+          }),
         ]);
       } catch (err: any) {
         const msg = err?.message || String(err);
@@ -674,9 +729,7 @@ export function agentToTool(
  *
  * @example `const tools = buildAgentTools([researcher, reviewer]);`
  */
-export function buildAgentTools(
-  agents?: (Agent | AgentAsToolTarget)[]
-): Record<string, ToolDefinition> {
+export function buildAgentTools(agents?: (Agent | AgentAsToolTarget)[]): Record<string, ToolDefinition> {
   if (!agents || agents.length === 0) return {};
 
   const tools: Record<string, ToolDefinition> = {};

@@ -1,9 +1,5 @@
 import { z } from "zod";
-import type {
-  ToolDefinition,
-  StandardToolDeclaration,
-  ToolExecuteFn,
-} from "../types/tool.ts";
+import type { ToolDefinition, StandardToolDeclaration, ToolExecuteFn } from "../types/tool.ts";
 import type { ThinkingLevel } from "../types/core.ts";
 import type { ThinkingOption } from "../types/agent.ts";
 import { zodToJsonSchema } from "./schema.ts";
@@ -54,9 +50,10 @@ export function normalizeThinkingV2(
  *
  * @example `resolveWhenBusy({ whenBusy: "queue", mode: "steer" }); // "queue"`
  */
-export function resolveWhenBusy(
-  config?: { mode?: "steer" | "queue" | "auto"; whenBusy?: "steer" | "queue" | "auto" }
-): "steer" | "queue" | "auto" {
+export function resolveWhenBusy(config?: {
+  mode?: "steer" | "queue" | "auto";
+  whenBusy?: "steer" | "queue" | "auto";
+}): "steer" | "queue" | "auto" {
   const v = config?.whenBusy ?? config?.mode ?? "auto";
   return v === "steer" || v === "queue" ? v : "auto";
 }
@@ -67,9 +64,10 @@ export function resolveWhenBusy(
  *
  * @example `normalizeMaxAttempts({ maxAttempts: 3 }); // 3`
  */
-export function normalizeMaxAttempts(
-  config?: { maxTries?: number | string; maxAttempts?: number | string }
-): number | string | undefined {
+export function normalizeMaxAttempts(config?: {
+  maxTries?: number | string;
+  maxAttempts?: number | string;
+}): number | string | undefined {
   return config?.maxTries ?? config?.maxAttempts;
 }
 

@@ -18,13 +18,7 @@
  * Needs: MODEL, SUB_AGENT_MODEL + provider keys (see .env.example).
  */
 
-import {
-  Agent,
-  sessionDirFor,
-  loadSessionDir,
-  isSessionDescendant,
-  formatSessionCost,
-} from "agent-accelerator";
+import { Agent, sessionDirFor, loadSessionDir, isSessionDescendant, formatSessionCost } from "agent-accelerator";
 import { fail } from "./_shared.ts";
 
 const MODEL = process.env.MODEL;
@@ -64,7 +58,10 @@ function shortLabel(trackingId: string): string {
 }
 /** Strips control chars that break terminal layout (`\r` repaints over the box border). */
 function sanitizeBoxText(text: string): string {
-  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 }
 function printBoxHeader(box: WorkerBox): void {
   const title = ` ${box.label} `;
@@ -97,7 +94,8 @@ function printBoxFooter(box: WorkerBox, note: string): void {
 // ---------------------------------------------------------------------------
 const agent = new Agent({
   name: "Identity Lead",
-  instructions: "You coordinate parallel research. Always delegate with the subagents tool, then synthesize. Name workers with short labels (e.g. research-analyst).",
+  instructions:
+    "You coordinate parallel research. Always delegate with the subagents tool, then synthesize. Name workers with short labels (e.g. research-analyst).",
   model: MODEL,
   dynamicSubagents: {
     enabled: true,
@@ -148,8 +146,24 @@ console.log(MAGENTA + "\n\n--- workers (session id + TrackingID) ---" + RESET);
 for (const s of res.subagents) {
   const ok = !s.isError ? GREEN + "ok" + RESET : YELLOW + "ERROR" + RESET;
   console.log(
-    MAGENTA + "- " + s.name + RESET + " " + ok + " model=" + CYAN + s.model + RESET + " turns=" + s.turns +
-    " tokens=" + s.usage.totalTokens + " cost=" + GREEN + formatSessionCost(s.usage?.cost?.totalCost ?? 0) + RESET
+    MAGENTA +
+      "- " +
+      s.name +
+      RESET +
+      " " +
+      ok +
+      " model=" +
+      CYAN +
+      s.model +
+      RESET +
+      " turns=" +
+      s.turns +
+      " tokens=" +
+      s.usage.totalTokens +
+      " cost=" +
+      GREEN +
+      formatSessionCost(s.usage?.cost?.totalCost ?? 0) +
+      RESET
   );
   console.log("  session: " + (s.sessionId ?? "(none)") + " TrackingID: " + ((s as any).trackingId ?? "(none)"));
 }
@@ -166,7 +180,14 @@ for (const s of res.subagents) {
   console.log("  TrackingID: " + ((s as any).trackingId ?? "(none)"));
   console.log("  descendant of this parent: " + (descendant ? GREEN + "true" + RESET : YELLOW + "false" + RESET));
 }
-console.log(MAGENTA + "parent session total usage: " + res.usage.totalTokens + " tokens, cost " + formatSessionCost(res.usage?.cost?.totalCost ?? 0) + RESET);
+console.log(
+  MAGENTA +
+    "parent session total usage: " +
+    res.usage.totalTokens +
+    " tokens, cost " +
+    formatSessionCost(res.usage?.cost?.totalCost ?? 0) +
+    RESET
+);
 
 // ---------------------------------------------------------------------------
 // 2b. Realtime tracking: agent.track(TrackingID) replays everything one worker did

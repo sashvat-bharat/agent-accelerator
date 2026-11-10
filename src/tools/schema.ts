@@ -65,7 +65,11 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
  *
  * @example `const clean = cleanJsonSchema(rawSchema);`
  */
-export function cleanJsonSchema(schema: any, rootDefs?: Record<string, any>, seenRefs: Set<string> = new Set()): Record<string, unknown> {
+export function cleanJsonSchema(
+  schema: any,
+  rootDefs?: Record<string, any>,
+  seenRefs: Set<string> = new Set()
+): Record<string, unknown> {
   if (typeof schema !== "object" || schema === null) {
     return schema;
   }
@@ -115,7 +119,8 @@ export function cleanJsonSchema(schema: any, rootDefs?: Record<string, any>, see
   if (rest.anyOf) rest.anyOf = (rest.anyOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
   if (rest.oneOf) rest.oneOf = (rest.oneOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
   if (rest.allOf) rest.allOf = (rest.allOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
-  if (rest.prefixItems) rest.prefixItems = (rest.prefixItems as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
+  if (rest.prefixItems)
+    rest.prefixItems = (rest.prefixItems as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
   // Recursively clean nested $ref inside properties that were not top-level
   for (const k of Object.keys(rest)) {
     if (rest[k] && typeof rest[k] === "object" && !Array.isArray(rest[k]) && (rest[k] as any).$ref) {
@@ -142,9 +147,7 @@ function extractZodObjectSchema(zodSchema: any): Record<string, unknown> {
 
   for (const [key, propSchema] of Object.entries(shape as Record<string, any>)) {
     const isOptional =
-      propSchema.isOptional?.() ||
-      propSchema._def?.typeName === "ZodOptional" ||
-      propSchema._def?.type === "optional";
+      propSchema.isOptional?.() || propSchema._def?.typeName === "ZodOptional" || propSchema._def?.type === "optional";
 
     if (!isOptional) {
       required.push(key);
@@ -169,7 +172,8 @@ function inferZodPropertyType(prop: any): Record<string, unknown> {
   const tn = String(typeName).toLowerCase();
 
   if (tn.includes("number") || tn === "zodnumber") return { type: "number", ...(description ? { description } : {}) };
-  if (tn.includes("boolean") || tn === "zodboolean") return { type: "boolean", ...(description ? { description } : {}) };
+  if (tn.includes("boolean") || tn === "zodboolean")
+    return { type: "boolean", ...(description ? { description } : {}) };
   if (tn.includes("integer")) return { type: "integer", ...(description ? { description } : {}) };
   if (tn.includes("enum") || tn === "zodenum") {
     const vals = unwrapped._def?.values || unwrapped._def?.entries || [];

@@ -3,7 +3,13 @@ import type { ToolDefinition, ToolCallRecord, ToolResultRecord } from "../types/
 import type { TokenUsage } from "../types/core.ts";
 import type { AgentRunOptions } from "../types/agent.ts";
 import type { ContentPart } from "../types/message.ts";
-import { AgentResponse, normalizeFinishReason, type FinishReason, type SubAgentExecutionMetadata, type StreamEvent } from "../types/response.ts";
+import {
+  AgentResponse,
+  normalizeFinishReason,
+  type FinishReason,
+  type SubAgentExecutionMetadata,
+  type StreamEvent,
+} from "../types/response.ts";
 import { priceUsage, reportUsageAnomaly } from "../session/store.ts";
 import { telemetryBus } from "../telemetry.ts";
 export { telemetryBus };
@@ -131,7 +137,13 @@ function drainSteerInbox(context: AgentContext, inbox?: SteerEntry[]): string[] 
 // Reports one finished turn to the caller's onTurn hook (ids only), never throwing; in: both loops, out: AgentRunOptions.onTurn.
 function emitTurn(
   runOptions: AgentRunOptions | undefined,
-  turn: { turns: number; text?: string; thinking?: string; toolCalls?: ToolCallRecord[]; toolResults?: ToolResultRecord[] }
+  turn: {
+    turns: number;
+    text?: string;
+    thinking?: string;
+    toolCalls?: ToolCallRecord[];
+    toolResults?: ToolResultRecord[];
+  }
 ): void {
   try {
     runOptions?.onTurn?.({
@@ -173,7 +185,9 @@ function shouldRollbackOnFailure(
 
 // Calls the persistence checkpoint hook, never throwing; in: both loops after each step, out: Agent.persistNow.
 function emitProgress(config: { onProgress?: () => void }): void {
-  try { config.onProgress?.(); } catch {}
+  try {
+    config.onProgress?.();
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -181,9 +195,13 @@ function emitProgress(config: { onProgress?: () => void }): void {
 // ---------------------------------------------------------------------------
 
 // Normalizes the structured-output option once per run (raw value + provider spec); in: AgentLoopConfig.output, out: the final-answer validation.
-function resolveLoopOutput(config: AgentLoopConfig): { raw: unknown; spec: import("../types/model.ts").StructuredOutputSpec | undefined } {
+function resolveLoopOutput(config: AgentLoopConfig): {
+  raw: unknown;
+  spec: import("../types/model.ts").StructuredOutputSpec | undefined;
+} {
   const raw = (config as { output?: unknown }).output;
-  const fromOptions = (config.options as { output?: import("../types/model.ts").StructuredOutputSpec } | undefined)?.output;
+  const fromOptions = (config.options as { output?: import("../types/model.ts").StructuredOutputSpec } | undefined)
+    ?.output;
   if (raw !== undefined && raw !== null) {
     // Throws ValidationError for invalid shapes — caught by run/stream catch
     // with partial attached, same as other config validation.
@@ -195,7 +213,11 @@ function resolveLoopOutput(config: AgentLoopConfig): { raw: unknown; spec: impor
 }
 
 // Validates the final text against the structured-output option, throwing ValidationError on mismatch; in: the last model text, out: AgentResponse.parsed.
-function parseFinalStructuredOutput(text: string, raw: unknown, spec: import("../types/model.ts").StructuredOutputSpec | undefined): unknown | undefined {
+function parseFinalStructuredOutput(
+  text: string,
+  raw: unknown,
+  spec: import("../types/model.ts").StructuredOutputSpec | undefined
+): unknown | undefined {
   if (raw === undefined && spec === undefined) return undefined;
   // Strict-fail when opted in: invalid JSON/schema throws ValidationError.
   // Tool turns skip this (called only for final no-tool text).
@@ -280,7 +302,9 @@ export function ensureToolPairing(context: AgentContext): void {
         const hit = results.get(p.id)?.shift();
         if (hit) {
           // Reuse the original message object when it carried exactly this result.
-          rebuilt.push(hit.message.content.length === 1 ? hit.message : { role: "tool", name: hit.part.name, content: [hit.part] });
+          rebuilt.push(
+            hit.message.content.length === 1 ? hit.message : { role: "tool", name: hit.part.name, content: [hit.part] }
+          );
         } else {
           const name = typeof p.name === "string" ? p.name : "tool";
           traceToolEvent("call_interrupted", "warn", { id: p.id, name }, {});
@@ -320,10 +344,12 @@ export interface LoopLimits {
 }
 
 /** Resolves `(config as any).limits` with defaults (timeouts tolerate reasoning). */
-function resolveLoopLimits(config: AgentLoopConfig, fallbackMaxTurns: number): LoopLimits & { maxTurns: number; deadlineMs: number; maxToolCallsPerRun: number; maxTotalTokens: number } {
+function resolveLoopLimits(
+  config: AgentLoopConfig,
+  fallbackMaxTurns: number
+): LoopLimits & { maxTurns: number; deadlineMs: number; maxToolCallsPerRun: number; maxTotalTokens: number } {
   const raw = ((config as unknown as { limits?: Record<string, unknown> }).limits ?? {}) as Record<string, unknown>;
-  const num = (v: unknown): number | undefined =>
-    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   let maxTurns = fallbackMaxTurns;
   const limMax = num(raw.maxTurns);
   if (limMax !== undefined) {
@@ -338,7 +364,15 @@ function resolveLoopLimits(config: AgentLoopConfig, fallbackMaxTurns: number): L
   const requestTimeoutMs = timeout(raw.requestTimeoutMs) ?? 300_000;
   const firstByteTimeoutMs = timeout(raw.firstByteTimeoutMs) ?? 120_000;
   const streamIdleTimeoutMs = timeout(raw.streamIdleTimeoutMs) ?? 300_000;
-  return { maxTurns, deadlineMs, maxToolCallsPerRun, maxTotalTokens, requestTimeoutMs, firstByteTimeoutMs, streamIdleTimeoutMs };
+  return {
+    maxTurns,
+    deadlineMs,
+    maxToolCallsPerRun,
+    maxTotalTokens,
+    requestTimeoutMs,
+    firstByteTimeoutMs,
+    streamIdleTimeoutMs,
+  };
 }
 
 // The session id a run's provider calls use (run override, else agent default); in: AgentLoopConfig, out: rollback and routing.
@@ -348,21 +382,24 @@ function loopSessionId(config: AgentLoopConfig): string | undefined {
       (config.runOptions as { sessionId?: string } | undefined)?.sessionId ||
       (config.options as { sessionId?: string } | undefined)?.sessionId
     );
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
 }
 
 // Builds an AbortError that carries the run's partial progress; in: an abort reason + partial usage, out: the error the run rejects with.
-function makeAbortError(
-  partial: { usage: TokenUsage; turns: number; text?: string },
-  reason?: unknown
-): Error {
+function makeAbortError(partial: { usage: TokenUsage; turns: number; text?: string }, reason?: unknown): Error {
   let base: Error;
   if (reason instanceof Error && reason.name === "AbortError") base = reason;
   else if (reason instanceof Error) base = new Error(reason.message || "Aborted");
   else if (typeof reason === "string" && reason) base = new Error(reason);
   else base = new Error("Aborted");
-  try { (base as { name: string }).name = "AbortError"; } catch {}
-  try { (base as unknown as { partial: unknown }).partial = partial; } catch {}
+  try {
+    (base as { name: string }).name = "AbortError";
+  } catch {}
+  try {
+    (base as unknown as { partial: unknown }).partial = partial;
+  } catch {}
   return base;
 }
 
@@ -402,7 +439,9 @@ async function generateWithTimeout<T>(task: () => Promise<T>, timeoutMs: number)
       timer = setTimeout(() => {
         reject(new TimeoutError(`[Agent Accelerator] Request timed out after ${timeoutMs}ms.`));
       }, timeoutMs);
-      try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
+      try {
+        (timer as unknown as { unref?: () => void }).unref?.();
+      } catch {}
     });
     return await Promise.race([task(), timeoutP]);
   } finally {
@@ -521,7 +560,13 @@ async function executeToolCallsWithRepeatGuard(options: {
   agentName?: string;
   signal?: AbortSignal;
   sessionId?: string;
-  onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
+  onSubagentEvent?: (event: {
+    trackingId: string;
+    delta?: string;
+    thinkingDelta?: string;
+    partialText?: string;
+    partialThinking?: string;
+  }) => void;
 }): Promise<{ results: ToolResultRecord[]; fingerprints: Set<string> }> {
   const { toolCalls, previousFingerprints, repeatCounts } = options;
   const currentFingerprints = new Set<string>();
@@ -538,7 +583,13 @@ async function executeToolCallsWithRepeatGuard(options: {
     }
     if (!previousFingerprints.has(fingerprint)) repeatCounts.delete(fingerprint); // streak broken
     if (shouldBlockRepeat(previousFingerprints, call, repeatCounts)) {
-      traceToolEvent("call_blocked", "warn", call, { agentName: options.agentName, sessionId: options.sessionId }, { reason: "repeat_blocked" });
+      traceToolEvent(
+        "call_blocked",
+        "warn",
+        call,
+        { agentName: options.agentName, sessionId: options.sessionId },
+        { reason: "repeat_blocked" }
+      );
       blocked.set(call.id, makeRepeatBlockedResult(call));
     } else {
       executable.push(call);
@@ -547,19 +598,20 @@ async function executeToolCallsWithRepeatGuard(options: {
   // Streaks only survive while the fingerprint keeps appearing every turn.
   for (const fp of [...repeatCounts.keys()]) if (!currentFingerprints.has(fp)) repeatCounts.delete(fp);
 
-  const executed = executable.length > 0
-    ? await executeToolCalls({
-        tools: options.tools,
-        toolCalls: executable,
-        agentName: options.agentName,
-        parallel: true,
-        signal: options.signal,
-        sessionId: options.sessionId,
-        onSubagentEvent: options.onSubagentEvent,
-        onResult: options.onResult,
-        openToolLog: options.openToolLog,
-      })
-    : [];
+  const executed =
+    executable.length > 0
+      ? await executeToolCalls({
+          tools: options.tools,
+          toolCalls: executable,
+          agentName: options.agentName,
+          parallel: true,
+          signal: options.signal,
+          sessionId: options.sessionId,
+          onSubagentEvent: options.onSubagentEvent,
+          onResult: options.onResult,
+          openToolLog: options.openToolLog,
+        })
+      : [];
   const byId = new Map<string, ToolResultRecord[]>();
   for (const result of executed) {
     const queue = byId.get(result.id) ?? [];
@@ -577,9 +629,7 @@ async function executeToolCallsWithRepeatGuard(options: {
     // id for several distinct calls in a turn, and a plain id->result map
     // would hand every call the last result. Queues keep each result aligned
     // with its own call.
-    results: toolCalls
-      .map((call) => byId.get(call.id)?.shift())
-      .filter((r): r is ToolResultRecord => Boolean(r)),
+    results: toolCalls.map((call) => byId.get(call.id)?.shift()).filter((r): r is ToolResultRecord => Boolean(r)),
     fingerprints: currentFingerprints,
   };
 }
@@ -603,7 +653,13 @@ export function unfinishedToolCalls(messages: AgentContext["messages"]): ToolCal
   const open: ToolCallRecord[] = [];
   for (const p of calls) {
     if (p.type === "tool_call" && !answered.has(p.id)) {
-      open.push({ id: p.id, name: p.name, arguments: p.arguments, ...(p.rawArguments ? { rawArguments: p.rawArguments } : {}), ...(p.callId ? { callId: p.callId } : {}) });
+      open.push({
+        id: p.id,
+        name: p.name,
+        arguments: p.arguments,
+        ...(p.rawArguments ? { rawArguments: p.rawArguments } : {}),
+        ...(p.callId ? { callId: p.callId } : {}),
+      });
     }
   }
   return open;
@@ -698,295 +754,305 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   const repeatCounts = new Map<string, number>();
 
   try {
-  const standardTools = toStandardToolDeclarations(tools);
+    const standardTools = toStandardToolDeclarations(tools);
 
-  if (config.resume) {
-    const finished = await finishInterruptedTools(config);
-    stoppedByTool = finished.results.some((r) => r.stopped) || endsWithStop(context.messages);
-    if (finished.calls.length > 0) {
-      toolsExecuted = true;
-      allToolCalls.push(...finished.calls);
-      allToolResults.push(...finished.results);
-      for (const meta of finished.subagents) {
-        allSubagents.push(meta);
-        accumulateUsage(accumulatedUsage, meta.usage, getModelFromCatalog(meta.provider, meta.model));
-      }
-    }
-  }
-
-  while (!stoppedByTool && turns < maxTurns) {
-    // Fail fast on abort (throws AbortError with partial).
-    throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: finalResult?.text });
-    checkDeadline(startTime, limits.deadlineMs);
-    config.enforceBudget?.();
-    // Repair orphan tool pairs before every request.
-    ensureToolPairing(context);
-    if (config.fileAccess?.roots) await enforceFileAccess(context.messages, config.fileAccess.roots);
-    turns++;
-
-    const spec = getModelFromCatalog(provider.id, modelId);
-
-    const providerOptions: ProviderRequestOptions = {
-      ...options,
-      sessionId: runOptions?.sessionId || options?.sessionId,
-      cache: options?.cache,
-      tools: standardTools.length > 0 ? standardTools : undefined,
-      signal: runOptions?.signal,
-      toolChoice: toolChoiceForTurn(options?.toolChoice, turns),
-      ...(loopOutput.spec ? { output: loopOutput.spec } : {}),
-    };
-    // Per-request timeout pass-through (providers honor timeoutMs).
-    try {
-      if (Number.isFinite(limits.requestTimeoutMs) && limits.requestTimeoutMs !== Infinity) {
-        (providerOptions as unknown as { timeoutMs?: number }).timeoutMs = limits.requestTimeoutMs;
-      }
-    } catch {}
-    // google:{store:false} opt-out pass-through (provider
-    // already respects body.store===false for chaining).
-    try {
-      const gStore =
-        (runOptions as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
-        (options as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
-        (config as unknown as { googleStore?: unknown }).googleStore;
-      if (gStore === false) (providerOptions as unknown as { store?: boolean }).store = false;
-    } catch {}
-    // Google interaction storage tier for the chain-TTL gate
-    // (`free`: 23h local gate; `paid`: 54d). Defaults to `free` in adapter.
-    try {
-      const gTier =
-        (runOptions as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
-        (options as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
-        (config as unknown as { googleTier?: unknown }).googleTier;
-      if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
-    } catch {}
-
-    // A long-running call (e.g. Google long decode) times each HTTP request itself: no whole-call race.
-    const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
-    const genResult = await generateWithTimeout(
-      () => provider.generate(
-        modelId,
-        {
-          systemPrompt: context.systemPrompt,
-          messages: context.messages,
-        },
-        providerOptions
-      ),
-      longRunning ? Infinity : limits.requestTimeoutMs
-    );
-
-    finalResult = genResult;
-
-    // Canonical session routing: lets adapters detect provider switches.
-    noteProviderTurn(
-      runOptions?.sessionId || options?.sessionId,
-      provider.id
-    );
-
-    // Thinking is exposed via events/traces and onTurn. Promoting it to answer text is gated (default
-    // OFF): without the opt-in the run returns the provider's empty text and finishReason.
-    if ((!genResult.text || genResult.text.trim() === "") && (!genResult.toolCalls || genResult.toolCalls.length === 0) && genResult.thinking) {
-      if (shouldPromoteThinkingToAnswer(config, runOptions)) {
-        if (genResult.thinking.includes("</think>")) {
-          const parts = genResult.thinking.split(/<\/(?:think|thought)>/i);
-          genResult.thinking = parts[0]!.replace(/<(?:think|thought)>/i, "").trim() || undefined;
-          genResult.text = parts.slice(1).join("").trim();
-        } else {
-          genResult.text = genResult.thinking;
-          genResult.thinking = undefined;
+    if (config.resume) {
+      const finished = await finishInterruptedTools(config);
+      stoppedByTool = finished.results.some((r) => r.stopped) || endsWithStop(context.messages);
+      if (finished.calls.length > 0) {
+        toolsExecuted = true;
+        allToolCalls.push(...finished.calls);
+        allToolResults.push(...finished.results);
+        for (const meta of finished.subagents) {
+          allSubagents.push(meta);
+          accumulateUsage(accumulatedUsage, meta.usage, getModelFromCatalog(meta.provider, meta.model));
         }
       }
     }
 
-    accumulateUsage(accumulatedUsage, genResult.usage, spec, options?.serviceTier);
-    try { config.onTurnUsage?.(genResult.usage, spec); } catch {}
-    config.enforceBudget?.({ ...genResult.usage, cost: computeCostFromPricing(genResult.usage, spec, options?.serviceTier) });
-    checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
+    while (!stoppedByTool && turns < maxTurns) {
+      // Fail fast on abort (throws AbortError with partial).
+      throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: finalResult?.text });
+      checkDeadline(startTime, limits.deadlineMs);
+      config.enforceBudget?.();
+      // Repair orphan tool pairs before every request.
+      ensureToolPairing(context);
+      if (config.fileAccess?.roots) await enforceFileAccess(context.messages, config.fileAccess.roots);
+      turns++;
 
-    // Record assistant turn in context
-    context.addAssistantMessage(
-      genResult.text,
-      genResult.toolCalls,
-      genResult.thinking,
-      genResult.thoughtSignature,
-      genResult.providerSteps
-    );
+      const spec = getModelFromCatalog(provider.id, modelId);
 
-    // Thinking-trace telemetry (observability-only, full text, no limit):
-    // one bus event per thinking turn carrying the text + thought signature.
-    // Never touches provider payloads, history, or persistence formats.
-    if (genResult.thinking) {
+      const providerOptions: ProviderRequestOptions = {
+        ...options,
+        sessionId: runOptions?.sessionId || options?.sessionId,
+        cache: options?.cache,
+        tools: standardTools.length > 0 ? standardTools : undefined,
+        signal: runOptions?.signal,
+        toolChoice: toolChoiceForTurn(options?.toolChoice, turns),
+        ...(loopOutput.spec ? { output: loopOutput.spec } : {}),
+      };
+      // Per-request timeout pass-through (providers honor timeoutMs).
       try {
-        telemetryBus.emit({
-          code: "turn.thinking",
-          message: `[Agent Accelerator] turn ${turns} thinking (${provider.id}/${modelId})`,
-          data: {
-            turns,
-            model: modelId,
-            provider: provider.id,
-            sessionId: runOptions?.sessionId || options?.sessionId,
-            thinking: genResult.thinking,
-            ...(genResult.thoughtSignature ? { thoughtSignature: genResult.thoughtSignature } : {}),
-          },
-        });
+        if (Number.isFinite(limits.requestTimeoutMs) && limits.requestTimeoutMs !== Infinity) {
+          (providerOptions as unknown as { timeoutMs?: number }).timeoutMs = limits.requestTimeoutMs;
+        }
       } catch {}
-    }
+      // google:{store:false} opt-out pass-through (provider
+      // already respects body.store===false for chaining).
+      try {
+        const gStore =
+          (runOptions as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
+          (options as unknown as { googleStore?: unknown } | undefined)?.googleStore ??
+          (config as unknown as { googleStore?: unknown }).googleStore;
+        if (gStore === false) (providerOptions as unknown as { store?: boolean }).store = false;
+      } catch {}
+      // Google interaction storage tier for the chain-TTL gate
+      // (`free`: 23h local gate; `paid`: 54d). Defaults to `free` in adapter.
+      try {
+        const gTier =
+          (runOptions as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+          (options as unknown as { googleTier?: unknown } | undefined)?.googleTier ??
+          (config as unknown as { googleTier?: unknown }).googleTier;
+        if (gTier === "paid" || gTier === "free") providerOptions.googleTier = gTier;
+      } catch {}
 
-    // Mid-session steer: if new queries arrived during this provider turn,
-    // inject them now. Tool turns still execute first (see below) so the
-    // current action finishes before redirection.
-    const noToolSteered = (!genResult.toolCalls || genResult.toolCalls.length === 0)
-      ? drainSteerInbox(context, config.steerInbox)
-      : [];
+      // A long-running call (e.g. Google long decode) times each HTTP request itself: no whole-call race.
+      const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
+      const genResult = await generateWithTimeout(
+        () =>
+          provider.generate(
+            modelId,
+            {
+              systemPrompt: context.systemPrompt,
+              messages: context.messages,
+            },
+            providerOptions
+          ),
+        longRunning ? Infinity : limits.requestTimeoutMs
+      );
 
-    // If no tool calls, generation is complete — unless steered, in which
-    // case the injected message extends the SAME run (no new response).
-    if (!genResult.toolCalls || genResult.toolCalls.length === 0) {
-      emitTurn(runOptions, { turns, text: genResult.text, thinking: genResult.thinking });
-      if (noToolSteered.length > 0) {
-        try { config.onSteerInjected?.(noToolSteered); } catch {}
+      finalResult = genResult;
+
+      // Canonical session routing: lets adapters detect provider switches.
+      noteProviderTurn(runOptions?.sessionId || options?.sessionId, provider.id);
+
+      // Thinking is exposed via events/traces and onTurn. Promoting it to answer text is gated (default
+      // OFF): without the opt-in the run returns the provider's empty text and finishReason.
+      if (
+        (!genResult.text || genResult.text.trim() === "") &&
+        (!genResult.toolCalls || genResult.toolCalls.length === 0) &&
+        genResult.thinking
+      ) {
+        if (shouldPromoteThinkingToAnswer(config, runOptions)) {
+          if (genResult.thinking.includes("</think>")) {
+            const parts = genResult.thinking.split(/<\/(?:think|thought)>/i);
+            genResult.thinking = parts[0]!.replace(/<(?:think|thought)>/i, "").trim() || undefined;
+            genResult.text = parts.slice(1).join("").trim();
+          } else {
+            genResult.text = genResult.thinking;
+            genResult.thinking = undefined;
+          }
+        }
+      }
+
+      accumulateUsage(accumulatedUsage, genResult.usage, spec, options?.serviceTier);
+      try {
+        config.onTurnUsage?.(genResult.usage, spec);
+      } catch {}
+      config.enforceBudget?.({
+        ...genResult.usage,
+        cost: computeCostFromPricing(genResult.usage, spec, options?.serviceTier),
+      });
+      checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
+
+      // Record assistant turn in context
+      context.addAssistantMessage(
+        genResult.text,
+        genResult.toolCalls,
+        genResult.thinking,
+        genResult.thoughtSignature,
+        genResult.providerSteps
+      );
+
+      // Thinking-trace telemetry (observability-only, full text, no limit):
+      // one bus event per thinking turn carrying the text + thought signature.
+      // Never touches provider payloads, history, or persistence formats.
+      if (genResult.thinking) {
+        try {
+          telemetryBus.emit({
+            code: "turn.thinking",
+            message: `[Agent Accelerator] turn ${turns} thinking (${provider.id}/${modelId})`,
+            data: {
+              turns,
+              model: modelId,
+              provider: provider.id,
+              sessionId: runOptions?.sessionId || options?.sessionId,
+              thinking: genResult.thinking,
+              ...(genResult.thoughtSignature ? { thoughtSignature: genResult.thoughtSignature } : {}),
+            },
+          });
+        } catch {}
+      }
+
+      // Mid-session steer: if new queries arrived during this provider turn,
+      // inject them now. Tool turns still execute first (see below) so the
+      // current action finishes before redirection.
+      const noToolSteered =
+        !genResult.toolCalls || genResult.toolCalls.length === 0 ? drainSteerInbox(context, config.steerInbox) : [];
+
+      // If no tool calls, generation is complete — unless steered, in which
+      // case the injected message extends the SAME run (no new response).
+      if (!genResult.toolCalls || genResult.toolCalls.length === 0) {
+        emitTurn(runOptions, { turns, text: genResult.text, thinking: genResult.thinking });
+        if (noToolSteered.length > 0) {
+          try {
+            config.onSteerInjected?.(noToolSteered);
+          } catch {}
+        }
+        emitProgress(config);
+        if (noToolSteered.length > 0) continue;
+        break;
+      }
+
+      // Execute tool calls — always parallel (model-driven, bloatfree DX7)
+      // Check abort before tools (throws AbortError with partial).
+      throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: genResult.text });
+      emitProgress(config); // the calls are on record BEFORE they run, so a crash can finish them instead of forgetting them
+      allToolCalls.push(...genResult.toolCalls);
+      // Per-run tool-call budget.
+      if (allToolCalls.length > limits.maxToolCallsPerRun) {
+        throw new BudgetExceededError(
+          `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${limits.maxToolCallsPerRun}).`
+        );
+      }
+      toolsExecuted = true;
+      const guarded = await executeToolCallsWithRepeatGuard({
+        tools,
+        toolCalls: genResult.toolCalls,
+        previousFingerprints: previousToolCallFingerprints,
+        repeatCounts,
+        agentName,
+        signal: runOptions?.signal,
+        sessionId: runOptions?.sessionId || options?.sessionId,
+        onResult: config.onToolResult,
+        openToolLog: config.openToolLog,
+      });
+      const results = guarded.results;
+      previousToolCallFingerprints = guarded.fingerprints;
+
+      // Process results and extract any sub-agent execution metadata
+      const sanitizedResults: ToolResultRecord[] = [];
+
+      for (const r of results) {
+        const { sanitized, metas } = sanitizeToolResult(r);
+        if (metas.length > 0) {
+          allSubagents.push(...metas);
+          for (const s of metas) {
+            if (s.raw) s.raw = applyCaptureRaw(s.raw, config.captureRaw);
+            const subagentSpec = getModelFromCatalog(s.provider, s.model);
+            if (subagentSpec && (!s.usage?.cost || !s.usage.cost.totalCost)) {
+              s.usage.cost = computeCostFromPricing(s.usage, subagentSpec);
+            }
+            accumulateUsage(accumulatedUsage, s.usage, subagentSpec);
+            config.enforceBudget?.(s.usage);
+          }
+        }
+        sanitizedResults.push(sanitized);
+      }
+
+      allToolResults.push(...sanitizedResults);
+      context.addToolResults(sanitizedResults);
+      checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
+      // Results are stored BEFORE the cancellation check so an abort
+      // never drops executed tool work from history.
+      throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: genResult.text });
+      emitTurn(runOptions, {
+        turns,
+        text: genResult.text,
+        thinking: genResult.thinking,
+        toolCalls: genResult.toolCalls,
+        toolResults: sanitizedResults,
+      });
+      // A tool ended the run (`ctx.stop`): the whole batch has finished, so stop here. Waiting steers become follow-ups.
+      if (sanitizedResults.some((r) => r.stopped)) {
+        stoppedByTool = true;
+        emitProgress(config);
+        break;
+      }
+      // Steer drain AFTER tool results so call/result pairs stay adjacent.
+      // The next loop iteration sends the injected user message to the model
+      // within the same run (same usage/turn budget).
+      const toolSteered = drainSteerInbox(context, config.steerInbox);
+      if (toolSteered.length > 0) {
+        try {
+          config.onSteerInjected?.(toolSteered);
+        } catch {}
       }
       emitProgress(config);
-      if (noToolSteered.length > 0) continue;
-      break;
+
+      // Abort always throws AbortError with partial attached (never
+      // silently breaks).
+      throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: finalResult?.text });
     }
 
-    // Execute tool calls — always parallel (model-driven, bloatfree DX7)
-    // Check abort before tools (throws AbortError with partial).
-    throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: genResult.text });
-    emitProgress(config); // the calls are on record BEFORE they run, so a crash can finish them instead of forgetting them
-    allToolCalls.push(...genResult.toolCalls);
-    // Per-run tool-call budget.
-    if (allToolCalls.length > limits.maxToolCallsPerRun) {
-      throw new BudgetExceededError(
-        `[Agent Accelerator] maxToolCallsPerRun exceeded (${allToolCalls.length} > ${limits.maxToolCallsPerRun}).`
+    // maxTurns exhausted while the model still requested tools: the tool
+    // results above were never sent back, so the run is truncated — surface
+    // it via finishReason + warning instead of silently returning.
+    const truncatedByMaxTurns =
+      !stoppedByTool && turns >= maxTurns && !!finalResult?.toolCalls && finalResult.toolCalls.length > 0;
+    if (truncatedByMaxTurns) {
+      warnMaxTurnsHit(
+        agentName,
+        maxTurns,
+        finalResult.toolCalls.map((c: ToolCallRecord) => c.name)
       );
     }
-    toolsExecuted = true;
-    const guarded = await executeToolCallsWithRepeatGuard({
-      tools,
-      toolCalls: genResult.toolCalls,
-      previousFingerprints: previousToolCallFingerprints,
-      repeatCounts,
-      agentName,
-      signal: runOptions?.signal,
-      sessionId: runOptions?.sessionId || options?.sessionId,
-      onResult: config.onToolResult,
-      openToolLog: config.openToolLog,
-    });
-    const results = guarded.results;
-    previousToolCallFingerprints = guarded.fingerprints;
 
-    // Process results and extract any sub-agent execution metadata
-    const sanitizedResults: ToolResultRecord[] = [];
+    // Structured outputs: validate final text only (tool turns skip this).
+    // Strict-fail throws ValidationError with partial attached via catch below.
+    let parsedOutput: unknown | undefined;
+    if (loopOutput.raw !== undefined && !truncatedByMaxTurns && !stoppedByTool) {
+      parsedOutput = parseFinalStructuredOutput(finalResult?.text || "", loopOutput.raw, loopOutput.spec);
+    }
 
-    for (const r of results) {
-      const { sanitized, metas } = sanitizeToolResult(r);
-      if (metas.length > 0) {
-        allSubagents.push(...metas);
-        for (const s of metas) {
-          if (s.raw) s.raw = applyCaptureRaw(s.raw, config.captureRaw);
-          const subagentSpec = getModelFromCatalog(s.provider, s.model);
-          if (subagentSpec && (!s.usage?.cost || !s.usage.cost.totalCost)) {
-            s.usage.cost = computeCostFromPricing(s.usage, subagentSpec);
+    return new AgentResponse({
+      text: finalResult?.text || "",
+      ...(parsedOutput !== undefined ? { parsed: parsedOutput } : {}),
+      thinking: finalResult?.thinking,
+      thoughtSignature: finalResult?.thoughtSignature,
+      toolCalls: allToolCalls,
+      toolResults: allToolResults,
+      subagents: allSubagents,
+      usage: accumulatedUsage,
+      responseId: finalResult?.responseId,
+      model: modelId,
+      provider: provider.id,
+      // Canonical finish reason + raw vendor passthrough.
+      ...(stoppedByTool
+        ? {
+            finishReason: "stopped" as const,
+            ...(finalResult?.finishReason ? { rawFinishReason: finalResult.finishReason } : {}),
           }
-          accumulateUsage(accumulatedUsage, s.usage, subagentSpec);
-          config.enforceBudget?.(s.usage);
-        }
-      }
-      sanitizedResults.push(sanitized);
-    }
-
-    allToolResults.push(...sanitizedResults);
-    context.addToolResults(sanitizedResults);
-    checkTokenLimit(accumulatedUsage, limits.maxTotalTokens);
-    // Results are stored BEFORE the cancellation check so an abort
-    // never drops executed tool work from history.
-    throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: genResult.text });
-    emitTurn(runOptions, {
+        : canonicalFinishReason(finalResult?.finishReason, truncatedByMaxTurns)),
+      durationMs: Date.now() - startTime,
+      raw: applyCaptureRaw(finalResult?.raw, config.captureRaw) as ProviderRawData,
       turns,
-      text: genResult.text,
-      thinking: genResult.thinking,
-      toolCalls: genResult.toolCalls,
-      toolResults: sanitizedResults,
     });
-    // A tool ended the run (`ctx.stop`): the whole batch has finished, so stop here. Waiting steers become follow-ups.
-    if (sanitizedResults.some((r) => r.stopped)) {
-      stoppedByTool = true;
-      emitProgress(config);
-      break;
-    }
-    // Steer drain AFTER tool results so call/result pairs stay adjacent.
-    // The next loop iteration sends the injected user message to the model
-    // within the same run (same usage/turn budget).
-    const toolSteered = drainSteerInbox(context, config.steerInbox);
-    if (toolSteered.length > 0) {
-      try { config.onSteerInjected?.(toolSteered); } catch {}
-    }
-    emitProgress(config);
-
-    // Abort always throws AbortError with partial attached (never
-    // silently breaks).
-    throwIfAborted(runOptions?.signal, { usage: accumulatedUsage, turns, text: finalResult?.text });
-  }
-
-  // maxTurns exhausted while the model still requested tools: the tool
-  // results above were never sent back, so the run is truncated — surface
-  // it via finishReason + warning instead of silently returning.
-  const truncatedByMaxTurns =
-    !stoppedByTool && turns >= maxTurns && !!finalResult?.toolCalls && finalResult.toolCalls.length > 0;
-  if (truncatedByMaxTurns) {
-    warnMaxTurnsHit(
-      agentName,
-      maxTurns,
-      finalResult.toolCalls.map((c: ToolCallRecord) => c.name)
-    );
-  }
-
-  // Structured outputs: validate final text only (tool turns skip this).
-  // Strict-fail throws ValidationError with partial attached via catch below.
-  let parsedOutput: unknown | undefined;
-  if (loopOutput.raw !== undefined && !truncatedByMaxTurns && !stoppedByTool) {
-    parsedOutput = parseFinalStructuredOutput(finalResult?.text || "", loopOutput.raw, loopOutput.spec);
-  }
-
-  return new AgentResponse({
-    text: finalResult?.text || "",
-    ...(parsedOutput !== undefined ? { parsed: parsedOutput } : {}),
-    thinking: finalResult?.thinking,
-    thoughtSignature: finalResult?.thoughtSignature,
-    toolCalls: allToolCalls,
-    toolResults: allToolResults,
-    subagents: allSubagents,
-    usage: accumulatedUsage,
-    responseId: finalResult?.responseId,
-    model: modelId,
-    provider: provider.id,
-    // Canonical finish reason + raw vendor passthrough.
-    ...(stoppedByTool
-      ? { finishReason: "stopped" as const, ...(finalResult?.finishReason ? { rawFinishReason: finalResult.finishReason } : {}) }
-      : canonicalFinishReason(finalResult?.finishReason, truncatedByMaxTurns)),
-    durationMs: Date.now() - startTime,
-    raw: applyCaptureRaw(finalResult?.raw, config.captureRaw) as ProviderRawData,
-    turns,
-  });
   } catch (err) {
     // Run-level onFailure rollback (default restores pre-run
     // checkpoint; opt out with (config as any).onFailure === "keep").
     // Aborts are excluded so partial history survives interruption.
-    const isAbort =
-      (err as { name?: string } | null)?.name === "AbortError" ||
-      !!runOptions?.signal?.aborted;
+    const isAbort = (err as { name?: string } | null)?.name === "AbortError" || !!runOptions?.signal?.aborted;
     if (shouldRollbackOnFailure(config.onFailure, isAbort, toolsExecuted)) {
-      try { context.rollback(preRunCp, sessionIdForRollback); } catch {
+      try {
+        context.rollback(preRunCp, sessionIdForRollback);
+      } catch {
         // why: rollback is best-effort — the original error takes precedence.
       }
     }
     // Ensure aborts surface as AbortError with partial attached.
     if (isAbort && (err as { name?: string } | null)?.name !== "AbortError") {
-      throw makeAbortError(
-        { usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, turns: 0 },
-        err
-      );
+      throw makeAbortError({ usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, turns: 0 }, err);
     }
     // Every failure carries its partial progress for observability.
     try {
@@ -1019,17 +1085,29 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   const linked = new AbortController();
   const userSignal = config.runOptions?.signal;
   const forwardUserAbort = () => {
-    try { linked.abort((userSignal as any)?.reason); } catch { try { linked.abort(); } catch {} }
+    try {
+      linked.abort((userSignal as any)?.reason);
+    } catch {
+      try {
+        linked.abort();
+      } catch {}
+    }
   };
   if (userSignal?.aborted) forwardUserAbort();
   else userSignal?.addEventListener("abort", forwardUserAbort, { once: true });
   let currentInner: AssistantMessageEventStream | null = null;
   const removeOuterCancel = outerStream.onCancel(() => {
-    try { linked.abort(); } catch {}
-    try { currentInner?.cancel(); } catch {}
+    try {
+      linked.abort();
+    } catch {}
+    try {
+      currentInner?.cancel();
+    } catch {}
   });
   linked.signal.addEventListener("abort", () => {
-    try { currentInner?.cancel(); } catch {}
+    try {
+      currentInner?.cancel();
+    } catch {}
   });
   const throwIfCancelled = (partial?: { usage: TokenUsage; turns: number; text?: string }) => {
     if (linked.signal.aborted || outerStream.isCancelled()) {
@@ -1082,15 +1160,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           }
         }
       }
-      const {
-        agentName,
-        provider,
-        modelId,
-        context,
-        tools,
-        options,
-        runOptions,
-      } = config;
+      const { agentName, provider, modelId, context, tools, options, runOptions } = config;
       const maxTurns = streamLimits.maxTurns;
 
       const standardTools = toStandardToolDeclarations(tools);
@@ -1183,22 +1253,35 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           let doneIter = false;
           while (!doneIter) {
             // Long-running streams pause for minutes between chunks; the adapter guards stalls and reconnects.
-            const waitMs = longRunning ? Infinity : first ? streamLimits.firstByteTimeoutMs : streamLimits.streamIdleTimeoutMs;
+            const waitMs = longRunning
+              ? Infinity
+              : first
+                ? streamLimits.firstByteTimeoutMs
+                : streamLimits.streamIdleTimeoutMs;
             let timer: ReturnType<typeof setTimeout> | undefined;
             const timeoutP =
               Number.isFinite(waitMs) && waitMs !== Infinity && waitMs > 0
                 ? new Promise<never>((_, reject) => {
                     timer = setTimeout(() => {
-                      reject(new TimeoutError(`[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`));
+                      reject(
+                        new TimeoutError(
+                          `[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`
+                        )
+                      );
                     }, waitMs);
-                    try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
+                    try {
+                      (timer as unknown as { unref?: () => void }).unref?.();
+                    } catch {}
                   })
                 : null;
             try {
               const nextP = it.next();
               const res = timeoutP ? await Promise.race([nextP, timeoutP]) : await nextP;
               if (timer) clearTimeout(timer);
-              if (res.done) { doneIter = true; break; }
+              if (res.done) {
+                doneIter = true;
+                break;
+              }
               first = false;
               throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
               const event = res.value as StreamEvent;
@@ -1214,7 +1297,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
               if (timer) clearTimeout(timer);
               // Timeout: cancel the hung inner stream before surfacing.
               if ((e as Error)?.name === "TimeoutError") {
-                try { currentInner?.cancel(); } catch {}
+                try {
+                  currentInner?.cancel();
+                } catch {}
               }
               throw e;
             }
@@ -1226,15 +1311,16 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         throwIfCancelled({ usage: accumulatedUsage, turns, text: (turnResponse as { text?: string })?.text });
         lastResponse = turnResponse;
         // Canonical session routing: lets adapters detect provider switches.
-        noteProviderTurn(
-          runOptions?.sessionId || options?.sessionId,
-          provider.id
-        );
+        noteProviderTurn(runOptions?.sessionId || options?.sessionId, provider.id);
 
         // Thinking stays on events/traces + onTurn (default exposed). Promoting
         // it to answer text is gated (default OFF): without the opt-in
         // the turn keeps the provider's empty text and finishReason.
-        if ((!turnResponse.text || turnResponse.text.trim() === "") && (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) && turnResponse.thinking) {
+        if (
+          (!turnResponse.text || turnResponse.text.trim() === "") &&
+          (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) &&
+          turnResponse.thinking
+        ) {
           if (shouldPromoteThinkingToAnswer(config, runOptions)) {
             if (turnResponse.thinking.includes("</think>")) {
               const parts = turnResponse.thinking.split(/<\/(?:think|thought)>/i);
@@ -1248,8 +1334,13 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         }
 
         accumulateUsage(accumulatedUsage, turnResponse.usage, spec2, options?.serviceTier);
-        try { config.onTurnUsage?.(turnResponse.usage, spec2); } catch {}
-        config.enforceBudget?.({ ...turnResponse.usage, cost: computeCostFromPricing(turnResponse.usage, spec2, options?.serviceTier) });
+        try {
+          config.onTurnUsage?.(turnResponse.usage, spec2);
+        } catch {}
+        config.enforceBudget?.({
+          ...turnResponse.usage,
+          cost: computeCostFromPricing(turnResponse.usage, spec2, options?.serviceTier),
+        });
         checkTokenLimit(accumulatedUsage, streamLimits.maxTotalTokens);
 
         context.addAssistantMessage(
@@ -1279,9 +1370,10 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           } catch {}
         }
 
-        const noToolSteered = (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0)
-          ? drainSteerInbox(context, config.steerInbox)
-          : [];
+        const noToolSteered =
+          !turnResponse.toolCalls || turnResponse.toolCalls.length === 0
+            ? drainSteerInbox(context, config.steerInbox)
+            : [];
         if (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) {
           emitTurn(runOptions, { turns, text: turnResponse.text, thinking: turnResponse.thinking });
           if (noToolSteered.length > 0) {
@@ -1292,7 +1384,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
                 // why: stream push never throws, but guard anyway to protect the loop.
               }
             }
-            try { config.onSteerInjected?.(noToolSteered); } catch {
+            try {
+              config.onSteerInjected?.(noToolSteered);
+            } catch {
               // why: user callback — a throw must not fail the run.
             }
           }
@@ -1320,7 +1414,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           tools,
           toolCalls: turnResponse.toolCalls,
           previousFingerprints: previousToolCallFingerprints,
-      repeatCounts,
+          repeatCounts,
           agentName,
           signal: linked.signal,
           sessionId: runOptions?.sessionId || options?.sessionId,
@@ -1406,7 +1500,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
               // why: stream push never throws, but guard anyway to protect the loop.
             }
           }
-          try { config.onSteerInjected?.(toolSteered); } catch {
+          try {
+            config.onSteerInjected?.(toolSteered);
+          } catch {
             // why: user callback — a throw must not fail the run.
           }
         }
@@ -1423,7 +1519,10 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         );
       }
       const truncatedFinish = stoppedByTool
-        ? { finishReason: "stopped" as const, ...(lastResponse?.finishReason ? { rawFinishReason: lastResponse.finishReason } : {}) }
+        ? {
+            finishReason: "stopped" as const,
+            ...(lastResponse?.finishReason ? { rawFinishReason: lastResponse.finishReason } : {}),
+          }
         : canonicalFinishReason(lastResponse?.finishReason, truncatedByMaxTurns);
 
       let streamParsed: unknown | undefined;
@@ -1432,15 +1531,17 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           streamParsed = parseFinalStructuredOutput(lastResponse?.text || "", streamOutputRaw, streamOutputSpec);
         } catch (err) {
           const raw = err instanceof Error ? err : new Error(String(err));
-          try { (raw as unknown as { partial?: unknown }).partial ??= {
-            usage: accumulatedUsage,
-            cost: accumulatedUsage.cost,
-            turns,
-            toolCalls: allToolCalls,
-            toolResults: allToolResults,
-            subagents: allSubagents,
-            text: lastResponse?.text,
-          }; } catch {}
+          try {
+            (raw as unknown as { partial?: unknown }).partial ??= {
+              usage: accumulatedUsage,
+              cost: accumulatedUsage.cost,
+              turns,
+              toolCalls: allToolCalls,
+              toolResults: allToolResults,
+              subagents: allSubagents,
+              text: lastResponse?.text,
+            };
+          } catch {}
           outerStream.fail(raw);
           return;
         }
@@ -1477,15 +1578,14 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       outerStream.end(finalAgentResponse);
     } catch (err: any) {
       const raw = err instanceof Error ? err : new Error(String(err));
-      const isAbort =
-        linked.signal.aborted ||
-        outerStream.isCancelled() ||
-        (raw as any)?.name === "AbortError";
+      const isAbort = linked.signal.aborted || outerStream.isCancelled() || (raw as any)?.name === "AbortError";
       // Streaming onFailure rollback (same policy as runAgentLoop;
       // aborts excluded so partial history survives).
       try {
         if (shouldRollbackOnFailure(config.onFailure, isAbort, toolsExecuted)) {
-          try { config.context.rollback(streamPreCp, streamSessionId); } catch {
+          try {
+            config.context.rollback(streamPreCp, streamSessionId);
+          } catch {
             // why: rollback is best-effort — the original error takes precedence.
           }
         }
@@ -1504,26 +1604,35 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       };
       // Aborts always surface as AbortError with partial attached.
       if (isAbort) {
-        const abortErr =
-          raw.name === "AbortError" ? raw : makeAbortError(partial, raw);
-        try { (abortErr as unknown as { partial?: unknown }).partial ??= partial; } catch {
+        const abortErr = raw.name === "AbortError" ? raw : makeAbortError(partial, raw);
+        try {
+          (abortErr as unknown as { partial?: unknown }).partial ??= partial;
+        } catch {
           // why: partial attachment is observability-only and must never mask the error.
         }
         outerStream.fail(abortErr);
       } else {
-        try { (raw as unknown as { partial?: unknown }).partial ??= partial; } catch {
+        try {
+          (raw as unknown as { partial?: unknown }).partial ??= partial;
+        } catch {
           // why: partial attachment is observability-only and must never mask the error.
         }
         outerStream.fail(raw);
       }
     } finally {
-      try { currentInner?.cancel(); } catch {
+      try {
+        currentInner?.cancel();
+      } catch {
         // why: inner streams tolerate double-cancel; cleanup must not throw.
       }
-      try { userSignal?.removeEventListener("abort", forwardUserAbort); } catch {
+      try {
+        userSignal?.removeEventListener("abort", forwardUserAbort);
+      } catch {
         // why: listener removal is best-effort cleanup.
       }
-      try { removeOuterCancel(); } catch {
+      try {
+        removeOuterCancel();
+      } catch {
         // why: unsubscribe is best-effort cleanup.
       }
     }
@@ -1549,10 +1658,13 @@ export function shouldPromoteThinkingToAnswer(config?: unknown, runOptions?: unk
     if ((runOptions as { thinkingAsAnswerFallback?: unknown } | null | undefined)?.thinkingAsAnswerFallback === true) {
       return true;
     }
-    const c = config as {
-      thinkingAsAnswerFallback?: unknown;
-      runOptions?: { thinkingAsAnswerFallback?: unknown };
-    } | null | undefined;
+    const c = config as
+      | {
+          thinkingAsAnswerFallback?: unknown;
+          runOptions?: { thinkingAsAnswerFallback?: unknown };
+        }
+      | null
+      | undefined;
     if (c?.thinkingAsAnswerFallback === true) return true;
     if (c?.runOptions?.thinkingAsAnswerFallback === true) return true;
     return false;

@@ -87,7 +87,9 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     this.includePartial = opts?.includePartial !== false;
     this.buffered = opts?.buffer !== false;
     this.maxBufferedEvents =
-      typeof opts?.maxBufferedEvents === "number" && Number.isFinite(opts.maxBufferedEvents) && opts.maxBufferedEvents > 0
+      typeof opts?.maxBufferedEvents === "number" &&
+      Number.isFinite(opts.maxBufferedEvents) &&
+      opts.maxBufferedEvents > 0
         ? Math.floor(opts.maxBufferedEvents)
         : MAX_BUFFERED_EVENTS;
     this.maxEventBytes =
@@ -131,12 +133,15 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     }
 
     if (out.type === "error") {
-      this.error = (out.error instanceof Error ? out.error : new Error(String(out.error))) ?? new Error("Unknown error in stream");
+      this.error =
+        (out.error instanceof Error ? out.error : new Error(String(out.error))) ?? new Error("Unknown error in stream");
       // Single error semantic: deliver the error event to listeners,
       // reject result(), mark finished, reject pending iterators, and queue
       // the error event so a late iterator observes it before failing.
       this.deliverToListeners(out);
-      try { this.rejectFinalResult(this.error); } catch {
+      try {
+        this.rejectFinalResult(this.error);
+      } catch {
         // why: rejecting an already-settled promise helper must not throw.
       }
       this.finished = true;
@@ -168,7 +173,9 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     const specificListeners = this.listeners.get(event.type);
     if (specificListeners) {
       for (const listener of specificListeners) {
-        try { listener(event); } catch (e) {
+        try {
+          listener(event);
+        } catch (e) {
           // why: one bad listener must not break the stream or other
           // listeners; capture the first exception for inspection instead.
           if (!this.listenerError) {
@@ -180,7 +187,9 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     const allListeners = this.listeners.get("*");
     if (allListeners) {
       for (const listener of allListeners) {
-        try { listener(event); } catch (e) {
+        try {
+          listener(event);
+        } catch (e) {
           // why: same as above — isolate wildcard-listener failures.
           if (!this.listenerError) {
             this.listenerError = e instanceof Error ? e : new Error(String(e));
@@ -245,13 +254,17 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
   /** Registers a callback invoked once on cancel(). Returns an unsubscribe fn. */
   onCancel(handler: () => void): () => void {
     if (this.cancelled) {
-      try { handler(); } catch {
+      try {
+        handler();
+      } catch {
         // why: a throwing cancel handler must not break the canceller.
       }
       return () => {};
     }
     this.cancelHandlers.add(handler);
-    return () => { this.cancelHandlers.delete(handler); };
+    return () => {
+      this.cancelHandlers.delete(handler);
+    };
   }
 
   /** Cancels the stream: stops background work and rejects result() with AbortError.
@@ -260,16 +273,16 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     if (this.finished || this.cancelled) return;
     this.cancelled = true;
     for (const h of [...this.cancelHandlers]) {
-      try { h(); } catch {
+      try {
+        h();
+      } catch {
         // why: isolate faulty cancel handlers so every handler still runs.
       }
     }
     this.cancelHandlers.clear();
     const err = reason instanceof Error ? reason : null;
     const abortErr: Error =
-      err && err.name === "AbortError"
-        ? err
-        : Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+      err && err.name === "AbortError" ? err : Object.assign(new Error("Stream aborted"), { name: "AbortError" });
     this.fail(abortErr);
   }
 

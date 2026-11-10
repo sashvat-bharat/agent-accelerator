@@ -45,13 +45,13 @@ const zodStrict = new Agent({
   captureRaw: true, // keep the full request body so the wire keys below are visible
 });
 
-const zodRes = await zodStrict
-  .run("Paris weather: 21C and sunny. Return the object.")
-  .catch(fail);
+const zodRes = await zodStrict.run("Paris weather: 21C and sunny. Return the object.").catch(fail);
 
 console.log("text:  ", zodRes.text.trim().slice(0, 200));
 console.log("parsed:", JSON.stringify(zodRes.parsed));
-console.log(`\x1b[90mturns: ${zodRes.turns} • usage: ↑${zodRes.usage.inputTokens} ↓${zodRes.usage.outputTokens}\x1b[0m`);
+console.log(
+  `\x1b[90mturns: ${zodRes.turns} • usage: ↑${zodRes.usage.inputTokens} ↓${zodRes.usage.outputTokens}\x1b[0m`
+);
 console.log(`\x1b[90mwire keys: ${Object.keys((zodRes.raw.request.body as object) ?? {}).join(", ")}\x1b[0m\n`);
 
 // ---------------------------------------------------------------------------
@@ -73,13 +73,13 @@ const jsonAgent = new Agent({
   },
 });
 
-const jsonRes = await jsonAgent
-  .run("Chocolate chip cookies with 9 ingredients. Return the object.")
-  .catch(fail);
+const jsonRes = await jsonAgent.run("Chocolate chip cookies with 9 ingredients. Return the object.").catch(fail);
 
 console.log("text:  ", jsonRes.text.trim().slice(0, 200));
 console.log("parsed:", JSON.stringify(jsonRes.parsed));
-console.log(`\x1b[90mturns: ${jsonRes.turns} • usage: ↑${jsonRes.usage.inputTokens} ↓${jsonRes.usage.outputTokens}\x1b[0m\n`);
+console.log(
+  `\x1b[90mturns: ${jsonRes.turns} • usage: ↑${jsonRes.usage.inputTokens} ↓${jsonRes.usage.outputTokens}\x1b[0m\n`
+);
 
 // ---------------------------------------------------------------------------
 // 3. Explicit { name, schema, strict } + streaming
@@ -119,7 +119,9 @@ console.log(`\x1b[90mtoJSON has parsed: ${"parsed" in streamRes.toJSON()}\x1b[0m
 // 4. Mismatch surfaces as ValidationError (strict-fail, partial attached)
 // ---------------------------------------------------------------------------
 console.log("\x1b[1;33m[4] Validation failure (strict-fail demo)\x1b[0m");
-console.log("\x1b[90mTip: wire-enforced schemas rarely mismatch. To see the error path, request prose while demanding JSON.\x1b[0m");
+console.log(
+  "\x1b[90mTip: wire-enforced schemas rarely mismatch. To see the error path, request prose while demanding JSON.\x1b[0m"
+);
 
 const strictAgent = new Agent({
   name: "Strict",

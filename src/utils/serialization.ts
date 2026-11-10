@@ -53,10 +53,7 @@ export function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknow
     }
 
     if (value instanceof Map) {
-      return Array.from(value.entries()).map(([key, entry]) => [
-        toJsonSafe(key, seen),
-        toJsonSafe(entry, seen),
-      ]);
+      return Array.from(value.entries()).map(([key, entry]) => [toJsonSafe(key, seen), toJsonSafe(entry, seen)]);
     }
 
     if (value instanceof Set) {

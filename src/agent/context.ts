@@ -192,8 +192,12 @@ export class AgentContext {
     if (Array.isArray(cp?.messages)) this.messages = deepCloneValue(cp.messages);
     if (Array.isArray(cp?.signatures)) this.thoughtSignatures = [...cp.signatures];
     if (sessionId) {
-      try { clearInteractionChains(sessionId); } catch {}
-      try { clearSessionRouting(sessionId); } catch {}
+      try {
+        clearInteractionChains(sessionId);
+      } catch {}
+      try {
+        clearSessionRouting(sessionId);
+      } catch {}
     }
   }
 }

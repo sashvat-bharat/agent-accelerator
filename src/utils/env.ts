@@ -11,7 +11,10 @@ export function getEnv(key: string, fallback?: string): string | undefined {
   if (typeof process !== "undefined" && process.env && process.env[key]) {
     // Trim quotes/whitespace from .env files (`sk-..."\n` -> 401 otherwise).
     const raw = String(process.env[key]);
-    const trimmed = raw.trim().replace(/^["']|["']$/g, "").trim();
+    const trimmed = raw
+      .trim()
+      .replace(/^["']|["']$/g, "")
+      .trim();
     if (trimmed) return trimmed;
   }
   return fallback;
@@ -27,7 +30,10 @@ export type ProviderEnv = Record<string, string>;
 export function getApiKey(provider: string, explicitKey?: string, env?: ProviderEnv): string | undefined {
   const clean = (v: unknown): string | undefined => {
     if (typeof v !== "string") return undefined;
-    const t = v.trim().replace(/^["']|["']$/g, "").trim();
+    const t = v
+      .trim()
+      .replace(/^["']|["']$/g, "")
+      .trim();
     return t || undefined;
   };
   const cleanedExplicit = clean(explicitKey);
@@ -56,11 +62,7 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
   switch (provider.toLowerCase()) {
     case "google":
     case "gemini":
-      return (
-        getEnv("GEMINI_API_KEY") ||
-        getEnv("GOOGLE_API_KEY") ||
-        getEnv("GOOGLE_GENAI_API_KEY")
-      );
+      return getEnv("GEMINI_API_KEY") || getEnv("GOOGLE_API_KEY") || getEnv("GOOGLE_GENAI_API_KEY");
     case "openrouter":
       return getEnv("OPENROUTER_API_KEY");
     case "openai":

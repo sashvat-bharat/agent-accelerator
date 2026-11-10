@@ -16,9 +16,7 @@ export interface SubAgentConfig extends AgentConfig {}
  * `Agent.fromEnv()` (attached below without touching `agent.ts`, owned by
  * another audit lane) delegates here.
  */
-export function agentFromEnv(
-  config?: Omit<AgentConfig, "model"> & { model?: AgentConfig["model"] }
-): Agent {
+export function agentFromEnv(config?: Omit<AgentConfig, "model"> & { model?: AgentConfig["model"] }): Agent {
   return new Agent({
     ...config,
     model: config?.model ?? getModel() ?? getSubModel(),

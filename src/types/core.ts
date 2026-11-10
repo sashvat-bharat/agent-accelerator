@@ -2,15 +2,7 @@
  * Level-based reasoning — single flag for all levels (bloatfree)
  */
 /** Public reasoning control accepted by AgentConfig. */
-export type ThinkingLevel =
-  | "none"
-  | "dynamic"
-  | "minimal"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh"
-  | "max";
+export type ThinkingLevel = "none" | "dynamic" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 // Internal normalized config (SDK-internal, not exposed as Agent flag)
 /** Internal normalized reasoning configuration passed to providers. */

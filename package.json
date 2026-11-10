@@ -42,6 +42,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "biome lint src examples",
+    "format": "biome format --write src examples",
     "test": "bun test test/",
     "update-models": "bun src/update-models.ts",
     "fetch-latest-provider-docs": "bun references/documentations/fetch-latest.ts"

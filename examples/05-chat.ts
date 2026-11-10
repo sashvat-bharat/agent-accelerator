@@ -36,8 +36,7 @@ import {
 // 1. Storage: <home>/sessions/<sessionId>/{session.json, media/*}
 // ---------------------------------------------------------------------------
 const EXPLICIT_FILE =
-  process.env.SESSION_FILE ??
-  process.argv.find((a) => a.startsWith("--session-file="))?.split("=")[1];
+  process.env.SESSION_FILE ?? process.argv.find((a) => a.startsWith("--session-file="))?.split("=")[1];
 const SESSION_ROOT =
   process.env.SESSION_DIR ??
   process.argv.find((a) => a.startsWith("--session-dir="))?.split("=")[1] ??
@@ -110,7 +109,9 @@ if (saved) {
 // ---------------------------------------------------------------------------
 console.log(`\n\x1b[1;36mAgent Accelerator — Interactive CLI\x1b[0m`);
 console.log(formatSessionBanner(saved, telemetry, sessionLocation));
-console.log(`Model: \x1b[32m"${agent.modelStringOrSpec}"\x1b[0m • Thinking: \x1b[33m${THINKING_LEVEL}\x1b[0m • Context: \x1b[34m${formatSessionTokens(getSessionContextWindow(agent.modelStringOrSpec as string))}\x1b[0m`);
+console.log(
+  `Model: \x1b[32m"${agent.modelStringOrSpec}"\x1b[0m • Thinking: \x1b[33m${THINKING_LEVEL}\x1b[0m • Context: \x1b[34m${formatSessionTokens(getSessionContextWindow(agent.modelStringOrSpec as string))}\x1b[0m`
+);
 console.log(`Session: \x1b[90m${agent.sessionId.slice(0, 16)}… (${sessionLocation})\x1b[0m`);
 console.log(`Commands: \x1b[90m/model "provider/model-id"  /help  /exit\x1b[0m\n`);
 
@@ -139,13 +140,17 @@ while (true) {
     const match = rawArg.match(/^"([^"]+)"$/);
     if (!match) {
       console.log(`\x1b[31m✖ Invalid format. You must specify the model in quotes: /model "provider/model-id"\x1b[0m`);
-      console.log(`\x1b[90mExample: /model "openrouter/z-ai/glm-5.3-flash" or /model "google/gemini-3.5-flash-lite"\x1b[0m`);
+      console.log(
+        `\x1b[90mExample: /model "openrouter/z-ai/glm-5.3-flash" or /model "google/gemini-3.5-flash-lite"\x1b[0m`
+      );
       continue;
     }
 
     const nextModel = match[1]!.trim();
     if (!nextModel.includes("/")) {
-      console.log(`\x1b[31m✖ Invalid model format "${nextModel}". Must be "provider/model-id" (e.g. /model "openrouter/z-ai/glm-5.3-flash").\x1b[0m`);
+      console.log(
+        `\x1b[31m✖ Invalid model format "${nextModel}". Must be "provider/model-id" (e.g. /model "openrouter/z-ai/glm-5.3-flash").\x1b[0m`
+      );
       continue;
     }
 
@@ -164,7 +169,9 @@ while (true) {
 
   if (q === "/help") {
     console.log(`\x1b[33mAvailable Commands:\x1b[0m`);
-    console.log(`  /model "provider/model-id"  Switch active model in quotes (e.g. /model "google/gemini-3.5-flash-lite")`);
+    console.log(
+      `  /model "provider/model-id"  Switch active model in quotes (e.g. /model "google/gemini-3.5-flash-lite")`
+    );
     console.log(`  /exit, /quit                Exit chat session\n`);
     continue;
   }
@@ -180,7 +187,9 @@ while (true) {
         if (e.type === "subagent_complete") {
           const sCost = e.subagent!.usage?.cost?.totalCost ?? 0;
           const sCostLabel = sCost > 0 ? ` • ${formatSessionCost(sCost)}` : "";
-          console.log(`\n\x1b[90m↳ ${e.subagent!.name} done (${formatSessionTokens(e.subagent!.usage.totalTokens)} tok${sCostLabel})\x1b[0m`);
+          console.log(
+            `\n\x1b[90m↳ ${e.subagent!.name} done (${formatSessionTokens(e.subagent!.usage.totalTokens)} tok${sCostLabel})\x1b[0m`
+          );
         }
       },
     });
@@ -188,11 +197,15 @@ while (true) {
     telemetry.add(res.usage, agent.modelStringOrSpec as string);
     persistSession();
 
-    console.log(`\n${telemetry.formatBar(res, { model: agent.modelStringOrSpec as string, thinkingLevel: THINKING_LEVEL })}`);
+    console.log(
+      `\n${telemetry.formatBar(res, { model: agent.modelStringOrSpec as string, thinkingLevel: THINKING_LEVEL })}`
+    );
     if (res.subagents?.length) {
       console.log(
         `\x1b[90m  ↳ subagents: ${res.subagents
-          .map((s: any) => `${s.name}:${s.isError ? "ERR" : "ok"} (${formatSessionCost(s.usage?.cost?.totalCost ?? 0)})`)
+          .map(
+            (s: any) => `${s.name}:${s.isError ? "ERR" : "ok"} (${formatSessionCost(s.usage?.cost?.totalCost ?? 0)})`
+          )
           .join(", ")}\x1b[0m`
       );
     }

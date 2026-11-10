@@ -129,7 +129,10 @@ interface ChatRequestBody {
   messages: ChatMessage[];
   tools?: Array<Record<string, unknown>>;
   tool_choice?: string | { type: "function"; function: { name: string } };
-  response_format?: { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
+  response_format?: {
+    type: "json_schema";
+    json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string };
+  };
   stream?: boolean;
   [k: string]: unknown;
 }
@@ -230,18 +233,20 @@ function resolveApiKey(
 ): string | undefined {
   const clean = (v: unknown): string | undefined => {
     if (typeof v !== "string") return undefined;
-    const t = v.trim().replace(/^["']|["']$/g, "").trim();
+    const t = v
+      .trim()
+      .replace(/^["']|["']$/g, "")
+      .trim();
     return t || undefined;
   };
   const envPrefix = envPrefixOf(prefix);
-  const key = (
+  const key =
     clean(options?.apiKey) ||
     clean(configuredApiKey) ||
     clean(options?.env?.[`${envPrefix}_API_KEY`]) ||
     clean(options?.env?.[`${envPrefix}_BASE_API_KEY`]) ||
     getApiKey(prefix, undefined, options?.env) ||
-    undefined
-  );
+    undefined;
   if (key) return key;
   if (hasAuthHeader(options?.headers)) return "unused";
   return undefined;
@@ -307,7 +312,8 @@ function warnThinkingDropped(prefix: string, thinking: ThinkingConfig | undefine
     provider: prefix,
     capability: "thinking level",
     requested: `${level} (${modelRef})`,
-    reason: "custom OpenAI-compatible endpoints define no portable reasoning control; levels vary by vendor and strict endpoints reject unknown fields.",
+    reason:
+      "custom OpenAI-compatible endpoints define no portable reasoning control; levels vary by vendor and strict endpoints reject unknown fields.",
     fallback: "the server default (no reasoning payload is sent)",
   });
 }
@@ -324,11 +330,7 @@ function audioFormatFor(mimeType?: string): string {
  * Completions subset has no shape for them, and a provider 400 would only say
  * so confusingly. Images and audio keep flowing natively.
  */
-function assertNoVideoOrFileParts(
-  context: ProviderContext,
-  prefix: string,
-  modelId: string
-): void {
+function assertNoVideoOrFileParts(context: ProviderContext, prefix: string, modelId: string): void {
   let kind: "video" | "file" | undefined;
   for (const msg of context.messages) {
     if (!Array.isArray((msg as { content?: unknown }).content)) continue;
@@ -373,10 +375,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
       const raw = (part as { audio?: unknown }).audio;
       const mimeType = (part as { mimeType?: string }).mimeType;
       // The OpenAI chat audio shape carries data only — always inline.
-      const norm = await normalizeMediaInput(
-        raw as string | Uint8Array | ArrayBuffer,
-        mimeType
-      );
+      const norm = await normalizeMediaInput(raw as string | Uint8Array | ArrayBuffer, mimeType);
       blocks.push({
         type: "input_audio",
         input_audio: { data: norm.base64Data, format: audioFormatFor(norm.mimeType) },
@@ -427,10 +426,16 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         messages.push({ role: "assistant", content: "I have processed the tool results." });
       }
       if (typeof m.content === "string") {
-        if (m.content) { messages.push({ role: "user", content: m.content }); lastRole = "user"; }
+        if (m.content) {
+          messages.push({ role: "user", content: m.content });
+          lastRole = "user";
+        }
       } else {
         const blocks = await contentPartsToBlocks(m.content);
-        if (blocks.length > 0) { messages.push({ role: "user", content: blocks }); lastRole = "user"; }
+        if (blocks.length > 0) {
+          messages.push({ role: "user", content: blocks });
+          lastRole = "user";
+        }
       }
     } else if (m.role === "assistant") {
       if (typeof m.content === "string") {
@@ -526,25 +531,22 @@ function mapUsage(raw?: ChatResponse["usage"]): TokenUsage {
 }
 
 // The Gemini thought signature a proxy put on a tool call, if any; in: parseResponse, out: a string or undefined.
-function extractSignature(rawTc: {
-  extra_content?: { google?: { thought_signature?: string } };
-}): string | undefined {
+function extractSignature(rawTc: { extra_content?: { google?: { thought_signature?: string } } }): string | undefined {
   const sig = rawTc?.extra_content?.google?.thought_signature;
   return typeof sig === "string" && sig ? sig : undefined;
 }
 
 /** Tags a captured compat signature with its issuing provider (`google`). */
-function withCompatSignature(sig: string | undefined): { thoughtSignature?: string; thoughtSignatureProvider?: string } {
+function withCompatSignature(sig: string | undefined): {
+  thoughtSignature?: string;
+  thoughtSignatureProvider?: string;
+} {
   if (!sig) return {};
   return { thoughtSignature: sig, thoughtSignatureProvider: "google" };
 }
 
 // Throws a concise error for an HTTP 200 reply that carries only `error`; in: parseResponse, out: a thrown error.
-function throwResponseError(
-  response: ChatResponse,
-  prefix: string,
-  modelId: string
-): void {
+function throwResponseError(response: ChatResponse, prefix: string, modelId: string): void {
   const message =
     response.error && typeof response.error.message === "string" && response.error.message
       ? response.error.message
@@ -715,7 +717,8 @@ export class OpenAICompatibleChatProvider implements Provider {
         provider: this.prefix,
         capability: "service tier",
         requested: `${options.serviceTier} (${this.prefix}/${modelId})`,
-        reason: "custom OpenAI-compatible endpoints define no service-tier primitive, and strict endpoints reject unknown body properties.",
+        reason:
+          "custom OpenAI-compatible endpoints define no service-tier primitive, and strict endpoints reject unknown body properties.",
         fallback: "standard routing (no service_tier payload is sent)",
       });
     }
@@ -744,7 +747,8 @@ export class OpenAICompatibleChatProvider implements Provider {
         provider: this.prefix,
         capability: "structured output",
         requested: `${outputSpec.name} (${this.prefix}/${modelId})`,
-        reason: "the catalog reports structured_output: false for this model, so native response_format is unsupported.",
+        reason:
+          "the catalog reports structured_output: false for this model, so native response_format is unsupported.",
         fallback: "emulated JSON instruction + client validation (no response_format is sent)",
       });
     }
@@ -790,7 +794,7 @@ export class OpenAICompatibleChatProvider implements Provider {
       const noStreamOptions =
         (options as { streamOptions?: unknown } | undefined)?.streamOptions === false ||
         getEnv("COMPAT_NO_STREAM_OPTIONS") === "1" ||
-        (options?.env?.["COMPAT_NO_STREAM_OPTIONS"] === "1");
+        options?.env?.["COMPAT_NO_STREAM_OPTIONS"] === "1";
       if (!noStreamOptions) {
         (body as unknown as Record<string, unknown>)["stream_options"] = { include_usage: true };
       }
@@ -806,11 +810,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): RequestInit {
-    const headers: Record<string, string> = buildSessionHeaders(
-      this.prefix,
-      options?.headers,
-      sessionId
-    );
+    const headers: Record<string, string> = buildSessionHeaders(this.prefix, options?.headers, sessionId);
     // Strict-endpoint opt-out (pi sendSessionAffinityHeaders pattern):
     // `COMPAT_NO_SESSION_HEADERS=1` or per-call `sendSessionHeaders:false`
     // drops affinity headers that trigger CORS preflights / strict 400s.
@@ -843,7 +843,10 @@ export class OpenAICompatibleChatProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
+    const { signal: effective, cleanup } = combinedSignal(
+      signal,
+      timeoutFor(options as { timeoutMs?: number } | undefined)
+    );
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
       const text = await res.text();
@@ -938,13 +941,10 @@ export class OpenAICompatibleChatProvider implements Provider {
       // Stateless turns never establish chains, but the session store still
       // records the turn so other providers' switch detection keeps working.
       noteProviderTurn(sessionId, this.prefix);
-      return parseResponse(
-        response,
-        this.prefix,
-        clean,
-        Date.now() - startTime,
-        { request: rawRequest, response: { status: res.status, statusText: res.statusText, headers: res.headers, body: response } }
-      );
+      return parseResponse(response, this.prefix, clean, Date.now() - startTime, {
+        request: rawRequest,
+        response: { status: res.status, statusText: res.statusText, headers: res.headers, body: response },
+      });
     };
 
     try {
@@ -999,9 +999,13 @@ export class OpenAICompatibleChatProvider implements Provider {
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({
-          fetchOnce: () => withAbortTimer(linked, streamTimeoutMs, () => (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))),
+          fetchOnce: () =>
+            withAbortTimer(linked, streamTimeoutMs, () =>
+              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))
+            ),
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
-          noBodyError: () => toConciseProviderError(new Error("OpenAI-compatible streaming response had no body"), prefix, clean),
+          noBodyError: () =>
+            toConciseProviderError(new Error("OpenAI-compatible streaming response had no body"), prefix, clean),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
           label: { providerId: prefix, modelId: clean },
@@ -1010,7 +1014,11 @@ export class OpenAICompatibleChatProvider implements Provider {
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
         });
-        const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
+        const responseMeta: Record<string, unknown> & {
+          status: number;
+          statusText: string;
+          headers: Record<string, string>;
+        } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         let text = "";
@@ -1058,7 +1066,8 @@ export class OpenAICompatibleChatProvider implements Provider {
           if (typeof msg["id"] === "string" && !responseId) {
             responseId = msg["id"] as string;
           }
-          const choice = (Array.isArray(msg["choices"]) ? (msg["choices"] as Record<string, unknown>[])[0] : undefined) ?? {};
+          const choice =
+            (Array.isArray(msg["choices"]) ? (msg["choices"] as Record<string, unknown>[])[0] : undefined) ?? {};
           const delta = (choice["delta"] as Record<string, unknown>) ?? {};
           // Text delta (content-free accounting frames carry "" — ignored).
           // Refusal deltas surface as text with a `refusal` finish.
