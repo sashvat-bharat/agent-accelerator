@@ -247,6 +247,21 @@ export function warnIgnoredVideoProcessing(provider: string, messages: Message[]
   });
 }
 
+/** Warns once per provider/model that media a tool returned with `toolContent` is not sent (only Google takes media inside a function result); the model still gets the tool's text; in: an adapter's request messages, out: telemetry bus only. */
+export function warnIgnoredToolMedia(provider: string, messages: Message[], modelRef: string): void {
+  const used = messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "tool_result" && p.parts && p.parts.length > 0)
+  );
+  if (!used) return;
+  emitProviderWarning({
+    provider,
+    capability: "media in tool results",
+    requested: modelRef,
+    reason: "only Google accepts images, audio, video or files inside a function result.",
+    fallback: "the tool's text only (the media is not sent)",
+  });
+}
+
 // Warns once that the `validated` tool choice (Google only) is dropped and the provider default (auto) is used; in: the OpenRouter and OpenAI tool-choice mappers (compat goes through the OpenAI one), out: a provider_warning on the bus.
 function warnValidatedToolChoice(provider: string): void {
   emitProviderWarning({

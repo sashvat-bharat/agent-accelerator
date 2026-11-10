@@ -427,6 +427,7 @@ const agent = new Agent({
 ### Tool Helpers
 
 * `tool({ name?, description, input?, parameters?, strict?, timeoutMs?, maxTries?, maxConcurrency?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return arbitrary values; results are converted safely for model context. `timeoutMs` defaults to `0` (no time limit) and is a best-effort event-loop deadline; `ctx.signal` enables cooperative cancellation. `maxAttempts` is the canonical name for `maxTries` (number or numeric string). A positive value is the total attempt limit; `0`/omitted means 3 attempts for `idempotent` tools and 1 for all others. `maxConcurrency` limits simultaneous calls for that tool (default pool: 8).
+* `toolContent([...])` — a tool's return value of text and media (`return toolContent(["chart.png", { type: "image", image: bytes, mimeType: "image/png" }])`). The text is the result every provider sees; Google (Gemini 3 and later) also gets the media inside the function result, other providers warn once and get the text only. Only a value made by `toolContent` counts, so JSON fetched by a tool can never become media. See the tools guide.
 * `toStandardToolDeclarations(record | array)` — converts tools to `{ name, description, parameters }` for providers.
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.

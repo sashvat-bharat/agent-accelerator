@@ -97,6 +97,7 @@ import {
   augmentSystemPromptWithStructuredOutput,
   warnIgnoredMediaResolution,
   warnIgnoredVideoProcessing,
+  warnIgnoredToolMedia,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -727,6 +728,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     resolveCache(this.prefix, options?.cache, ["implicit"], `${this.prefix}/${modelId}`);
     warnIgnoredMediaResolution(this.prefix, context.messages, `${this.prefix}/${modelId}`);
     warnIgnoredVideoProcessing(this.prefix, context.messages, `${this.prefix}/${modelId}`);
+    warnIgnoredToolMedia(this.prefix, context.messages, `${this.prefix}/${modelId}`);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system prompt (strict endpoints would 400 on json_schema

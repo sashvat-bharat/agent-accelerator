@@ -738,6 +738,7 @@ export class Agent {
           result: t.result,
           ...(t.isError ? { isError: true } : {}),
           ...(t.stopped ? { stopped: true } : {}),
+          ...(t.parts && t.parts.length > 0 ? { parts: t.parts } : {}),
         } as ToolResultRecord,
       ])
     );
@@ -759,6 +760,7 @@ export class Agent {
       result: isSubagentResult(result.result) ? result.result.xml : result.result,
       ...(result.isError ? { isError: true } : {}),
       ...(result.stopped ? { stopped: true } : {}),
+      ...(result.parts && result.parts.length > 0 ? { parts: result.parts } : {}),
     });
     this.doPersist();
   }

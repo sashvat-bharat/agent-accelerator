@@ -3,6 +3,9 @@ import { toJsonSafe } from "../utils/serialization.ts";
 import { ConfigError } from "../types/errors.ts";
 import { isTransientError } from "../utils/errors.ts";
 import { isSubagentResult } from "./subagent-result.ts";
+import { isToolContent, type ToolContent } from "./tool-content.ts";
+import { normalizeMediaInput } from "../utils/media.ts";
+import type { ContentPart } from "../types/message.ts";
 import { isTruncatedArguments } from "../types/tool.ts";
 import { telemetryBus } from "../telemetry.ts";
 import type { ToolLogWriter } from "../session/tool-log.ts";
@@ -477,6 +480,36 @@ async function executeAttempt(
   }
 }
 
+// Turns a `toolContent` result into its text (what every provider sees) and its media as inline data URLs (what Google also sends); in: runSingle for a branded tool result, out: the result record's `result` and `parts`.
+async function resolveToolContent(
+  content: ToolContent,
+  charLimit: number
+): Promise<{ text: string; parts: ContentPart[] }> {
+  const texts: string[] = [];
+  const parts: ContentPart[] = [];
+  const kinds: string[] = [];
+  for (const raw of content.parts) {
+    const part = typeof raw === "string" ? ({ type: "text", text: raw } as const) : raw;
+    if (part.type === "text") {
+      texts.push(part.text);
+      continue;
+    }
+    const value = (part as unknown as Record<string, string | Uint8Array | ArrayBuffer>)[part.type]!;
+    const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType);
+    const filename = (part as { filename?: string }).filename;
+    parts.push({
+      type: part.type,
+      [part.type]: media.dataUrl,
+      mimeType: media.mimeType,
+      ...(filename ? { filename } : {}),
+      ...((part.type === "image" || part.type === "video") && part.resolution ? { resolution: part.resolution } : {}),
+    } as unknown as ContentPart);
+    kinds.push(media.mimeType);
+  }
+  const text = texts.join("\n") || (kinds.length > 0 ? `[media result: ${kinds.join(", ")}]` : "null");
+  return { text: truncateResultString(text, charLimit), parts };
+}
+
 /**
  * Executes one or more tool calls in parallel or sequence, handling errors safely
  */
@@ -692,6 +725,19 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
       log?.write({ phase: "result", result: isSubagentResult(rawResult) ? rawResult.xml : toJsonSafe(rawResult) });
       const finishOk = (resultChars: number): void =>
         trace("call_succeeded", "info", { attempts: attempt, durationMs: elapsedMs(executionStartTime), resultChars });
+      // Text and media from `toolContent`: the text is the result, the media rides in `parts` (inline data, set only here).
+      if (isToolContent(rawResult)) {
+        const { text, parts } = await resolveToolContent(rawResult, resultCharLimit(toolDef));
+        finishOk(text.length);
+        return {
+          id: call.id,
+          name: resolved.name,
+          result: text,
+          ...(parts.length > 0 ? { parts } : {}),
+          isError: false,
+          durationMs: elapsedMs(executionStartTime),
+        };
+      }
       if (rawResult === undefined) {
         finishOk(4);
         return {

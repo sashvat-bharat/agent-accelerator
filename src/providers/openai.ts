@@ -92,6 +92,7 @@ import {
   emitProviderWarning,
   warnIgnoredMediaResolution,
   warnIgnoredVideoProcessing,
+  warnIgnoredToolMedia,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -553,6 +554,7 @@ export class OpenAIResponsesProvider implements Provider {
     const cache = resolveCache("openai", options?.cache, ["implicit", "12h"], `openai/${modelId}`);
     warnIgnoredMediaResolution("openai", context.messages, `openai/${modelId}`);
     warnIgnoredVideoProcessing("openai", context.messages, `openai/${modelId}`);
+    warnIgnoredToolMedia("openai", context.messages, `openai/${modelId}`);
 
     // Structured outputs: native `text.format` when supported, else emulated
     // via instructions (catalog `structured_output: false` would 400).

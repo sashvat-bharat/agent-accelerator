@@ -86,6 +86,7 @@ import {
   emitProviderWarning,
   warnIgnoredMediaResolution,
   warnIgnoredVideoProcessing,
+  warnIgnoredToolMedia,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -642,6 +643,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     );
     warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`, ["video"]);
     warnIgnoredVideoProcessing("openrouter", context.messages, `openrouter/${modelId}`);
+    warnIgnoredToolMedia("openrouter", context.messages, `openrouter/${modelId}`);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system-prompt instruction + client validation (catalog

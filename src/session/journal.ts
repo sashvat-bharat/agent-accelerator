@@ -39,6 +39,7 @@ function toolLine(t: SessionToolRecord): string {
     result: t.result,
     ...(t.isError ? { isError: true } : {}),
     ...(t.stopped ? { stopped: true } : {}),
+    ...(t.parts && t.parts.length > 0 ? { parts: t.parts } : {}),
   });
 }
 

@@ -31,6 +31,8 @@ export {
 } from "./tools/tool.ts";
 export type { CreateToolOptions } from "./tools/tool.ts";
 export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
+export { toolContent } from "./tools/tool-content.ts";
+export type { ToolContent, ToolContentPart } from "./tools/tool-content.ts";
 /**
  * @deprecated Internal executor surface. Prefer `Agent` runs; for direct
  * execution import from the future `/internal` entry.

@@ -637,13 +637,14 @@ function resultToText(result: unknown): string {
   return safeStringify(result);
 }
 
-// Builds the documented `function_result` step (`is_error` only when the tool failed); in: a canonical tool_result part, out: chained or full-history `input`.
-function functionResultStep(part: ToolResultPart): InteractionInputStep {
+// Builds the documented `function_result` step (`is_error` only when the tool failed); text first, then the media the tool returned with `toolContent` (Gemini 3 accepts image and document blocks in `result`); in: a canonical tool_result part, out: chained or full-history `input`.
+async function functionResultStep(part: ToolResultPart): Promise<InteractionInputStep> {
+  const media = part.parts && part.parts.length > 0 ? await contentPartsToBlocks(part.parts) : [];
   return {
     type: "function_result",
     name: part.name,
     call_id: part.id,
-    result: [{ type: "text", text: resultToText(part.result) }],
+    result: [{ type: "text", text: resultToText(part.result) }, ...media],
     ...(part.isError ? { is_error: true } : {}),
   };
 }
@@ -687,7 +688,7 @@ async function latestTurnInput(
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push(functionResultStep(part));
+          steps.push(await functionResultStep(part));
         }
       }
     } else if (m.role === "user") {
@@ -777,7 +778,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push(functionResultStep(part));
+          steps.push(await functionResultStep(part));
         }
       }
     }

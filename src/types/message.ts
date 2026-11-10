@@ -94,6 +94,8 @@ export interface ToolResultPart {
   logFile?: string;
   /** The tool ended the run with `ctx.stop(reason)` (see `ToolExecutionContext.stop`). */
   stopped?: boolean;
+  /** Media the tool returned with `toolContent` (inline data URLs; `result` holds its text). Google sends it to the model. */
+  parts?: ContentPart[];
 }
 
 /** Provider reasoning/thinking content. */
