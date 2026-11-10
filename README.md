@@ -1291,7 +1291,7 @@ Supported content parts include:
 * `ToolResultPart { type:"tool_result", id, name, result, isError? }`
 * `ImagePart { type:"image", image, mimeType?, resolution? }`
 * `AudioPart { type:"audio", audio, mimeType? }`
-* `VideoPart { type:"video", video, mimeType?, resolution? }`
+* `VideoPart { type:"video", video, mimeType?, resolution?, processing? }`
 * `FilePart { type:"file", file, mimeType?, filename? }` — PDFs/documents.
 
 `image`, `audio`, `video`, and `file` inputs accept:
@@ -1336,6 +1336,16 @@ OpenRouter an image's `resolution` is sent as `image_url.detail` (`low` → `low
 `medium` → `auto`, `high` → `high`, `ultra_high` → `original`, which OpenRouter
 downgrades to `high` where unsupported); a video's `resolution` is ignored. Other
 providers (and OpenRouter videos) ignore it with one `provider_warning`.
+
+`processing` (`VideoProcessing`: `"static" | "agentic"`) sets how Google reads one
+video. `"static"` (the default) puts frames taken at a fixed rate into the
+context. `"agentic"` lets the model explore the timeline and load only the
+transcript and frames the prompt needs, which suits long videos and
+needle-in-a-haystack questions (Google lists Gemini 4 Argon, 3.8 Flash, 3.6 Flash
+and 3.5 Flash Lite as supporting it; for any other model Google returns its own
+error). The model's `processing_call` / `processing_result` steps are kept and
+replayed with the rest of the turn's raw steps. Other providers ignore it with
+one `provider_warning`; an unknown value throws a `ValidationError`.
 
 Before any network call, the executor checks `image` / `audio` / `video` /
 `file`-as-PDF parts against the catalog's `modalities.input` for that

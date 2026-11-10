@@ -12,6 +12,9 @@ export interface TextPart {
 /** Detail level a provider spends on one image or video (more detail = more input tokens). Google (images and videos) and OpenRouter (images, as `image_url.detail`) honour it; other providers ignore it with a warning. */
 export type MediaResolution = "low" | "medium" | "high" | "ultra_high";
 
+/** How a provider reads a video: `"static"` (fixed-rate frames, the default) or `"agentic"` (the model navigates the timeline and loads only what the prompt needs). Only Google honours it, and agentic mode only on some Gemini models; other providers ignore it with a warning. */
+export type VideoProcessing = "static" | "agentic";
+
 /** Image content accepted as a URL, data, path, or binary value. */
 export interface ImagePart {
   type: "image";
@@ -55,6 +58,8 @@ export interface VideoPart {
   mimeType?: string;
   /** Detail level per frame (Google: `low`/`medium` 70, `high` 280 tokens). */
   resolution?: MediaResolution;
+  /** How the video is read (Google: `"agentic"` lets the model explore a long video instead of loading every frame). */
+  processing?: VideoProcessing;
 }
 
 /** Assistant-generated structured tool invocation. */

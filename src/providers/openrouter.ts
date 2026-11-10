@@ -85,6 +85,7 @@ import {
   augmentSystemPromptWithStructuredOutput,
   emitProviderWarning,
   warnIgnoredMediaResolution,
+  warnIgnoredVideoProcessing,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -640,6 +641,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       `openrouter/${modelId}`
     );
     warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`, ["video"]);
+    warnIgnoredVideoProcessing("openrouter", context.messages, `openrouter/${modelId}`);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system-prompt instruction + client validation (catalog

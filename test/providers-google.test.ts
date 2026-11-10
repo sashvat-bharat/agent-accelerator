@@ -1091,6 +1091,57 @@ describe("Google media inputs (documented MIME types, URLs, YouTube)", () => {
     ]);
   });
 
+  it("sends a video's processing mode, and rejects an unknown one before the network", async () => {
+    const seen = captureInput();
+    await send([
+      { type: "video", video: "https://www.youtube.com/watch?v=9hE5-98ZeCg", processing: "agentic", resolution: "low" },
+      { type: "video", video: "https://example.com/clip.mp4", processing: "static" },
+      { type: "video", video: "https://example.com/other.mp4" },
+    ]);
+    expect(seen.body.input).toEqual([
+      { type: "video", uri: "https://www.youtube.com/watch?v=9hE5-98ZeCg", resolution: "low", processing: "agentic" },
+      { type: "video", uri: "https://example.com/clip.mp4", mime_type: "video/mp4", processing: "static" },
+      { type: "video", uri: "https://example.com/other.mp4", mime_type: "video/mp4" },
+    ]);
+    const calls = seen.apiCalls;
+    await expect(send([{ type: "video", video: "https://example.com/clip.mp4", processing: "smart" }])).rejects.toMatchObject({
+      name: "ValidationError",
+    });
+    expect(seen.apiCalls).toBe(calls);
+  });
+
+  it("keeps processing_call and processing_result steps in the replayed history", async () => {
+    const steps = [
+      { type: "thought", signature: "s1", summary: [{ type: "text", text: "Looking at the transcript" }] },
+      { type: "processing_call", id: "call_01", signature: "sig_call_01" },
+      { type: "processing_result", call_id: "call_01", signature: "sig_result_01" },
+      { type: "model_output", content: [{ type: "text", text: "It is about pelicans." }] },
+    ];
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify({ ...TEXT_INTERACTION, id: `v1_${bodies.length}`, steps }), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const first = await provider.generate("gemini-3.5-flash", { messages: [{ role: "user", content: "summarise" }] }, { apiKey: "k" });
+    expect(first.text).toBe("It is about pelicans.");
+    expect(first.providerSteps?.steps).toEqual(steps);
+    // A reseed (no live chain) replays the stored steps verbatim, processing steps included.
+    clearInteractionChains();
+    await provider.generate(
+      "gemini-3.5-flash",
+      {
+        messages: [
+          { role: "user", content: "summarise" },
+          { role: "assistant", content: "It is about pelicans.", providerSteps: first.providerSteps },
+          { role: "user", content: "again" },
+        ],
+      },
+      { apiKey: "k" }
+    );
+    expect(bodies[1].input.filter((x: any) => x.type.startsWith("processing_") || x.type === "thought")).toEqual(steps.slice(0, 3));
+  });
+
   it("recognises Files API links on /v1 and /v1beta, but not look-alike hosts or other paths", async () => {
     // Audio is never fetched by Google, so only a real Files API link can travel as a uri; anything else is downloaded and inlined.
     const seen = captureInput({

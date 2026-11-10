@@ -232,6 +232,21 @@ export function warnIgnoredMediaResolution(
   });
 }
 
+/** Warns once per provider/model that a video's `processing` mode is ignored (only Google has one); in: an adapter's request messages, out: telemetry bus only. */
+export function warnIgnoredVideoProcessing(provider: string, messages: Message[], modelRef: string): void {
+  const used = messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "video" && p.processing)
+  );
+  if (!used) return;
+  emitProviderWarning({
+    provider,
+    capability: "video processing",
+    requested: modelRef,
+    reason: "only Google reads a video in a chosen processing mode (static or agentic).",
+    fallback: "the provider's default video handling",
+  });
+}
+
 /** OpenRouter Chat Completions `tool_choice` wire values. */
 export type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 

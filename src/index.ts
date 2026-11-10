@@ -323,6 +323,7 @@ export type {
   ProviderContext,
   ProviderSteps,
   MediaResolution,
+  VideoProcessing,
 } from "./types/message.ts";
 
 export type {

@@ -540,6 +540,29 @@ describe("per-media resolution on OpenRouter", () => {
     expect(warnings).toEqual([]);
   });
 
+  it("warns once on the bus for a video's processing mode and never sends the field", async () => {
+    const { telemetryBus } = await import("../src/telemetry.ts");
+    clearEmittedWarnings();
+    const warnings: any[] = [];
+    const off = telemetryBus.onEvent((e) => {
+      if (e.code === "provider_warning" && (e.data as any)?.capability === "video processing") warnings.push(e.data);
+    });
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), sseReply(TEXT_RESPONSE));
+    const w = captureWarnings();
+    try {
+      const provider = new OpenRouterChatCompletionsProvider();
+      const ctx = { messages: [{ role: "user", content: [{ type: "video", video: "https://example.com/v.mp4", processing: "agentic" }] }] } as any;
+      await provider.generate("x/model", ctx, { apiKey: "k" });
+      await provider.generate("x/model", ctx, { apiKey: "k" });
+    } finally {
+      off();
+      w.restore();
+    }
+    expect(warnings.length).toBe(1);
+    expect(JSON.stringify(bodies)).not.toContain("processing");
+  });
+
   it("warns once on the bus for a video's resolution and never sends the field", async () => {
     const { bodies, warnings } = await run([{ type: "video", video: "https://example.com/v.mp4", resolution: "high" }] as any);
     expect(warnings.length).toBe(1);

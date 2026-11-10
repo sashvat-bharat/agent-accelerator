@@ -29,7 +29,14 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, ContentPart, ProviderSteps, ToolResultPart, MediaResolution } from "../types/message.ts";
+import type {
+  ProviderContext,
+  ContentPart,
+  ProviderSteps,
+  ToolResultPart,
+  MediaResolution,
+  VideoProcessing,
+} from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -232,6 +239,7 @@ type MediaBlock = {
   data?: string;
   uri?: string;
   resolution?: MediaResolution;
+  processing?: VideoProcessing;
 };
 type InteractionContentBlock = { type: "text"; text: string } | MediaBlock;
 
@@ -537,7 +545,13 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionCo
     const block = uri ?? (await inlineBlock(type, value, part.mimeType));
     // Per-item detail level (image and video blocks only, api-ref `MediaResolution`).
     const resolution = part.type === "image" || part.type === "video" ? part.resolution : undefined;
-    blocks.push(resolution ? { ...block, resolution } : block);
+    // Per-video processing mode (`static` | `agentic`, api-ref `MediaProcessing`): the model may then add `processing_call` / `processing_result` steps, which the raw-steps replay keeps like any other step.
+    const processing = part.type === "video" ? part.processing : undefined;
+    if (processing !== undefined && processing !== "static" && processing !== "agentic")
+      throw new ValidationError(
+        `[Agent Accelerator] Invalid video processing ${JSON.stringify(processing)}: expected "static" or "agentic".`
+      );
+    blocks.push({ ...block, ...(resolution ? { resolution } : {}), ...(processing ? { processing } : {}) });
   }
   return blocks;
 }
