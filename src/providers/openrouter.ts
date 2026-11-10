@@ -136,8 +136,13 @@ interface ChatUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
-  prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
-  completion_tokens_details?: { reasoning_tokens?: number };
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+    audio_tokens?: number;
+    video_tokens?: number;
+  };
+  completion_tokens_details?: { reasoning_tokens?: number; audio_tokens?: number; image_tokens?: number };
   cost?: number;
   [k: string]: unknown;
 }
@@ -476,6 +481,25 @@ function mapUsage(raw?: ChatUsage): TokenUsage {
     cacheWriteTokens: raw?.prompt_tokens_details?.cache_write_tokens ?? 0,
     thinkingTokens: raw?.completion_tokens_details?.reasoning_tokens ?? 0,
   };
+  // Media tokens are listed only when the provider reported more than zero of them.
+  const count = (n: unknown): number | undefined =>
+    typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
+  const inDet = {
+    audioTokens: count(raw?.prompt_tokens_details?.audio_tokens),
+    videoTokens: count(raw?.prompt_tokens_details?.video_tokens),
+  };
+  const outDet = {
+    audioTokens: count(raw?.completion_tokens_details?.audio_tokens),
+    imageTokens: count(raw?.completion_tokens_details?.image_tokens),
+  };
+  const keep = (d: Record<string, number | undefined>): Record<string, number> | undefined => {
+    const kept = Object.fromEntries(Object.entries(d).filter(([, v]) => v !== undefined)) as Record<string, number>;
+    return Object.keys(kept).length > 0 ? kept : undefined;
+  };
+  const inKept = keep(inDet);
+  const outKept = keep(outDet);
+  if (inKept) usage.inputDetails = inKept;
+  if (outKept) usage.outputDetails = outKept;
   if (typeof raw?.cost === "number" && raw.cost >= 0) {
     // an explicit 0 (a free model, a response-cache hit) is a known cost, not a missing one
     usage.cost = { totalCost: raw.cost };

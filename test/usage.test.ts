@@ -241,3 +241,16 @@ describe("agent.usageReport()", () => {
     expect(report.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
   });
 });
+
+describe("media usage details across turns", () => {
+  it("accumulateUsage sums them, never mutates the source, and does not change the priced cost", async () => {
+    const { accumulateUsage } = await import("../src/agent/loop.ts");
+    const turn = { inputTokens: 100, outputTokens: 10, totalTokens: 110, inputDetails: { audioTokens: 30 }, outputDetails: { imageTokens: 2 } };
+    const total: any = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    accumulateUsage(total, turn);
+    accumulateUsage(total, turn);
+    expect(total.inputDetails).toEqual({ audioTokens: 60 });
+    expect(total.outputDetails).toEqual({ imageTokens: 4 });
+    expect(turn.inputDetails).toEqual({ audioTokens: 30 });
+  });
+});

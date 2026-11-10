@@ -101,7 +101,7 @@ console.log(telemetry.formatBar(res)); // tokens, cache hit rates, cost, context
 console.log(telemetry.totals); // { input, output, cacheRead, cacheWrite, reasoning, cost }
 ```
 
-`res.usage` has `inputTokens`, `outputTokens`, `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens` and optional `cost`. Cached tokens are always a subset of input. Cost is the provider's reported total when present (OpenRouter), else computed from catalog prices with integer micro-USD maths, including tiered prices above 200k context and service-tier multipliers (flex 0.5x, priority 2x). **Unknown pricing stays unknown**, never a made-up zero. Sub-agent usage is added to the parent's total.
+`res.usage` has `inputTokens`, `outputTokens`, `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`, and, on OpenRouter, `inputDetails` (`audioTokens`, `videoTokens`) and `outputDetails` (`audioTokens`, `imageTokens`) when the route reports them (subsets of input and output, report only). Cached tokens are always a subset of input. Cost is the provider's reported total when present (OpenRouter), else computed from catalog prices with integer micro-USD maths, including tiered prices above 200k context and service-tier multipliers (flex 0.5x, priority 2x). **Unknown pricing stays unknown**, never a made-up zero. Sub-agent usage is added to the parent's total.
 
 ## Model catalog
 

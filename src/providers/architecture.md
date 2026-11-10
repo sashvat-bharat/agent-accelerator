@@ -2,14 +2,14 @@
 
 All HTTP and wire parsing. Canonical mappers (thinking, cache, tool choice, structured output) live in `../providers.ts`, never here.
 
-| File               | Wire                               | Notes                                                                                                                                                                                       |
-| :----------------- | :--------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `google.ts`        | Google Interactions                | Stateful chaining (TTL gate, self-heal on `not_found`), exact replay of raw `steps`, media consts at the top, Gemini 4 long decode as background interactions.                              |
-| `openai.ts`        | OpenAI Responses                   | Stateless (`store:false`), full history every turn.                                                                                                                                         |
-| `openrouter.ts`    | OpenRouter Chat Completions        | Every request streams (so it can be cancelled); `generate()` collects its own stream. A turn's `reasoning_details` blocks are kept as `providerSteps` and sent back verbatim on the next request.  |
-| `openai-compat.ts` | OpenAI-compatible Chat Completions | Serves every custom prefix; strict subset of fields; no default base URL.                                                                                                                   |
-| `registry.ts`      | -                                  | Routes `provider/model` to an adapter; the registry is immutable; `ModelProvider` helpers.                                                                                                  |
-| `shared.ts`        | -                                  | Helpers every adapter uses: signals and timers, error payloads, ids, retry-after, SSE scaffold (`linkStreamAbort`, `withAbortTimer`, `readSseData`, `incompleteStreamCheck`, `failStream`). |
+| File               | Wire                               | Notes                                                                                                                                                                                             |
+| :----------------- | :--------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `google.ts`        | Google Interactions                | Stateful chaining (TTL gate, self-heal on `not_found`), exact replay of raw `steps`, media consts at the top, Gemini 4 long decode as background interactions.                                    |
+| `openai.ts`        | OpenAI Responses                   | Stateless (`store:false`), full history every turn.                                                                                                                                               |
+| `openrouter.ts`    | OpenRouter Chat Completions        | Every request streams (so it can be cancelled); `generate()` collects its own stream. A turn's `reasoning_details` blocks are kept as `providerSteps` and sent back verbatim on the next request. |
+| `openai-compat.ts` | OpenAI-compatible Chat Completions | Serves every custom prefix; strict subset of fields; no default base URL.                                                                                                                         |
+| `registry.ts`      | -                                  | Routes `provider/model` to an adapter; the registry is immutable; `ModelProvider` helpers.                                                                                                        |
+| `shared.ts`        | -                                  | Helpers every adapter uses: signals and timers, error payloads, ids, retry-after, SSE scaffold (`linkStreamAbort`, `withAbortTimer`, `readSseData`, `incompleteStreamCheck`, `failStream`).       |
 
 ## Contract (`Provider`, in `../types/model.ts`)
 

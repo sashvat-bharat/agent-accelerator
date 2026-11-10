@@ -940,3 +940,32 @@ describe("reasoning_details replay", () => {
     expect(body.messages.find((m: any) => m.role === "assistant").reasoning_details).toBeUndefined();
   });
 });
+
+describe("media usage details", () => {
+  afterEach(() => {
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  it("reports audio, video and image tokens from the usage block, only when above zero", async () => {
+    mockFetchOnce({
+      ...TEXT_RESPONSE,
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        total_tokens: 120,
+        prompt_tokens_details: { cached_tokens: 0, audio_tokens: 30, video_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 0, image_tokens: 7 },
+      },
+    });
+    const res = await new OpenRouterChatCompletionsProvider().generate("acme/test-model", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    expect(res.usage.inputDetails).toEqual({ audioTokens: 30 });
+    expect(res.usage.outputDetails).toEqual({ imageTokens: 7 });
+  });
+
+  it("leaves the fields out when nothing media was reported", async () => {
+    mockFetchOnce(TEXT_RESPONSE);
+    const res = await new OpenRouterChatCompletionsProvider().generate("acme/test-model", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" });
+    expect(res.usage.inputDetails).toBeUndefined();
+    expect(res.usage.outputDetails).toBeUndefined();
+  });
+});

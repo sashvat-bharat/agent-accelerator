@@ -472,6 +472,14 @@ export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec, serv
   }
 }
 
+// Adds the media token details of `source` into `target` (kept only when something was reported); in: accumulateUsage, out: target.inputDetails / outputDetails.
+function sumDetails(target: TokenUsage, source: TokenUsage, key: "inputDetails" | "outputDetails"): void {
+  const from = source[key] as Record<string, number | undefined> | undefined;
+  if (!from) return;
+  const into = ((target[key] as Record<string, number> | undefined) ??= {});
+  for (const [k, v] of Object.entries(from)) if (typeof v === "number") into[k] = (into[k] ?? 0) + v;
+}
+
 // ---------------------------------------------------------------------------
 // Canonical usage accumulation (pure w.r.t. source).
 // Invariants (see assertUsageInvariants in session/store.ts):
@@ -484,6 +492,7 @@ export function computeCostFromPricing(usage: TokenUsage, spec?: ModelSpec, serv
 // This function never mutates `source`: the priced cost is cloned
 // into a local before folding into the target.
 // ---------------------------------------------------------------------------
+// Adds one turn's usage (and its priced cost) into a running total without touching the source; in: both loops per model turn and finished worker, out: the run's accumulatedUsage.
 export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: ModelSpec, serviceTier?: string): void {
   target.inputTokens += source.inputTokens || 0;
   target.outputTokens += source.outputTokens || 0;
@@ -492,6 +501,8 @@ export function accumulateUsage(target: TokenUsage, source: TokenUsage, spec?: M
   target.cacheReadTokens = (target.cacheReadTokens ?? 0) + (source.cacheReadTokens ?? 0);
   target.cacheWriteTokens = (target.cacheWriteTokens ?? 0) + (source.cacheWriteTokens ?? 0);
   target.thinkingTokens = (target.thinkingTokens ?? 0) + (source.thinkingTokens ?? 0);
+  sumDetails(target, source, "inputDetails");
+  sumDetails(target, source, "outputDetails");
 
   // Canonical invariant (provider-agnostic): cache hits are a subset of
   // input. Some providers occasionally report cached > input on long chained

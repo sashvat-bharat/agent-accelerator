@@ -42,6 +42,10 @@ export interface TokenUsage {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   thinkingTokens?: number;
+  /** Media part of `inputTokens` (a subset, report only: pricing never reads it). OpenRouter reports audio and video. */
+  inputDetails?: { audioTokens?: number; videoTokens?: number };
+  /** Media part of `outputTokens` (a subset, report only). OpenRouter reports audio and image. */
+  outputDetails?: { audioTokens?: number; imageTokens?: number };
   cost?: {
     inputCost?: number;
     outputCost?: number;

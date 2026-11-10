@@ -1021,6 +1021,8 @@ TokenUsage {
   cacheReadTokens?,
   cacheWriteTokens?,
   thinkingTokens?,
+  inputDetails?: { audioTokens?, videoTokens? },   // media part of inputTokens (OpenRouter), report only
+  outputDetails?: { audioTokens?, imageTokens? }, // media part of outputTokens (OpenRouter), report only
   cost?: {
     inputCost?,
     outputCost?,
