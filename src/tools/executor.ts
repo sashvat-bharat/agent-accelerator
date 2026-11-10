@@ -1,6 +1,7 @@
 import type { ToolDefinition, ToolCallRecord, ToolResultRecord, ToolExecutionContext } from "../types/tool.ts";
 import { toJsonSafe } from "../utils/serialization.ts";
 import { ConfigError } from "../types/errors.ts";
+import { isTransientError } from "../utils/errors.ts";
 import { isSubagentResult } from "./subagent-result.ts";
 import { isTruncatedArguments } from "../types/tool.ts";
 import { telemetryBus } from "../telemetry.ts";
@@ -393,22 +394,6 @@ class Semaphore {
       return;
     }
   }
-}
-
-/**
- * True for retry-worthy failures: explicit opt-in flags (`transient` /
- * `retryable`), retryable HTTP statuses, or retryable network codes. Never
- * matches on message text — message content is untrusted and locale-fragile.
- */
-function isTransientError(error: any): boolean {
-  if (!error) return false;
-  if (error.transient === true || error.retryable === true) return true;
-  const status = Number(error.status ?? error.statusCode ?? error.response?.status);
-  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
-  const code = String(error.code || "").toUpperCase();
-  if (["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ETIMEDOUT", "EPIPE", "UND_ERR_CONNECT_TIMEOUT"].includes(code))
-    return true;
-  return false;
 }
 
 // Waits the retry backoff, rejecting `Tool execution aborted` as soon as the run aborts; in: runSingle's retry loop, out: nothing.
