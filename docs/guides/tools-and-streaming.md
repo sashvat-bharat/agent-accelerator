@@ -41,7 +41,7 @@ How a call is executed, in order:
 7. **Tool log**: with `persist: { dir }` the call also gets `tool-logs/<n>-<tool>.ndjson` in the session folder (input, attempts, retries, full result or error, duration, plus your `ctx.log(message, data?)` lines, each flushed as written; never sent to the model; the result carries `logFile`). Without `persist: { dir }`, `ctx.log` is a no-op.
 8. **Repeat guard**: the 3rd identical call in a row is answered with `repeat_blocked`; `repeatable`/`idempotent` tools are exempt.
 
-`toolChoice` (agent or per run): `"auto"`, `"none"` (whole run), `"required"` or `{ tool: "name" }` (these two apply to the **first turn only**, otherwise a run could never finish). Also exported: `executeToolCalls`, `toStandardToolDeclarations`, `zodToJsonSchema`, `cleanJsonSchema`, `stripSchemaForGoogle`, `assertValidToolName`. Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; ambiguous names fail at construction.
+`toolChoice` (agent or per run): `"auto"`, `"none"` (whole run), `"validated"` (Google only, whole run), `"required"` or `{ tool: "name" }` (these two apply to the **first turn only**, otherwise a run could never finish). `"validated"` forces nothing: the model still decides whether to call a tool, but every call it makes is kept valid against the tool's schema (Google's `validated` mode); other providers ignore it with one warning. Also exported: `executeToolCalls`, `toStandardToolDeclarations`, `zodToJsonSchema`, `cleanJsonSchema`, `stripSchemaForGoogle`, `assertValidToolName`. Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; ambiguous names fail at construction.
 
 **Recommendations**
 - ✅ Write descriptions like instructions to a colleague; `.describe()` every field.

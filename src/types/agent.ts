@@ -43,7 +43,12 @@ export interface AgentLogger {
 }
 
 /** Canonical tool-selection control. String form is the portable subset. */
-export type ToolChoiceOption = "auto" | "none" | "required" | { mode?: "auto" | "none" | "required"; tool?: string };
+export type ToolChoiceOption =
+  | "auto"
+  | "none"
+  | "required"
+  | "validated"
+  | { mode?: "auto" | "none" | "required" | "validated"; tool?: string };
 
 /** Canonical structured-output input. Zod, JSON Schema, or explicit form. */
 export type StructuredOutputOption =
@@ -149,7 +154,10 @@ export interface AgentConfig {
    * Canonical tool-selection control (`"auto"` default). `"none"` applies to
    * every turn of a run; `"required"` and a pinned tool (`{ tool: "name" }`)
    * apply to the FIRST model turn only, since forcing a tool call on every
-   * turn would make a run unable to finish.
+   * turn would make a run unable to finish. `"validated"` (Google only) lets the
+   * model decide whether to call a tool but makes it keep every call valid against
+   * the tool's schema; it holds for the whole run. Other providers ignore it
+   * with one warning.
    */
   toolChoice?: ToolChoiceOption;
   /** Google Interactions storage tier for the chain-TTL gate: `"free"` (23h, default) or `"paid"` (54d). */

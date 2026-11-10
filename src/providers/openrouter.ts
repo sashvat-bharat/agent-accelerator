@@ -678,9 +678,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     };
     const orTools = toOpenRouterTools(tools);
     if (orTools) body.tools = orTools;
-    const toolChoice = mapToolChoiceToOpenRouterChat(
-      options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
-    );
+    const toolChoice = mapToolChoiceToOpenRouterChat(options?.toolChoice);
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     const env = openRouterEnvOptions(options);
     if (effort || env.reasoning_exclude !== undefined)

@@ -764,9 +764,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     if (compatTools) body.tools = compatTools;
     // Standard Chat Completions generation fields, only when the caller set them.
     Object.assign(body, mapGenerationParamsToChat(options));
-    const toolChoice = mapToolChoiceToOpenAI(
-      options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
-    );
+    const toolChoice = mapToolChoiceToOpenAI(options?.toolChoice, this.prefix);
     if (toolChoice !== undefined) {
       // Chat Completions nests pinned names under `function`; the canonical
       // mapper emits the flat Responses shape, so normalize here.

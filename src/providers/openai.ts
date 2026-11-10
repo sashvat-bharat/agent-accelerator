@@ -588,9 +588,7 @@ export class OpenAIResponsesProvider implements Provider {
     if (effectiveSystemPrompt) body.instructions = effectiveSystemPrompt;
     const aiTools = toOpenAITools(tools);
     if (aiTools) body.tools = aiTools;
-    const toolChoice = mapToolChoiceToOpenAI(
-      options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
-    );
+    const toolChoice = mapToolChoiceToOpenAI(options?.toolChoice);
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;

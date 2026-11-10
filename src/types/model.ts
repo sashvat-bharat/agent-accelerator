@@ -169,7 +169,7 @@ export interface ProviderRequestOptions {
   cache?: CacheOption;
   serviceTier?: ServiceTier;
   tools?: StandardToolDeclaration[];
-  toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+  toolChoice?: "auto" | "none" | "required" | "validated" | { type: "function"; function: { name: string } };
   signal?: AbortSignal;
   sessionId?: string;
   env?: Record<string, string>;

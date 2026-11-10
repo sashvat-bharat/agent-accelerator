@@ -247,6 +247,17 @@ export function warnIgnoredVideoProcessing(provider: string, messages: Message[]
   });
 }
 
+// Warns once that the `validated` tool choice (Google only) is dropped and the provider default (auto) is used; in: the OpenRouter and OpenAI tool-choice mappers (compat goes through the OpenAI one), out: a provider_warning on the bus.
+function warnValidatedToolChoice(provider: string): void {
+  emitProviderWarning({
+    provider,
+    capability: "tool choice",
+    requested: "validated",
+    reason: "only Google has a validated tool-choice mode.",
+    fallback: "automatic tool choice",
+  });
+}
+
 /** OpenRouter Chat Completions `tool_choice` wire values. */
 export type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 
@@ -258,9 +269,10 @@ export type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "f
  * (`{type:function,name}`): completions nests the name under `function`.
  */
 export function mapToolChoiceToOpenRouterChat(
-  choice: "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
+  choice: "auto" | "none" | "required" | "validated" | { type: "function"; function: { name: string } } | undefined
 ): OpenRouterChatToolChoice | undefined {
   if (!choice || choice === "auto") return undefined;
+  if (choice === "validated") return (warnValidatedToolChoice("openrouter"), undefined);
   if (choice === "none" || choice === "required") return choice;
   const name = choice.function?.name;
   if (name) return { type: "function", function: { name } };
@@ -307,9 +319,11 @@ export type OpenAIToolChoice = "auto" | "none" | "required" | { type: "function"
  * variants are out of scope and never emitted.
  */
 export function mapToolChoiceToOpenAI(
-  choice: "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
+  choice: "auto" | "none" | "required" | "validated" | { type: "function"; function: { name: string } } | undefined,
+  provider = "openai"
 ): OpenAIToolChoice | undefined {
   if (!choice || choice === "auto") return undefined;
+  if (choice === "validated") return (warnValidatedToolChoice(provider), undefined);
   if (choice === "none" || choice === "required") return choice;
   const name = choice.function?.name;
   if (name) return { type: "function", name };
@@ -317,7 +331,7 @@ export function mapToolChoiceToOpenAI(
 }
 
 /** Normalized tool-choice mode shared by provider adapters. */
-export type CanonicalToolChoiceMode = "auto" | "any" | "none";
+export type CanonicalToolChoiceMode = "auto" | "any" | "none" | "validated";
 
 /**
  * Normalizes canonical toolChoice into a provider-neutral mode + optional
@@ -325,13 +339,14 @@ export type CanonicalToolChoiceMode = "auto" | "any" | "none";
  * `{ allowed_tools: { mode, tools? } }` in its own adapter.
  */
 export function normalizeToolChoice(
-  choice: "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined,
+  choice: "auto" | "none" | "required" | "validated" | { type: "function"; function: { name: string } } | undefined,
   availableToolNames: string[]
 ): { mode: CanonicalToolChoiceMode; tools?: string[] } | undefined {
   if (!choice) return undefined;
   if (typeof choice === "string") {
     if (choice === "auto") return undefined; // server default
     if (choice === "none") return { mode: "none" };
+    if (choice === "validated") return { mode: "validated" };
     if (choice === "required") {
       return availableToolNames.length > 0 ? { mode: "any", tools: availableToolNames } : { mode: "any" };
     }

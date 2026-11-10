@@ -163,6 +163,48 @@ describe("generation + call controls are forwarded", () => {
     expect(second.calls[0]!.body.generation_config.tool_choice).toEqual({ allowed_tools: { mode: "none" } });
   });
 
+  it("`toolChoice: validated` (Google) is sent on EVERY turn, since it forces nothing", async () => {
+    const lookup = tool({ description: "lookup", input: z.object({}), execute: async () => "found" });
+    const { fn, calls } = recorder((n) =>
+      n === 1
+        ? new Response(JSON.stringify({ ...textInteraction("v1_a"), status: "requires_action", steps: [{ type: "function_call", id: "call_1", name: "lookup", arguments: {} }] }), { status: 200 })
+        : new Response(JSON.stringify(textInteraction("v1_b")), { status: 200 })
+    );
+    const res = await new Agent({ model: GOOGLE_MODEL, apiKey: "k", fetch: fn, tools: { lookup }, toolChoice: "validated" }).run("go");
+    expect(res.text).toBe("ok");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.generation_config.tool_choice).toEqual({ allowed_tools: { mode: "validated" } });
+    expect(calls[1]!.body.generation_config.tool_choice).toEqual({ allowed_tools: { mode: "validated" } });
+    // The object form means the same, and a per-run value overrides the agent default.
+    const second = recorder(() => new Response(JSON.stringify(textInteraction()), { status: 200 }));
+    await new Agent({ model: GOOGLE_MODEL, apiKey: "k", fetch: second.fn, tools: { lookup } }).run("go", { toolChoice: { mode: "validated" } });
+    expect(second.calls[0]!.body.generation_config.tool_choice).toEqual({ allowed_tools: { mode: "validated" } });
+  });
+
+  it("`toolChoice: validated` is dropped with one warning on providers that have no such mode", async () => {
+    const { telemetryBus } = await import("../src/telemetry.ts");
+    const { clearEmittedWarnings } = await import("../src/providers.ts");
+    clearEmittedWarnings();
+    const seen: any[] = [];
+    const off = telemetryBus.onEvent((e) => {
+      if (e.code === "provider_warning" && (e.data as any)?.capability === "tool choice") seen.push(e.data);
+    });
+    const lookup = tool({ description: "lookup", input: z.object({}), execute: async () => "found" });
+    try {
+      const { fn, calls } = recorder(() => new Response(JSON.stringify(chat()), { status: 200 }));
+      await groq({ tools: { lookup }, toolChoice: "validated" }, fn).run("hi");
+      expect(calls[0]!.body.tool_choice).toBeUndefined();
+      const oa = recorder(
+        () => new Response(JSON.stringify({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { status: 200 })
+      );
+      await new Agent({ model: "openai/gpt-4o", apiKey: "k", fetch: oa.fn, tools: { lookup }, toolChoice: "validated" }).run("hi");
+      expect(oa.calls[0]!.body.tool_choice).toBeUndefined();
+    } finally {
+      off();
+    }
+    expect(seen.map((w) => w.provider).sort()).toEqual(["groq", "openai"]);
+  });
+
   it("`retry.maxRetries: 0` disables retries; the default retries a 503", async () => {
     const run = async (retry?: { maxRetries: number }) => {
       let n = 0;

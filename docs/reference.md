@@ -25,7 +25,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `midSession` | `{ mode \| whenBusy: "steer" \| "queue" \| "auto", maxQueued }` | [Tools](guides/tools-and-streaming.md) |
 | `resume` | `"automatic"` (default) or `"explicit"`: whether a run a crash cut off continues when the Agent is constructed (needs `persist: { dir }` and the same `sessionId`). See `agent.resume()` / `agent.interrupted()` | [Data](guides/data-and-media.md) |
 | `persist`, `home` | Session saving; base folder (`setHome(dir)` / `AGENT_ACCEL_HOME` / `.agent-accel/`). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
-| `toolChoice` | `"auto"`, `"none"`, `"required"`, `{ tool }` | [Tools](guides/tools-and-streaming.md) |
+| `toolChoice` | `"auto"`, `"none"`, `"required"`, `"validated"` (Google), `{ tool }` | [Tools](guides/tools-and-streaming.md) |
 | `maxOutputTokens` | Output-token cap for one model call | [Agents](guides/agents-and-models.md) |
 | `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
 | `retry`, `fetch`, `env` | Retry policy of one provider call, custom `fetch`, env-var overrides | [Safety](guides/safety-and-ops.md) |

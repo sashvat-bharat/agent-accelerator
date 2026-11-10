@@ -157,7 +157,7 @@ function emitTurn(
 }
 
 /**
- * Per-turn `toolChoice`. `"none"` holds for the whole run; a forced choice
+ * Per-turn `toolChoice`. `"none"` and `"validated"` (which forces nothing) hold for the whole run; a forced choice
  * (`"required"` or a pinned function) applies to the FIRST model turn only:
  * forcing a tool call on every turn would keep the model calling tools until
  * `maxTurns`, so the run could never produce a final answer.
@@ -167,7 +167,7 @@ function toolChoiceForTurn(
   turn: number
 ): ProviderRequestOptions["toolChoice"] {
   if (choice === undefined || choice === "auto") return undefined;
-  if (choice === "none") return "none";
+  if (choice === "none" || choice === "validated") return choice;
   return turn === 1 ? choice : undefined;
 }
 
