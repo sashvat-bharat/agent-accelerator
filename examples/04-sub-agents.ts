@@ -1,4 +1,4 @@
-import { Agent, agentToTool, tool } from "agent-accelerator";
+import { Agent, tool } from "agent-accelerator";
 import { z } from "zod";
 import { fail } from "./_shared";
 

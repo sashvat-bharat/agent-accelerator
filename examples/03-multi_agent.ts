@@ -78,6 +78,6 @@ async function ask(prompt: string) {
 }
 
 // Chained pipeline — append as many requests as you want:
-const r1 = await ask("Research on the rising HBM RAM pricings and rapid development in the AI space, then merge both to make a final editorial-level professional detailed report.");
-const r2 = await ask("Based on the editorial report above, summarize all critical strategic takeaways in bullet points and identify the #1 supplier positioned to benefit the most.");
-const r3 = await ask("Based on the editorial report above, explain the entire report clearly in bullet points, covering all major findings, arguments, data, implications, and conclusions.");
+await ask("Research on the rising HBM RAM pricings and rapid development in the AI space, then merge both to make a final editorial-level professional detailed report.");
+await ask("Based on the editorial report above, summarize all critical strategic takeaways in bullet points and identify the #1 supplier positioned to benefit the most.");
+await ask("Based on the editorial report above, explain the entire report clearly in bullet points, covering all major findings, arguments, data, implications, and conclusions.");

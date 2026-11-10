@@ -8,14 +8,6 @@
 import {
   getActiveCatalog,
   registerCatalogUpdateListener,
-  refreshModelCatalog,
-  ensureModelCatalogFresh,
-  getCatalogStatus,
-  setCatalogTTL,
-  getCatalogTTL,
-  DEFAULT_CATALOG_TTL_MS,
-  type CatalogStatus,
-  type RefreshCatalogOptions,
 } from "./catalog-cache.ts";
 import type { ModelSpec, ProviderId, ModelLimit, ModelCost, ModelModalities } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";

@@ -313,7 +313,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
       fallbackToDiskCache();
       return getCatalogStatus();
     }
-  } catch (err: any) {
+  } catch {
     clearTimeout(timer);
     // If download fails, retain disk cache if available
     fallbackToDiskCache();

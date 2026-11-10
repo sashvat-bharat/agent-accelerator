@@ -29,7 +29,7 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, Message, ContentPart, ProviderSteps, ToolResultPart, MediaResolution } from "../types/message.ts";
+import type { ProviderContext, ContentPart, ProviderSteps, ToolResultPart, MediaResolution } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -53,7 +53,6 @@ import {
   combinedSignal,
   timeoutFor,
   hasAuthHeader,
-  clampToolCallId,
   openStreamResponse,
   retryOptionsFrom,
   headersToRecord,
@@ -944,7 +943,6 @@ export class GoogleInteractionsProvider implements Provider {
   // Throws a concise provider error (status, code, Retry-After, key hint) for a non-2xx reply; in: every Google HTTP call, out: nothing or a thrown error.
   private throwIfError(
     status: number,
-    statusText: string,
     url: string,
     bodyText: string,
     modelId: string,
@@ -989,7 +987,7 @@ export class GoogleInteractionsProvider implements Provider {
     modelId: string
   ): Promise<InteractionReply> {
     const res = await this.doFetch(url, method, body, options, apiKey, options?.signal);
-    this.throwIfError(res.status, res.statusText, url, res.text, modelId, res.headers);
+    this.throwIfError(res.status, url, res.text, modelId, res.headers);
     try {
       return { status: res.status, statusText: res.statusText, headers: res.headers, interaction: JSON.parse(res.text) as InteractionObject };
     } catch {
@@ -1166,7 +1164,7 @@ export class GoogleInteractionsProvider implements Provider {
         const open = (target: string, method: "POST" | "GET"): Promise<Response> =>
           openStreamResponse({
             fetchOnce: () => withAbortTimer(linked, streamTimeoutMs, () => (options?.fetch ?? fetch)(target, this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, linked.signal))),
-            onHttpError: (r, text) => this.throwIfError(r.status, r.statusText, target, text, clean, headersToRecord(r.headers)),
+            onHttpError: (r, text) => this.throwIfError(r.status, target, text, clean, headersToRecord(r.headers)),
             noBodyError: () => toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
             retry: retryOptionsFrom(options),
             signal: linked.signal,

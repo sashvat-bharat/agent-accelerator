@@ -1090,7 +1090,6 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         tools,
         options,
         runOptions,
-        maxTurns: rawMaxTurns = Infinity,
       } = config;
       const maxTurns = streamLimits.maxTurns;
 

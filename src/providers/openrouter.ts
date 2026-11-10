@@ -51,7 +51,6 @@ import {
   newToolCallId,
   redactedHeaders,
   readErrorPayload,
-  incompleteStreamError,
   hasUnfinishedToolCall,
   linkStreamAbort,
   withAbortTimer,

@@ -175,7 +175,7 @@ export async function normalizeMediaInput(
         base64Data,
         dataUrl: `data:${mimeType};base64,${base64Data}`,
       };
-    } catch (err) {
+    } catch {
       // S11: don't silently return path string as base64 (would 400). Re-check if it's actually base64 with "/"
       const trimmed = input.replace(/\s/g, "");
       const isMaybeBase64 = trimmed.length > 100 && /^[A-Za-z0-9+/=\n\r]+$/.test(trimmed.slice(0, 500)) && trimmed.length % 4 === 0;
