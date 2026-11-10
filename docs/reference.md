@@ -26,7 +26,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `resume` | `"automatic"` (default) or `"explicit"`: whether a run a crash cut off continues when the Agent is constructed (needs `persist: { dir }` and the same `sessionId`). See `agent.resume()` / `agent.interrupted()` | [Data](guides/data-and-media.md) |
 | `persist`, `home` | Session saving; base folder (`setHome(dir)` / `AGENT_ACCEL_HOME` / `.agent-accel/`). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
 | `toolChoice` | `"auto"`, `"none"`, `"required"`, `{ tool }` | [Tools](guides/tools-and-streaming.md) |
-| `maxOutputTokens`, `stop`, `seed` | Generation controls (`stop`/`seed`: Chat Completions only) | [Agents](guides/agents-and-models.md) |
+| `maxOutputTokens`, `stop` | Generation controls (`stop`: Chat Completions only) | [Agents](guides/agents-and-models.md) |
 | `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
 | `retry`, `fetch`, `env` | Retry policy of one provider call, custom `fetch`, env-var overrides | [Safety](guides/safety-and-ops.md) |
 | `runRetries` | Times a whole run that failed for a transient reason is tried again from where it stopped (default 3, `0` = off) | [Safety](guides/safety-and-ops.md) |
@@ -58,7 +58,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `headers` | Extra request headers |
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
 | `wrapThinking` | Display reasoning inside `<think>…</think>` |
-| `toolChoice`, `maxOutputTokens`, `stop`, `seed` | Same as config |
+| `toolChoice`, `maxOutputTokens`, `stop` | Same as config |
 | `retry`, `fetch`, `env`, `logger` | Same as config |
 
 ## Response

@@ -187,8 +187,6 @@ export interface ProviderRequestOptions {
   maxOutputTokens?: number;
   /** Stop sequence(s). Chat Completions only; other wires warn+drop. */
   stop?: string[];
-  /** Deterministic-sampling seed. Chat Completions only; other wires warn+drop. */
-  seed?: number;
   /** `fetch` implementation used for the provider request (defaults to global `fetch`). */
   fetch?: typeof fetch;
   /** Base backoff delay in ms for provider retries (default 250). */

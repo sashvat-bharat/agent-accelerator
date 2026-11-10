@@ -254,7 +254,6 @@ export class Agent {
     toolChoice?: ToolChoiceOption;
     maxOutputTokens?: number;
     stop?: string | string[];
-    seed?: number;
     retry?: RetryPolicyConfig;
     env?: Record<string, string>;
     fetch?: typeof fetch;
@@ -505,7 +504,6 @@ export class Agent {
       toolChoice: config.toolChoice,
       maxOutputTokens: config.maxOutputTokens,
       stop: config.stop,
-      seed: config.seed,
       retry: config.retry,
       env: config.env,
       fetch: config.fetch,
@@ -1382,7 +1380,6 @@ export class Agent {
     const env = { ...d.env, ...runOptions?.env };
     const stop = normalizeStop(runOptions?.stop ?? d.stop);
     const maxOutputTokens = runOptions?.maxOutputTokens ?? d.maxOutputTokens;
-    const seed = runOptions?.seed ?? d.seed;
     const fetchImpl = runOptions?.fetch ?? d.fetch;
     return {
       apiKey: this.apiKey,
@@ -1397,7 +1394,6 @@ export class Agent {
       ...(toolChoice !== undefined ? { toolChoice } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       ...(stop ? { stop } : {}),
-      ...(seed !== undefined ? { seed } : {}),
       ...(Object.keys(env).length > 0 ? { env } : {}),
       ...(fetchImpl ? { fetch: fetchImpl } : {}),
       ...(retry.maxRetries !== undefined ? { maxRetries: retry.maxRetries } : {}),

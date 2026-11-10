@@ -382,14 +382,13 @@ export function selectRawArguments(startText: string, deltaText: string): string
 }
 
 // ---------------------------------------------------------------------------
-// Generation controls (maxOutputTokens / stop / seed)
+// Generation controls (maxOutputTokens / stop)
 // ---------------------------------------------------------------------------
 
 /** Canonical generation controls as carried on `ProviderRequestOptions`. */
 export interface GenerationParams {
   maxOutputTokens?: number;
   stop?: string[];
-  seed?: number;
 }
 
 /** Most stop sequences a Chat Completions request may carry (OpenRouter chat-completion api-ref `maxItems`, OpenAI the same). */
@@ -407,7 +406,7 @@ export function normalizeStop(stop: string | string[] | undefined): string[] | u
 
 /**
  * Standard Chat Completions fields (OpenRouter + generic compat endpoints):
- * `max_tokens`, `stop`, `seed`. Only set values are
+ * `max_tokens`, `stop`. Only set values are
  * emitted, so strict endpoints never see anything the caller did not ask for.
  */
 export function mapGenerationParamsToChat(
@@ -431,17 +430,11 @@ export function mapGenerationParamsToChat(
       });
     }
   }
-  if (finiteNumber(params.seed)) out["seed"] = Math.floor(params.seed);
   return out;
 }
 
-// Warns that `stop`/`seed` have no parameter on this wire and are dropped; in: the OpenAI and Google mappers, out: provider_warning events.
-function warnUnsupportedStopSeed(
-  provider: string,
-  modelRef: string,
-  params: GenerationParams,
-  reasonSuffix: string
-): void {
+// Warns that `stop` has no parameter on this wire and is dropped; in: the OpenAI and Google mappers, out: provider_warning events.
+function warnUnsupportedStop(provider: string, modelRef: string, params: GenerationParams, reasonSuffix: string): void {
   if (params.stop && params.stop.length > 0) {
     emitProviderWarning({
       provider,
@@ -451,36 +444,27 @@ function warnUnsupportedStopSeed(
       fallback: "no stop sequences (the model decides when to stop)",
     });
   }
-  if (finiteNumber(params.seed)) {
-    emitProviderWarning({
-      provider,
-      capability: "seed",
-      requested: `${params.seed} (${modelRef})`,
-      reason: `the ${reasonSuffix} defines no seed parameter.`,
-      fallback: "non-deterministic sampling",
-    });
-  }
 }
 
-/** OpenAI Responses: `max_output_tokens` is native; `stop` and `seed` do not exist on this wire (warn + drop). */
+/** OpenAI Responses: `max_output_tokens` is native; `stop` does not exist on this wire (warn + drop). */
 export function mapGenerationParamsToOpenAI(
   params: GenerationParams | undefined,
   modelRef: string
 ): { max_output_tokens?: number } {
   if (!params) return {};
-  warnUnsupportedStopSeed("openai", modelRef, params, "OpenAI Responses API");
+  warnUnsupportedStop("openai", modelRef, params, "OpenAI Responses API");
   return finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0
     ? { max_output_tokens: Math.floor(params.maxOutputTokens) }
     : {};
 }
 
-/** Google Interactions `generation_config`: `max_output_tokens` is documented; `stop` and `seed` are not (warn + drop). */
+/** Google Interactions `generation_config`: `max_output_tokens` is documented; `stop` is not sent (warn + drop). */
 export function mapGenerationParamsToGoogle(
   params: GenerationParams | undefined,
   modelRef: string
 ): { max_output_tokens?: number } {
   if (!params) return {};
-  warnUnsupportedStopSeed("google", modelRef, params, "Gemini Interactions API");
+  warnUnsupportedStop("google", modelRef, params, "Gemini Interactions API");
   return finiteNumber(params.maxOutputTokens) && params.maxOutputTokens > 0
     ? { max_output_tokens: Math.floor(params.maxOutputTokens) }
     : {};
@@ -640,9 +624,7 @@ export function parseStructuredOutput(text: string, output: unknown): unknown {
  * Maps a normalized spec onto OpenAI Responses `text.format`.
  * `{ type: json_schema, name, schema, strict }` (docs: responses/create).
  */
-export function mapOutputToOpenAI(
-  spec: StructuredOutputSpec | undefined
-):
+export function mapOutputToOpenAI(spec: StructuredOutputSpec | undefined):
   | {
       format: {
         type: "json_schema";

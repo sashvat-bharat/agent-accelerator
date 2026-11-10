@@ -161,8 +161,6 @@ export interface AgentConfig {
   maxOutputTokens?: number;
   /** Stop sequence(s). */
   stop?: StopOption;
-  /** Deterministic seed, when the provider supports it. */
-  seed?: number;
   /**
    * Optional output schema (Zod, JSON Schema, or `{ name, schema, strict }`,
    * see `StructuredOutputOption`, stored as `unknown` so `zod`
@@ -377,8 +375,6 @@ export interface AgentRunOptions {
   maxOutputTokens?: number;
   /** Per-run stop sequence(s). */
   stop?: StopOption;
-  /** Per-run seed. */
-  seed?: number;
   /** Per-run retry override. */
   retry?: RetryPolicyConfig;
   /** Per-run fetch override. */
