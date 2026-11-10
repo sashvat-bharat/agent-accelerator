@@ -17,8 +17,6 @@ import * as path from "node:path";
 import { z } from "zod";
 import { readWithBackup, withFileMutex, writeFileDurable } from "../utils/durable.ts";
 import { telemetryBus } from "../telemetry.ts";
-import { resolveHome } from "../utils/home.ts";
-export { resolveHome };
 import { ValidationError } from "../types/errors.ts";
 import type { CostSource } from "../session/usage.ts";
 import type { ScheduledActionRecord, ScheduledRunStatus } from "../types/scheduler.ts";

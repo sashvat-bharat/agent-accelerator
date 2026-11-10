@@ -32,7 +32,7 @@ import { WorkerRegistry } from "./workers.ts";
 import { DEFAULT_MAX_DEPTH, normalizeToolMap, resolveDynamicModelInput, resolveMainModel } from "./worker.ts";
 import * as path from "node:path";
 import { registerAgent } from "../scheduler/scheduler.ts";
-import { resolveHome } from "../scheduler/store.ts";
+import { resolveHome } from "../utils/home.ts";
 import { persistTelemetry, registerSessionFolder, unregisterSessionFolder } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";

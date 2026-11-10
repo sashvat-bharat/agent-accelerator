@@ -42,7 +42,6 @@ import {
   readTask,
   readTasks,
   removeTaskFolder,
-  resolveHome,
   runPath,
   touchHeartbeat,
   updateDeliveries,
@@ -54,6 +53,7 @@ import {
   type PendingDelivery,
   type RunHeader,
 } from "./store.ts";
+import { resolveHome } from "../utils/home.ts";
 import {
   assertCookShorterThanRepeat,
   cookTime,
