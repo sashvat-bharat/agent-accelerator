@@ -12,7 +12,12 @@ const agent = new Agent({
   fileAccess: { roots: ["./examples/files"] },
 });
 
-const res = await agent.run([{ type: "text", text: "What is in this image? One paragraph." }, { type: "image", image }]).catch(fail);
+const res = await agent
+  .run([
+    { type: "text", text: "What is in this image? One paragraph." },
+    { type: "image", image },
+  ])
+  .catch(fail);
 
 console.log(res.text);
 console.log("TOTAL_TOKENS: " + `[${res.usage.totalTokens} tok]`);

@@ -58,9 +58,7 @@ export function redactValue(value: unknown): unknown {
  * Deny-list (name contains): *key*, *token*, *secret*, cookie, authorization.
  * Value patterns (redacted regardless of name): sk-, AIza, gsk-, xox-.
  */
-export function redactHeadersCentral(
-  headers: Record<string, unknown> | undefined | null
-): Record<string, unknown> {
+export function redactHeadersCentral(headers: Record<string, unknown> | undefined | null): Record<string, unknown> {
   if (!headers || typeof headers !== "object") return {};
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(headers)) {

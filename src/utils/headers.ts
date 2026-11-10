@@ -24,7 +24,7 @@ export function getPackageVersion(): string {
     const v = (globalThis as any).process?.env?.npm_package_version;
     if (typeof v === "string" && v) return v;
   } catch {}
-  return "0.5.9";
+  return "0.6.0";
 }
 
 // User-Agent string with version and platform; in: AGENT_ACCEL_USER_AGENT, out: a string.
@@ -93,11 +93,7 @@ function findHeaderKey(headers: Record<string, string>, name: string): string | 
  * coexist on the wire.
  * @example `setHeaderCaseInsensitive(headers, "Authorization", "Bearer k");`
  */
-export function setHeaderCaseInsensitive(
-  headers: Record<string, string>,
-  name: string,
-  value: string
-): void {
+export function setHeaderCaseInsensitive(headers: Record<string, string>, name: string, value: string): void {
   const existing = findHeaderKey(headers, name);
   if (existing !== undefined && existing !== name) delete headers[existing];
   headers[name] = value;
@@ -111,10 +107,7 @@ export function setHeaderCaseInsensitive(
  * Returns true when a stored signature may be echoed on `currentProvider`:
  * untagged (legacy) echoes everywhere, tagged echoes only on a match.
  */
-export function shouldEchoSignature(
-  storedProvider: unknown,
-  currentProvider: string
-): boolean {
+export function shouldEchoSignature(storedProvider: unknown, currentProvider: string): boolean {
   if (!storedProvider) return true;
   return storedProvider === currentProvider;
 }

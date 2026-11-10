@@ -12,13 +12,7 @@
  * 8. Complete Serialized JSON Export (`response.toJSON()`)
  */
 
-import {
-  Agent,
-  tool,
-  getModelFromCatalog,
-  getModelThinkingInfo,
-  resolveModel,
-} from "agent-accelerator";
+import { Agent, tool, getModelFromCatalog, getModelThinkingInfo, resolveModel } from "agent-accelerator";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -57,7 +51,8 @@ let agent: Agent;
 try {
   agent = new Agent({
     name: "Telemetry Analyst",
-    instructions: "You are a systems infrastructure analyst. Always use get_system_metrics to inspect clusters and give concise, technical summaries.",
+    instructions:
+      "You are a systems infrastructure analyst. Always use get_system_metrics to inspect clusters and give concise, technical summaries.",
     model: modelToUse,
     dynamicSubagents: {
       enabled: true,
@@ -98,7 +93,9 @@ console.log(`Supported Input Modalities: [${catalogSpec?.modalities?.input?.join
 console.log(`Supported Output Modalities:[${catalogSpec?.modalities?.output?.join(", ") ?? "text"}]`);
 console.log(`Pricing (Per 1M tokens):`);
 console.log(`  • Uncached Input:        $${catalogSpec?.pricing?.inputPerMillion ?? catalogSpec?.cost?.input ?? 0}`);
-console.log(`  • Cached Input Read:     $${catalogSpec?.pricing?.cacheReadPerMillion ?? catalogSpec?.cost?.cache_read ?? 0}`);
+console.log(
+  `  • Cached Input Read:     $${catalogSpec?.pricing?.cacheReadPerMillion ?? catalogSpec?.cost?.cache_read ?? 0}`
+);
 console.log(`  • Output Tokens:         $${catalogSpec?.pricing?.outputPerMillion ?? catalogSpec?.cost?.output ?? 0}`);
 console.log(`Thinking Capabilities:`);
 console.log(`  • Supports Thinking:     ${thinkingInfo.supportsThinking}`);
@@ -127,9 +124,13 @@ try {
     onEvent: (event) => {
       streamEventsLog.push(event.type);
       if (event.type === "tool_call_complete") {
-        console.log(`\n\x1b[34m↳ Stream Event [tool_call_complete]:\x1b[0m ${event.toolCall?.name}(${JSON.stringify(event.toolCall?.arguments)})`);
+        console.log(
+          `\n\x1b[34m↳ Stream Event [tool_call_complete]:\x1b[0m ${event.toolCall?.name}(${JSON.stringify(event.toolCall?.arguments)})`
+        );
       } else if (event.type === "tool_result") {
-        console.log(`\x1b[34m↳ Stream Event [tool_result]:\x1b[0m ${event.toolResult?.name} completed in ${event.toolResult?.durationMs ?? 0}ms`);
+        console.log(
+          `\x1b[34m↳ Stream Event [tool_result]:\x1b[0m ${event.toolResult?.name} completed in ${event.toolResult?.durationMs ?? 0}ms`
+        );
       } else if (event.type === "subagent_complete") {
         console.log(`\x1b[35m↳ Stream Event [subagent_complete]:\x1b[0m Subagent "${event.subagent?.name}" finished`);
       }
@@ -154,7 +155,9 @@ console.log(`res.responseId:            "${response.responseId ?? "N/A"}"`);
 console.log(`res.finishReason:          "${response.finishReason ?? "N/A"}"`);
 console.log(`res.durationMs:            ${response.durationMs}ms`);
 console.log(`res.turns:                 ${response.turns} turns`);
-console.log(`res.thoughtSignature:      ${response.thoughtSignature ? `"${response.thoughtSignature.slice(0, 32)}..."` : "None"}`);
+console.log(
+  `res.thoughtSignature:      ${response.thoughtSignature ? `"${response.thoughtSignature.slice(0, 32)}..."` : "None"}`
+);
 console.log(`res.thinking (length):     ${response.thinking ? `${response.thinking.length} chars` : "None"}\n`);
 
 // ---------------------------------------------------------------------------
@@ -170,9 +173,10 @@ console.log(`res.usage.cacheReadTokens:  ${response.usage.cacheReadTokens?.toLoc
 console.log(`res.usage.cacheWriteTokens: ${response.usage.cacheWriteTokens?.toLocaleString() ?? 0}`);
 console.log(`res.usage.thinkingTokens:   ${response.usage.thinkingTokens?.toLocaleString() ?? 0}`);
 
-const cacheHitRate = response.usage.inputTokens > 0
-  ? (((response.usage.cachedTokens ?? 0) / response.usage.inputTokens) * 100).toFixed(1)
-  : "0.0";
+const cacheHitRate =
+  response.usage.inputTokens > 0
+    ? (((response.usage.cachedTokens ?? 0) / response.usage.inputTokens) * 100).toFixed(1)
+    : "0.0";
 console.log(`Cache Efficiency Ratio:     ${cacheHitRate}%\n`);
 
 // ---------------------------------------------------------------------------
@@ -180,9 +184,11 @@ console.log(`Cache Efficiency Ratio:     ${cacheHitRate}%\n`);
 // ---------------------------------------------------------------------------
 console.log("\x1b[1;33m[5] REAL-TIME DOLLAR COST BREAKDOWN (res.usage.cost)\x1b[0m");
 console.log("─".repeat(70));
-const formatDollar = (val?: number) => val !== undefined ? `$${val.toFixed(6)}` : "$0.000000";
+const formatDollar = (val?: number) => (val !== undefined ? `$${val.toFixed(6)}` : "$0.000000");
 console.log(`res.usage.cost.inputCost:      ${formatDollar(response.usage.cost?.inputCost)}`);
-console.log(`res.usage.cost.cacheReadCost:  ${formatDollar(response.usage.cost?.cacheReadCost)} (Prompt Cache Savings)`);
+console.log(
+  `res.usage.cost.cacheReadCost:  ${formatDollar(response.usage.cost?.cacheReadCost)} (Prompt Cache Savings)`
+);
 console.log(`res.usage.cost.cacheWriteCost: ${formatDollar(response.usage.cost?.cacheWriteCost)}`);
 console.log(`res.usage.cost.outputCost:     ${formatDollar(response.usage.cost?.outputCost)}`);
 console.log(`res.usage.cost.totalCost:      ${formatDollar(response.usage.cost?.totalCost)} (Grand Total)\n`);
@@ -223,7 +229,9 @@ if (response.subagents && response.subagents.length > 0) {
     console.log(`    • Model / Provider:  ${sub.provider}/${sub.model}`);
     console.log(`    • Task Given:        "${sub.task}"`);
     console.log(`    • Execution Time:    ${sub.durationMs}ms (${sub.turns} turns)`);
-    console.log(`    • Tokens Consumed:   ↑${sub.usage.inputTokens} ↓${sub.usage.outputTokens} (Total: ${sub.usage.totalTokens})`);
+    console.log(
+      `    • Tokens Consumed:   ↑${sub.usage.inputTokens} ↓${sub.usage.outputTokens} (Total: ${sub.usage.totalTokens})`
+    );
     console.log(`    • Subagent Cost:     ${formatDollar(sub.usage.cost?.totalCost)}`);
     console.log(`    • Is Error:          ${sub.isError ?? false}`);
   });
@@ -246,7 +254,11 @@ console.log(`  • Raw Payload Keys:    ${Object.keys(response.raw.request.body 
 
 console.log("\nIncoming HTTP Response:");
 console.log(`  • Status Code:         ${response.raw.response?.status} (${response.raw.response?.statusText})`);
-console.log(`  • Headers Received:    ${Object.keys(response.raw.response?.headers ?? {}).slice(0, 8).join(", ")}...`);
+console.log(
+  `  • Headers Received:    ${Object.keys(response.raw.response?.headers ?? {})
+    .slice(0, 8)
+    .join(", ")}...`
+);
 console.log(`  • Raw Response Keys:   ${Object.keys((response.raw.response?.body as object) ?? {}).join(", ")}`);
 console.log("");
 
@@ -256,19 +268,25 @@ console.log("");
 console.log("\x1b[1;33m[9] COMPLETE SERIALIZED JSON (res.toJSON() Schema)\x1b[0m");
 console.log("─".repeat(70));
 const jsonTree = response.toJSON();
-console.log(JSON.stringify({
-  text: jsonTree.text.slice(0, 60) + "...",
-  thinking: jsonTree.thinking ? jsonTree.thinking.slice(0, 40) + "..." : undefined,
-  model: jsonTree.model,
-  provider: jsonTree.provider,
-  durationMs: jsonTree.durationMs,
-  turns: jsonTree.turns,
-  usage: jsonTree.usage,
-  toolCallsCount: jsonTree.toolCalls?.length ?? 0,
-  toolResultsCount: jsonTree.toolResults?.length ?? 0,
-  subagentsCount: jsonTree.subagents?.length ?? 0,
-  rawRequestUrl: jsonTree.raw.request.url,
-  rawResponseStatus: jsonTree.raw.response?.status,
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      text: jsonTree.text.slice(0, 60) + "...",
+      thinking: jsonTree.thinking ? jsonTree.thinking.slice(0, 40) + "..." : undefined,
+      model: jsonTree.model,
+      provider: jsonTree.provider,
+      durationMs: jsonTree.durationMs,
+      turns: jsonTree.turns,
+      usage: jsonTree.usage,
+      toolCallsCount: jsonTree.toolCalls?.length ?? 0,
+      toolResultsCount: jsonTree.toolResults?.length ?? 0,
+      subagentsCount: jsonTree.subagents?.length ?? 0,
+      rawRequestUrl: jsonTree.raw.request.url,
+      rawResponseStatus: jsonTree.raw.response?.status,
+    },
+    null,
+    2
+  )
+);
 
 console.log("\n\x1b[1;32m✔ Complete metadata inspection finished successfully.\x1b[0m\n");

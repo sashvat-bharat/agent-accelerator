@@ -12,7 +12,7 @@
  * effort, service_tier flex/priority, prompt_cache_key affinity, usage,
  * finish reasons, switching, abort, errors.
  *
- * Also implemented: `text.format` structured output, `max_output_tokens` (stop + seed have no Responses equivalent: warn+drop).
+ * Also implemented: `text.format` structured output, `max_output_tokens`.
  *
  * Out of scope (never sent): background, conversation, previous_response_id
  * chaining, include, metadata, truncation, safety_identifier,
@@ -59,7 +59,6 @@ import {
   newToolCallId,
   redactedHeaders,
   readErrorPayload,
-  incompleteStreamError,
   hasUnfinishedToolCall,
   linkStreamAbort,
   withAbortTimer,
@@ -71,7 +70,6 @@ import {
   combinedSignal,
   timeoutFor,
   hasAuthHeader,
-  clampToolCallId,
   openStreamResponse,
   retryOptionsFrom,
   headersToRecord,
@@ -124,7 +122,15 @@ interface ResponsesRequestBody {
   prompt_cache_key?: string;
   store?: boolean;
   stream?: boolean;
-  text?: { format: { type: "json_schema"; name: string; schema: Record<string, unknown>; strict: boolean; description?: string } };
+  text?: {
+    format: {
+      type: "json_schema";
+      name: string;
+      schema: Record<string, unknown>;
+      strict: boolean;
+      description?: string;
+    };
+  };
   [k: string]: unknown;
 }
 
@@ -212,13 +218,9 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
   for (const part of parts) {
     if (part.type === "text" && part.text) {
       blocks.push({ type: "input_text", text: part.text });
-    } else if (
-      part.type === "image" ||
-      part.type === "audio" ||
-      part.type === "video" ||
-      part.type === "file"
-    ) {
-      const raw = (part as { image?: unknown; audio?: unknown; video?: unknown; file?: unknown }).image ??
+    } else if (part.type === "image" || part.type === "audio" || part.type === "video" || part.type === "file") {
+      const raw =
+        (part as { image?: unknown; audio?: unknown; video?: unknown; file?: unknown }).image ??
         (part as { audio?: unknown }).audio ??
         (part as { video?: unknown }).video ??
         (part as { file?: unknown }).file;
@@ -319,7 +321,8 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
     if (m.role === "system") continue;
     if (m.role === "user") {
       if (typeof m.content === "string") {
-        if (m.content) items.push({ type: "message", role: "user", content: [{ type: "input_text", text: m.content }] });
+        if (m.content)
+          items.push({ type: "message", role: "user", content: [{ type: "input_text", text: m.content }] });
       } else {
         const blocks = await contentPartsToBlocks(m.content);
         if (blocks.length > 0) items.push({ type: "message", role: "user", content: blocks });
@@ -363,7 +366,11 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
         // provider-minted ids that canonical history does not retain.
       }
       if (texts.length > 0) {
-        items.push({ type: "message", role: "assistant", content: texts.map((t) => ({ type: "output_text", text: t })) });
+        items.push({
+          type: "message",
+          role: "assistant",
+          content: texts.map((t) => ({ type: "output_text", text: t })),
+        });
       }
     } else if (m.role === "tool") {
       if (typeof m.content === "string") {
@@ -585,8 +592,8 @@ export class OpenAIResponsesProvider implements Provider {
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;
-    // max_output_tokens (stop + seed warn+drop: not on this wire).
-    Object.assign(body, mapGenerationParamsToOpenAI(options, `openai/${modelId}`));
+    // max_output_tokens.
+    Object.assign(body, mapGenerationParamsToOpenAI(options));
     // Structured outputs: Responses `text.format{type:json_schema,name,schema,strict}`.
     // Skipped when emulated (instruction already in `instructions`).
     if (outputSpec && !outputEmulated) {
@@ -640,11 +647,7 @@ export class OpenAIResponsesProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): RequestInit {
-    const headers: Record<string, string> = buildSessionHeaders(
-      "openai",
-      options?.headers,
-      sessionId
-    );
+    const headers: Record<string, string> = buildSessionHeaders("openai", options?.headers, sessionId);
     // Case-insensitive merge so a lowercase `authorization` custom header
     // never coexists with the canonical bearer. Proxy flows
     // (`apiKey === "unused"`) preserve custom auth instead of overwriting.
@@ -662,7 +665,10 @@ export class OpenAIResponsesProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options as { timeoutMs?: number } | undefined));
+    const { signal: effective, cleanup } = combinedSignal(
+      signal,
+      timeoutFor(options as { timeoutMs?: number } | undefined)
+    );
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
       const text = await res.text();
@@ -769,12 +775,10 @@ export class OpenAIResponsesProvider implements Provider {
       // Stateless turns never establish chains, but the session store still
       // records the turn so other providers' switch detection keeps working.
       noteProviderTurn(sessionId, "openai");
-      return parseResponse(
-        response,
-        clean,
-        Date.now() - startTime,
-        { request: rawRequest, response: { status: res.status, statusText: res.statusText, headers: res.headers, body: response } }
-      );
+      return parseResponse(response, clean, Date.now() - startTime, {
+        request: rawRequest,
+        response: { status: res.status, statusText: res.statusText, headers: res.headers, body: response },
+      });
     };
 
     try {
@@ -834,9 +838,13 @@ export class OpenAIResponsesProvider implements Provider {
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({
-          fetchOnce: () => withAbortTimer(linked, streamTimeoutMs, () => (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))),
+          fetchOnce: () =>
+            withAbortTimer(linked, streamTimeoutMs, () =>
+              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))
+            ),
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
-          noBodyError: () => toConciseProviderError(new Error("OpenAI streaming response had no body"), "openai", clean),
+          noBodyError: () =>
+            toConciseProviderError(new Error("OpenAI streaming response had no body"), "openai", clean),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
           label: { providerId: "openai", modelId: clean },
@@ -845,13 +853,20 @@ export class OpenAIResponsesProvider implements Provider {
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
         });
-        const responseMeta: Record<string, unknown> & { status: number; statusText: string; headers: Record<string, string> } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
+        const responseMeta: Record<string, unknown> & {
+          status: number;
+          statusText: string;
+          headers: Record<string, string>;
+        } = { status: res.status, statusText: res.statusText, headers: responseHeaders };
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
         let text = "";
         let thinking = "";
         // Tool calls keyed by output_index: { itemId, callId, name, startArgs, deltaArgs }.
-        const calls = new Map<number, { itemId: string; callId: string; name: string; startArgs: string; deltaArgs: string }>();
+        const calls = new Map<
+          number,
+          { itemId: string; callId: string; name: string; startArgs: string; deltaArgs: string }
+        >();
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
         let sawFinishReason = false;
@@ -892,10 +907,7 @@ export class OpenAIResponsesProvider implements Provider {
           } else if (type === "response.output_text.delta" && typeof msg["delta"] === "string") {
             text += msg["delta"] as string;
             eventStream.push({ type: "text_delta", delta: msg["delta"] as string, partialText: text });
-          } else if (
-            type === "response.refusal.delta" ||
-            type === "response.output_refusal.delta"
-          ) {
+          } else if (type === "response.refusal.delta" || type === "response.output_refusal.delta") {
             // Refusal deltas carry the filter text; surface as text and
             // remember for a `refusal` finish reason.
             if (typeof msg["delta"] === "string" && msg["delta"]) {
@@ -908,7 +920,11 @@ export class OpenAIResponsesProvider implements Provider {
             typeof msg["delta"] === "string"
           ) {
             thinking += msg["delta"] as string;
-            eventStream.push({ type: "thinking_delta", thinkingDelta: msg["delta"] as string, partialThinking: thinking });
+            eventStream.push({
+              type: "thinking_delta",
+              thinkingDelta: msg["delta"] as string,
+              partialThinking: thinking,
+            });
           } else if (type === "response.output_item.added") {
             const index = (msg["output_index"] as number) ?? 0;
             const item = (msg["item"] as Record<string, unknown>) ?? {};
@@ -957,7 +973,8 @@ export class OpenAIResponsesProvider implements Provider {
             // Non-streaming maps `incomplete` → `length` (max tokens). Streaming
             // must do the same — otherwise truncated turns misreport `stop`.
             // Content-filter incompletes surface as `refusal`.
-            const incompleteReason = (response as { incomplete_details?: { reason?: string } }).incomplete_details?.reason;
+            const incompleteReason = (response as { incomplete_details?: { reason?: string } }).incomplete_details
+              ?.reason;
             if (response.status === "incomplete") {
               finishReason = incompleteReason === "content_filter" ? "refusal" : "length";
               sawFinishReason = true;

@@ -72,8 +72,17 @@ export function addTurn(totals: UsageTotals, usage: TokenUsage, priced: PricedCo
 
 /** Adds `other` into `into` (workers into a total). */
 export function mergeUsage(into: UsageTotals, other: UsageTotals): void {
-  for (const k of ["turns", "inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "thinkingTokens"] as const) into[k] += other[k];
-  for (const k of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) into.costMicroUSD[k] += other.costMicroUSD[k];
+  for (const k of [
+    "turns",
+    "inputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "outputTokens",
+    "thinkingTokens",
+  ] as const)
+    into[k] += other[k];
+  for (const k of ["input", "output", "cacheRead", "cacheWrite", "total"] as const)
+    into.costMicroUSD[k] += other.costMicroUSD[k];
   for (const k of ["provider", "catalog", "unpriced"] as const) into.turnsBy[k] += other.turnsBy[k];
 }
 
@@ -82,8 +91,17 @@ export function readUsage(saved: unknown): UsageTotals {
   const out = emptyUsage();
   const s = saved as Partial<UsageTotals> | null | undefined;
   if (!s || typeof s !== "object") return out;
-  for (const k of ["turns", "inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "thinkingTokens"] as const) out[k] = count(s[k]);
-  for (const k of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) out.costMicroUSD[k] = count(s.costMicroUSD?.[k]);
+  for (const k of [
+    "turns",
+    "inputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "outputTokens",
+    "thinkingTokens",
+  ] as const)
+    out[k] = count(s[k]);
+  for (const k of ["input", "output", "cacheRead", "cacheWrite", "total"] as const)
+    out.costMicroUSD[k] = count(s.costMicroUSD?.[k]);
   for (const k of ["provider", "catalog", "unpriced"] as const) out.turnsBy[k] = count(s.turnsBy?.[k]);
   return out;
 }
@@ -124,7 +142,14 @@ export interface UsageLine {
 /** Turns raw totals into a readable {@link UsageLine}. */
 export function usageLine(t: UsageTotals): UsageLine {
   const priced = t.turnsBy.provider + t.turnsBy.catalog;
-  const source: CostSource = priced === 0 ? "unknown" : t.turnsBy.provider > 0 && t.turnsBy.catalog > 0 ? "mixed" : t.turnsBy.provider > 0 ? "provider" : "catalog";
+  const source: CostSource =
+    priced === 0
+      ? "unknown"
+      : t.turnsBy.provider > 0 && t.turnsBy.catalog > 0
+        ? "mixed"
+        : t.turnsBy.provider > 0
+          ? "provider"
+          : "catalog";
   const usd = (micro: number): number => micro / 1_000_000;
   const c = t.costMicroUSD;
   return {
@@ -143,7 +168,16 @@ export function usageLine(t: UsageTotals): UsageLine {
       source,
       unpricedTurns: t.turnsBy.unpriced,
       totalUsd: priced === 0 ? null : usd(c.total),
-      ...(priced === 0 ? {} : { parts: { inputUsd: usd(c.input), outputUsd: usd(c.output), cacheReadUsd: usd(c.cacheRead), cacheWriteUsd: usd(c.cacheWrite) } }),
+      ...(priced === 0
+        ? {}
+        : {
+            parts: {
+              inputUsd: usd(c.input),
+              outputUsd: usd(c.output),
+              cacheReadUsd: usd(c.cacheRead),
+              cacheWriteUsd: usd(c.cacheWrite),
+            },
+          }),
     },
   };
 }
@@ -190,13 +224,28 @@ function sumTree(into: UsageTotals, nodes: UsageNode[]): void {
 
 // One node as a report line, children included; in: a usage node, out: UsageReport.workers.
 function nodeLine(n: UsageNode): WorkerUsage {
-  return { id: n.id, name: n.name, ...(n.role ? { role: n.role } : {}), model: n.model, status: n.status, ...usageLine(n.totals), workers: n.workers.map(nodeLine) };
+  return {
+    id: n.id,
+    name: n.name,
+    ...(n.role ? { role: n.role } : {}),
+    model: n.model,
+    status: n.status,
+    ...usageLine(n.totals),
+    workers: n.workers.map(nodeLine),
+  };
 }
 
 /** Builds the report from the agent's own totals and its worker tree. */
-export function buildUsageReport(own: { id: string; name: string; model: string; totals: UsageTotals }, workers: UsageNode[]): UsageReport {
+export function buildUsageReport(
+  own: { id: string; name: string; model: string; totals: UsageTotals },
+  workers: UsageNode[]
+): UsageReport {
   const total = emptyUsage();
   mergeUsage(total, own.totals);
   sumTree(total, workers);
-  return { agent: { id: own.id, name: own.name, model: own.model, ...usageLine(own.totals) }, workers: workers.map(nodeLine), total: usageLine(total) };
+  return {
+    agent: { id: own.id, name: own.name, model: own.model, ...usageLine(own.totals) },
+    workers: workers.map(nodeLine),
+    total: usageLine(total),
+  };
 }

@@ -25,13 +25,13 @@ import {
 import { z } from "zod";
 import { getScheduler, resetSchedulers, type Scheduler } from "../src/scheduler/scheduler.ts";
 import { createScheduledActionsTool } from "../src/scheduler/tool.ts";
+import { resolveHome } from "../src/utils/home.ts";
 import { scheduledRunTimeoutMs } from "../src/agent/worker.ts";
 import {
   readDeliveries,
   readRun,
   readTasks,
   removeTaskFolder,
-  resolveHome,
   updateDeliveries,
   updateTask,
   validateDelivery,

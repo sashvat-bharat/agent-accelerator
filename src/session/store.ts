@@ -30,7 +30,7 @@ import type { AgentResponse } from "../types/response.ts";
 import { base64ToBytes, bytesToBase64 } from "../utils/base64.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
 import type { SubAgentStep } from "../types/response.ts";
-import { SessionLoadError } from "../types/errors.ts";
+import { SecurityPolicyError, SessionLoadError, ValidationError } from "../types/errors.ts";
 import { createSessionId } from "../utils/session.ts";
 import { writeFileDurable, readWithBackup } from "../utils/durable.ts";
 import type { UsageTotals } from "./usage.ts";
@@ -106,7 +106,7 @@ export interface PersistedAgentSession {
   thinkingLevel?: string;
   cache?: CacheOption;
   /** Legacy read-only: pre-compact files duplicated base instructions here;
-  * no longer written (`systemPrompt` already embeds them). */
+   * no longer written (`systemPrompt` already embeds them). */
   instructions?: string;
   systemPrompt?: string;
   messages: Message[];
@@ -230,7 +230,9 @@ export class SessionTelemetry {
   }
 
   /** Restores totals from a loaded session (tolerates legacy `metrics` shape). */
-  static fromSaved(saved?: PersistedAgentSession | { totals?: SessionTotals; metrics?: Record<string, number> } | null): SessionTelemetry {
+  static fromSaved(
+    saved?: PersistedAgentSession | { totals?: SessionTotals; metrics?: Record<string, number> } | null
+  ): SessionTelemetry {
     const raw: any = (saved as any)?.totals ?? (saved as any)?.metrics ?? null;
     if (!raw) return new SessionTelemetry();
     // Legacy metrics files used {input,output,cacheRead,cacheWrite,reasoning,cost}
@@ -279,15 +281,12 @@ export class SessionTelemetry {
    * Shows per-turn tokens + `turn-CH%`, session totals + `total-CH%`, cost, context %.
    * `thinkingLevel` defaults to the agent's level when omitted.
    */
-  formatBar(
-    res: AgentResponse,
-    opts?: { model?: string; thinkingLevel?: string }
-  ): string {
+  formatBar(res: AgentResponse, opts?: { model?: string; thinkingLevel?: string }): string {
     const inTok = res.usage.inputTokens ?? 0;
     const outTok = res.usage.outputTokens ?? 0;
     const crTok = res.usage.cachedTokens ?? res.usage.cacheReadTokens ?? 0;
     const cwTurnTok = res.usage.cacheWriteTokens ?? 0;
-    const turnRate = (this.turnHitRate(res.usage)).toFixed(1);
+    const turnRate = this.turnHitRate(res.usage).toFixed(1);
     const totalRate = this.totalHitRate().toFixed(1);
     const cwTurnLabel = cwTurnTok > 0 ? ` CW${formatSessionTokens(cwTurnTok)}` : "";
     const totCW = this.totals.cacheWrite;
@@ -350,7 +349,9 @@ export interface SessionAgentLike {
 }
 
 // Slims worker traces for the snapshot (one key per tracking id, repeated final text dropped, reasoning kept); in: buildSessionData, out: the `subagents` field.
-function snapshotSubagents(traces: Record<string, PersistedSubAgentTrace> | undefined): Record<string, PersistedSubAgentTrace> | undefined {
+function snapshotSubagents(
+  traces: Record<string, PersistedSubAgentTrace> | undefined
+): Record<string, PersistedSubAgentTrace> | undefined {
   if (!traces) return undefined;
   const keys = Object.keys(traces);
   if (keys.length === 0) return undefined;
@@ -376,12 +377,7 @@ function snapshotSubagents(traces: Record<string, PersistedSubAgentTrace> | unde
     // Reasoning is never dropped: `thinking`/`thoughtSignature` survive the
     // dedup so persisted worker steps keep their reasoning traces.
     const steps = (t.steps ?? []).map((s) => {
-      if (
-        s.type === "assistant" &&
-        typeof s.text === "string" &&
-        typeof t.text === "string" &&
-        s.text === t.text
-      ) {
+      if (s.type === "assistant" && typeof s.text === "string" && typeof t.text === "string" && s.text === t.text) {
         const marker: SubAgentStep = { turn: s.turn, type: s.type, timestamp: s.timestamp };
         if (typeof s.thinking === "string" && s.thinking) marker.thinking = s.thinking;
         const sig = (s as { thoughtSignature?: unknown }).thoughtSignature;
@@ -463,18 +459,20 @@ function inlineBinaryMedia(messages: Message[]): Message[] {
 }
 
 /** Builds a storable snapshot from a live agent + optional telemetry. */
-export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTelemetry | SessionTotals | null): PersistedAgentSession {
+export function buildSessionData(
+  agent: SessionAgentLike,
+  telemetry?: SessionTelemetry | SessionTotals | null
+): PersistedAgentSession {
   const rawModel = agent.modelStringOrSpec as any;
   const model = typeof rawModel === "string" ? rawModel : (rawModel?.id ?? String(rawModel ?? ""));
   const rawSub = agent.subagentModel as any;
-  const subagentModel =
-    typeof rawSub === "string" ? rawSub : rawSub?.model ?? rawSub?.id ?? undefined;
-  const totals = telemetry instanceof SessionTelemetry
-    ? telemetry.toJSON()
-    : telemetry ?? undefined;
+  const subagentModel = typeof rawSub === "string" ? rawSub : (rawSub?.model ?? rawSub?.id ?? undefined);
+  const totals = telemetry instanceof SessionTelemetry ? telemetry.toJSON() : (telemetry ?? undefined);
   const parentSessionId =
-    typeof (agent as any)?.parentSessionId === "string" ? (agent as any).parentSessionId as string : undefined;
-  const subagents = snapshotSubagents((agent as any)?.subagentTraces as Record<string, PersistedSubAgentTrace> | undefined);
+    typeof (agent as any)?.parentSessionId === "string" ? ((agent as any).parentSessionId as string) : undefined;
+  const subagents = snapshotSubagents(
+    (agent as any)?.subagentTraces as Record<string, PersistedSubAgentTrace> | undefined
+  );
   const messages = inlineBinaryMedia(stripRedundantRawArguments(agent.context.messages));
   // Field order is the on-disk layout contract: identity → config →
   // systemPrompt → totals → messages → lineage/traces. `instructions` is
@@ -494,7 +492,9 @@ export function buildSessionData(agent: SessionAgentLike, telemetry?: SessionTel
     ...(parentSessionId ? { parentSessionId } : {}),
     ...(subagents ? { subagents } : {}),
     ...(agent.runMarks && agent.runMarks.length > 0 ? { runs: agent.runMarks.map((r) => ({ ...r })) } : {}),
-    ...(agent.usageTotals && agent.usageTotals.turns > 0 ? { usage: JSON.parse(JSON.stringify(agent.usageTotals)) as UsageTotals } : {}),
+    ...(agent.usageTotals && agent.usageTotals.turns > 0
+      ? { usage: JSON.parse(JSON.stringify(agent.usageTotals)) as UsageTotals }
+      : {}),
   };
 }
 
@@ -563,7 +563,8 @@ const OVER_LIMIT = Symbol("session-over-limit");
 
 // Reads a stored `cache` field: a current string value, or a pre-0.5.1 `{ retention }` object (short=5m, medium=1h, long=12h); in: a parsed session file, out: `PersistedAgentSession.cache`.
 function toCacheOption(raw: unknown): CacheOption | undefined {
-  if (typeof raw === "string") return (CACHE_OPTIONS as readonly string[]).includes(raw) ? (raw as CacheOption) : undefined;
+  if (typeof raw === "string")
+    return (CACHE_OPTIONS as readonly string[]).includes(raw) ? (raw as CacheOption) : undefined;
   const legacy: Record<string, CacheOption> = { implicit: "implicit", short: "5m", medium: "1h", long: "12h" };
   const retention = (raw as { retention?: unknown } | null)?.retention;
   return typeof retention === "string" ? legacy[retention] : undefined;
@@ -753,14 +754,17 @@ export const writeFileAtomic = writeFileDurable;
 /** Session id grammar: no traversal, no slashes, no hidden files. */
 export function assertValidSessionId(sessionId: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sessionId)) {
-    throw new Error(`[Agent Accelerator] Invalid sessionId "${sessionId}": must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`);
+    throw new ValidationError(
+      `[Agent Accelerator] Invalid sessionId "${sessionId}": must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`
+    );
   }
 }
 
 /** Renames a genuinely corrupt snapshot to `*.corrupt-<ts>` before it is overwritten (a healthy one over the load limits is our own prior save and is just rewritten). */
 export function quarantineIfCorrupt(file: string): void {
   try {
-    if (inspectSessionPayload(fs.readFileSync(file, "utf8")).status === "corrupt") fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+    if (inspectSessionPayload(fs.readFileSync(file, "utf8")).status === "corrupt")
+      fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
   } catch {
     // why: no file yet, or it cannot be read: nothing to quarantine.
   }
@@ -840,9 +844,12 @@ function extForMedia(mimeType?: string, filename?: string): string {
 }
 
 // Finds embedded media bytes in a part (binary, `data:` URL or raw base64); remote URLs and local paths are references and give undefined; in: any content part, out: extractMediaToDir and the session journal.
-export function embeddedMedia(part: ContentPart): { key: (typeof MEDIA_PART_KEYS)[number]; bytes: Uint8Array; mimeType?: string; ext: string } | undefined {
+export function embeddedMedia(
+  part: ContentPart
+): { key: (typeof MEDIA_PART_KEYS)[number]; bytes: Uint8Array; mimeType?: string; ext: string } | undefined {
   const p = part as unknown as Record<string, unknown> | null;
-  if (!p || typeof p["type"] !== "string" || !(MEDIA_PART_KEYS as readonly string[]).includes(p["type"])) return undefined;
+  if (!p || typeof p["type"] !== "string" || !(MEDIA_PART_KEYS as readonly string[]).includes(p["type"]))
+    return undefined;
   const key = p["type"] as (typeof MEDIA_PART_KEYS)[number];
   const raw = p[key];
   let bytes: Uint8Array;
@@ -858,7 +865,12 @@ export function embeddedMedia(part: ContentPart): { key: (typeof MEDIA_PART_KEYS
     } else if (looksLikeEmbeddedBase64(raw)) bytes = base64ToBytes(raw.replace(/\s/g, ""));
     else return undefined; // local path or short label: keep as reference
   } else return undefined;
-  return { key, bytes, ...(mimeType ? { mimeType } : {}), ext: extForMedia(mimeType, typeof p["filename"] === "string" ? (p["filename"] as string) : undefined) };
+  return {
+    key,
+    bytes,
+    ...(mimeType ? { mimeType } : {}),
+    ext: extForMedia(mimeType, typeof p["filename"] === "string" ? (p["filename"] as string) : undefined),
+  };
 }
 
 // Copy of the messages that keeps media bytes (structuredClone, else JSON); in: extractMediaToDir/resolveMediaPaths, out: a new array.
@@ -879,15 +891,12 @@ function cloneMessages(messages: Message[]): Message[] {
  * `<sessionDir>/media/` and rewrites those parts to relative `media/…`
  * paths. Remote URLs and filesystem paths are left as references.
  */
-export function extractMediaToDir(
-  messages: Message[],
-  sessionDir: string
-): { messages: Message[]; wrote: string[] } {
+export function extractMediaToDir(messages: Message[], sessionDir: string): { messages: Message[]; wrote: string[] } {
   const cloned = cloneMessages(messages);
   const root = path.resolve(sessionDir);
   const mediaDir = path.resolve(root, "media");
   if (!mediaDir.startsWith(root + path.sep) && mediaDir !== root) {
-    throw new Error("[Agent Accelerator] Media dir escapes session dir");
+    throw new SecurityPolicyError("[Agent Accelerator] Media dir escapes session dir");
   }
   try {
     fs.mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
@@ -896,7 +905,9 @@ export function extractMediaToDir(
   try {
     for (const f of fs.readdirSync(mediaDir)) {
       if (/^(image|audio|video|file)-\d+\.[a-z0-9]{1,5}$/.test(f)) {
-        try { fs.unlinkSync(path.join(mediaDir, f)); } catch {}
+        try {
+          fs.unlinkSync(path.join(mediaDir, f));
+        } catch {}
       }
     }
   } catch {}
@@ -916,7 +927,9 @@ export function extractMediaToDir(
         const dest = path.resolve(mediaDir, file);
         if (!dest.startsWith(mediaDir + path.sep)) continue;
         fs.writeFileSync(dest, bytes, { mode: 0o600 });
-        try { fs.chmodSync(dest, 0o600); } catch {}
+        try {
+          fs.chmodSync(dest, 0o600);
+        } catch {}
       } catch {
         continue;
       }
@@ -963,7 +976,7 @@ export function sessionDirFor(rootDir: string, sessionId: string): string {
   const dir = path.resolve(root, sessionId);
   const rel = path.relative(root, dir);
   if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new Error(`[Agent Accelerator] Session dir escapes root: ${sessionId}`);
+    throw new SecurityPolicyError(`[Agent Accelerator] Session dir escapes root: ${sessionId}`);
   }
   return dir;
 }
@@ -984,10 +997,7 @@ export function saveSessionDir(
     fs.mkdirSync(sessionDir, { recursive: true });
   } catch {}
   const { messages } = extractMediaToDir(agent.context.messages, sessionDir);
-  const data = buildSessionData(
-    { ...agent, context: { ...agent.context, messages } },
-    telemetry
-  );
+  const data = buildSessionData({ ...agent, context: { ...agent.context, messages } }, telemetry);
   try {
     const target = path.join(sessionDir, "session.json");
     quarantineIfCorrupt(target);
@@ -1002,7 +1012,15 @@ export function saveSessionDir(
 export const JOURNAL_FILE = "journal.ndjson";
 
 // Snapshot fields a `meta` journal record replaces (everything except messages, identity and totals).
-const JOURNAL_META_KEYS = ["model", "subagentModel", "thinkingLevel", "cache", "systemPrompt", "parentSessionId", "subagents"] as const;
+const JOURNAL_META_KEYS = [
+  "model",
+  "subagentModel",
+  "thinkingLevel",
+  "cache",
+  "systemPrompt",
+  "parentSessionId",
+  "subagents",
+] as const;
 
 // Applies a journal to its snapshot: records of the snapshot's own epoch only, `msg` by index (already-present ones skipped), `run` adds a run boundary, `end` closes one, `usage` replaces the agent's spending totals, `tool` keeps a finished tool result, `pending` replaces the waiting prompts, `meta` replaces config fields, unknown record types ignored; a torn last line is dropped, damage earlier stops the replay with a bus warning; in: the parsed snapshot + journal text, out: loadSessionDir.
 function replayJournal(snapshot: PersistedAgentSession, text: string, file: string): PersistedAgentSession {
@@ -1011,12 +1029,31 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
   const session: PersistedAgentSession = { ...snapshot, messages: [...snapshot.messages] };
   let sawHeader = false;
   const stop = (reason: string, line: number): void => {
-    telemetryBus.emitWarning("session.journal_corrupt", `[Agent Accelerator] ${path.basename(file)} line ${line + 1}: ${reason}; the rest of the journal is ignored.`, { file, line: line + 1 });
+    telemetryBus.emitWarning(
+      "session.journal_corrupt",
+      `[Agent Accelerator] ${path.basename(file)} line ${line + 1}: ${reason}; the rest of the journal is ignored.`,
+      { file, line: line + 1 }
+    );
   };
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k]!.trim();
     if (!line) continue;
-    let rec: { t?: unknown; e?: unknown; i?: unknown; m?: unknown; p?: unknown; id?: unknown; at?: unknown; u?: unknown; status?: unknown; call?: unknown; name?: unknown; result?: unknown; isError?: unknown; stopped?: unknown };
+    let rec: {
+      t?: unknown;
+      e?: unknown;
+      i?: unknown;
+      m?: unknown;
+      p?: unknown;
+      id?: unknown;
+      at?: unknown;
+      u?: unknown;
+      status?: unknown;
+      call?: unknown;
+      name?: unknown;
+      result?: unknown;
+      isError?: unknown;
+      stopped?: unknown;
+    };
     try {
       rec = JSON.parse(line);
     } catch {
@@ -1035,13 +1072,28 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
         break;
       }
       session.messages.push(rec.m as Message);
-    } else if (rec.t === "run" && typeof rec.id === "string" && typeof rec.i === "number" && typeof rec.at === "number") {
-      if (!session.runs?.some((r) => r.id === rec.id)) session.runs = [...(session.runs ?? []), { id: rec.id, i: rec.i, at: rec.at }];
+    } else if (
+      rec.t === "run" &&
+      typeof rec.id === "string" &&
+      typeof rec.i === "number" &&
+      typeof rec.at === "number"
+    ) {
+      if (!session.runs?.some((r) => r.id === rec.id))
+        session.runs = [...(session.runs ?? []), { id: rec.id, i: rec.i, at: rec.at }];
     } else if (rec.t === "end" && typeof rec.id === "string" && typeof rec.status === "string") {
       const mark = session.runs?.find((r) => r.id === rec.id);
       if (mark) session.runs = session.runs!.map((r) => (r === mark ? { ...r, end: rec.status as SessionRunEnd } : r));
     } else if (rec.t === "tool" && typeof rec.call === "string" && typeof rec.name === "string") {
-      session.tools = [...(session.tools ?? []).filter((x) => x.id !== rec.call), { id: rec.call, name: rec.name, result: rec.result, ...(rec.isError ? { isError: true } : {}), ...(rec.stopped ? { stopped: true } : {}) }];
+      session.tools = [
+        ...(session.tools ?? []).filter((x) => x.id !== rec.call),
+        {
+          id: rec.call,
+          name: rec.name,
+          result: rec.result,
+          ...(rec.isError ? { isError: true } : {}),
+          ...(rec.stopped ? { stopped: true } : {}),
+        },
+      ];
     } else if (rec.t === "usage" && rec.u && typeof rec.u === "object") {
       session.usage = rec.u as UsageTotals; // latest record wins
     } else if (rec.t === "pending" && rec.p && typeof rec.p === "object") {
@@ -1148,11 +1200,9 @@ export const MAX_SESSION_MESSAGES = 50_000;
 /** Default max raw JSON size accepted when loading a session snapshot (override via `SessionLimits`). */
 export const MAX_SESSION_JSON_BYTES = 100 * 1024 * 1024;
 
-// A SessionLoadError-named Error with the SDK prefix; in: validateSessionData, out: the error.
-function sessionLoadError(message: string): Error {
-  const e = new Error(`[Agent Accelerator] Invalid session: ${message}`);
-  e.name = "SessionLoadError";
-  return e;
+// A SessionLoadError with the SDK prefix; in: validateSessionData, out: the error.
+function sessionLoadError(message: string): SessionLoadError {
+  return new SessionLoadError(`[Agent Accelerator] Invalid session: ${message}`);
 }
 
 /**
@@ -1245,12 +1295,12 @@ export function reportUsageAnomaly(detail: { type: string; [k: string]: unknown 
  *   (reasoning is generated output); providers that omit one side are
  *   accepted, only impossible `thinking > output` with both present fails.
  *
- * Test helper: throws an Error describing the first violation, returns void
+ * Test helper: throws a ValidationError describing the first violation, returns void
  * when invariants hold. Not called in hot paths (validation only).
  */
 export function assertUsageInvariants(usage: TokenUsage): void {
   const fail = (msg: string): never => {
-    throw new Error(`[Agent Accelerator] Invalid usage: ${msg}`);
+    throw new ValidationError(`[Agent Accelerator] Invalid usage: ${msg}`);
   };
   const ints: Array<[string, unknown]> = [
     ["inputTokens", usage.inputTokens],
@@ -1356,7 +1406,14 @@ function toDollars(microUSD: number): number {
 function resolveEffectivePricing(
   spec: ModelSpec | undefined,
   inputTokens: number
-): { input: number; output: number; cacheRead: number | undefined; cacheWrite: number | undefined; audio: number; tier: string } {
+): {
+  input: number;
+  output: number;
+  cacheRead: number | undefined;
+  cacheWrite: number | undefined;
+  audio: number;
+  tier: string;
+} {
   const base = {
     input: spec?.pricing?.inputPerMillion ?? (spec?.cost?.input as number | undefined) ?? 0,
     output: spec?.pricing?.outputPerMillion ?? (spec?.cost?.output as number | undefined) ?? 0,
@@ -1380,7 +1437,12 @@ function resolveEffectivePricing(
   const tiers = spec.cost?.tiers;
   if (Array.isArray(tiers) && tiers.length > 0) {
     let best: { input: number; output: number; cache_read?: number; size: number } | undefined;
-    for (const t of tiers as Array<{ tier?: { type?: string; size?: number }; input?: number; output?: number; cache_read?: number }>) {
+    for (const t of tiers as Array<{
+      tier?: { type?: string; size?: number };
+      input?: number;
+      output?: number;
+      cache_read?: number;
+    }>) {
       const size = typeof t?.tier?.size === "number" ? t.tier.size : undefined;
       if (size === undefined || size > inputTokens) continue;
       const type = String(t?.tier?.type ?? "").toLowerCase();
@@ -1455,10 +1517,9 @@ export function priceUsage(
   const cachedTokens = usage.cachedTokens ?? usage.cacheReadTokens ?? 0;
   const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
   const audioTokens =
-    (usage as { audioTokens?: unknown }).audioTokens ??
-    (usage as { inputAudioTokens?: unknown }).inputAudioTokens ??
-    0;
-  const audioCount = typeof audioTokens === "number" && Number.isFinite(audioTokens) && audioTokens > 0 ? Math.round(audioTokens) : 0;
+    (usage as { audioTokens?: unknown }).audioTokens ?? (usage as { inputAudioTokens?: unknown }).inputAudioTokens ?? 0;
+  const audioCount =
+    typeof audioTokens === "number" && Number.isFinite(audioTokens) && audioTokens > 0 ? Math.round(audioTokens) : 0;
   const pricing = resolveEffectivePricing(spec, inputTokens);
   if (!pricing.input && !pricing.output && !pricing.cacheRead && !pricing.cacheWrite && !pricing.audio) {
     return undefined;

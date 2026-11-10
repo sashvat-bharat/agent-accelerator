@@ -5,21 +5,10 @@
  * rebuilt in place whenever it changes.
  */
 
-import {
-  getActiveCatalog,
-  registerCatalogUpdateListener,
-  refreshModelCatalog,
-  ensureModelCatalogFresh,
-  getCatalogStatus,
-  setCatalogTTL,
-  getCatalogTTL,
-  DEFAULT_CATALOG_TTL_MS,
-  type CatalogStatus,
-  type RefreshCatalogOptions,
-} from "./catalog-cache.ts";
+import { getActiveCatalog, registerCatalogUpdateListener } from "./catalog-cache.ts";
 import type { ModelSpec, ProviderId, ModelLimit, ModelCost, ModelModalities } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
-import { ConfigError } from "../types/errors.ts";
+import { ConfigError, ValidationError } from "../types/errors.ts";
 
 // ---------------------------------------------------------------------------
 // Provider aliases — maps our internal ids to models.dev keys
@@ -49,8 +38,8 @@ function applyModalityOverrides(provider: string, modelId: string, base: ModelMo
     MODALITY_OVERRIDES[`${provider}/${normalizeModelIdForLookup(modelId)}`];
   if (!hit) return base;
   return {
-    input: ((hit.input ?? base.input) as ModelModalities["input"]),
-    output: ((hit.output ?? base.output) as ModelModalities["output"]),
+    input: (hit.input ?? base.input) as ModelModalities["input"],
+    output: (hit.output ?? base.output) as ModelModalities["output"],
   };
 }
 
@@ -107,7 +96,7 @@ function customRegistryKey(provider: string, modelId: string): string {
  */
 export function registerModel(spec: ModelSpec): void {
   if (!spec || typeof spec.id !== "string" || typeof spec.provider !== "string") {
-    throw new Error("[Agent Accelerator] registerModel requires spec.id and spec.provider strings");
+    throw new ValidationError("[Agent Accelerator] registerModel requires spec.id and spec.provider strings");
   }
   customModelRegistry.set(customRegistryKey(String(spec.provider), String(spec.id)), { ...spec });
   // Invalidate derived caches so the custom model is visible immediately.
@@ -136,30 +125,38 @@ export function getModelSource(provider: string, modelId: string): "catalog" | "
   if (customModelRegistry.has(customRegistryKey(p, m)) || customModelRegistry.has(customRegistryKey(p, norm))) {
     return "override";
   }
-  if (
-    MODALITY_OVERRIDES[`${p}/${m}`] !== undefined ||
-    MODALITY_OVERRIDES[`${p}/${norm}`] !== undefined
-  ) {
+  if (MODALITY_OVERRIDES[`${p}/${m}`] !== undefined || MODALITY_OVERRIDES[`${p}/${norm}`] !== undefined) {
     return "override";
   }
   return getModelFromCatalog(provider, modelId) ? "catalog" : "unknown";
 }
 
 // Derives capability flags (thinking, caching, tools, structured output, modalities) from a raw catalog entry; in: mapModelSpec, out: ModelCapabilities.
-function mapCapabilities(raw: any, cost: ModelCost, reasoning: boolean, toolCall: boolean, modalities: ModelModalities) {
+function mapCapabilities(
+  raw: any,
+  cost: ModelCost,
+  reasoning: boolean,
+  toolCall: boolean,
+  modalities: ModelModalities
+) {
   return {
     supportsThinking: reasoning,
     supportsThinkingLevel: !!raw.reasoning_options,
-    supportsThinkingBudget: Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "budget_tokens"),
+    supportsThinkingBudget:
+      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "budget_tokens"),
     supportsImplicitCaching: cost.cache_read !== undefined || cost.cache_write !== undefined,
     supportsLongCacheRetention: cost.cache_read !== undefined,
     supportsExplicitCaching: cost.cache_read !== undefined,
     supportsParallelToolCalls: toolCall,
     supportsStreaming: true,
     supportsStructuredOutput: raw.structured_output === undefined ? true : !!raw.structured_output,
-    supportsReasoningToggle: Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "toggle"),
-    supportsReasoningEffort: Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "effort"),
-    modalities: [...(modalities.input || []), ...(modalities.output || [])].filter((v: any, i: any, a: any) => a.indexOf(v) === i),
+    supportsReasoningToggle:
+      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "toggle"),
+    supportsReasoningEffort:
+      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "effort"),
+    modalities: [...(modalities.input || []), ...(modalities.output || [])].filter(
+      (v: any, i: any, a: any) => a.indexOf(v) === i
+    ),
   };
 }
 
@@ -268,7 +265,9 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
   }
 
   const aliasProviders = PROVIDER_ALIASES[provider] || [provider];
-  const tryProviders = [...new Set([...aliasProviders, provider, provider.replace("-zen", ""), provider.replace("-go", "")])];
+  const tryProviders = [
+    ...new Set([...aliasProviders, provider, provider.replace("-zen", ""), provider.replace("-go", "")]),
+  ];
   const catalog = getActiveCatalog();
 
   for (const p of tryProviders) {
@@ -292,7 +291,11 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
     // or normalized equality. The old loose `modelId.endsWith(key)` is removed
     // (e.g. "gpt-4o-mini-extra" must not match "mini").
     for (const [key, raw] of Object.entries(providerData.models as Record<string, any>)) {
-      if (key === modelId || key.endsWith(`/${modelId}`) || normalizeModelIdForLookup(key) === normalizeModelIdForLookup(modelId)) {
+      if (
+        key === modelId ||
+        key.endsWith(`/${modelId}`) ||
+        normalizeModelIdForLookup(key) === normalizeModelIdForLookup(modelId)
+      ) {
         result = mapModelSpec(p as ProviderId, key, raw as any);
         setLookupCache(cacheKey, result);
         return result;
@@ -411,7 +414,8 @@ export function getModelThinkingInfo(provider: string, modelId: string): ModelTh
   allowed.add("dynamic");
 
   const allowedLevels = Array.from(allowed);
-  const supportsDisable = allowed.has("none") || !!toggleOpt || Boolean(budgetOpt && (budgetOpt.min === undefined || budgetOpt.min <= 0));
+  const supportsDisable =
+    allowed.has("none") || !!toggleOpt || Boolean(budgetOpt && (budgetOpt.min === undefined || budgetOpt.min <= 0));
 
   return {
     supportsThinking: true,
@@ -444,7 +448,8 @@ export class ThinkingLevelError extends ConfigError {
     reason: string;
     remedy?: string;
   }) {
-    const allowed = opts.allowedLevels.length > 0 ? ` Allowed levels: ${opts.allowedLevels.map((l) => `"${l}"`).join(", ")}.` : "";
+    const allowed =
+      opts.allowedLevels.length > 0 ? ` Allowed levels: ${opts.allowedLevels.map((l) => `"${l}"`).join(", ")}.` : "";
     const remedy = opts.remedy ? ` How to fix: ${opts.remedy}` : "";
     super(
       `[Agent Accelerator] Thinking level "${opts.requestedLevel}" does not fit "${opts.provider}/${opts.modelId}": ${opts.reason}${allowed}${remedy}`,
@@ -464,7 +469,11 @@ export class ThinkingLevelError extends ConfigError {
  *
  * @example `validateModelThinking("google", "gemini-3.5-flash-lite", "medium");`
  */
-export function validateModelThinking(provider: string, modelId: string, requestedLevel?: ThinkingLevel | string): void {
+export function validateModelThinking(
+  provider: string,
+  modelId: string,
+  requestedLevel?: ThinkingLevel | string
+): void {
   if (!requestedLevel) return;
   const level = String(requestedLevel).toLowerCase().trim();
   const info = getModelThinkingInfo(provider, modelId);

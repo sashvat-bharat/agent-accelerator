@@ -3,12 +3,13 @@ import type { ToolCallRecord, ToolResultRecord } from "../types/tool.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { clearSessionRouting } from "../providers.ts";
 import { clearInteractionChains } from "../providers/google.ts";
+import { ValidationError } from "../types/errors.ts";
 
 const USER_PART_TYPES = new Set(["text", "image", "audio", "video", "file"]);
 
 // Throws the AgentContext validation error with the SDK prefix; in: the add* validators, out: a thrown Error.
 function fail(message: string): never {
-  throw new Error(`[Agent Accelerator] AgentContext: ${message}`);
+  throw new ValidationError(`[Agent Accelerator] AgentContext: ${message}`);
 }
 
 /** Deep clone that preserves Uint8Array/ArrayBuffer media (structuredClone may be absent). */
@@ -192,8 +193,12 @@ export class AgentContext {
     if (Array.isArray(cp?.messages)) this.messages = deepCloneValue(cp.messages);
     if (Array.isArray(cp?.signatures)) this.thoughtSignatures = [...cp.signatures];
     if (sessionId) {
-      try { clearInteractionChains(sessionId); } catch {}
-      try { clearSessionRouting(sessionId); } catch {}
+      try {
+        clearInteractionChains(sessionId);
+      } catch {}
+      try {
+        clearSessionRouting(sessionId);
+      } catch {}
     }
   }
 }

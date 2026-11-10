@@ -40,7 +40,11 @@ export class AgentAccelError extends Error {
   readonly code: AgentAccelErrorCode;
   readonly retryable: boolean;
   readonly context: AgentAccelErrorContext;
-  constructor(code: AgentAccelErrorCode, message: string, opts?: { retryable?: boolean; context?: AgentAccelErrorContext; cause?: unknown }) {
+  constructor(
+    code: AgentAccelErrorCode,
+    message: string,
+    opts?: { retryable?: boolean; context?: AgentAccelErrorContext; cause?: unknown }
+  ) {
     super(message);
     this.name = "AgentAccelError";
     this.code = code;
@@ -59,10 +63,26 @@ export class ConfigError extends AgentAccelError {
 
 export class ProviderError extends AgentAccelError {
   readonly status?: number;
-  constructor(message: string, opts?: { status?: number; provider?: string; model?: string; requestId?: string; retryable?: boolean; context?: AgentAccelErrorContext }) {
+  constructor(
+    message: string,
+    opts?: {
+      status?: number;
+      provider?: string;
+      model?: string;
+      requestId?: string;
+      retryable?: boolean;
+      context?: AgentAccelErrorContext;
+    }
+  ) {
     super("provider", message, {
       retryable: opts?.retryable ?? false,
-      context: { ...opts?.context, provider: opts?.provider, model: opts?.model, status: opts?.status, requestId: opts?.requestId },
+      context: {
+        ...opts?.context,
+        provider: opts?.provider,
+        model: opts?.model,
+        status: opts?.status,
+        requestId: opts?.requestId,
+      },
     });
     this.name = "ProviderError";
     this.status = opts?.status;
@@ -124,7 +144,9 @@ export function isAbortError(error: unknown): boolean {
 /** Format without ANSI for CLI pretty-printing. */
 export function formatErrorPlain(err: unknown): string {
   if (err instanceof AgentAccelError) {
-    const ctx = err.context?.provider ? ` [${err.context.provider}${err.context.model ? `/${err.context.model}` : ""}]` : "";
+    const ctx = err.context?.provider
+      ? ` [${err.context.provider}${err.context.model ? `/${err.context.model}` : ""}]`
+      : "";
     const status = err.context?.status ? ` (${err.context.status})` : "";
     return `[${err.code}]${ctx}${status}: ${err.message}`;
   }

@@ -1,6 +1,6 @@
 {
   "name": "agent-accelerator",
-  "version": "0.5.9",
+  "version": "0.6.0",
   "description": "High-performance SDK for AI agents with a unified API across AI providers. Optimized for high cache hit rates, observability, and seamless agent orchestration. Built to power production-grade agentic systems and harnesses for teams at any scale.",
   "license": "MIT",
   "author": "Sashvat Bharat",
@@ -41,6 +41,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "biome lint src examples",
+    "format": "biome format --write src examples",
     "test": "bun test test/",
     "update-models": "bun src/update-models.ts",
     "fetch-latest-provider-docs": "bun references/documentations/fetch-latest.ts"
@@ -49,6 +51,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.6",
     "@types/bun": "latest",
     "typescript": "^7.0.0",
     "zod": "^4.4.3"

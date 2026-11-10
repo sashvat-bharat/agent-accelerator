@@ -31,12 +31,7 @@ providerRegistry.set("openai", openaiProvider);
 //   MODEL="cerebras/gpt-oss-120b"      + CEREBRAS_API_KEY + CEREBRAS_BASE_URL
 //   MODEL="ollama/qwen2.5-coder"        + OLLAMA_BASE_URL (key optional for local)
 // ---------------------------------------------------------------------------
-const FIRST_CLASS = new Set([
-  "google",
-  "gemini",
-  "openrouter",
-  "openai",
-]);
+const FIRST_CLASS = new Set(["google", "gemini", "openrouter", "openai"]);
 
 // Removed providers: fail loudly instead of misrouting. OpenCode free models
 // are harness-only since 2026, so the opencode/opencode-go prefixes no longer
@@ -168,9 +163,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
   // Try catalog first for any provider/model
   const tryCatalogLookup = (prov: string, mid: string): ModelSpec | undefined => {
     return (
-      getModelFromCatalog(prov, mid) ||
-      getModelFromCatalog(prov.toLowerCase(), mid) ||
-      getModelFromCatalog(mid, mid)
+      getModelFromCatalog(prov, mid) || getModelFromCatalog(prov.toLowerCase(), mid) || getModelFromCatalog(mid, mid)
     );
   };
 
@@ -194,11 +187,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
     }
 
     // 2. Unified layer: any non-first-class prefix routes to auto-created custom provider
-    const isExplicitOther = [
-      "google",
-      "gemini",
-      "openrouter",
-    ].includes(providerPrefix);
+    const isExplicitOther = ["google", "gemini", "openrouter"].includes(providerPrefix);
 
     if (!isExplicitOther && providerPrefix !== "openai") {
       const envName = providerPrefix.toUpperCase().replace(/[^A-Z0-9]/g, "_");
@@ -210,8 +199,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
         getEnv(`${envName}_BASE_API_KEY`)
       );
 
-      const looksLikeOpenRouterScope =
-        parts.length === 2 && modelStr.includes(":") && !hasDedicatedEnv;
+      const looksLikeOpenRouterScope = parts.length === 2 && modelStr.includes(":") && !hasDedicatedEnv;
 
       if (!looksLikeOpenRouterScope) {
         const custom = ensureCustomProvider(providerPrefix);
@@ -251,9 +239,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
     }
 
     // Check catalog for this exact provider/model
-    const catalogSpec =
-      tryCatalogLookup(providerPrefix, remainingModel) ||
-      tryCatalogLookup(providerPrefix, modelStr);
+    const catalogSpec = tryCatalogLookup(providerPrefix, remainingModel) || tryCatalogLookup(providerPrefix, modelStr);
     if (catalogSpec) {
       const internalProvider = getProvider(catalogSpec.provider);
       return { provider: internalProvider, modelId: catalogSpec.id, modelSpec: catalogSpec };
@@ -277,8 +263,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
 
     // Fallback custom provider
     const fallbackCustom = ensureCustomProvider(providerPrefix);
-    const fallbackSpec =
-      fallbackCustom.getModel(remainingModel) || fallbackCustom.getModel(modelStr);
+    const fallbackSpec = fallbackCustom.getModel(remainingModel) || fallbackCustom.getModel(modelStr);
     return {
       provider: fallbackCustom,
       modelId: remainingModel,

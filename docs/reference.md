@@ -26,7 +26,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `resume` | `"automatic"` (default) or `"explicit"`: whether a run a crash cut off continues when the Agent is constructed (needs `persist: { dir }` and the same `sessionId`). See `agent.resume()` / `agent.interrupted()` | [Data](guides/data-and-media.md) |
 | `persist`, `home` | Session saving; base folder (`setHome(dir)` / `AGENT_ACCEL_HOME` / `.agent-accel/`). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
 | `toolChoice` | `"auto"`, `"none"`, `"required"`, `{ tool }` | [Tools](guides/tools-and-streaming.md) |
-| `maxOutputTokens`, `stop`, `seed` | Generation controls (`stop`/`seed`: Chat Completions only) | [Agents](guides/agents-and-models.md) |
+| `maxOutputTokens` | Output-token cap for one model call | [Agents](guides/agents-and-models.md) |
 | `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
 | `retry`, `fetch`, `env` | Retry policy of one provider call, custom `fetch`, env-var overrides | [Safety](guides/safety-and-ops.md) |
 | `runRetries` | Times a whole run that failed for a transient reason is tried again from where it stopped (default 3, `0` = off) | [Safety](guides/safety-and-ops.md) |
@@ -58,7 +58,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `headers` | Extra request headers |
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
 | `wrapThinking` | Display reasoning inside `<think>…</think>` |
-| `toolChoice`, `maxOutputTokens`, `stop`, `seed` | Same as config |
+| `toolChoice`, `maxOutputTokens` | Same as config |
 | `retry`, `fetch`, `env`, `logger` | Same as config |
 
 ## Response
@@ -110,7 +110,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `config.unsupported_option` | A placeholder or unsupported option was given and dropped |
 | `config.thinking_budget_ignored` | `thinking.budgetTokens` is not forwarded |
 | `config.not_editable` | `Agent.fromConfig` got keys other than `model`, `instructions`, `tools`; they were ignored (`data.fields`) |
-| `provider_warning` | A provider-specific option was dropped (e.g. `stop` on Google) |
+| `provider_warning` | A provider-specific option was dropped (e.g. `thinking: "none"` on Google) |
 | `agent.max_turns_truncated` | Run stopped at `maxTurns` with tool work pending |
 | `turn.thinking` | Full reasoning text of a turn (bus only) |
 | `cache_clamp` | A session/affinity key was shortened to 64 chars |
@@ -131,12 +131,12 @@ All extend `AgentAccelError` (`code`, `retryable`, `context`).
 
 | Class | Raised when |
 |---|---|
-| `ConfigError` | Missing key/base URL, no or bad model string, a removed provider, Gemini 1.x/2.x, invalid config (before any network call) |
+| `ConfigError` | Missing key/base URL, no or bad model string, a removed provider, Gemini 1.x/2.x, invalid config, a `steer`/`queue`/`enqueue` call the `midSession.mode` forbids (before any network call) |
 | `ProviderError` | The API failed; `code` is `"provider"` (`"incomplete_stream"` for a cut stream), `retryable` says whether a retry can help; `statusCode`, `provider`, `model`, `providerCode` (the provider's own code), `retryAfterMs` (non-enumerable) |
 | `TimeoutError` | A request, first-byte or idle timeout (retryable) |
 | `BudgetExceededError` | `budget` or `limits.maxTotalTokens` / `deadlineMs` / `maxToolCallsPerRun` exceeded; partial usage attached |
 | `ToolError` | A tool failed in a way surfaced to the caller |
-| `ValidationError` | Structured output or scheduled-action input did not validate; input the model cannot take (an unsupported modality), before any network call; an empty prompt |
+| `ValidationError` | Structured output or scheduled-action input did not validate; input the model cannot take (an unsupported modality), before any network call; an empty prompt; a call made the wrong way (a streaming option on `steer`/`queue`/`interrupt(message)`, `resume()` while busy, a full queue or steer inbox); a bad session id, `registerModel` spec or media input |
 | `ThinkingLevelError` | Level not supported by the model (a `ConfigError`); `allowedLevels` lists valid ones |
 | `SubAgentModelError` | Dynamic workers or scheduling without a worker model |
 | `SessionLoadError` | A valid session file exceeds limits (never quarantined) |

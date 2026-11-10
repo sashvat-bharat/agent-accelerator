@@ -21,7 +21,9 @@ export function isTransientError(error: unknown): boolean {
       NaN
   );
   if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
-  const code = String((err["providerCode"] as string | undefined) ?? (err["code"] as string | undefined) ?? "").toUpperCase();
+  const code = String(
+    (err["providerCode"] as string | undefined) ?? (err["code"] as string | undefined) ?? ""
+  ).toUpperCase();
   if (["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT", "EPIPE", "ETIMEDOUT"].includes(code)) {
     return true;
   }
@@ -114,9 +116,7 @@ export function toConciseProviderError(error: unknown, providerId: string, model
     // Forwarded when present (e.g. OpenRouter's canonical `error_type`,
     // which disambiguates lossy native codes). Survives re-wraps so retry
     // helpers never strip it.
-    ...(typeof err?.errorType === "string"
-      ? { errorType: { value: err.errorType, enumerable: false } }
-      : {}),
+    ...(typeof err?.errorType === "string" ? { errorType: { value: err.errorType, enumerable: false } } : {}),
     // The provider's own error code (e.g. Google's `not_found` chain-eviction code, which carries no HTTP status on
     // SSE error frames); `code` itself is the SDK kind (`"provider"`). Survives re-wraps so chain detectors never lose it.
     ...((typeof err?.code === "string" || typeof err?.code === "number") && err.code !== ""
@@ -148,11 +148,7 @@ const PART_TO_MODALITY: Record<string, "image" | "audio" | "video" | "pdf"> = {
  * models (custom providers, dynamic routers) are skipped: the provider
  * verdict stands and surfaces via toConciseProviderError instead. Throws a `ValidationError`.
  */
-export function assertModalitiesSupported(
-  context: ProviderContext,
-  providerId: string,
-  modelId: string
-): void {
+export function assertModalitiesSupported(context: ProviderContext, providerId: string, modelId: string): void {
   const needed = new Set<string>();
   for (const msg of context.messages) {
     if (!Array.isArray((msg as any)?.content)) continue;
@@ -191,11 +187,7 @@ export function assertModalitiesSupported(
  * a clear one-liner instead; video stays Gemini-only, and OpenRouter Chat
  * Completions carries `video_url` natively (no guard there). Throws a `ValidationError`.
  */
-export function assertNoVideoPartsOnResponses(
-  context: ProviderContext,
-  providerId: string,
-  modelId: string
-): void {
+export function assertNoVideoPartsOnResponses(context: ProviderContext, providerId: string, modelId: string): void {
   let hasVideo = false;
   for (const msg of context.messages) {
     if (!Array.isArray((msg as any)?.content)) continue;

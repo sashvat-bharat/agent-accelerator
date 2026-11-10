@@ -313,7 +313,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
       fallbackToDiskCache();
       return getCatalogStatus();
     }
-  } catch (err: any) {
+  } catch {
     clearTimeout(timer);
     // If download fails, retain disk cache if available
     fallbackToDiskCache();
@@ -356,7 +356,6 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
   return getCatalogStatus();
 }
 
-
 /** True when `AGENT_CATALOG_REFRESH` is `off`/`0`/`false`: never touch the network automatically. */
 function automaticRefreshDisabled(): boolean {
   const v = getEnv("AGENT_CATALOG_REFRESH")?.trim().toLowerCase();
@@ -388,9 +387,11 @@ export async function ensureModelCatalogFresh(options: RefreshCatalogOptions = {
   const start = (): Promise<CatalogStatus> => {
     if (!inFlightRefresh) {
       const timeoutMs = options.timeoutMs ?? (current.loaded ? BACKGROUND_REFRESH_TIMEOUT_MS : undefined);
-      inFlightRefresh = refreshModelCatalog({ ...options, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }).finally(() => {
-        inFlightRefresh = null;
-      });
+      inFlightRefresh = refreshModelCatalog({ ...options, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }).finally(
+        () => {
+          inFlightRefresh = null;
+        }
+      );
     }
     return inFlightRefresh;
   };

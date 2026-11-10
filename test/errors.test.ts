@@ -12,6 +12,10 @@ import {
   BudgetExceededError,
   ThinkingLevelError,
   AgentAccelError,
+  SessionLoadError,
+  registerModel,
+  sessionDirFor,
+  normalizeMediaInput,
 } from "../src/index.ts";
 
 // A thrown error, or what a promise rejects with.
@@ -83,5 +87,25 @@ describe("every SDK error is typed", () => {
     const late = await caught(() => agentWith({ deadlineMs: 5 }, 20).run("go"));
     expect(late).toBeInstanceOf(BudgetExceededError);
     expect(String(late.message)).toContain("deadline");
+  });
+
+  it("caller mistakes that used to throw a bare Error are typed", async () => {
+    const agent = new Agent({ model: "groq/test-model", apiKey: "k", midSession: { mode: "queue" } });
+    // wrong mode for the verb: a configuration policy
+    const steerDisabled = await caught(() => agent.steer("x"));
+    expect(steerDisabled).toBeInstanceOf(ConfigError);
+    // wrong call form: a validation problem
+    const steerStream = await caught(() => new Agent({ model: "groq/test-model", apiKey: "k" }).steer("x", { stream: true }));
+    expect(steerStream).toBeInstanceOf(ValidationError);
+    expect(await caught(() => registerModel({} as any))).toBeInstanceOf(ValidationError);
+    expect(await caught(() => sessionDirFor("/tmp/x", "../evil"))).toBeInstanceOf(ValidationError);
+    expect(await caught(() => normalizeMediaInput(42 as any))).toBeInstanceOf(ValidationError);
+  });
+
+  it("an unusable session snapshot is a real SessionLoadError", async () => {
+    const { validateSessionData } = await import("../src/session/store.ts");
+    const bad = await caught(() => validateSessionData({ version: 2 }));
+    expect(bad).toBeInstanceOf(SessionLoadError);
+    expect(bad.name).toBe("SessionLoadError");
   });
 });

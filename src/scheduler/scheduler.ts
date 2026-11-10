@@ -42,7 +42,6 @@ import {
   readTask,
   readTasks,
   removeTaskFolder,
-  resolveHome,
   runPath,
   touchHeartbeat,
   updateDeliveries,
@@ -54,6 +53,7 @@ import {
   type PendingDelivery,
   type RunHeader,
 } from "./store.ts";
+import { resolveHome } from "../utils/home.ts";
 import {
   assertCookShorterThanRepeat,
   cookTime,
@@ -150,7 +150,7 @@ function requireText(field: string, value: unknown): void {
 // Throws unless every requested worker tool name exists in the developer's pool; in: create/update validation, out: collect.
 function checkTools(value: unknown, pool: PoolTools): void {
   if (!Array.isArray(value) || value.some((n) => typeof n !== "string")) {
-    throw new ValidationError("tools: must be an array of worker tool names, e.g. [\"recent_news\"].");
+    throw new ValidationError('tools: must be an array of worker tool names, e.g. ["recent_news"].');
   }
   const unknown = (value as string[]).filter((n) => Object.keys(grantWorkerTools(pool, [n])).length === 0);
   if (unknown.length > 0) {
@@ -179,7 +179,9 @@ function checkSchedule(
     collect(problems, () => {
       const repeatMs = durationMs(sa.repeatEvery, "scheduled_action.repeatEvery");
       if (repeatMs === 0) {
-        throw new ValidationError('scheduled_action.repeatEvery: must be greater than 00:00:00 (e.g. "01:00:00" = every day).');
+        throw new ValidationError(
+          'scheduled_action.repeatEvery: must be greater than 00:00:00 (e.g. "01:00:00" = every day).'
+        );
       }
       if (cookMs !== undefined) assertCookShorterThanRepeat(cookMs, repeatMs);
     });
@@ -188,15 +190,24 @@ function checkSchedule(
     problems.push("scheduled_action.retries: must be a whole number >= 0.");
   }
   if (sa.onMissed !== undefined && sa.onMissed !== "skip" && sa.onMissed !== "run") {
-    problems.push(`scheduled_action.onMissed: must be "skip" or "run" (omit it to decide later with run_now or skip); got ${JSON.stringify(sa.onMissed)}.`);
+    problems.push(
+      `scheduled_action.onMissed: must be "skip" or "run" (omit it to decide later with run_now or skip); got ${JSON.stringify(sa.onMissed)}.`
+    );
   }
 }
 
 // Validates role, tools and timeoutMs of a create or update; in: validateInput/updateScheduledAction, out: the problems list.
-function checkOptionalFields(input: Pick<ScheduledActionPatch, "role" | "tools" | "timeoutMs">, pool: PoolTools | undefined, problems: string[]): void {
+function checkOptionalFields(
+  input: Pick<ScheduledActionPatch, "role" | "tools" | "timeoutMs">,
+  pool: PoolTools | undefined,
+  problems: string[]
+): void {
   if (input.role !== undefined && typeof input.role !== "string") problems.push("role: must be a string.");
   if (input.tools !== undefined && pool) collect(problems, () => checkTools(input.tools, pool));
-  if (input.timeoutMs !== undefined && !(typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0)) {
+  if (
+    input.timeoutMs !== undefined &&
+    !(typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0)
+  ) {
     problems.push("timeoutMs: must be a number of milliseconds > 0.");
   }
 }
@@ -290,7 +301,11 @@ export class Scheduler {
       this.startDue(now);
       if (!this.hasPending()) this.stop();
     } catch (err) {
-      telemetryBus.emitWarning("scheduled_action.error", `[Agent Accelerator] Scheduler tick failed: ${errText(err)}`, {});
+      telemetryBus.emitWarning(
+        "scheduled_action.error",
+        `[Agent Accelerator] Scheduler tick failed: ${errText(err)}`,
+        {}
+      );
     }
   }
 
@@ -324,7 +339,9 @@ export class Scheduler {
   // True while anything keeps the clock useful (a run in flight, a saved delivery, a waiting or cooking action); in: ensureRunning and tick, out: start/stop of the interval.
   private hasPending(): boolean {
     const { live, pending } = this.snapshot();
-    return this.running.size > 0 || pending.length > 0 || live.some((t) => t.state === "waiting" || t.state === "cooking");
+    return (
+      this.running.size > 0 || pending.length > 0 || live.some((t) => t.state === "waiting" || t.state === "cooking")
+    );
   }
 
   // ----- startup -----------------------------------------------------------
@@ -412,8 +429,18 @@ export class Scheduler {
       return true;
     });
     if (!changed) return;
-    const next = policy === "skip" ? "Skipping it (onMissed: skip)." : policy === "run" ? "Running it now (onMissed: run)." : "Use run_now or skip.";
-    emit("missed", `"${name}" (${id}) missed its run (${reason}). ${next}`, { id, name, reason, ...(policy ? { onMissed: policy } : {}) }, "warn");
+    const next =
+      policy === "skip"
+        ? "Skipping it (onMissed: skip)."
+        : policy === "run"
+          ? "Running it now (onMissed: run)."
+          : "Use run_now or skip.";
+    emit(
+      "missed",
+      `"${name}" (${id}) missed its run (${reason}). ${next}`,
+      { id, name, reason, ...(policy ? { onMissed: policy } : {}) },
+      "warn"
+    );
     if (policy === "skip") this.skip(id);
     else if (policy === "run") this.startCook(id, true);
   }
@@ -439,12 +466,21 @@ export class Scheduler {
     });
     if (!removed) return; // another process took this delivery: exactly one process delivers it
     const deliverAt = parseLocalIso(entry.deliverAt).getTime();
-    const late = entry.late === true || now.getTime() - deliverAt > 2 * this.tickMs || parseLocalIso(entry.readyAt).getTime() > deliverAt;
+    const late =
+      entry.late === true ||
+      now.getTime() - deliverAt > 2 * this.tickMs ||
+      parseLocalIso(entry.readyAt).getTime() > deliverAt;
     let name = entry.id;
     updateTask(this.home, entry.id, (t) => {
       if (!t) return;
       name = t.name;
-      t.lastRun = { status: entry.status, file: entry.file, deliverAt: entry.deliverAt, deliveredAt: toLocalIso(now), late };
+      t.lastRun = {
+        status: entry.status,
+        file: entry.file,
+        deliverAt: entry.deliverAt,
+        deliveredAt: toLocalIso(now),
+        late,
+      };
     });
     const delivery: ScheduledDelivery = {
       id: entry.id,
@@ -502,7 +538,8 @@ export class Scheduler {
       }
       if (t.state === "cooking") return undefined;
       // Another process may have started (and even finished) this run since the caller looked: a scheduled start needs the action to be waiting and due right now.
-      if (!manual && (t.state !== "waiting" || !t.nextCookAt || parseLocalIso(t.nextCookAt).getTime() > now.getTime())) return undefined;
+      if (!manual && (t.state !== "waiting" || !t.nextCookAt || parseLocalIso(t.nextCookAt).getTime() > now.getTime()))
+        return undefined;
       ctx.replacesMissed = manual && t.state === "missed";
       ctx.agent = this.agents.get(t.agent)?.deref();
       if (!ctx.agent) {
@@ -515,7 +552,8 @@ export class Scheduler {
       const deliverAt = manual || !t.nextDeliverAt ? now : parseLocalIso(t.nextDeliverAt);
       let next = { cook: t.nextCookAt, deliver: t.nextDeliverAt };
       if (!manual) {
-        const following = t.schedule.repeatEvery && t.nextDeliverAt ? nextOccurrence(deliverAt, t.schedule.repeatEvery) : undefined;
+        const following =
+          t.schedule.repeatEvery && t.nextDeliverAt ? nextOccurrence(deliverAt, t.schedule.repeatEvery) : undefined;
         next = following
           ? { cook: toLocalIso(cookTime(following, cookMs)), deliver: toLocalIso(following) }
           : { cook: null, deliver: null };
@@ -531,7 +569,12 @@ export class Scheduler {
     });
     if (ctx.noAgent) {
       const name = this.nameOf(id);
-      emit("missed", `"${name}" (${id}) cannot run: no live Agent named in its task.json is registered.`, { id, name, reason: "no_agent" }, "warn");
+      emit(
+        "missed",
+        `"${name}" (${id}) cannot run: no live Agent named in its task.json is registered.`,
+        { id, name, reason: "no_agent" },
+        "warn"
+      );
     }
     if (!started || !ctx.agent) return undefined;
     emit("started", `"${started.name}" (${id}) started cooking.`, {
@@ -561,23 +604,39 @@ export class Scheduler {
       }
       const cookMs = durationMs(t.schedule.startCookingInAdvance, "schedule.startCookingInAdvance");
       let deliverAt = parseLocalIso(t.nextDeliverAt);
-      while (cookTime(deliverAt, cookMs).getTime() <= now.getTime()) deliverAt = nextOccurrence(deliverAt, t.schedule.repeatEvery);
+      while (cookTime(deliverAt, cookMs).getTime() <= now.getTime())
+        deliverAt = nextOccurrence(deliverAt, t.schedule.repeatEvery);
       t.nextDeliverAt = toLocalIso(deliverAt);
       t.nextCookAt = toLocalIso(cookTime(deliverAt, cookMs));
     });
     if (ctx.skipped) {
       const { name, deliverAt } = ctx.skipped;
-      emit("skipped", `"${name}" (${id}) skipped a run: the previous one is still cooking.`, { id, name, reason: "overlap", deliverAt }, "warn");
+      emit(
+        "skipped",
+        `"${name}" (${id}) skipped a run: the previous one is still cooking.`,
+        { id, name, reason: "overlap", deliverAt },
+        "warn"
+      );
     }
   }
 
   // Starts one run without awaiting it and tracks it until it ends; in: startCook, out: this.running + the run's files.
   private launch(task: ScheduledActionRecord, agent: Agent, manual: boolean, missed: boolean): void {
-    const entry: RunningEntry = { controller: new AbortController(), done: Promise.resolve(), deleted: false, manual, missed };
+    const entry: RunningEntry = {
+      controller: new AbortController(),
+      done: Promise.resolve(),
+      deleted: false,
+      manual,
+      missed,
+    };
     this.running.set(task.id, entry);
     entry.done = this.runWorker(task, agent, entry)
       .catch((err) => {
-        telemetryBus.emitWarning("scheduled_action.error", `[Agent Accelerator] Run of "${task.id}" failed unexpectedly: ${errText(err)}`, { id: task.id });
+        telemetryBus.emitWarning(
+          "scheduled_action.error",
+          `[Agent Accelerator] Run of "${task.id}" failed unexpectedly: ${errText(err)}`,
+          { id: task.id }
+        );
       })
       .finally(() => {
         this.running.delete(task.id);
@@ -597,14 +656,21 @@ export class Scheduler {
   }
 
   /** A fresh stateless worker built from the saved fields; retries only while there is time before delivery. */
-  private async execute(task: ScheduledActionRecord, agent: Agent, entry: RunningEntry, deliverAt: Date): Promise<Outcome> {
+  private async execute(
+    task: ScheduledActionRecord,
+    agent: Agent,
+    entry: RunningEntry,
+    deliverAt: Date
+  ): Promise<Outcome> {
     let worker: Agent | undefined;
     try {
       const { Agent: AgentClass } = await import("../agent/agent.ts");
       const pool = agent.dynamicSubagents?.tools ?? {};
       const missing = task.tools.filter((n) => Object.keys(grantWorkerTools(pool, [n])).length === 0);
       if (missing.length > 0) {
-        throw new Error(`worker tool(s) no longer in the pool: ${missing.join(", ")} (available: ${Object.keys(pool).join(", ") || "none"})`);
+        throw new Error(
+          `worker tool(s) no longer in the pool: ${missing.join(", ")} (available: ${Object.keys(pool).join(", ") || "none"})`
+        );
       }
       worker = new AgentClass(
         buildDynamicWorkerConfig(agent, {
@@ -635,7 +701,12 @@ export class Scheduler {
   }
 
   // One worker run with a per-attempt timeout and the delete signal, raced so a hung provider cannot hold it; in: execute, out: the worker's AgentResponse.
-  private async attempt(worker: Agent, task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<AgentResponse> {
+  private async attempt(
+    worker: Agent,
+    task: ScheduledActionRecord,
+    agent: Agent,
+    entry: RunningEntry
+  ): Promise<AgentResponse> {
     const ms = scheduledRunTimeoutMs(agent.dynamicSubagents?.workerTimeoutMs ?? Infinity, task.timeoutMs);
     // One controller per attempt (the timeout is per attempt), fed by the entry's delete controller.
     const controller = new AbortController();
@@ -645,7 +716,9 @@ export class Scheduler {
     const timer = ms > 0 ? setTimeout(() => controller.abort(new Error(`timed out after ${ms}ms`)), ms) : undefined;
     // Raced so a timeout or delete ends the attempt even if the provider ignores the signal.
     const aborted = new Promise<never>((_, reject) => {
-      controller.signal.addEventListener("abort", () => reject(controller.signal.reason ?? new Error("aborted")), { once: true });
+      controller.signal.addEventListener("abort", () => reject(controller.signal.reason ?? new Error("aborted")), {
+        once: true,
+      });
     });
     try {
       return await Promise.race([worker.run(task.task, { signal: controller.signal }), aborted]);
@@ -656,7 +729,13 @@ export class Scheduler {
   }
 
   // Writes a finished run: run file, then the `delivery.json` entry, then `task.json` (a crash in between is repaired on start); a manual run is due when it finishes and is late only if it replaced a missed occurrence, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
-  private finish(task: ScheduledActionRecord, outcome: Outcome, startedAt: string, deliverAt: Date, run: Pick<RunningEntry, "manual" | "missed">): void {
+  private finish(
+    task: ScheduledActionRecord,
+    outcome: Outcome,
+    startedAt: string,
+    deliverAt: Date,
+    run: Pick<RunningEntry, "manual" | "missed">
+  ): void {
     const now = this.now();
     const ok = "res" in outcome;
     const finishedAt = toLocalIso(now);
@@ -677,16 +756,35 @@ export class Scheduler {
     const body = ok ? outcome.res.text.trim() || "[The worker returned no text.]" : `The run failed: ${outcome.error}`;
     const file = writeRunFile(this.home, task.id, deliverAt, header, body);
     updateDeliveries(this.home, task.id, (pending) => {
-      pending.push({ id: task.id, file, status: header.status, readyAt: finishedAt, deliverAt: header.deliverAt, ...(run.missed ? { late: true } : {}) });
+      pending.push({
+        id: task.id,
+        file,
+        status: header.status,
+        readyAt: finishedAt,
+        deliverAt: header.deliverAt,
+        ...(run.missed ? { late: true } : {}),
+      });
     });
     updateTask(this.home, task.id, (t) => {
       if (!t || t.state !== "cooking") return;
       delete t.current;
       t.state = t.nextDeliverAt ? "waiting" : "done";
     });
-    const data = { id: task.id, name: task.name, file: runPath(this.home, file), readyAt: finishedAt, deliverAt: header.deliverAt };
+    const data = {
+      id: task.id,
+      name: task.name,
+      file: runPath(this.home, file),
+      readyAt: finishedAt,
+      deliverAt: header.deliverAt,
+    };
     if (ok) emit("ready", `"${task.name}" (${task.id}) finished; its result is saved.`, data);
-    else emit("failed", `"${task.name}" (${task.id}) failed: ${(outcome as { error: string }).error}`, { ...data, error: (outcome as { error: string }).error }, "warn");
+    else
+      emit(
+        "failed",
+        `"${task.name}" (${task.id}) failed: ${(outcome as { error: string }).error}`,
+        { ...data, error: (outcome as { error: string }).error },
+        "warn"
+      );
   }
 
   // ----- commands ----------------------------------------------------------
@@ -704,7 +802,10 @@ export class Scheduler {
       );
     }
     const started = this.startCook(id, true);
-    if (!started) throw new ValidationError(`Scheduled action "${id}" could not be started (see the scheduled_action.invalid warning).`);
+    if (!started)
+      throw new ValidationError(
+        `Scheduled action "${id}" could not be started (see the scheduled_action.invalid warning).`
+      );
     return started;
   }
 
@@ -713,7 +814,8 @@ export class Scheduler {
     const now = this.now();
     const rec = updateTask(this.home, id, (t) => {
       if (!t) throw notFound(id);
-      if (t.state !== "missed") throw new ValidationError(`Scheduled action "${id}" is ${t.state}, not missed: nothing to skip.`);
+      if (t.state !== "missed")
+        throw new ValidationError(`Scheduled action "${id}" is ${t.state}, not missed: nothing to skip.`);
       const next = this.afterMissed(t, now);
       t.nextCookAt = next.cook;
       t.nextDeliverAt = next.deliver;
@@ -721,7 +823,12 @@ export class Scheduler {
       delete t.current;
       return t;
     });
-    emit("skipped", `"${rec.name}" (${id}) skipped its missed run.`, { id, name: rec.name, reason: "skip", nextDeliverAt: rec.nextDeliverAt });
+    emit("skipped", `"${rec.name}" (${id}) skipped its missed run.`, {
+      id,
+      name: rec.name,
+      reason: "skip",
+      nextDeliverAt: rec.nextDeliverAt,
+    });
     this.ensureRunning();
     return rec;
   }
@@ -809,31 +916,35 @@ export function createScheduledAction(agent: Agent, input: ScheduledActionInput)
   const sa = input.scheduled_action;
   const lead = sa.startCookingInAdvance ?? DEFAULT_COOK_LEAD;
   const deliverAt = resolveDelivery(now, sa.timeToDeliver, sa.meridiem);
-  const record = createTask(s.home, () => `${sa.id}-${randomSuffix()}`, (id) => {
-    const rec: ScheduledActionRecord = {
-      id,
-      name: sa.name.trim(),
-      agent: agent.name,
-      ...(input.role ? { role: input.role } : {}),
-      instructions: input.instructions,
-      task: input.task,
-      tools: input.tools ?? [],
-      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-      schedule: {
-        timeToDeliver: sa.timeToDeliver,
-        meridiem: sa.meridiem,
-        startCookingInAdvance: lead,
-        ...(sa.repeatEvery !== undefined ? { repeatEvery: sa.repeatEvery } : {}),
-        ...(sa.retries !== undefined ? { retries: sa.retries } : {}),
-        ...(sa.onMissed !== undefined ? { onMissed: sa.onMissed } : {}),
-      },
-      state: "waiting",
-      nextCookAt: toLocalIso(cookTime(deliverAt, durationMs(lead, "scheduled_action.startCookingInAdvance"))),
-      nextDeliverAt: toLocalIso(deliverAt),
-      createdAt: toLocalIso(now),
-    };
-    return rec;
-  });
+  const record = createTask(
+    s.home,
+    () => `${sa.id}-${randomSuffix()}`,
+    (id) => {
+      const rec: ScheduledActionRecord = {
+        id,
+        name: sa.name.trim(),
+        agent: agent.name,
+        ...(input.role ? { role: input.role } : {}),
+        instructions: input.instructions,
+        task: input.task,
+        tools: input.tools ?? [],
+        ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+        schedule: {
+          timeToDeliver: sa.timeToDeliver,
+          meridiem: sa.meridiem,
+          startCookingInAdvance: lead,
+          ...(sa.repeatEvery !== undefined ? { repeatEvery: sa.repeatEvery } : {}),
+          ...(sa.retries !== undefined ? { retries: sa.retries } : {}),
+          ...(sa.onMissed !== undefined ? { onMissed: sa.onMissed } : {}),
+        },
+        state: "waiting",
+        nextCookAt: toLocalIso(cookTime(deliverAt, durationMs(lead, "scheduled_action.startCookingInAdvance"))),
+        nextDeliverAt: toLocalIso(deliverAt),
+        createdAt: toLocalIso(now),
+      };
+      return rec;
+    }
+  );
   s.agents.set(agent.name, new WeakRef(agent));
   emit("created", `"${record.name}" (${record.id}) scheduled for ${record.nextDeliverAt}.`, {
     id: record.id,
@@ -857,7 +968,11 @@ export function listScheduledActions(opts?: HomeOptions): Array<ScheduledActionR
  * recomputes the schedule (`DD` relative to now); schedule changes are
  * refused while the action is cooking.
  */
-export function updateScheduledAction(id: string, patch: ScheduledActionPatch, opts?: HomeOptions): ScheduledActionRecord {
+export function updateScheduledAction(
+  id: string,
+  patch: ScheduledActionPatch,
+  opts?: HomeOptions
+): ScheduledActionRecord {
   const s = schedulerFor(opts);
   const now = s.now();
   const sa = patch.scheduled_action ?? {};
@@ -868,11 +983,14 @@ export function updateScheduledAction(id: string, patch: ScheduledActionPatch, o
     if (stored) throw new ValidationError(`Scheduled action "${id}" is invalid in its task.json: ${stored}`);
     const scheduleChanged = Object.values(scheduleChange).some((v) => v !== undefined);
     if (scheduleChanged && t.state === "cooking") {
-      throw new ValidationError(`Scheduled action "${id}" is cooking right now; schedule changes are refused while it runs. Try again after it finishes.`);
+      throw new ValidationError(
+        `Scheduled action "${id}" is cooking right now; schedule changes are refused while it runs. Try again after it finishes.`
+      );
     }
     const deliveryChanged = scheduleChange.timeToDeliver !== undefined || scheduleChange.meridiem !== undefined;
     const merged = { ...t.schedule };
-    for (const [key, value] of Object.entries(scheduleChange)) if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+    for (const [key, value] of Object.entries(scheduleChange))
+      if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
 
     const problems: string[] = [];
     const pool = s.agents.get(t.agent)?.deref()?.dynamicSubagents?.tools;
@@ -903,7 +1021,12 @@ export function updateScheduledAction(id: string, patch: ScheduledActionPatch, o
     }
     return t;
   });
-  emit("updated", `"${rec.name}" (${id}) updated.`, { id, name: rec.name, nextCookAt: rec.nextCookAt, nextDeliverAt: rec.nextDeliverAt });
+  emit("updated", `"${rec.name}" (${id}) updated.`, {
+    id,
+    name: rec.name,
+    nextCookAt: rec.nextCookAt,
+    nextDeliverAt: rec.nextDeliverAt,
+  });
   s.ensureRunning();
   return rec;
 }
@@ -923,6 +1046,9 @@ export function skipScheduledAction(id: string, opts?: HomeOptions): ScheduledAc
  * `force: true` (the run is aborted, then deleted). Past run files are kept
  * unless `purge: true`.
  */
-export function deleteScheduledAction(id: string, opts?: HomeOptions & { force?: boolean; purge?: boolean }): Promise<DeleteResult> {
+export function deleteScheduledAction(
+  id: string,
+  opts?: HomeOptions & { force?: boolean; purge?: boolean }
+): Promise<DeleteResult> {
   return schedulerFor(opts).delete(id, { force: opts?.force, purge: opts?.purge });
 }

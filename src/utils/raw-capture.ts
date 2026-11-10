@@ -16,7 +16,11 @@ function byteLength(value: unknown): number {
 function toolNames(tools: unknown): string[] | undefined {
   if (!Array.isArray(tools)) return undefined;
   const names = tools
-    .map((t) => (t as { name?: unknown; function?: { name?: unknown } })?.name ?? (t as { function?: { name?: unknown } })?.function?.name)
+    .map(
+      (t) =>
+        (t as { name?: unknown; function?: { name?: unknown } })?.name ??
+        (t as { function?: { name?: unknown } })?.function?.name
+    )
     .filter((n): n is string => typeof n === "string");
   return names.length > 0 ? names : undefined;
 }
@@ -56,7 +60,10 @@ function summarizeResponseBody(body: unknown): unknown {
  *   model output never leak through `response.raw` / `toJSON()` into logs.
  * - `false`: keep only URL, method and HTTP status.
  */
-export function applyCaptureRaw(raw: ProviderRawData | undefined, mode: CaptureRawMode | undefined): ProviderRawData | undefined {
+export function applyCaptureRaw(
+  raw: ProviderRawData | undefined,
+  mode: CaptureRawMode | undefined
+): ProviderRawData | undefined {
   if (!raw || mode === true) return raw;
   const redactedMode = mode !== false; // undefined -> default "redacted"
   const request = raw.request

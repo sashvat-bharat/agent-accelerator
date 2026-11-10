@@ -53,7 +53,9 @@ export function historyUpTo(messages: Message[], marks: SessionRunMark[], n: num
     );
   }
   if (n === 0) return [];
-  const first = marks.filter((m) => m.i >= 0 && m.i < messages.length).reduce((lo, m) => Math.min(lo, m.i), messages.length);
+  const first = marks
+    .filter((m) => m.i >= 0 && m.i < messages.length)
+    .reduce((lo, m) => Math.min(lo, m.i), messages.length);
   const kept = [...messages.slice(0, first)];
   for (const turn of turns.slice(0, n)) kept.push(...messages.slice(turn.from, turn.to));
   return deepCloneValue(kept);

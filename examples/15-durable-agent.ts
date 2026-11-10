@@ -77,7 +77,8 @@ const pay_invoice = tool({
   input: z.object({ invoiceId: z.string(), amount: z.number() }),
   execute: async ({ invoiceId, amount }, ctx) => {
     // Your own permission check goes here (a rule, a prompt to the user, ...). Refusing = ctx.stop.
-    if (amount > PAYMENT_LIMIT) ctx.stop(`Refused: $${amount} is above the $${PAYMENT_LIMIT} limit and the user has not approved it.`);
+    if (amount > PAYMENT_LIMIT)
+      ctx.stop(`Refused: $${amount} is above the $${PAYMENT_LIMIT} limit and the user has not approved it.`);
     note(`paid invoice ${invoiceId}: $${amount}`);
     return `Invoice ${invoiceId} paid.`;
   },
@@ -146,11 +147,14 @@ async function main() {
   head("2. A new process picks the session up");
   telemetryBus.onEvent((e) => e.code === "agent.run_retry" && say(`↻ ${e.message}`));
   const agent = makeAgent(true); // takes over the dead process's folder lock by itself
-  for (const run of agent.interrupted()) say(`cut-off run: "${run.prompt}" (tool calls without a result: ${run.pendingToolCalls.join(", ")})`);
+  for (const run of agent.interrupted())
+    say(`cut-off run: "${run.prompt}" (tool calls without a result: ${run.pendingToolCalls.join(", ")})`);
   say(`prompts that were still waiting: ${agent.pendingCount}`);
 
   const resumed = await agent.resume();
-  say(`resumed run finished: "${resumed?.finishReason}", ${resumed?.toolResults.length} tool result(s) in its response`);
+  say(
+    `resumed run finished: "${resumed?.finishReason}", ${resumed?.toolResults.length} tool result(s) in its response`
+  );
   await idle(agent); // the queued follow-up runs after the resumed run
   say(`follow-up answer: ${lastText(agent)}`);
   say(`ledger now:\n${fs.readFileSync(LEDGER, "utf8")}`);

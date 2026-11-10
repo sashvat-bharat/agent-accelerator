@@ -1,12 +1,14 @@
 Starts helpers ("workers") that work on a task for you and can be asked again later. A worker is a separate agent with its own instructions, its own tools and its own memory: it knows only what you give it (plus the earlier conversation you choose to copy). Use workers for parallel research, a second opinion, or a long side task you do not want in your own context.
 
 COMMANDS (one tool, the `command` field)
+
 - spawn: start a worker. Needs `name` and `task`. Optional: `instructions` (the worker's own system prompt), `role`, `tools`, `history`. It waits for the worker's first reply and gives you the worker's `id`.
 - message: send `task` to the open worker `id`. The worker remembers everything said to it before. It waits for the reply.
 - close: end the worker `id` when you no longer need it. A closed worker cannot be messaged again.
 - list: your open workers, plus the numbered turns of this conversation that `history` can copy.
 
 FIELDS
+
 - name: a short label such as "researcher". The SDK adds a suffix; use the full `id` it returns ("researcher-1a2b3c4d") in message and close.
 - instructions: the worker's own system prompt: its role, rules and the format you want back.
 - task: for spawn, the first assignment; for message, the next message to that worker.
@@ -23,6 +25,7 @@ Ask it a follow-up:
 {"command":"message","id":"researcher-1a2b3c4d","task":"Now focus on write-heavy workloads."}
 
 RULES
+
 - Several workers at once: make several spawn calls in the same turn. They run in parallel.
 - A worker handles one call at a time. Wait for its reply before messaging it again.
 - {{LIMIT}}

@@ -76,7 +76,6 @@ Provider behavior differences the SDK handles for you:
 |---|---|---|---|---|
 | History | stateful chaining (full history on reseed) | full history each turn | full history | full history |
 | `maxOutputTokens` | sent; above 65,536 on Gemini 4 = background long decode, other models fail fast | sent | sent | sent |
-| `stop`, `seed` | warn + drop | warn + drop | sent | sent |
 | `serviceTier` | `flex`/`priority` | `flex`/`priority` | `flex`/`priority` | warn + drop |
 | `thinking` | `thinking_level` (max `high`) | `reasoning.effort` | `reasoning.effort` | warn + drop |
 | Video / files | native | images + files | images, video, files | images + audio only |
@@ -86,8 +85,7 @@ Unsupported options are **warned on the telemetry bus and dropped**, never sent.
 **Recommendations**
 - ✅ Use explicit `ModelProvider.*` or `apiKey`/`baseUrl` when running several providers in one process.
 - ✅ Check what a string resolves to with `resolveModel("...")` before shipping.
-- ❌ Do not rely on `stop`/`seed` with Google or OpenAI.
-- `stop` is capped at 4 sequences on Chat Completions endpoints (OpenRouter and custom prefixes); extra ones are dropped with one `provider_warning`.
+- There are no `stop` or `seed` options (both removed in 0.6.0).
 - 💡 Switching providers mid-session is supported; the conversation history is provider-neutral.
 
 ## Thinking (reasoning)

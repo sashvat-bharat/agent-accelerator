@@ -13,7 +13,18 @@ export function isRetryableRun(error: unknown): boolean {
   if (!error || isAbortError(error)) return false;
   const name = (error as { name?: unknown }).name;
   if (name === "TimeoutError") return true; // the loop's own request / first-byte / idle timeouts
-  if (["BudgetExceededError", "ConfigError", "ValidationError", "SecurityPolicyError", "SessionLoadError", "ThinkingLevelError", "ToolError"].includes(String(name))) return false;
+  if (
+    [
+      "BudgetExceededError",
+      "ConfigError",
+      "ValidationError",
+      "SecurityPolicyError",
+      "SessionLoadError",
+      "ThinkingLevelError",
+      "ToolError",
+    ].includes(String(name))
+  )
+    return false;
   return isTransientError(error);
 }
 
@@ -24,8 +35,9 @@ export function readRetryAfterMs(error: unknown): number | undefined {
   const direct = err["retryAfterMs"];
   if (typeof direct === "number" && Number.isFinite(direct) && direct >= 0) return Math.min(60_000, direct);
   const raw =
-    ((err["response"] as Record<string, unknown> | undefined)?.["headers"] as Record<string, unknown> | undefined)?.["retry-after"] ??
-    ((err["headers"] as Record<string, unknown> | undefined)?.["retry-after"]);
+    ((err["response"] as Record<string, unknown> | undefined)?.["headers"] as Record<string, unknown> | undefined)?.[
+      "retry-after"
+    ] ?? (err["headers"] as Record<string, unknown> | undefined)?.["retry-after"];
   if (raw === undefined) return undefined;
   const secs = Number(Array.isArray(raw) ? raw[0] : raw);
   if (!Number.isFinite(secs) || secs < 0) return undefined;

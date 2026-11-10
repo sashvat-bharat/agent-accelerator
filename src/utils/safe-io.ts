@@ -139,19 +139,31 @@ function isPrivateHostname(host: string): boolean {
 // Throws RemoteFetchError for a non-http(s) URL or, unless private hosts are allowed, a private host (also by DNS result); in: fetchRemoteBytes on every hop, out: nothing or a thrown error.
 async function assertRemoteUrlAllowed(url: URL, allowPrivateNetwork: boolean): Promise<void> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new RemoteFetchError("blocked", `[Agent Accelerator] Only http(s) URLs are allowed (got ${url.protocol}).`, url.href);
+    throw new RemoteFetchError(
+      "blocked",
+      `[Agent Accelerator] Only http(s) URLs are allowed (got ${url.protocol}).`,
+      url.href
+    );
   }
   if (allowPrivateNetwork) return;
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (isPrivateHostname(host)) {
-    throw new RemoteFetchError("blocked", `[Agent Accelerator] Refusing to fetch private/internal host "${host}".`, url.href);
+    throw new RemoteFetchError(
+      "blocked",
+      `[Agent Accelerator] Refusing to fetch private/internal host "${host}".`,
+      url.href
+    );
   }
   if (/^[\d.]+$/.test(host) || host.includes(":")) return; // IP literal already checked
   try {
     const dns = await import("node:dns");
     const addrs = await dns.promises.lookup(host, { all: true });
     if (addrs.some((a) => isPrivateAddress(a.address))) {
-      throw new RemoteFetchError("blocked", `[Agent Accelerator] Host "${host}" resolves to a private/internal address.`, url.href);
+      throw new RemoteFetchError(
+        "blocked",
+        `[Agent Accelerator] Host "${host}" resolves to a private/internal address.`,
+        url.href
+      );
     }
   } catch (err) {
     if (err instanceof RemoteFetchError) throw err;
@@ -169,7 +181,9 @@ async function readCapped(res: Response, maxBytes: number, url: string): Promise
     );
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
-    try { await res.body?.cancel(); } catch {}
+    try {
+      await res.body?.cancel();
+    } catch {}
     throw tooLarge();
   }
   if (!res.body) {
@@ -185,7 +199,9 @@ async function readCapped(res: Response, maxBytes: number, url: string): Promise
     if (done) break;
     total += value.byteLength;
     if (total > maxBytes) {
-      try { await reader.cancel(); } catch {}
+      try {
+        await reader.cancel();
+      } catch {}
       throw tooLarge();
     }
     chunks.push(value);
@@ -227,7 +243,11 @@ export async function fetchRemoteBytes(
     if ((res as { type?: string }).type === "opaqueredirect") {
       // Browser runtimes hide the Location header: only trusted callers may follow blindly.
       if (!allowPrivate) {
-        throw new RemoteFetchError("blocked", "[Agent Accelerator] Redirects cannot be validated in this runtime.", current.href);
+        throw new RemoteFetchError(
+          "blocked",
+          "[Agent Accelerator] Redirects cannot be validated in this runtime.",
+          current.href
+        );
       }
       const followed = await fetch(current.href, { signal: opts.signal });
       return {
@@ -240,7 +260,9 @@ export async function fetchRemoteBytes(
     }
     const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
     if (location) {
-      try { await res.body?.cancel(); } catch {}
+      try {
+        await res.body?.cancel();
+      } catch {}
       current = new URL(location, current);
       continue;
     }

@@ -79,7 +79,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | `needsApproval` | Removed. Ask inside `execute` and refuse with `ctx.stop(reason)` |
 | Tool `retry` / `tags` / `output` | Stored but not enforced |
 | `thinking.budgetTokens` | Not forwarded by any adapter |
-| `stop`, `seed` on Google or OpenAI | Warn and dropped |
+| `stop`, `seed` | Removed in 0.6.0; do not pass them |
 | `temperature` / `topP` / `sampling` | Removed on every provider; do not pass them |
 | Gemini 1.x / 2.x | Rejected; minimum is Gemini 3 |
 | `cache` TTLs (`5m`, `30m`, `1h`, `12h`) | Honoured only where the provider supports them (see README Cache table); others warn and fall back |

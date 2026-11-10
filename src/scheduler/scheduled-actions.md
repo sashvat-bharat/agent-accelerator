@@ -3,6 +3,7 @@ Schedules a sub-agent (a "scheduled action") to run LATER, once or on repeat, on
 Call get_datetime first whenever you create or reschedule, then pick DD from today's date.
 
 COMMANDS (one tool, the `command` field)
+
 - create: schedule a new action. Needs instructions, task and scheduled_action.{name, id, timeToDeliver, meridiem, startCookingInAdvance}. Optional: role, tools, timeoutMs, scheduled_action.repeatEvery, scheduled_action.retries, scheduled_action.onMissed.
 - list: every action with its metadata and state (waiting, cooking, missed, done).
 - get: one action by `id`, with its latest run result.
@@ -12,6 +13,7 @@ COMMANDS (one tool, the `command` field)
 - skip: ignore a missed run of `id` and wait for the next scheduled time.
 
 SCHEDULED_ACTION FIELDS
+
 - name: human label.
 - id: lowercase kebab-case, at most 48 characters, e.g. "daily-ai-brief". The SDK appends 6 characters ("daily-ai-brief-d64aj2"); use that full id in every later command.
 - timeToDeliver: "DD:HH:MM". DD = days from today (00 today, 01 tomorrow, 55 = 55 days ahead). HH:MM = clock time on a 12-hour clock, HH 01-12.
@@ -30,12 +32,14 @@ Weekly report, every Monday at 9:00 AM (use get_datetime to count the days to th
 {"command":"create","instructions":"You review a codebase and report its health.","task":"Report test health, open risks and notable changes this week.","scheduled_action":{"name":"Weekly Codebase Health Report","id":"weekly-code-health","timeToDeliver":"03:09:00","meridiem":"AM","startCookingInAdvance":"00:02:00","repeatEvery":"07:00:00"}}
 
 TIMING ADVICE (do not guess; talk to the user)
+
 - A run must finish before the next one is due, so startCookingInAdvance must be shorter than repeatEvery.
 - Pick the lead time from the job: a quick lookup fits the 10-minute lead ("00:00:10"); research with many tools needs much more.
 - If the job looks too heavy for the gap the user asked for, do not schedule it blindly. Say so and suggest a wider gap, an earlier start, or a lighter task.
 - A run still cooking when the next one is due is skipped, never stacked, so a gap that is too small means lost runs.
 
 RULES
+
 - Each run starts blank and remembers nothing from earlier runs: put everything the worker needs in instructions and task.
 - Results go to files, not into this chat. Tell the user the action is scheduled and when it will be delivered.
 - Never put secrets in instructions or task: they are stored as plain text.

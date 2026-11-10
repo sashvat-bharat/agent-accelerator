@@ -21,7 +21,8 @@ const TINYFISH_API_KEY = process.env.TINYFISH_API_KEY;
 
 const web_search = tool({
   name: "web_search",
-  description: "Search the live web for current information. Returns ranked web sources with titles, snippets, and URLs. Use this when you need fresh information, documentation, research, news, or facts that may have changed.",
+  description:
+    "Search the live web for current information. Returns ranked web sources with titles, snippets, and URLs. Use this when you need fresh information, documentation, research, news, or facts that may have changed.",
   input: z.object({ query: z.string().min(1).describe("The web search query") }),
   timeoutMs: 15_000,
   maxAttempts: 2,
@@ -47,14 +48,17 @@ const web_search = tool({
 
     if (!response.ok) {
       const error = await response.text();
-      console.log(`\x1b[31m← [web_search] error (${Date.now() - startedAt}ms): ${response.status} ${error.slice(0, 200)}\x1b[0m`);
+      console.log(
+        `\x1b[31m← [web_search] error (${Date.now() - startedAt}ms): ${response.status} ${error.slice(0, 200)}\x1b[0m`
+      );
       throw new Error(`TinyFish Search failed (${response.status}): ${error}`);
     }
 
     const data = (await response.json()) as TinyFishSearchResponse;
 
     const mapped = {
-      query, results:
+      query,
+      results:
         data.results?.map((result) => ({
           position: result.position,
           title: result.title,
@@ -64,14 +68,16 @@ const web_search = tool({
         })) ?? [],
       totalResults: data.total_results ?? 0,
     };
-    console.log(`\x1b[32m← [web_search] arrived: ${mapped.results.length} results (total: ${mapped.totalResults}) in ${Date.now() - startedAt}ms\x1b[0m`);
+    console.log(
+      `\x1b[32m← [web_search] arrived: ${mapped.results.length} results (total: ${mapped.totalResults}) in ${Date.now() - startedAt}ms\x1b[0m`
+    );
     return mapped;
   },
 });
 
 const agent = new Agent({
   name: "Main Agent",
-  tools: {web_search},
+  tools: { web_search },
   thinking: "medium",
   model: process.env.MODEL,
   budget: { maxCostUsd: 2, maxTotalSubagents: 6 },
@@ -98,7 +104,8 @@ When answering research questions:
   },
 });
 
-const res = await agent.run("Research on the latest model and its capability introduced by OpenAI called GPT-6-ASTRA", {
+const res = await agent
+  .run("Research on the latest model and its capability introduced by OpenAI called GPT-6-ASTRA", {
     stream: true,
     wrapThinking: true,
     onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
@@ -110,7 +117,9 @@ const res = await agent.run("Research on the latest model and its capability int
       } else if (e.type === "tool_result" && e.toolResult?.name === "web_search") {
         const r = e.toolResult.result as any;
         const count = Array.isArray(r?.results) ? r.results.length : "?";
-        console.log(`\x1b[32m↳ [web_search ←] result arrived: ${count} results in ${e.toolResult.durationMs ?? 0}ms${e.toolResult.isError ? " (error)" : ""}\x1b[0m`);
+        console.log(
+          `\x1b[32m↳ [web_search ←] result arrived: ${count} results in ${e.toolResult.durationMs ?? 0}ms${e.toolResult.isError ? " (error)" : ""}\x1b[0m`
+        );
       } else if (e.type === "subagent_complete" && e.subagent) {
         console.log(`\n\x1b[33m↳ [SubAgent Completed] ${e.subagent.name} (${e.subagent.durationMs}ms)\x1b[0m`);
       }

@@ -21,7 +21,13 @@ export interface ToolExecutionContext {
   /** Session identifier associated with this invocation. */
   sessionId?: string;
   /** Forwards live sub-agent deltas (used by the `subagents` tool for realtime tracking). */
-  onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
+  onSubagentEvent?: (event: {
+    trackingId: string;
+    delta?: string;
+    thinkingDelta?: string;
+    partialText?: string;
+    partialThinking?: string;
+  }) => void;
   // Tool API v2 context additions (all optional, additive).
   /** Stable id for this run (`newRunId`). Mirrors SubAgentRunIds.runId. */
   runId?: string;
@@ -161,5 +167,9 @@ export const TRUNCATED_ARGS_KEY = "__truncated_raw";
 export function isTruncatedArguments(args: unknown): boolean {
   if (!args || typeof args !== "object" || Array.isArray(args)) return false;
   const keys = Object.keys(args as Record<string, unknown>);
-  return keys.length === 1 && keys[0] === TRUNCATED_ARGS_KEY && typeof (args as Record<string, unknown>)[TRUNCATED_ARGS_KEY] === "string";
+  return (
+    keys.length === 1 &&
+    keys[0] === TRUNCATED_ARGS_KEY &&
+    typeof (args as Record<string, unknown>)[TRUNCATED_ARGS_KEY] === "string"
+  );
 }

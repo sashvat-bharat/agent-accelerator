@@ -1,10 +1,6 @@
 import type { ModelSpec } from "./model.ts";
 import type { ToolDefinition } from "./tool.ts";
-import type {
-  ThinkingLevel,
-  CacheOption,
-  ServiceTier,
-} from "./core.ts";
+import type { ThinkingLevel, CacheOption, ServiceTier } from "./core.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
 import type { Agent } from "../agent/agent.ts";
 import type { z } from "zod";
@@ -47,14 +43,7 @@ export interface AgentLogger {
 }
 
 /** Canonical tool-selection control. String form is the portable subset. */
-export type ToolChoiceOption =
-  | "auto"
-  | "none"
-  | "required"
-  | { mode?: "auto" | "none" | "required"; tool?: string };
-
-/** Canonical stop control: sequence(s) halting generation. */
-export type StopOption = string | string[];
+export type ToolChoiceOption = "auto" | "none" | "required" | { mode?: "auto" | "none" | "required"; tool?: string };
 
 /** Canonical structured-output input. Zod, JSON Schema, or explicit form. */
 export type StructuredOutputOption =
@@ -167,10 +156,6 @@ export interface AgentConfig {
   googleTier?: "free" | "paid";
   /** Maximum output tokens for one model call. */
   maxOutputTokens?: number;
-  /** Stop sequence(s). */
-  stop?: StopOption;
-  /** Deterministic seed, when the provider supports it. */
-  seed?: number;
   /**
    * Optional output schema (Zod, JSON Schema, or `{ name, schema, strict }`,
    * see `StructuredOutputOption`, stored as `unknown` so `zod`
@@ -383,10 +368,6 @@ export interface AgentRunOptions {
   toolChoice?: ToolChoiceOption;
   /** Per-run output-token cap. */
   maxOutputTokens?: number;
-  /** Per-run stop sequence(s). */
-  stop?: StopOption;
-  /** Per-run seed. */
-  seed?: number;
   /** Per-run retry override. */
   retry?: RetryPolicyConfig;
   /** Per-run fetch override. */

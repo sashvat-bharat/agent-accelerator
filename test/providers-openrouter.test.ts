@@ -748,24 +748,6 @@ describe("small request and usage values", () => {
     expect(bodies[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(w.messages).toEqual([]);
   });
-
-  it("sends at most 4 stop sequences and says so once", async () => {
-    const bodies: any[] = [];
-    (globalThis as any).fetch = async (_u: unknown, req: any) => (bodies.push(JSON.parse(req.body)), frames({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }));
-    const w = captureWarnings();
-    try {
-      const provider = new OpenRouterChatCompletionsProvider();
-      const ctx = { messages: [{ role: "user" as const, content: "hi" }] };
-      await provider.generate("m", ctx, { apiKey: "k", stop: ["a", "b", "c", "d", "e", "f"] });
-      await provider.generate("m", ctx, { apiKey: "k", stop: ["a", "b"] });
-    } finally {
-      w.restore();
-    }
-    expect(bodies[0].stop).toEqual(["a", "b", "c", "d"]);
-    expect(bodies[1].stop).toEqual(["a", "b"]);
-    expect(w.messages.length).toBe(1);
-    expect(w.messages[0]).toMatch(/at most 4 stop sequences/);
-  });
 });
 
 describe("402 from the in-flight spending budget", () => {

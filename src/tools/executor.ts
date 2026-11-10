@@ -1,11 +1,7 @@
-import type {
-  ToolDefinition,
-  ToolCallRecord,
-  ToolResultRecord,
-  ToolExecutionContext,
-} from "../types/tool.ts";
+import type { ToolDefinition, ToolCallRecord, ToolResultRecord, ToolExecutionContext } from "../types/tool.ts";
 import { toJsonSafe } from "../utils/serialization.ts";
 import { ConfigError } from "../types/errors.ts";
+import { isTransientError } from "../utils/errors.ts";
 import { isSubagentResult } from "./subagent-result.ts";
 import { isTruncatedArguments } from "../types/tool.ts";
 import { telemetryBus } from "../telemetry.ts";
@@ -23,7 +19,13 @@ export interface ExecuteToolsOptions {
   /** Opens the log file of one call (only when the Agent persists to a folder); the executor writes its steps into it and `ctx.log` writes through it. */
   openToolLog?: (call: ToolCallRecord, sessionId: string | undefined) => ToolLogWriter | undefined;
   /** Forwards live sub-agent deltas (realtime worker thinking/text) to the caller. */
-  onSubagentEvent?: (event: { trackingId: string; delta?: string; thinkingDelta?: string; partialText?: string; partialThinking?: string }) => void;
+  onSubagentEvent?: (event: {
+    trackingId: string;
+    delta?: string;
+    thinkingDelta?: string;
+    partialText?: string;
+    partialThinking?: string;
+  }) => void;
 }
 
 const DEFAULT_TOOL_CONCURRENCY = 8;
@@ -93,9 +95,7 @@ export function isTruncatedToolCall(call: ToolCallRecord): boolean {
  * same name (case/format-insensitive via {@link normalizeToolName}), which
  * would otherwise make model tool calls ambiguous.
  */
-export function assertNoToolCollisions(
-  tools: Record<string, ToolDefinition>
-): void {
+export function assertNoToolCollisions(tools: Record<string, ToolDefinition>): void {
   if (!tools) return;
   const seen = new Map<string, string>();
   for (const [key, definition] of Object.entries(tools)) {
@@ -296,9 +296,7 @@ function levenshtein(a: string, b: string): number {
     row[0] = i;
     for (let j = 1; j <= b.length; j++) {
       const current = row[j]!;
-      row[j] = a[i - 1] === b[j - 1]
-        ? previous
-        : Math.min(previous + 1, row[j - 1]! + 1, current + 1);
+      row[j] = a[i - 1] === b[j - 1] ? previous : Math.min(previous + 1, row[j - 1]! + 1, current + 1);
       previous = current;
     }
   }
@@ -339,10 +337,7 @@ function resolveTool(tools: Record<string, ToolDefinition>, requestedName: strin
 }
 
 /** Finds a tool definition by exact or case/format-insensitive name (no suggestion logic). */
-export function findToolDefinition(
-  tools: Record<string, ToolDefinition>,
-  name: string
-): ToolDefinition | undefined {
+export function findToolDefinition(tools: Record<string, ToolDefinition>, name: string): ToolDefinition | undefined {
   return resolveTool(tools, name).definition;
 }
 
@@ -399,21 +394,6 @@ class Semaphore {
       return;
     }
   }
-}
-
-/**
- * True for retry-worthy failures: explicit opt-in flags (`transient` /
- * `retryable`), retryable HTTP statuses, or retryable network codes. Never
- * matches on message text — message content is untrusted and locale-fragile.
- */
-function isTransientError(error: any): boolean {
-  if (!error) return false;
-  if (error.transient === true || error.retryable === true) return true;
-  const status = Number(error.status ?? error.statusCode ?? error.response?.status);
-  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
-  const code = String(error.code || "").toUpperCase();
-  if (["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ETIMEDOUT", "EPIPE", "UND_ERR_CONNECT_TIMEOUT"].includes(code)) return true;
-  return false;
 }
 
 // Waits the retry backoff, rejecting `Tool execution aborted` as soon as the run aborts; in: runSingle's retry loop, out: nothing.
@@ -505,10 +485,18 @@ async function executeAttempt(
  *
  * @example `const results = await executeToolCalls({ tools, toolCalls });`
  */
-export async function executeToolCalls(
-  options: ExecuteToolsOptions
-): Promise<ToolResultRecord[]> {
-  const { tools, toolCalls, agentName, parallel = true, signal, sessionId, onSubagentEvent, onResult, openToolLog } = options;
+export async function executeToolCalls(options: ExecuteToolsOptions): Promise<ToolResultRecord[]> {
+  const {
+    tools,
+    toolCalls,
+    agentName,
+    parallel = true,
+    signal,
+    sessionId,
+    onSubagentEvent,
+    onResult,
+    openToolLog,
+  } = options;
   assertNoToolCollisions(tools);
   const globalSemaphore = new Semaphore(DEFAULT_TOOL_CONCURRENCY);
   const perToolSemaphores = new Map<string, Semaphore>();
@@ -516,9 +504,7 @@ export async function executeToolCalls(
   const getToolSemaphore = (name: string, definition: ToolDefinition): Semaphore => {
     const existing = perToolSemaphores.get(name);
     if (existing) return existing;
-    const configured = integerOption(
-      definition.maxConcurrency
-    );
+    const configured = integerOption(definition.maxConcurrency);
     const limit = configured && configured > 0 ? configured : DEFAULT_TOOL_CONCURRENCY;
     const semaphore = new Semaphore(limit);
     perToolSemaphores.set(name, semaphore);
@@ -578,7 +564,14 @@ export async function executeToolCalls(
     let stopReason: string | undefined;
     const stoppedResult = (): ToolResultRecord => {
       trace("call_stopped", "warn", { reason: stopReason, attempts, durationMs: elapsedMs(executionStartTime) });
-      return { id: call.id, name: resolved.name, result: stopReason, isError: false, stopped: true, durationMs: elapsedMs(executionStartTime) };
+      return {
+        id: call.id,
+        name: resolved.name,
+        result: stopReason,
+        isError: false,
+        stopped: true,
+        durationMs: elapsedMs(executionStartTime),
+      };
     };
 
     try {
@@ -599,7 +592,8 @@ export async function executeToolCalls(
           stopReason ??= String(reason);
           throw new ToolStopSignal();
         },
-        log: (message, data) => log?.write({ phase: "log", message, ...(data !== undefined ? { data: toJsonSafe(data) } : {}) }),
+        log: (message, data) =>
+          log?.write({ phase: "log", message, ...(data !== undefined ? { data: toJsonSafe(data) } : {}) }),
         emit: (event) => {
           if (event?.type === "progress") progress = event;
           trace(event?.type === "progress" ? "progress" : "event", "info", { event: capJson(event) });
@@ -620,9 +614,7 @@ export async function executeToolCalls(
               ? JSON.stringify(toolDef.parameters).slice(0, 800)
               : undefined;
           const detail = parseRes.error.message;
-          const hint = expectedParams
-            ? ` Expected parameters: ${expectedParams}.`
-            : "";
+          const hint = expectedParams ? ` Expected parameters: ${expectedParams}.` : "";
           trace("call_blocked", "warn", { reason: "schema_validation", detail: parseRes.error.message });
           return {
             id: call.id,
@@ -648,7 +640,7 @@ export async function executeToolCalls(
       // Attempts run serially in the while loop below — never concurrently —
       // so a non-idempotent tool cannot execute twice at the same time.
       const isIdempotent = (toolDef as any).idempotent === true;
-      const maxAttempts = configuredTries && configuredTries > 0 ? configuredTries : (isIdempotent ? 3 : 1);
+      const maxAttempts = configuredTries && configuredTries > 0 ? configuredTries : isIdempotent ? 3 : 1;
       const timeoutMs = numericOption(toolDef.timeoutMs);
       // Telemetry starts when the tool body is about to run, excluding queue
       // wait and schema validation. Retries/backoff remain part of this call.
@@ -668,8 +660,16 @@ export async function executeToolCalls(
           if (stopReason !== undefined) throw err; // ctx.stop: not a failure, never retried
           timedOut = err?.toolTimeout === true;
           const willRetry =
-            isTransientError(err) && attempt < maxAttempts && !(err?.code === "ETIMEDOUT" && (!configuredTries || configuredTries <= 0));
-          trace("attempt_failed", "warn", { attempt, maxAttempts, willRetry, error: describeError(err), progress: capJson(progress) });
+            isTransientError(err) &&
+            attempt < maxAttempts &&
+            !(err?.code === "ETIMEDOUT" && (!configuredTries || configuredTries <= 0));
+          trace("attempt_failed", "warn", {
+            attempt,
+            maxAttempts,
+            willRetry,
+            error: describeError(err),
+            progress: capJson(progress),
+          });
           if (!isTransientError(err) || attempt >= maxAttempts) throw err;
           // A timeout is a deliberate per-attempt deadline, not a parent
           // cancellation (which rejects via the abort signal instead and is
@@ -765,7 +765,9 @@ export async function executeToolCalls(
               error: {
                 name: err?.name,
                 ...(err?.code !== undefined ? { code: err.code } : {}),
-                ...(err?.status !== undefined || err?.statusCode !== undefined ? { status: err.status ?? err.statusCode } : {}),
+                ...(err?.status !== undefined || err?.statusCode !== undefined
+                  ? { status: err.status ?? err.statusCode }
+                  : {}),
               },
             }),
         attempts,

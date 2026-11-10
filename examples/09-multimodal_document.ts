@@ -9,12 +9,14 @@ const agent = new Agent({
   captureRaw: "redacted",
 });
 
-const res = await agent.run([
-  { type: "text", text: "Summarize this document in one line. also tell me did you actually read the file or not?" },
-  // NOTE: the parser fetches the URL itself — it must be directly reachable.
-  // NOTE: native parsing needs a file-capable model (catalog `pdf` input).
-  { type: "file", file: "https://arxiv.org/pdf/2609.25611v1", mimeType: "application/pdf", filename: "2024ltr.pdf" },
-]).catch(fail);
+const res = await agent
+  .run([
+    { type: "text", text: "Summarize this document in one line. also tell me did you actually read the file or not?" },
+    // NOTE: the parser fetches the URL itself — it must be directly reachable.
+    // NOTE: native parsing needs a file-capable model (catalog `pdf` input).
+    { type: "file", file: "https://arxiv.org/pdf/2609.25611v1", mimeType: "application/pdf", filename: "2024ltr.pdf" },
+  ])
+  .catch(fail);
 
 console.log(res.text);
 console.log(`[${res.usage.totalTokens} tok]`);

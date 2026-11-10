@@ -17,8 +17,6 @@ import * as path from "node:path";
 import { z } from "zod";
 import { readWithBackup, withFileMutex, writeFileDurable } from "../utils/durable.ts";
 import { telemetryBus } from "../telemetry.ts";
-import { resolveHome } from "../utils/home.ts";
-export { resolveHome };
 import { ValidationError } from "../types/errors.ts";
 import type { CostSource } from "../session/usage.ts";
 import type { ScheduledActionRecord, ScheduledRunStatus } from "../types/scheduler.ts";
@@ -106,7 +104,9 @@ export interface Heartbeat {
 
 /** Marks an action as running in this process (pid, host, token); written before the record flips to `cooking`; in: startCook, out: `<id>/.heartbeat`. */
 export function writeHeartbeat(home: string, id: string, token: string): void {
-  fs.writeFileSync(heartbeatFile(taskDir(home, id)), JSON.stringify({ pid: process.pid, host: os.hostname(), token }), { mode: 0o600 });
+  fs.writeFileSync(heartbeatFile(taskDir(home, id)), JSON.stringify({ pid: process.pid, host: os.hostname(), token }), {
+    mode: 0o600,
+  });
 }
 
 /** Refreshes the heartbeat's modification time; false when the file is gone; in: the scheduler tick for each run in flight. */
@@ -147,7 +147,8 @@ const isMissingFolder = (err: unknown): boolean => (err as { code?: string } | n
 // Deletes the leftover temp files of a task.json / delivery.json write that never finished (a killed process); only called while holding the action's mutex, which is what makes it safe (run files are written outside the mutex, so they are never touched); in: the three mutating helpers, out: nothing.
 function sweepShardTemps(dir: string): void {
   try {
-    for (const name of fs.readdirSync(dir)) if (/^(task|delivery)\.json\.tmp-\d+-[0-9a-z]+$/.test(name)) fs.rmSync(path.join(dir, name), { force: true });
+    for (const name of fs.readdirSync(dir))
+      if (/^(task|delivery)\.json\.tmp-\d+-[0-9a-z]+$/.test(name)) fs.rmSync(path.join(dir, name), { force: true });
   } catch {
     // why: an unreadable folder or an undeletable leftover is harmless.
   }
@@ -288,7 +289,8 @@ export function updateTask<T>(home: string, id: string, fn: (rec: ScheduledActio
       const rec = readTask(home, id);
       const before = rec ? JSON.stringify(rec) : "";
       const result = fn(rec);
-      if (rec && JSON.stringify(rec) !== before) writeFileDurable(taskFile(dir), JSON.stringify({ version: 2, task: rec }, null, 2) + "\n");
+      if (rec && JSON.stringify(rec) !== before)
+        writeFileDurable(taskFile(dir), JSON.stringify({ version: 2, task: rec }, null, 2) + "\n");
       return result;
     });
   } catch (err) {
@@ -301,7 +303,11 @@ export function updateTask<T>(home: string, id: string, fn: (rec: ScheduledActio
  * Creates an action in a new folder. The folder is made with a create-only `mkdir`, so two processes can never take the
  * same id; `nextId` is called again until a free one is found, then `build` makes the record for it.
  */
-export function createTask(home: string, nextId: () => string, build: (id: string) => ScheduledActionRecord): ScheduledActionRecord {
+export function createTask(
+  home: string,
+  nextId: () => string,
+  build: (id: string) => ScheduledActionRecord
+): ScheduledActionRecord {
   fs.mkdirSync(baseDir(home), { recursive: true, mode: 0o700 });
   for (let attempt = 0; attempt < 100; attempt++) {
     const id = nextId();
@@ -330,7 +336,8 @@ export function deleteTask(home: string, id: string): boolean {
   try {
     removed = withFileMutex(mutexFile(dir), () => {
       const had = fs.existsSync(taskFile(dir)) || fs.existsSync(deliveryFile(dir));
-      for (const f of [taskFile(dir), deliveryFile(dir)]) fs.rmSync(f, { force: true }), fs.rmSync(`${f}.bak`, { force: true });
+      for (const f of [taskFile(dir), deliveryFile(dir)])
+        fs.rmSync(f, { force: true }), fs.rmSync(`${f}.bak`, { force: true });
       fs.rmSync(heartbeatFile(dir), { force: true });
       return had;
     });
@@ -352,7 +359,8 @@ export function readDeliveries(home: string): PendingDelivery[] {
   for (const folder of actionFolders(home)) {
     if (!TASK_ID_PATTERN.test(folder) || folder.length > MAX_TASK_ID_LENGTH) continue;
     const file = deliveryFile(taskDir(home, folder));
-    for (const entry of readShard(file, parsePending) ?? []) if (inOwnFolder(file, folder, entry["id"])) out.push(entry as unknown as PendingDelivery);
+    for (const entry of readShard(file, parsePending) ?? [])
+      if (inOwnFolder(file, folder, entry["id"])) out.push(entry as unknown as PendingDelivery);
   }
   return out.sort((a, b) => String(a.deliverAt).localeCompare(String(b.deliverAt)));
 }
@@ -441,7 +449,9 @@ const deliverySchema = z.object({
 /** `undefined` when a `delivery.json` entry is usable, else a one-line reason. Never throws. */
 export function validateDelivery(raw: unknown): string | undefined {
   const parsed = deliverySchema.safeParse(raw);
-  return parsed.success ? undefined : parsed.error.issues.map((i) => `${i.path.join(".") || "entry"}: ${i.message}`).join("; ");
+  return parsed.success
+    ? undefined
+    : parsed.error.issues.map((i) => `${i.path.join(".") || "entry"}: ${i.message}`).join("; ");
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +482,10 @@ export function writeRunFile(home: string, id: string, deliverAt: Date, header: 
 }
 
 /** Reads a run file (header fields as strings + result text). `undefined` when missing or outside the folder. */
-export function readRun(home: string, relativeFile: string): { header: Record<string, string>; body: string } | undefined {
+export function readRun(
+  home: string,
+  relativeFile: string
+): { header: Record<string, string>; body: string } | undefined {
   const file = runPath(home, relativeFile);
   if (!file.startsWith(baseDir(home) + path.sep)) return undefined;
   let text: string;

@@ -95,36 +95,34 @@ describe("generation + call controls are forwarded", () => {
   const groq = (extra: object = {}, fn?: typeof fetch) =>
     new Agent({ model: "groq/llama-3.3-70b-versatile", apiKey: "k", baseUrl: "https://api.groq.com/openai/v1", ...(fn ? { fetch: fn } : {}), ...extra });
 
-  it("Chat Completions: maxOutputTokens/stop/seed, with per-run overrides merged per key", async () => {
+  it("Chat Completions: maxOutputTokens, with per-run overrides merged per key", async () => {
     const { fn, calls } = recorder(() => new Response(JSON.stringify(chat()), { status: 200 }));
-    const agent = groq({ maxOutputTokens: 100, stop: "END", seed: 7 }, fn);
+    const agent = groq({ maxOutputTokens: 100 }, fn);
     await agent.run("hi");
-    expect(calls[0]!.body).toMatchObject({ max_tokens: 100, stop: ["END"], seed: 7 });
+    expect(calls[0]!.body).toMatchObject({ max_tokens: 100 });
     await agent.run("again", { maxOutputTokens: 50 });
-    expect(calls[1]!.body).toMatchObject({ max_tokens: 50, stop: ["END"], seed: 7 });
+    expect(calls[1]!.body).toMatchObject({ max_tokens: 50 });
   });
 
   it("sends none of them when unset (strict endpoints stay untouched)", async () => {
     const { fn, calls } = recorder(() => new Response(JSON.stringify(chat()), { status: 200 }));
     await groq({}, fn).run("hi");
-    for (const k of ["max_tokens", "stop", "seed"]) expect(calls[0]!.body[k]).toBeUndefined();
+    for (const k of ["max_tokens"]) expect(calls[0]!.body[k]).toBeUndefined();
   });
 
-  it("Google: max_output_tokens is sent; stop and seed warn on the bus instead of vanishing", async () => {
-    clearEmittedWarnings();
-    console.warn = () => {};
-    const seen: string[] = [];
-    const off = telemetryBus.onEvent((e) => e.code === "provider_warning" && seen.push(e.data?.capability));
-    try {
-      const { fn, calls } = recorder(() => new Response(JSON.stringify(textInteraction()), { status: 200 }));
-      await new Agent({ model: GOOGLE_MODEL, apiKey: "k", fetch: fn, maxOutputTokens: 77, stop: ["X"], seed: 3 }).run("hi");
-      expect(calls[0]!.body.generation_config.max_output_tokens).toBe(77);
-      expect(JSON.stringify(calls[0]!.body)).not.toContain('"seed"');
-      expect(seen).toContain("stop sequences");
-      expect(seen).toContain("seed");
-    } finally {
-      off();
-    }
+  it("leftover `seed` and `stop` options (removed in 0.6.0) are ignored and never reach the wire", async () => {
+    const { fn, calls } = recorder(() => new Response(JSON.stringify(chat()), { status: 200 }));
+    const agent = groq({ seed: 7, stop: "END" }, fn);
+    await agent.run("hi", { seed: 9, stop: ["X"] } as object);
+    const wire = JSON.stringify(calls[0]!.body);
+    expect(wire).not.toContain("seed");
+    expect(wire).not.toContain('"stop"');
+  });
+
+  it("Google: max_output_tokens is sent", async () => {
+    const { fn, calls } = recorder(() => new Response(JSON.stringify(textInteraction()), { status: 200 }));
+    await new Agent({ model: GOOGLE_MODEL, apiKey: "k", fetch: fn, maxOutputTokens: 77 }).run("hi");
+    expect(calls[0]!.body.generation_config.max_output_tokens).toBe(77);
   });
 
   it("OpenAI Responses: max_output_tokens is sent", async () => {

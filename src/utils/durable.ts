@@ -32,7 +32,11 @@ export function fsyncFolder(dir: string): void {
  * Durable atomic write: temp file (0600) -> fsync -> previous version kept as `<file>.bak` (hard link, no copy)
  * -> rename -> fsync of the folder. Throws on failure; the temp file is removed. `backup: false` skips the `.bak`.
  */
-export function writeFileDurable(filePath: string, content: string | Uint8Array, opts: { backup?: boolean } = {}): void {
+export function writeFileDurable(
+  filePath: string,
+  content: string | Uint8Array,
+  opts: { backup?: boolean } = {}
+): void {
   const dir = path.dirname(filePath);
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -73,7 +77,10 @@ export function writeFileDurable(filePath: string, content: string | Uint8Array,
  * Reads `file`; when `isValid` rejects it, falls back to `<file>.bak`. `undefined` when the file is missing (a deleted
  * file is never resurrected from its backup). When both are invalid the primary text comes back, `fromBackup: false`.
  */
-export function readWithBackup(file: string, isValid: (text: string) => boolean): { text: string; fromBackup: boolean } | undefined {
+export function readWithBackup(
+  file: string,
+  isValid: (text: string) => boolean
+): { text: string; fromBackup: boolean } | undefined {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf8");
@@ -234,7 +241,8 @@ const heldMutexes = new Set<string>();
  */
 export function withFileMutex<T>(lockFile: string, fn: () => T): T {
   const file = path.resolve(lockFile);
-  if (heldMutexes.has(file)) throw new ConfigError(`[Agent Accelerator] Mutex "${file}" is already held by this process (nested use).`);
+  if (heldMutexes.has(file))
+    throw new ConfigError(`[Agent Accelerator] Mutex "${file}" is already held by this process (nested use).`);
   const mine = JSON.stringify({ pid: process.pid, host: os.hostname(), at: Date.now() });
   const deadline = Date.now() + MUTEX_WAIT_MS;
   let unreadable = 0;
@@ -265,7 +273,8 @@ export function withFileMutex<T>(lockFile: string, fn: () => T): T {
       owner = undefined;
     }
     let stale = false;
-    if (typeof owner?.pid !== "number") stale = ++unreadable > 5; // empty or garbage: another process may be mid-write
+    if (typeof owner?.pid !== "number")
+      stale = ++unreadable > 5; // empty or garbage: another process may be mid-write
     else if (owner.host === os.hostname() && !processAlive(owner.pid)) stale = true;
     else if (Date.now() - mtime > MUTEX_MAX_AGE_MS) stale = true;
     if (stale) {
@@ -276,7 +285,10 @@ export function withFileMutex<T>(lockFile: string, fn: () => T): T {
       }
       continue;
     }
-    if (Date.now() > deadline) throw new ConfigError(`[Agent Accelerator] Timed out after ${MUTEX_WAIT_MS} ms waiting for the lock "${file}" (held by process ${String(owner?.pid)}).`);
+    if (Date.now() > deadline)
+      throw new ConfigError(
+        `[Agent Accelerator] Timed out after ${MUTEX_WAIT_MS} ms waiting for the lock "${file}" (held by process ${String(owner?.pid)}).`
+      );
     pause(typeof owner?.pid === "number" ? 2 : 40);
   }
   heldMutexes.add(file);

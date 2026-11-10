@@ -28,9 +28,7 @@ export function parseArguments(raw: string | undefined): Record<string, unknown>
 
 /** Trims/collapses assembled thinking parts (no edge-tripling). */
 export function normalizeThinkingParts(parts: string[]): string | undefined {
-  const cleaned = parts
-    .map((p) => p.replace(/\n{3,}/g, "\n\n").trim())
-    .filter((p) => p.length > 0);
+  const cleaned = parts.map((p) => p.replace(/\n{3,}/g, "\n\n").trim()).filter((p) => p.length > 0);
   return cleaned.length > 0 ? cleaned.join("\n") : undefined;
 }
 
@@ -49,21 +47,35 @@ export function redactedHeaders(headers: Record<string, string>): Record<string,
  * OpenAI `type`, OpenRouter `metadata.error_type` + `metadata.raw` + `metadata.limit_source`, and Google
  * `status` code shapes; unknown bodies degrade to a 300-char slice.
  */
-export function readErrorPayload(
-  bodyText: string
-): { message: string; code?: string | number; errorType?: string; raw?: string; limitSource?: string } {
+export function readErrorPayload(bodyText: string): {
+  message: string;
+  code?: string | number;
+  errorType?: string;
+  raw?: string;
+  limitSource?: string;
+} {
   try {
     const parsed: unknown = JSON.parse(bodyText);
     const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const err = (first as { error?: { message?: string; code?: string | number; type?: string; status?: string | number; metadata?: { error_type?: string; raw?: unknown; limit_source?: unknown } } })?.error;
+    const err = (
+      first as {
+        error?: {
+          message?: string;
+          code?: string | number;
+          type?: string;
+          status?: string | number;
+          metadata?: { error_type?: string; raw?: unknown; limit_source?: unknown };
+        };
+      }
+    )?.error;
     if (err && typeof err.message === "string") {
       const code = err.code ?? err.status;
-      const errorType =
-        err.type ?? err.metadata?.error_type ?? (first as { error_type?: string })?.error_type;
+      const errorType = err.type ?? err.metadata?.error_type ?? (first as { error_type?: string })?.error_type;
       const rawCandidate =
         (err as { metadata?: { raw?: unknown } }).metadata?.raw ??
         (first as { metadata?: { raw?: unknown } })?.metadata?.raw;
-      const raw = typeof rawCandidate === "string" && rawCandidate.trim() ? rawCandidate.trim().slice(0, 500) : undefined;
+      const raw =
+        typeof rawCandidate === "string" && rawCandidate.trim() ? rawCandidate.trim().slice(0, 500) : undefined;
       return {
         message: err.message,
         ...(code !== undefined ? { code } : {}),
@@ -111,7 +123,9 @@ export function isNotFoundChainError(error: unknown): boolean {
   );
   if (status === 404) return true;
   // `providerCode` on a wrapped ProviderError (its `code` is the SDK kind), `code` on a raw error.
-  return [err["providerCode"], err["code"], err["errorType"]].some((c) => String(c ?? "").toLowerCase() === "not_found");
+  return [err["providerCode"], err["code"], err["errorType"]].some(
+    (c) => String(c ?? "").toLowerCase() === "not_found"
+  );
 }
 
 /** Per-request timeout ms from provider options. */
@@ -121,25 +135,40 @@ export function timeoutFor(options: { timeoutMs?: number } | undefined): number 
 }
 
 /** Merges a parent signal with a timeout into one effective signal. Caller must call cleanup when the request settles so the timer never holds the loop open. */
-export function combinedSignal(signal?: AbortSignal, timeoutMs?: number): { signal: AbortSignal | undefined; cleanup: () => void } {
+export function combinedSignal(
+  signal?: AbortSignal,
+  timeoutMs?: number
+): { signal: AbortSignal | undefined; cleanup: () => void } {
   if (timeoutMs === undefined) return { signal, cleanup: () => {} };
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
-    try { ctrl.abort(); } catch {}
+    try {
+      ctrl.abort();
+    } catch {}
   }, timeoutMs);
-  try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
+  try {
+    (timer as unknown as { unref?: () => void }).unref?.();
+  } catch {}
   const cleanup = () => {
-    try { clearTimeout(timer); } catch {}
+    try {
+      clearTimeout(timer);
+    } catch {}
   };
   if (signal) {
     if (signal.aborted) {
       cleanup();
       ctrl.abort(signal.reason); // the caller's reason survives (`interrupt(new Error("..."))`)
     } else {
-      signal.addEventListener("abort", () => {
-        cleanup();
-        try { ctrl.abort(signal.reason); } catch {}
-      }, { once: true });
+      signal.addEventListener(
+        "abort",
+        () => {
+          cleanup();
+          try {
+            ctrl.abort(signal.reason);
+          } catch {}
+        },
+        { once: true }
+      );
     }
   }
   return { signal: ctrl.signal, cleanup };
@@ -167,7 +196,11 @@ export function hasAuthHeader(headers: Record<string, string> | undefined): bool
   if (!headers) return false;
   for (const [k, v] of Object.entries(headers)) {
     const lower = k.toLowerCase();
-    if ((lower === "authorization" || lower === "cf-aig-authorization") && typeof v === "string" && v.trim().length > 0) {
+    if (
+      (lower === "authorization" || lower === "cf-aig-authorization") &&
+      typeof v === "string" &&
+      v.trim().length > 0
+    ) {
       return true;
     }
   }
@@ -180,7 +213,10 @@ export function hasTruncatedToolArguments(args: unknown): boolean {
 }
 
 // True when a stream with no terminal event left a tool call whose arguments never fully arrived (none at all, or cut mid-JSON); in: the adapter's assembled calls and their records, out: its incomplete_stream guard.
-export function hasUnfinishedToolCall(calls: Iterable<{ startArgs: string; deltaArgs: string }>, toolCalls: Array<{ arguments: unknown }>): boolean {
+export function hasUnfinishedToolCall(
+  calls: Iterable<{ startArgs: string; deltaArgs: string }>,
+  toolCalls: Array<{ arguments: unknown }>
+): boolean {
   for (const c of calls) if (!c.startArgs.trim() && !c.deltaArgs.trim()) return true;
   return toolCalls.some((c) => isTruncatedArguments(c.arguments));
 }
@@ -220,7 +256,9 @@ export function clampToolCallId(id: string): string {
 
 // The finish reason of a turn that produced tool calls: `tool_calls`, except that a turn cut off by the output limit (`length`) keeps saying so when one of its calls was cut mid-JSON; in: the wire finish reason + the assembled calls, out: each streaming adapter.
 export function toolTurnFinishReason(finishReason: string, toolCalls: Array<{ arguments: unknown }>): string {
-  return finishReason === "length" && toolCalls.some((c) => isTruncatedArguments(c.arguments)) ? "length" : "tool_calls";
+  return finishReason === "length" && toolCalls.some((c) => isTruncatedArguments(c.arguments))
+    ? "length"
+    : "tool_calls";
 }
 
 // The JSON text of a tool call's arguments for a history message: `{}` for a call whose streamed arguments were cut off (the internal `__truncated_raw` marker was never the model's own output and is never resent); in: a stored tool call, out: each adapter's history builder.
@@ -249,7 +287,8 @@ export function parseRetryAfterMs(headers: Record<string, string> | undefined, n
     return undefined;
   };
   const ms = get("retry-after-ms");
-  if (ms !== undefined && ms.trim() !== "" && Number.isFinite(Number(ms)) && Number(ms) >= 0) return Math.round(Number(ms));
+  if (ms !== undefined && ms.trim() !== "" && Number.isFinite(Number(ms)) && Number(ms) >= 0)
+    return Math.round(Number(ms));
   const ra = get("retry-after");
   if (ra === undefined || ra.trim() === "") return undefined;
   const secs = Number(ra);
@@ -287,12 +326,16 @@ export function openStreamResponse(args: {
 }
 
 /** Retry knobs from provider request options, in the shape `withRetries` expects. */
-export function retryOptionsFrom(options: {
-  maxRetries?: number;
-  maxRetryDelayMs?: number;
-  retryBaseDelayMs?: number;
-  retryBudgetMs?: number;
-} | undefined): { maxRetries?: number; maxRetryDelayMs?: number; baseDelayMs?: number; retryBudgetMs?: number } {
+export function retryOptionsFrom(
+  options:
+    | {
+        maxRetries?: number;
+        maxRetryDelayMs?: number;
+        retryBaseDelayMs?: number;
+        retryBudgetMs?: number;
+      }
+    | undefined
+): { maxRetries?: number; maxRetryDelayMs?: number; baseDelayMs?: number; retryBudgetMs?: number } {
   return {
     maxRetries: options?.maxRetries,
     maxRetryDelayMs: options?.maxRetryDelayMs,
@@ -306,7 +349,10 @@ export function retryOptionsFrom(options: {
 // ---------------------------------------------------------------------------
 
 // Ties a provider stream to the caller's signal and to the stream's own cancel: one controller that aborts when either does; in: an adapter's stream(), out: the controller its request uses and the `release` its finally block calls.
-export function linkStreamAbort(eventStream: AssistantMessageEventStream, signal: AbortSignal | undefined): { linked: AbortController; release: () => void } {
+export function linkStreamAbort(
+  eventStream: AssistantMessageEventStream,
+  signal: AbortSignal | undefined
+): { linked: AbortController; release: () => void } {
   const linked = new AbortController();
   const forwardUserAbort = (): void => {
     try {
@@ -338,7 +384,11 @@ export function linkStreamAbort(eventStream: AssistantMessageEventStream, signal
 }
 
 // Runs one request attempt under a timer that aborts `controller` after `ms` (none when unset); in: an adapter's fetchOnce, out: its Response.
-export async function withAbortTimer<T>(controller: AbortController, ms: number | undefined, run: () => Promise<T>): Promise<T> {
+export async function withAbortTimer<T>(
+  controller: AbortController,
+  ms: number | undefined,
+  run: () => Promise<T>
+): Promise<T> {
   const timer =
     ms && ms > 0
       ? setTimeout(() => {
@@ -397,13 +447,17 @@ export function incompleteStreamCheck(a: {
 }): Error | undefined {
   if (a.hasTerminal || !(a.empty || a.unfinishedCall)) return undefined;
   const contentType = Object.entries(a.responseHeaders).find(([k]) => k.toLowerCase() === "content-type")?.[1];
-  const isSSEPayload = (typeof contentType === "string" && (contentType.includes("event-stream") || contentType.startsWith("text/"))) || a.framesSeen > 0 || a.badFrames > 0;
+  const isSSEPayload =
+    (typeof contentType === "string" && (contentType.includes("event-stream") || contentType.startsWith("text/"))) ||
+    a.framesSeen > 0 ||
+    a.badFrames > 0;
   return isSSEPayload ? incompleteStreamError(a.provider, a.modelId) : undefined;
 }
 
 // Fails a stream with the right error: an abort (the signal, the stream's cancel, or an AbortError) becomes the plain `AbortError`, anything else passes through; in: an adapter's catch block, out: the stream's result() rejection.
 export function failStream(eventStream: AssistantMessageEventStream, linked: AbortController, err: unknown): void {
   const raw = err instanceof Error ? err : new Error(String(err));
-  const isAbort = linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
+  const isAbort =
+    linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
   eventStream.fail(isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw);
 }
