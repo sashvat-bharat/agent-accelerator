@@ -1000,3 +1000,70 @@ describe("media usage details", () => {
     expect(res.usage.outputDetails).toBeUndefined();
   });
 });
+
+describe("OpenRouter env options", () => {
+  const VARS = [
+    "OPENROUTER_ORDER", "OPENROUTER_ONLY", "OPENROUTER_IGNORE", "OPENROUTER_ALLOW_FALLBACKS", "OPENROUTER_REQUIRE_PARAMETERS",
+    "OPENROUTER_ZDR", "OPENROUTER_DATA_COLLECTION", "OPENROUTER_SORT", "OPENROUTER_PARALLEL_TOOL_CALLS",
+    "OPENROUTER_REASONING_EXCLUDE", "OPENROUTER_USER",
+  ];
+  const saved: Record<string, string | undefined> = {};
+  beforeEach(() => { for (const v of VARS) { saved[v] = process.env[v]; delete process.env[v]; } });
+  afterEach(() => {
+    for (const v of VARS) saved[v] === undefined ? delete process.env[v] : (process.env[v] = saved[v]);
+    (globalThis as any).fetch = ORIGINAL_FETCH;
+  });
+
+  const tools = [{ name: "t", description: "d", parameters: { type: "object", properties: {} } }];
+  async function body(options: Record<string, unknown> = {}): Promise<any> {
+    let sent: any;
+    (globalThis as any).fetch = async (_u: unknown, req: any) => { sent = JSON.parse(req.body); return sseReply(TEXT_RESPONSE); };
+    await new OpenRouterChatCompletionsProvider().generate("acme/test-model", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k", ...options } as any);
+    return sent;
+  }
+
+  it("sends none of the extra fields when no variable is set", async () => {
+    const b = await body({ tools });
+    for (const k of ["provider", "parallel_tool_calls", "user", "reasoning"]) expect(b[k]).toBeUndefined();
+  });
+
+  it("maps every variable to its documented body field", async () => {
+    Object.assign(process.env, {
+      OPENROUTER_ORDER: "anthropic, openai", OPENROUTER_ONLY: "anthropic", OPENROUTER_IGNORE: "azure",
+      OPENROUTER_ALLOW_FALLBACKS: "false", OPENROUTER_REQUIRE_PARAMETERS: "true", OPENROUTER_ZDR: "1",
+      OPENROUTER_DATA_COLLECTION: "deny", OPENROUTER_SORT: "throughput", OPENROUTER_PARALLEL_TOOL_CALLS: "false",
+      OPENROUTER_REASONING_EXCLUDE: "true", OPENROUTER_USER: "end-user-7",
+    });
+    const b = await body({ tools, thinking: { level: "low" } });
+    expect(b.provider).toEqual({
+      order: ["anthropic", "openai"], only: ["anthropic"], ignore: ["azure"], allow_fallbacks: false,
+      require_parameters: true, zdr: true, data_collection: "deny", sort: "throughput",
+    });
+    expect(b.parallel_tool_calls).toBe(false);
+    expect(b.reasoning).toEqual({ effort: "low", exclude: true });
+    expect(b.user).toBe("end-user-7");
+  });
+
+  it("lets the Agent's own env win, and sends exclude without an effort", async () => {
+    process.env["OPENROUTER_ALLOW_FALLBACKS"] = "true";
+    const b = await body({ env: { OPENROUTER_ALLOW_FALLBACKS: "false", OPENROUTER_REASONING_EXCLUDE: "true" } });
+    expect(b.provider).toEqual({ allow_fallbacks: false });
+    expect(b.reasoning).toEqual({ exclude: true });
+  });
+
+  it("sends parallel_tool_calls only when the request has tools", async () => {
+    process.env["OPENROUTER_PARALLEL_TOOL_CALLS"] = "true";
+    expect((await body()).parallel_tool_calls).toBeUndefined();
+    expect((await body({ tools })).parallel_tool_calls).toBe(true);
+  });
+
+  it("fails with a ConfigError before any network call on a bad value", async () => {
+    process.env["OPENROUTER_SORT"] = "cheapest";
+    let called = false;
+    (globalThis as any).fetch = async () => { called = true; return sseReply(TEXT_RESPONSE); };
+    await expect(
+      new OpenRouterChatCompletionsProvider().generate("acme/test-model", { messages: [{ role: "user", content: "hi" }] }, { apiKey: "k" })
+    ).rejects.toMatchObject({ name: "ConfigError" });
+    expect(called).toBe(false);
+  });
+});

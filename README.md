@@ -720,7 +720,21 @@ It also:
 * maps `tool_choice` (`auto` omitted; `none`, `required`, and function pins supported);
 * treats an error chunk inside a stream (HTTP 200) like an HTTP error: its status comes from the chunk's `code`, or from its `error_type` (`rate_limit_exceeded` 429, `provider_overloaded` 503, `provider_unavailable` 502, `timeout` 504, `server` 500), so `runRetries` retries the retryable ones;
 * reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present (a reported `0`, a free model or a cache hit, stays a known `$0`);
-* accepts `anthropic/...` and `~anthropic/...` model names for the `5m` / `1h` cache setting.
+* accepts `anthropic/...` and `~anthropic/...` model names for the `5m` / `1h` cache setting;
+* sends a turn's `reasoning_details` blocks and parsed-PDF `file` annotations back on the next turns, exactly as OpenRouter returned them;
+* reads provider routing and a few request fields from env vars (see below), never from `AgentConfig`.
+
+**Env vars** (an Agent's own `env: { ... }` wins over `process.env`; nothing is sent for a variable that is not set; a bad value throws a `ConfigError` before any request):
+
+| Variable | Sent as |
+|---|---|
+| `OPENROUTER_ORDER`, `OPENROUTER_ONLY`, `OPENROUTER_IGNORE` | `provider.order` / `only` / `ignore` (comma-separated provider slugs) |
+| `OPENROUTER_ALLOW_FALLBACKS`, `OPENROUTER_REQUIRE_PARAMETERS`, `OPENROUTER_ZDR` | `provider.allow_fallbacks` / `require_parameters` / `zdr` (`true`/`false`/`1`/`0`) |
+| `OPENROUTER_DATA_COLLECTION` | `provider.data_collection` (`allow` or `deny`) |
+| `OPENROUTER_SORT` | `provider.sort` (`price`, `throughput` or `latency`) |
+| `OPENROUTER_PARALLEL_TOOL_CALLS` | `parallel_tool_calls` (only when the request has tools) |
+| `OPENROUTER_REASONING_EXCLUDE` | `reasoning.exclude` (the model reasons but the text is not returned) |
+| `OPENROUTER_USER` | `user` (a stable end-user id) |
 
 `serviceTier` values other than `flex` / `priority` are omitted (standard routing).
 

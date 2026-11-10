@@ -155,6 +155,8 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `OPENAI_API_KEY`, `OPENAI_BASE_API_KEY` | OpenAI key |
 | `OPENAI_BASE_URL`, `OPENAI_API_BASE` | OpenAI endpoint; when set, a bare `MODEL` routes to OpenAI |
 | `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` | OpenRouter key and endpoint |
+| `OPENROUTER_ORDER`, `_ONLY`, `_IGNORE`, `_ALLOW_FALLBACKS`, `_REQUIRE_PARAMETERS`, `_ZDR`, `_DATA_COLLECTION`, `_SORT` | OpenRouter provider routing (`provider.*` in the request); see the OpenRouter section of the README |
+| `OPENROUTER_PARALLEL_TOOL_CALLS`, `OPENROUTER_REASONING_EXCLUDE`, `OPENROUTER_USER` | OpenRouter `parallel_tool_calls`, `reasoning.exclude` and `user` |
 | `<PREFIX>_API_KEY`, `<PREFIX>_BASE_URL` | Any OpenAI-compatible endpoint (for `PREFIX/model`), e.g. `GROQ_API_KEY` and `GROQ_BASE_URL`. Base URL is required |
 | `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
 | `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |

@@ -121,7 +121,10 @@ interface ChatRequestBody {
   messages: ChatMessage[];
   tools?: Array<Record<string, unknown>>;
   tool_choice?: string | { type: "function"; function: { name: string } };
-  reasoning?: { effort: string };
+  reasoning?: { effort?: string; exclude?: boolean };
+  provider?: Record<string, unknown>;
+  parallel_tool_calls?: boolean;
+  user?: string;
   service_tier?: string;
   session_id?: string;
   cache_control?: { type: "ephemeral"; ttl: "5m" | "1h" };
@@ -194,6 +197,71 @@ const RETRYABLE_ERROR_TYPE_STATUS: Record<string, number> = {
 function midStreamStatus(code: unknown, errorType: unknown): number | undefined {
   if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) return code;
   return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
+}
+
+// OpenRouter options that come from env vars, never from AgentConfig (provider routing, `parallel_tool_calls`, `reasoning.exclude`, `user`). A per-Agent `env` wins over the process env; nothing is sent when no variable is set; a bad value is a ConfigError before any network call. NOT supported on purpose (the owner does not want them for now): `reasoning.max_tokens` and `trace`; in: buildBody, out: the extra body fields.
+const ROUTING_LISTS = { OPENROUTER_ORDER: "order", OPENROUTER_ONLY: "only", OPENROUTER_IGNORE: "ignore" } as const;
+const ROUTING_FLAGS = {
+  OPENROUTER_ALLOW_FALLBACKS: "allow_fallbacks",
+  OPENROUTER_REQUIRE_PARAMETERS: "require_parameters",
+  OPENROUTER_ZDR: "zdr",
+} as const;
+function openRouterEnvOptions(options?: ProviderRequestOptions): {
+  provider?: Record<string, unknown>;
+  parallel_tool_calls?: boolean;
+  reasoning_exclude?: boolean;
+  user?: string;
+} {
+  const read = (name: string): string | undefined => {
+    const own = options?.env?.[name]?.trim();
+    return own ? own : getEnv(name);
+  };
+  const bad = (name: string, value: string, expected: string): never => {
+    throw new ConfigError(`[Agent Accelerator] Invalid ${name} ${JSON.stringify(value)}: expected ${expected}.`);
+  };
+  const flag = (name: string): boolean | undefined => {
+    const v = read(name);
+    if (v === undefined) return undefined;
+    const t = v.toLowerCase();
+    if (t === "true" || t === "1") return true;
+    if (t === "false" || t === "0") return false;
+    return bad(name, v, "true or false");
+  };
+  const provider: Record<string, unknown> = {};
+  for (const [name, field] of Object.entries(ROUTING_LISTS)) {
+    const v = read(name);
+    if (v === undefined) continue;
+    const list = v
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (list.length === 0) bad(name, v, "a comma-separated list of provider slugs");
+    provider[field] = list;
+  }
+  for (const [name, field] of Object.entries(ROUTING_FLAGS)) {
+    const v = flag(name);
+    if (v !== undefined) provider[field] = v;
+  }
+  const collection = read("OPENROUTER_DATA_COLLECTION");
+  if (collection !== undefined) {
+    if (collection !== "allow" && collection !== "deny") bad("OPENROUTER_DATA_COLLECTION", collection, "allow or deny");
+    provider["data_collection"] = collection;
+  }
+  const sort = read("OPENROUTER_SORT");
+  if (sort !== undefined) {
+    if (sort !== "price" && sort !== "throughput" && sort !== "latency")
+      bad("OPENROUTER_SORT", sort, "price, throughput or latency");
+    provider["sort"] = sort;
+  }
+  const parallel = flag("OPENROUTER_PARALLEL_TOOL_CALLS");
+  const exclude = flag("OPENROUTER_REASONING_EXCLUDE");
+  const user = read("OPENROUTER_USER");
+  return {
+    ...(Object.keys(provider).length > 0 ? { provider } : {}),
+    ...(parallel !== undefined ? { parallel_tool_calls: parallel } : {}),
+    ...(exclude !== undefined ? { reasoning_exclude: exclude } : {}),
+    ...(user ? { user } : {}),
+  };
 }
 
 // Canonical tool declarations as Chat Completions function tools; in: options.tools, out: request `tools`.
@@ -612,7 +680,15 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
     );
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
-    if (effort) body.reasoning = { effort };
+    const env = openRouterEnvOptions(options);
+    if (effort || env.reasoning_exclude !== undefined)
+      body.reasoning = {
+        ...(effort ? { effort } : {}),
+        ...(env.reasoning_exclude !== undefined ? { exclude: env.reasoning_exclude } : {}),
+      };
+    if (env.provider) body.provider = env.provider;
+    if (env.parallel_tool_calls !== undefined && orTools) body.parallel_tool_calls = env.parallel_tool_calls;
+    if (env.user) body.user = env.user;
     if (serviceTier) body.service_tier = serviceTier;
     if (cache === "5m" || cache === "1h") body.cache_control = { type: "ephemeral", ttl: cache };
     // Documented Chat Completions generation controls (only those the caller set).
