@@ -1509,3 +1509,43 @@ describe("Google per-media resolution (media-resolution.md, api-ref MediaResolut
     expect(body.input[1]).toEqual({ type: "video", uri: "https://www.youtube.com/watch?v=9hE5-98ZeCg", resolution: "low" });
   });
 });
+
+describe("Google inline size checks (implemented, not wired in yet)", () => {
+  const MB = 1024 * 1024;
+  // 4 base64 characters decode to 3 bytes, so this is exactly n MB (n divisible by 3 only matters for padding: none here).
+  const b64 = (mb: number) => "A".repeat((mb * MB * 4) / 3);
+
+  it("accepts inline media under the limits and counts decoded bytes, not base64 length", async () => {
+    const { assertGoogleInlineSizes } = await import("../src/providers/google.ts");
+    const big = b64(48);
+    expect(() =>
+      assertGoogleInlineSizes([{ type: "user_input", content: [{ type: "document", mime_type: "application/pdf", data: big }] }], "gemini-3.5-flash")
+    ).not.toThrow(); // 48 MB decoded, though its base64 text is 64 MB
+  });
+
+  it("rejects a PDF over 50 MB, even when the request total is fine", async () => {
+    const { assertGoogleInlineSizes } = await import("../src/providers/google.ts");
+    expect(() =>
+      assertGoogleInlineSizes([{ type: "document", mime_type: "application/pdf", data: b64(51) }], "gemini-3.5-flash")
+    ).toThrow(/PDF of 51\.0 MB.*Files API/);
+    expect(() => assertGoogleInlineSizes([{ type: "image", mime_type: "image/png", data: b64(51) }], "gemini-3.5-flash")).not.toThrow();
+  });
+
+  it("rejects a request whose inline media adds up to more than 100 MB, including blocks nested in steps", async () => {
+    const { assertGoogleInlineSizes } = await import("../src/providers/google.ts");
+    const half = b64(51); // one string shared by both blocks
+    const input = [
+      { type: "user_input", content: [{ type: "image", mime_type: "image/png", data: half }] },
+      { type: "function_result", name: "t", call_id: "c", result: [{ type: "image", mime_type: "image/png", data: half }] },
+    ];
+    expect(() => assertGoogleInlineSizes(input, "gemini-3.5-flash")).toThrow(/102\.0 MB.*100\.0 MB/);
+    expect(() => assertGoogleInlineSizes(input.slice(0, 1), "gemini-3.5-flash")).not.toThrow();
+  });
+
+  it("ignores uri blocks and plain text", async () => {
+    const { assertGoogleInlineSizes } = await import("../src/providers/google.ts");
+    expect(() =>
+      assertGoogleInlineSizes([{ type: "user_input", content: [{ type: "text", text: "x".repeat(1000) }, { type: "video", uri: "gs://b/v.mp4" }] }], "m")
+    ).not.toThrow();
+  });
+});
