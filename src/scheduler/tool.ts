@@ -2,9 +2,8 @@
  * The two model-facing tools of scheduled actions: `scheduled_actions` (one
  * flat tool with a `command` field, a thin wrapper over the developer
  * functions) and `get_datetime`. The tool manual lives in
- * `scheduled-actions.md`, not in code.
+ * `src/prompts/scheduled-actions-tool.md`, not in code.
  */
-import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { Agent } from "../agent/agent.ts";
 import { tool } from "../tools/tool.ts";
@@ -23,14 +22,9 @@ import {
 } from "./scheduler.ts";
 import { readRun } from "./store.ts";
 import { formatDatetime } from "./time.ts";
+import { fillPrompt } from "../prompts/prompts.ts";
 
 const COMMANDS = ["create", "list", "get", "update", "delete", "run_now", "skip"] as const;
-
-let manual: string | undefined;
-/** Read on first use (not at import), so a program that never enables scheduling never touches the file. */
-function loadManual(): string {
-  return (manual ??= readFileSync(new URL("./scheduled-actions.md", import.meta.url), "utf8"));
-}
 
 /** Returns the machine's local date and time. Exported for any agent; auto-registered with the scheduling tools. */
 export const getDatetimeTool: ToolDefinition = tool({
@@ -83,7 +77,9 @@ export function createScheduledActionsTool(agent: Agent): ToolDefinition {
 
   return tool({
     name: "scheduled_actions",
-    description: loadManual().replace("{{TOOLS}}", poolNames.length > 0 ? poolNames.join(", ") : "none (omit tools)"),
+    description: fillPrompt(agent.prompts.scheduledActionsTool, {
+      TOOLS: poolNames.length > 0 ? poolNames.join(", ") : "none (omit tools)",
+    }),
     input: z.object({
       command: z.enum(COMMANDS),
       id: z.string().optional().describe(describedId),

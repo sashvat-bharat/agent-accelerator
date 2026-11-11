@@ -20,7 +20,7 @@ function writeChildScript(dir: string): string {
   fs.writeFileSync(
     file,
     `import * as fs from "node:fs";
-import { Agent, telemetryBus, createScheduledAction, deleteScheduledAction, runScheduledAction } from ${JSON.stringify(path.resolve("src/index.ts"))};
+import { Agent, telemetryBus } from ${JSON.stringify(path.resolve("src/index.ts"))};
 import { getScheduler } from ${JSON.stringify(path.resolve("src/scheduler/scheduler.ts"))};
 const [home, dir] = process.argv.slice(2) as [string, string];
 const events: Array<{ code: string; data: unknown }> = [];
@@ -45,9 +45,9 @@ async function handle(line: string): Promise<unknown> {
   if (cmd === "clock") { s.now = () => new Date(a!); return { ok: true }; }
   if (cmd === "tickAt") { waitUntil(Number(a)); s.tick(); return { ok: true }; }
   if (cmd === "settle") { await Promise.all([...s.running.values()].map((r) => r.done)); return { ok: true }; }
-  if (cmd === "create") { const ids: string[] = []; for (let i = 0; i < Number(a); i++) ids.push(createScheduledAction(agent, input(i) as never).id); return { ids }; }
-  if (cmd === "deleteAt") { waitUntil(Number(a)); return await deleteScheduledAction(b!, { home }); }
-  if (cmd === "runNow") { runScheduledAction(a!, { home }); await Promise.all([...s.running.values()].map((r) => r.done)); return { ok: true }; }
+  if (cmd === "create") { const ids: string[] = []; for (let i = 0; i < Number(a); i++) ids.push(agent.scheduled.create(input(i) as never).id); return { ids }; }
+  if (cmd === "deleteAt") { waitUntil(Number(a)); return await agent.scheduled.delete(b!); }
+  if (cmd === "runNow") { agent.scheduled.run(a!); await Promise.all([...s.running.values()].map((r) => r.done)); return { ok: true }; }
   if (cmd === "emitAt") { waitUntil(Number(a)); for (let i = 0; i < Number(b); i++) telemetryBus.emit({ code: "test.load", message: "x".repeat(300), level: "info", data: { pid: process.pid, i } }); return { ok: true }; }
   if (cmd === "dump") return { pid: process.pid, events };
   if (cmd === "exit") process.exit(0);

@@ -91,6 +91,8 @@ import {
   augmentSystemPromptWithStructuredOutput,
   emitProviderWarning,
   warnIgnoredMediaResolution,
+  warnIgnoredVideoProcessing,
+  warnIgnoredToolMedia,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -551,6 +553,8 @@ export class OpenAIResponsesProvider implements Provider {
     // `12h` maps to `prompt_cache_retention: "24h"`; everything else stays on implicit prompt_cache_key affinity.
     const cache = resolveCache("openai", options?.cache, ["implicit", "12h"], `openai/${modelId}`);
     warnIgnoredMediaResolution("openai", context.messages, `openai/${modelId}`);
+    warnIgnoredVideoProcessing("openai", context.messages, `openai/${modelId}`);
+    warnIgnoredToolMedia("openai", context.messages, `openai/${modelId}`);
 
     // Structured outputs: native `text.format` when supported, else emulated
     // via instructions (catalog `structured_output: false` would 400).
@@ -564,7 +568,11 @@ export class OpenAIResponsesProvider implements Provider {
     }
     if (outputSpec && !modelSupportsStructuredOutput("openai", modelId)) {
       outputEmulated = true;
-      effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec);
+      effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(
+        context.systemPrompt,
+        outputSpec,
+        options?.prompts?.structuredOutput
+      );
       emitProviderWarning({
         provider: "openai",
         capability: "structured output",
@@ -586,9 +594,7 @@ export class OpenAIResponsesProvider implements Provider {
     if (effectiveSystemPrompt) body.instructions = effectiveSystemPrompt;
     const aiTools = toOpenAITools(tools);
     if (aiTools) body.tools = aiTools;
-    const toolChoice = mapToolChoiceToOpenAI(
-      options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
-    );
+    const toolChoice = mapToolChoiceToOpenAI(options?.toolChoice);
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;

@@ -83,6 +83,8 @@ export interface SessionToolRecord {
   isError?: boolean;
   /** The tool ended the run with `ctx.stop`. */
   stopped?: boolean;
+  /** Media the tool returned (inline data URLs). */
+  parts?: ContentPart[];
 }
 
 /** A prompt that was waiting when the process stopped (its options other than `additionalContext` are not saved). */
@@ -1053,6 +1055,7 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
       result?: unknown;
       isError?: unknown;
       stopped?: unknown;
+      parts?: unknown;
     };
     try {
       rec = JSON.parse(line);
@@ -1092,6 +1095,7 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
           result: rec.result,
           ...(rec.isError ? { isError: true } : {}),
           ...(rec.stopped ? { stopped: true } : {}),
+          ...(Array.isArray(rec.parts) ? { parts: rec.parts as ContentPart[] } : {}),
         },
       ];
     } else if (rec.t === "usage" && rec.u && typeof rec.u === "object") {

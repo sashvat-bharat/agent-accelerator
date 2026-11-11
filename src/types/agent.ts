@@ -4,6 +4,7 @@ import type { ThinkingLevel, CacheOption, ServiceTier } from "./core.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
 import type { Agent } from "../agent/agent.ts";
 import type { z } from "zod";
+import type { PromptOverrides } from "../prompts/prompts.ts";
 
 // ---------------------------------------------------------------------------
 // Canonical option types (all additive; nothing renamed).
@@ -43,7 +44,12 @@ export interface AgentLogger {
 }
 
 /** Canonical tool-selection control. String form is the portable subset. */
-export type ToolChoiceOption = "auto" | "none" | "required" | { mode?: "auto" | "none" | "required"; tool?: string };
+export type ToolChoiceOption =
+  | "auto"
+  | "none"
+  | "required"
+  | "validated"
+  | { mode?: "auto" | "none" | "required" | "validated"; tool?: string };
 
 /** Canonical structured-output input. Zod, JSON Schema, or explicit form. */
 export type StructuredOutputOption =
@@ -149,7 +155,10 @@ export interface AgentConfig {
    * Canonical tool-selection control (`"auto"` default). `"none"` applies to
    * every turn of a run; `"required"` and a pinned tool (`{ tool: "name" }`)
    * apply to the FIRST model turn only, since forcing a tool call on every
-   * turn would make a run unable to finish.
+   * turn would make a run unable to finish. `"validated"` (Google only) lets the
+   * model decide whether to call a tool but makes it keep every call valid against
+   * the tool's schema; it holds for the whole run. Other providers ignore it
+   * with one warning.
    */
   toolChoice?: ToolChoiceOption;
   /** Google Interactions storage tier for the chain-TTL gate: `"free"` (23h, default) or `"paid"` (54d). */
@@ -216,11 +225,28 @@ export interface AgentConfig {
   /** Run + network limits. Turn/budget caps unlimited by default; network timeouts finite. */
   limits?: AgentRunLimits;
   /**
+   * A spending cap for the WHOLE chat, for its whole life: what the agent, all its workers (the `subagents` tool,
+   * `agent.workers` at any depth, fixed `subagents`) and their model calls cost, added up. It survives restarts: a
+   * persisted agent starts from what its saved sessions already spent. Once the total reaches `maxCostUsd` or
+   * `maxTotalTokens`, the next model call anywhere in the chat throws a `BudgetExceededError` ("Usage limit reached").
+   * Unlike `budget` (per run) it never resets. Scheduled actions are separate and never count. Models with unknown
+   * pricing add tokens but $0 to the cost. Unset = no cap.
+   */
+  usageLimit?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
+  /**
    * The only models this agent may use, as `provider/model` strings compared as written. Unset (default) = any model.
    * Checked when the Agent is built (also for a config an agent edited through {@link Agent.fromConfig}); a model
    * outside the list throws a `ConfigError`. Workers and `subagentModel` are not affected.
    */
   allowedModels?: string[];
+  /**
+   * Replaces single prompts the SDK puts in front of the model (the reasoning directive, tool refusals, the worker
+   * headers, the tool manuals ...). Every prompt you leave out keeps its default; see `DEFAULT_PROMPTS` for the names, the
+   * shipped text and the `{{placeholders}}` the SDK fills in. Keeping the original text is recommended: it is what the SDK
+   * is tested with, and a good reference for writing your own. Workers inherit it. A prompt is part of the cached prompt
+   * prefix when it is in the system prompt or a tool description, so change it once, not per run.
+   */
+  prompts?: PromptOverrides;
 }
 
 /**
@@ -301,12 +327,20 @@ export interface DynamicSubagentsConfig {
   /** Fixed reasoning level for all dynamic workers. The Main Agent cannot override it. Falls back to the parent level when omitted. */
   thinkingLevel?: ThinkingLevel;
   /**
-   * Spending cap of EACH worker (the `subagents` tool, `agent.workers` and scheduled actions), set as that worker's own
-   * per-run `budget`: a spawn, a message or a scheduled run is one run, and the usage of the worker's own workers counts
-   * toward it. Exceeding it fails that call with a budget error and leaves the worker open. Default: unlimited. Models
-   * with unknown pricing count $0 toward `maxCostUsd`. Passed down to the workers' own workers.
+   * Spending cap of EACH chat worker (the `subagents` tool and `agent.workers`), set as that worker's own per-run
+   * `budget`: a spawn or a message is one run, and the usage of the worker's own workers counts toward it. Exceeding it
+   * fails that call with a budget error and leaves the worker open. Default: unlimited. Models with unknown pricing count
+   * $0 toward `maxCostUsd`. Passed down to the workers' own workers. Scheduled actions have their own cap:
+   * `scheduledActionBudget`.
    */
   workerBudget?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
+  /**
+   * Spending cap of EACH scheduled-action run, set as that run's own per-run `budget` (attempts included: a retry is part
+   * of the same run). Scheduled actions are detached from the chat, so neither `workerBudget` nor `usageLimit` applies to
+   * them. Exceeding it records a failed run. Default: unlimited. Models with unknown pricing count $0 toward
+   * `maxCostUsd`.
+   */
+  scheduledActionBudget?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
   /**
    * How many levels of workers may exist below this agent. Default: no limit. `1` = workers cannot start workers of their
    * own; `3` = a worker may start workers that start workers. A worker with levels left gets its own `subagents` tool, and

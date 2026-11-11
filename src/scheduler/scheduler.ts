@@ -1052,3 +1052,43 @@ export function deleteScheduledAction(
 ): Promise<DeleteResult> {
   return schedulerFor(opts).delete(id, { force: opts?.force, purge: opts?.purge });
 }
+
+/**
+ * The scheduled-action API of one Agent (`agent.scheduled`): every method works on that agent's home folder, so an Agent
+ * with its own `home` never needs `{ home }` passed. `create` needs `dynamicSubagents.allowScheduledActions` (else a
+ * `ConfigError`). `list`, `update`, `run`, `skip` and `delete` work on every action in the home, as the model's
+ * `scheduled_actions` tool does; `run` needs the action's creating Agent alive in this process.
+ */
+export class ScheduledActions {
+  constructor(private readonly agent: Agent) {}
+
+  /** Schedules a new action under this agent. Returns the saved record; throws one `ValidationError` listing every problem. */
+  create(input: ScheduledActionInput): ScheduledActionRecord {
+    return createScheduledAction(this.agent, input);
+  }
+
+  /** Every action in this agent's home with its full metadata and state, plus a `running` flag. */
+  list(): Array<ScheduledActionRecord & { running: boolean }> {
+    return listScheduledActions({ home: this.agent.home });
+  }
+
+  /** Changes instructions, task, tools, timeout, role or any schedule field of action `id` (refused for a schedule change while it cooks). */
+  update(id: string, patch: ScheduledActionPatch): ScheduledActionRecord {
+    return updateScheduledAction(id, patch, { home: this.agent.home });
+  }
+
+  /** Runs action `id` now, outside its schedule (also resolves a missed run). */
+  run(id: string): ScheduledActionRecord {
+    return runScheduledAction(id, { home: this.agent.home });
+  }
+
+  /** Ignores a missed run of `id` and waits for the next scheduled time (a one-shot becomes `done`). */
+  skip(id: string): ScheduledActionRecord {
+    return skipScheduledAction(id, { home: this.agent.home });
+  }
+
+  /** Deletes action `id` for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes its past run files. */
+  delete(id: string, opts?: { force?: boolean; purge?: boolean }): Promise<DeleteResult> {
+    return deleteScheduledAction(id, { home: this.agent.home, ...opts });
+  }
+}

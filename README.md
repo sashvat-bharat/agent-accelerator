@@ -121,12 +121,13 @@ An `Agent` holds:
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
 | `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Falls back to `SUB_AGENT_MODEL`. |
-| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned workers: `{ enabled, model?, maxSpawn?, maxDepth?, workerBudget?, thinkingLevel?, tools?, workerTimeoutMs?, allowScheduledActions? }` (`workerTimeoutMs` is for scheduled actions only). See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
+| `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned workers: `{ enabled, model?, maxSpawn?, maxDepth?, workerBudget?, scheduledActionBudget?, thinkingLevel?, tools?, workerTimeoutMs?, allowScheduledActions? }` (`workerTimeoutMs` is for scheduled actions only). See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
 | `serviceTier`     | `"flex" \| "priority"`                               | Cost / priority routing where supported. Omit for standard routing.                                                                                        |
 | `maxTurns`        | `number`                                             | Maximum model → tool → model loops per `run`. Infinite by default (`0` or omitted = no limit). Hitting a finite limit with pending tool calls warns and sets `finishReason: "max_turns"`. |
 | `limits`          | `AgentRunLimits`                                     | `{ maxTurns?, deadlineMs?, maxToolCallsPerRun?, maxTotalTokens?, requestTimeoutMs?, firstByteTimeoutMs?, streamIdleTimeoutMs? }`. The first four are unlimited by default; hitting `maxTurns` ends the run with `finishReason: "max_turns"`, the other three throw a `BudgetExceededError`. The three network timeouts default to 300 s / 120 s / 300 s so a silent connection fails instead of hanging; set one to `0` or `Infinity` to turn it off. A timeout raises a retryable `TimeoutError`. See [Safety and operations](docs/guides/safety-and-ops.md#network-timeouts). |
+| `usageLimit`      | `{ maxCostUsd?, maxTotalTokens? }`                   | A spending cap for the WHOLE chat, for its whole life: the agent and all its workers added up, kept across restarts. Reaching it throws `BudgetExceededError` ("Usage limit reached"). Scheduled actions never count. Unset = no cap. |
 | `budget`          | `Budget`                                             | `{ maxCostUsd?, maxTotalTokens?, maxDurationMs?, maxTotalSubagents? }`, per run, workers included. Unlimited by default; exceeding it throws `BudgetExceededError` with partial usage. |
 | `sessionId`       | `string`                                             | Stable identifier used for cache affinity. Auto-generated when omitted.                                                                                    |
 | `headers`         | `Record<string,string>`                              | Additional headers merged into every request.                                                                                                              |
@@ -292,7 +293,8 @@ One `subagents` tool is injected. It takes `{ command, id?, name?, role?, instru
 - `tools` is the developer-owned pool. Workers get zero tools unless the Main Agent grants a subset by name; unknown names are rejected with the pool listed.
 - The Main Agent cannot choose worker models, reasoning levels or timeouts. The `subagents` tool has no timeouts (`workerTimeoutMs` and an action's `timeoutMs` apply only to scheduled actions).
 - `maxDepth` caps how many levels of workers may exist below the agent. By default there is no cap (a worker can start workers that start workers, as deep as the model goes); set a whole number >= 1 to limit it: `1` keeps workers flat, `3` allows three levels. A worker with levels left gets its own `subagents` tool, and its children can only be granted the tools **it** was granted. The levels are saved inside each other (`<session>/workers/<id>/workers/<id>/…`).
-- `workerBudget: { maxCostUsd?, maxTotalTokens? }` is each worker's own spending cap, applied as that worker's per-run `budget` (a spawn, a message or a scheduled run is one run; the usage of the worker's own workers counts toward it) and passed down to its workers. Going over fails that call with a budget error (`[worker <id>] failed: Token budget exceeded…`), leaves the worker open and does not affect the parent. Default: unlimited; models with unknown pricing count $0 toward `maxCostUsd`. Values must be numbers above 0.
+- `workerBudget: { maxCostUsd?, maxTotalTokens? }` is each chat worker's own spending cap, applied as that worker's per-run `budget` (a spawn or a message is one run; the usage of the worker's own workers counts toward it) and passed down to its workers. Going over fails that call with a budget error (`[worker <id>] failed: Token budget exceeded…`), leaves the worker open and does not affect the parent. Default: unlimited; models with unknown pricing count $0 toward `maxCostUsd`. Values must be numbers above 0.
+- `scheduledActionBudget: { maxCostUsd?, maxTotalTokens? }` is the same kind of cap for each scheduled-action run (retries included). Scheduled actions are detached from the chat, so only this cap applies to them: not `workerBudget`, the agent's `budget` or `usageLimit`. Default: unlimited.
 - Workers are real agents with their own session: see [Persistent workers](#persistent-workers-agentworkers) below (the same functions in code, saved on disk with `persist`, resumed after a restart). Each reply's usage is metered into the parent's usage and budget.
 - Each run of a worker gets a system-generated 32-char TrackingID, displayed as `NAME-{TrackingID}`. Thinking/text deltas update the worker trace live (`agent.track(id)`, `subscribeToSubAgent`) and surface on the parent stream as `subagent_delta` events.
 
@@ -354,9 +356,9 @@ The Main Agent then gets two tools, fixed by config so the prompt cache stays st
 The same code is available to your program:
 
 ```ts
-import { createScheduledAction, telemetryBus } from "agent-accelerator";
+import { telemetryBus } from "agent-accelerator";
 
-createScheduledAction(agent, {
+agent.scheduled.create({
   instructions: "You write a short, sourced AI research brief.",
   task: "Summarize the most important AI news of the last day in 5 bullets.",
   tools: ["recent_news"], // names from the worker pool
@@ -377,16 +379,16 @@ telemetryBus.onEvent((e) => {
 });
 ```
 
-| Function | What it does |
+| `agent.scheduled` | What it does |
 | --- | --- |
-| `createScheduledAction(agent, input)` | Schedule a new action. Throws one `ValidationError` listing every problem. |
-| `listScheduledActions({ home? })` | Every action with its metadata, state (`waiting`, `cooking`, `missed`, `done`), `lastRun` and a `running` flag. |
-| `updateScheduledAction(id, patch, { home? })` | Change instructions, task, tools, timeout, role or any schedule field. Schedule changes are refused while it is cooking. |
-| `runScheduledAction(id, { home? })` | Run now, outside the schedule (also resolves a missed run). Needs the creating `Agent` alive. |
-| `skipScheduledAction(id, { home? })` | Ignore a missed run and wait for the next scheduled time. |
-| `deleteScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
+| `create(input)` | Schedule a new action under this agent. Throws one `ValidationError` listing every problem, and a `ConfigError` when `allowScheduledActions` is off. |
+| `list()` | Every action in the agent's home with its metadata, state (`waiting`, `cooking`, `missed`, `done`), `lastRun` and a `running` flag. |
+| `update(id, patch)` | Change instructions, task, tools, timeout, role or any schedule field. Schedule changes are refused while it is cooking. |
+| `run(id)` | Run now, outside the schedule (also resolves a missed run). Needs the creating `Agent` alive. |
+| `skip(id)` | Ignore a missed run and wait for the next scheduled time. |
+| `delete(id, { force?, purge? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
 
-Every function except `createScheduledAction` finds the home folder through `setHome()`, `AGENT_ACCEL_HOME`, or `.agent-accel/` in the working directory. If you built the Agent with its own `home`, pass the same `{ home }` to these calls (the model's `scheduled_actions` tool already does).
+Every method works on **the agent's own home** (`home` option, else `setHome()`, `AGENT_ACCEL_HOME`, or `.agent-accel/`), so nothing needs a `{ home }` argument. `list`, `update`, `run`, `skip` and `delete` see every action in that home, like the model's `scheduled_actions` tool does.
 
 **How it behaves**
 
@@ -401,6 +403,21 @@ Every function except `createScheduledAction` finds the home folder through `set
 * **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once. By default it runs nothing by itself and the action waits as `missed`: pick `run_now` or `skip`. Set `scheduled_action.onMissed` per action to decide in advance: `"skip"` moves on to the next time (a one-shot is `done`; a `skipped` event follows), `"run"` runs it as soon as the program is back (delivered when it finishes, marked `late`). The same applies to a run a crash cut off. An action whose creating Agent is gone stays `missed` whatever `onMissed` says (nothing can run it). A result saved before the process exited is simply delivered (marked `late`) on the first tick after start. `late` means the result was delivered more than two ticks after its time, finished after its delivery second, or replaced a missed run. A `run_now` result is delivered when it finishes: it is `late` only when it replaces a missed run (a `run_now` on a `missed` action, or `onMissed: "run"`), never for an ordinary early run.
 
 ---
+## Prompts
+
+The SDK's own prompts (the reasoning directive, tool refusals, worker reply headers, the manuals of the `subagents` and `scheduled_actions` tools) are plain `.md` files in `src/prompts/`, exported as `DEFAULT_PROMPTS`. `AgentConfig.prompts` replaces single ones for an agent and its workers; the rest keep their defaults. `{{name}}` marks values the SDK fills in.
+
+```ts
+import { Agent, DEFAULT_PROMPTS } from "agent-accelerator";
+
+const agent = new Agent({
+  model: "google/gemini-3.5-flash-lite",
+  prompts: { toolNotFound: "Unknown tool '{{tool}}'.{{suggestion}} Use only the tools you were given." },
+});
+```
+
+**Keeping the original prompt is recommended**: it is what the SDK is tested with, and `DEFAULT_PROMPTS` is the reference for writing your own. Names, placeholders and where each prompt appears: [the prompts guide](docs/guides/prompts.md).
+
 ## Tools
 
 ```ts
@@ -427,6 +444,7 @@ const agent = new Agent({
 ### Tool Helpers
 
 * `tool({ name?, description, input?, parameters?, strict?, timeoutMs?, maxTries?, maxConcurrency?, execute })` — creates a `ToolDefinition`. Provide either a Zod `input` schema or raw JSON `parameters`. `execute(input, ctx)` may return arbitrary values; results are converted safely for model context. `timeoutMs` defaults to `0` (no time limit) and is a best-effort event-loop deadline; `ctx.signal` enables cooperative cancellation. `maxAttempts` is the canonical name for `maxTries` (number or numeric string). A positive value is the total attempt limit; `0`/omitted means 3 attempts for `idempotent` tools and 1 for all others. `maxConcurrency` limits simultaneous calls for that tool (default pool: 8).
+* `toolContent([...])` — a tool's return value of text and media (`return toolContent(["chart.png", { type: "image", image: bytes, mimeType: "image/png" }])`). The text is the result every provider sees; Google (Gemini 3 and later) also gets the media inside the function result, other providers warn once and get the text only. Only a value made by `toolContent` counts, so JSON fetched by a tool can never become media. See the tools guide.
 * `toStandardToolDeclarations(record | array)` — converts tools to `{ name, description, parameters }` for providers.
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
@@ -717,10 +735,24 @@ It also:
 * passes `service_tier` (`flex` | `priority`);
 * sends audio with its real format (`wav`, `mp3`, `aiff`, `aac`, `ogg`, `flac`, `m4a`) and QuickTime video as `video/mov`;
 * sends file parts as `file.file_data` (a public URL or a base64 data URL) and never adds a plugin: OpenRouter reads the file natively or with its own default parser;
-* maps `tool_choice` (`auto` omitted; `none`, `required`, and function pins supported);
+* maps `tool_choice` (`auto` omitted; `none`, `required`, and function pins supported; `validated` is Google-only and is dropped with one warning);
 * treats an error chunk inside a stream (HTTP 200) like an HTTP error: its status comes from the chunk's `code`, or from its `error_type` (`rate_limit_exceeded` 429, `provider_overloaded` 503, `provider_unavailable` 502, `timeout` 504, `server` 500), so `runRetries` retries the retryable ones;
 * reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present (a reported `0`, a free model or a cache hit, stays a known `$0`);
-* accepts `anthropic/...` and `~anthropic/...` model names for the `5m` / `1h` cache setting.
+* accepts `anthropic/...` and `~anthropic/...` model names for the `5m` / `1h` cache setting;
+* sends a turn's `reasoning_details` blocks and parsed-PDF `file` annotations back on the next turns, exactly as OpenRouter returned them;
+* reads provider routing and a few request fields from env vars (see below), never from `AgentConfig`.
+
+**Env vars** (an Agent's own `env: { ... }` wins over `process.env`; nothing is sent for a variable that is not set; a bad value throws a `ConfigError` before any request):
+
+| Variable | Sent as |
+|---|---|
+| `OPENROUTER_ORDER`, `OPENROUTER_ONLY`, `OPENROUTER_IGNORE` | `provider.order` / `only` / `ignore` (comma-separated provider slugs) |
+| `OPENROUTER_ALLOW_FALLBACKS`, `OPENROUTER_REQUIRE_PARAMETERS`, `OPENROUTER_ZDR` | `provider.allow_fallbacks` / `require_parameters` / `zdr` (`true`/`false`/`1`/`0`) |
+| `OPENROUTER_DATA_COLLECTION` | `provider.data_collection` (`allow` or `deny`) |
+| `OPENROUTER_SORT` | `provider.sort` (`price`, `throughput` or `latency`) |
+| `OPENROUTER_PARALLEL_TOOL_CALLS` | `parallel_tool_calls` (only when the request has tools) |
+| `OPENROUTER_REASONING_EXCLUDE` | `reasoning.exclude` (the model reasons but the text is not returned) |
+| `OPENROUTER_USER` | `user` (a stable end-user id) |
 
 `serviceTier` values other than `flex` / `priority` are omitted (standard routing).
 
@@ -1021,6 +1053,8 @@ TokenUsage {
   cacheReadTokens?,
   cacheWriteTokens?,
   thinkingTokens?,
+  inputDetails?: { audioTokens?, videoTokens? },   // media part of inputTokens (OpenRouter), report only
+  outputDetails?: { audioTokens?, imageTokens? }, // media part of outputTokens (OpenRouter), report only
   cost?: {
     inputCost?,
     outputCost?,
@@ -1138,6 +1172,7 @@ The model catalog is synced from [models.dev](https://models.dev) into a local c
 
 - **Automated 12-hour validation**: `.run()`, `.ask()` and `.stream()` check `<home>/catalog/models.dev.json`. Within 12 hours it reads from disk with no network delay. After that the expired catalog is served immediately and refreshed from `https://models.dev/api.json` in the background (8 s timeout). Only a cold start, with nothing loaded yet, waits for the download. A failed refresh pauses automatic refreshes for 10 minutes.
 - **Git & Package Safety**: The cache lives in the single Agent Accelerator home (`<home>/catalog/models.dev.json`, `.agent-accel/` by default and gitignored), never inside the package or scattered in the project.
+- **Spending-cap defaults**: `configure({ usageLimit, scheduledActionBudget })` sets the two caps for every agent you build (one call at startup, like `setHome()`; each call replaces the last, `configure({})` clears it). The env vars `AGENT_ACCEL_USAGE_LIMIT_USD` / `_TOKENS` and `AGENT_ACCEL_SCHEDULED_BUDGET_USD` / `_TOKENS` do the same. Precedence, field by field: the Agent's own config, then `configure()`, then env, then no cap. Workers and scheduled runs built by the SDK never take them.
 - **Environment**: `setHome(dir)` / `AGENT_ACCEL_HOME` move the whole home; `AGENT_CACHE_DIR` moves only the cache (for read-only or serverless filesystems). `AGENT_CATALOG_REFRESH=off` disables automatic refreshes; `bun run update-models` and `refreshModelCatalog()` still work.
 
 ### Developer Catalog Controls
@@ -1275,7 +1310,7 @@ Supported content parts include:
 * `ToolResultPart { type:"tool_result", id, name, result, isError? }`
 * `ImagePart { type:"image", image, mimeType?, resolution? }`
 * `AudioPart { type:"audio", audio, mimeType? }`
-* `VideoPart { type:"video", video, mimeType?, resolution? }`
+* `VideoPart { type:"video", video, mimeType?, resolution?, processing? }`
 * `FilePart { type:"file", file, mimeType?, filename? }` — PDFs/documents.
 
 `image`, `audio`, `video`, and `file` inputs accept:
@@ -1320,6 +1355,16 @@ OpenRouter an image's `resolution` is sent as `image_url.detail` (`low` → `low
 `medium` → `auto`, `high` → `high`, `ultra_high` → `original`, which OpenRouter
 downgrades to `high` where unsupported); a video's `resolution` is ignored. Other
 providers (and OpenRouter videos) ignore it with one `provider_warning`.
+
+`processing` (`VideoProcessing`: `"static" | "agentic"`) sets how Google reads one
+video. `"static"` (the default) puts frames taken at a fixed rate into the
+context. `"agentic"` lets the model explore the timeline and load only the
+transcript and frames the prompt needs, which suits long videos and
+needle-in-a-haystack questions (Google lists Gemini 4 Argon, 3.8 Flash, 3.6 Flash
+and 3.5 Flash Lite as supporting it; for any other model Google returns its own
+error). The model's `processing_call` / `processing_result` steps are kept and
+replayed with the rest of the turn's raw steps. Other providers ignore it with
+one `provider_warning`; an unknown value throws a `ValidationError`.
 
 Before any network call, the executor checks `image` / `audio` / `video` /
 `file`-as-PDF parts against the catalog's `modalities.input` for that
@@ -1462,7 +1507,8 @@ bun run update-models # refresh model catalog cache (supports --force, --ttl=24h
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
-├── scheduler/  # Scheduled actions: clock, store, tool + its manual (scheduled-actions.md)
+├── scheduler/  # Scheduled actions: clock, store, tool
+├── prompts/    # The SDK's own prompts as .md files, DEFAULT_PROMPTS, AgentConfig.prompts
 ├── session/    # Session persistence + telemetry (snapshots, hit rates, .session.json store)
 ├── providers/  # native REST adapters (google/openai/openrouter/openai-compat) + registry + canonical contract
 ├── models/     # Dynamic catalog cache, parser, verified overrides

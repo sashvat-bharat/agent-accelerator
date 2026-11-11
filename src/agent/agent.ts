@@ -28,14 +28,23 @@ import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
-import { WorkerRegistry } from "./workers.ts";
-import { DEFAULT_MAX_DEPTH, normalizeToolMap, resolveDynamicModelInput, resolveMainModel } from "./worker.ts";
+import { WorkerRegistry, savedSpend } from "./workers.ts";
+import {
+  DEFAULT_MAX_DEPTH,
+  isWorkerConfig,
+  normalizeToolMap,
+  resolveDynamicModelInput,
+  resolveMainModel,
+} from "./worker.ts";
 import * as path from "node:path";
-import { registerAgent } from "../scheduler/scheduler.ts";
+import { registerAgent, ScheduledActions } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../utils/home.ts";
 import { persistTelemetry, registerSessionFolder, unregisterSessionFolder } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
+import { fillPrompt, resolvePrompts, type Prompts } from "../prompts/prompts.ts";
+import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
+import { mergeCap } from "./defaults.ts";
 import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
@@ -197,6 +206,8 @@ export class Agent {
   readonly description: string;
   /** Stable system instructions. */
   instructions: string;
+  /** The SDK prompts in use: the shipped defaults with `AgentConfig.prompts` applied. */
+  readonly prompts: Prompts;
   /** Original model string or catalog spec used for resolution. */
   readonly modelStringOrSpec: string | any;
   /** Configured dynamic sub-agent model, if enabled. */
@@ -217,6 +228,8 @@ export class Agent {
     maxDepth: number;
     /** Per-run spending cap of each worker (unset = unlimited). */
     workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
+    /** Per-run spending cap of each scheduled-action run (unset = unlimited). */
+    scheduledActionBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
   };
   /** Home folder for everything written to disk (`sessions/`, `scheduled/`, `telemetry/`). */
   readonly home: string;
@@ -324,6 +337,11 @@ export class Agent {
   /** The resume in flight, so a second `resume()` returns the same promise. */
   private resuming?: Promise<AgentResponse | undefined>;
   private workerRegistry?: WorkerRegistry;
+  /** The chat-wide spending cap this agent counts into and checks against: its own (`usageLimit`) or the root's, handed down to workers. @internal */
+  chat?: UsageLimit;
+  /** True for the agent that created `chat` from its own `usageLimit` (the root of the chat). */
+  private ownsChat = false;
+  private scheduledActions?: ScheduledActions;
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -349,6 +367,18 @@ export class Agent {
     this.description = config.description || "AI Agent powered by Agent Accelerator";
     // DX1: only instructions (no systemPrompt alias)
     this.instructions = config.instructions || "";
+    this.prompts = resolvePrompts(config.prompts);
+    // Workers and scheduled runs the SDK builds never take developer defaults (`configure()`, env vars).
+    const takesDefaults = !isWorkerConfig(config);
+    if (config.usageLimit !== undefined) {
+      const problem = checkUsageLimitConfig(config.usageLimit);
+      if (problem) throw new ConfigError(`[Agent Accelerator] Invalid usageLimit: ${problem}.`);
+    }
+    const chatCap = mergeCap("usageLimit", config.usageLimit, takesDefaults);
+    if (chatCap) {
+      this.chat = new UsageLimit(chatCap);
+      this.ownsChat = true;
+    }
     // Unified model resolution (shared with SubAgent/workers): supports
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
@@ -374,15 +404,25 @@ export class Agent {
           `[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1, or omit it for no limit; set dynamicSubagents.enabled: false to turn workers off.`
         );
       }
-      const rawBudget = (dynRaw as { workerBudget?: { maxCostUsd?: unknown; maxTotalTokens?: unknown } }).workerBudget;
-      for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
-        const v = rawBudget?.[key];
-        if (v !== undefined && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
-          throw new ConfigError(
-            `[Agent Accelerator] Invalid dynamicSubagents.workerBudget.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`
-          );
+      type RawBudget = { maxCostUsd?: unknown; maxTotalTokens?: unknown } | undefined;
+      const checkBudgetKeys = (name: "workerBudget" | "scheduledActionBudget"): RawBudget => {
+        const raw = (dynRaw as Record<string, RawBudget>)[name];
+        for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
+          const v = raw?.[key];
+          if (v !== undefined && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
+            throw new ConfigError(
+              `[Agent Accelerator] Invalid dynamicSubagents.${name}.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`
+            );
+          }
         }
-      }
+        return raw;
+      };
+      const rawBudget = checkBudgetKeys("workerBudget");
+      const rawScheduledBudget = mergeCap(
+        "scheduledActionBudget",
+        checkBudgetKeys("scheduledActionBudget") as { maxCostUsd?: number; maxTotalTokens?: number } | undefined,
+        takesDefaults
+      );
       // Open workers are unlimited unless the developer sets a cap (a number >= 1; Infinity also means unlimited).
       const rawMax = (dynRaw as { maxSpawn?: unknown }).maxSpawn;
       if (rawMax !== undefined && (typeof rawMax !== "number" || Number.isNaN(rawMax))) {
@@ -416,6 +456,9 @@ export class Agent {
         allowScheduledActions: dynRaw.allowScheduledActions === true,
         maxDepth: (rawDepth as number | undefined) ?? DEFAULT_MAX_DEPTH,
         ...(rawBudget ? { workerBudget: { ...(rawBudget as { maxCostUsd?: number; maxTotalTokens?: number }) } } : {}),
+        ...(rawScheduledBudget
+          ? { scheduledActionBudget: { ...(rawScheduledBudget as { maxCostUsd?: number; maxTotalTokens?: number }) } }
+          : {}),
       };
     }
     this.apiKey = (rawModel as any)?.apiKey || config.apiKey;
@@ -519,7 +562,7 @@ export class Agent {
     }
 
     if (Array.isArray(config.subagents)) {
-      const subagentTools = buildAgentTools(config.subagents);
+      const subagentTools = buildAgentTools(config.subagents, { chat: this.chat });
       for (const [toolName, toolDef] of Object.entries(subagentTools)) {
         this.tools[toolName] = toolDef;
       }
@@ -557,6 +600,11 @@ export class Agent {
   /** The persistent sub-agent workers of this agent: `spawn`, `message`, `close`, `list`, `turns` (see `WorkerRegistry`). */
   get workers(): WorkerRegistry {
     return (this.workerRegistry ??= new WorkerRegistry(this));
+  }
+
+  /** The scheduled actions of this agent's home: `create`, `list`, `update`, `run`, `skip`, `delete` (see `ScheduledActions`). */
+  get scheduled(): ScheduledActions {
+    return (this.scheduledActions ??= new ScheduledActions(this));
   }
 
   // Takes the one-process lock of the folder this Agent persists to: its own session folder, or the folder of a single `persist.file`; throws ConfigError when another live process holds it; in: the constructor and importSession (a new session id is a new folder), out: a `.lock` file there.
@@ -621,15 +669,14 @@ export class Agent {
   // Puts saved spending totals back after a restart or import (zeros when the file has none); in: a loaded session's `usage`, out: this.usageTotals.
   private restoreUsage(saved: unknown): void {
     Object.assign(this.usageTotals, readUsage(saved));
+    if (this.ownsChat) this.chat!.restart(); // a restored session changes the starting point of the chat total
   }
 
   // Records one model call of THIS agent (priced per turn, with the service tier); in: the loop's onTurnUsage, out: this.usageTotals (saved by the next persist).
   private recordTurnUsage(usage: TokenUsage, spec: Parameters<typeof priceUsage>[1]): void {
-    addTurn(
-      this.usageTotals,
-      usage,
-      priceUsage(usage, spec, this.serviceTier ? { serviceTier: this.serviceTier } : undefined)
-    );
+    const priced = priceUsage(usage, spec, this.serviceTier ? { serviceTier: this.serviceTier } : undefined);
+    addTurn(this.usageTotals, usage, priced);
+    this.chat?.add((usage.inputTokens || 0) + (usage.outputTokens || 0), priced?.breakdown.totalMicroUSD ?? 0);
   }
 
   /** Adds another agent's spending to this one (a fixed worker's per-call copy into its template). @internal */
@@ -738,6 +785,7 @@ export class Agent {
           result: t.result,
           ...(t.isError ? { isError: true } : {}),
           ...(t.stopped ? { stopped: true } : {}),
+          ...(t.parts && t.parts.length > 0 ? { parts: t.parts } : {}),
         } as ToolResultRecord,
       ])
     );
@@ -759,6 +807,7 @@ export class Agent {
       result: isSubagentResult(result.result) ? result.result.xml : result.result,
       ...(result.isError ? { isError: true } : {}),
       ...(result.stopped ? { stopped: true } : {}),
+      ...(result.parts && result.parts.length > 0 ? { parts: result.parts } : {}),
     });
     this.doPersist();
   }
@@ -769,12 +818,8 @@ export class Agent {
     let out = base;
     const isThinkingEnabled =
       this.thinkingConfig?.enabled !== false && this.thinkingConfig?.level && this.thinkingConfig?.level !== "none";
-    if (isThinkingEnabled && !out.includes("[Reasoning Directive]")) {
-      const guidance =
-        "[Reasoning Directive]\n" +
-        "1. Use internal reasoning strictly for private planning and step-by-step thinking.\n" +
-        "2. Never attempt to execute tools or output final user deliverables inside reasoning.\n" +
-        "3. Once your reasoning is complete, output your final response or function calls directly in the standard response output.";
+    const guidance = this.prompts.reasoningDirective;
+    if (isThinkingEnabled && !out.includes(guidance)) {
       out = out ? `${out}\n\n${guidance}` : guidance;
     }
     return out || undefined;
@@ -1299,6 +1344,7 @@ export class Agent {
     const d = this.callDefaults;
     return {
       limits: { ...this.runLimits },
+      ...(this.forkConfig.prompts ? { prompts: { ...this.forkConfig.prompts } } : {}),
       ...(d.retry ? { retry: d.retry } : {}),
       ...(d.env ? { env: d.env } : {}),
       ...(d.fetch ? { fetch: d.fetch } : {}),
@@ -1350,13 +1396,34 @@ export class Agent {
     return new Agent(applyEditable(editable, base));
   }
 
+  // Takes the chat total's starting point (what the saved sessions of this agent and its workers already spent) once, before the first turn of the chat's root agent; in: the run starters, out: this.chat.
+  private beginChat(): void {
+    if (!this.ownsChat) return;
+    this.chat!.begin(() => {
+      // A persisted chat starts from its saved sessions (this agent's and every worker's); a memory-only one from what it holds now.
+      const root = this.persistConfig?.dir;
+      if (root && !this.stateless) {
+        try {
+          const saved = savedSpend(sessionDirFor(root, this.sessionId));
+          return { tokens: saved.inputTokens + saved.outputTokens, microUSD: saved.costMicroUSD.total };
+        } catch {
+          // not a usable session folder name: nothing was saved there
+        }
+      }
+      const total = this.usageReport().total;
+      return { tokens: total.tokens.total, microUSD: Math.round((total.cost.totalUsd ?? 0) * 1_000_000) };
+    });
+  }
+
   /** Budgets are per run: counters restart whenever a new run begins. */
   private resetBudgetState(): void {
+    this.beginChat();
     if (this.budget) this.budgetState = { spawned: 0, totalTokens: 0, totalCostUsd: 0, startedAtMs: nowMs() };
   }
 
   /** Loop hook: charge `usage` (when given) and throw `BudgetExceededError` once any cap is passed. */
   private enforceBudget(usage?: TokenUsage): void {
+    this.chat?.check(); // the chat-wide cap: before every turn and right after each one
     if (!this.budget) return;
     if (usage) chargeBudgetUsage(this as unknown as Parameters<typeof chargeBudgetUsage>[0], usage);
     checkBudget(this.budget, this.budgetState);
@@ -1390,6 +1457,7 @@ export class Agent {
       serviceTier: this.serviceTier,
       sessionId,
       ...(this.outputSpec ? { output: this.outputSpec } : {}),
+      prompts: { structuredOutput: this.prompts.structuredOutput, toolBridge: this.prompts.toolBridge },
       ...(this.googleTier ? { googleTier: this.googleTier } : {}),
       ...(toolChoice !== undefined ? { toolChoice } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
@@ -1447,7 +1515,7 @@ export class Agent {
         ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
         onFailure: this.onFailure,
         ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
-        ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
+        ...(this.budget || this.chat ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
         onTurnUsage: (u: TokenUsage, spec: Parameters<typeof priceUsage>[1]) => this.recordTurnUsage(u, spec),
         onToolResult: (r: ToolResultRecord) => this.recordTool(r),
@@ -1457,6 +1525,7 @@ export class Agent {
         onSteerInjected: () => this.persistNow(),
         // Loop enforces these (plus local timeout races).
         limits: { ...this.runLimits },
+        prompts: this.prompts,
         ...(this.output !== undefined ? { output: this.output } : {}),
       };
 
@@ -1543,7 +1612,7 @@ export class Agent {
       ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
       onFailure: this.onFailure,
       ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
-      ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
+      ...(this.budget || this.chat ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
       onProgress: () => this.persistNow(),
       onTurnUsage: (u: TokenUsage, spec: Parameters<typeof priceUsage>[1]) => this.recordTurnUsage(u, spec),
       onToolResult: (r: ToolResultRecord) => this.recordTool(r),
@@ -1552,6 +1621,7 @@ export class Agent {
       onSteerInjected: () => this.persistNow(),
       // Loop enforces these (plus local timeout races).
       limits: { ...this.runLimits },
+      prompts: this.prompts,
       ...(this.output !== undefined ? { output: this.output } : {}),
     };
 
@@ -1898,7 +1968,7 @@ export class Agent {
     if (options?.additionalContext) {
       // Preserve stable instructions as systemPrompt
       ctx.systemPrompt = fullInstructions;
-      const prefix = `[Additional Context]\n${options.additionalContext}\n\n`;
+      const prefix = `${fillPrompt(this.prompts.additionalContext, { context: options.additionalContext })}\n\n`;
       if (typeof prompt === "string") {
         prompt = prefix + prompt;
       } else if (Array.isArray(prompt)) {

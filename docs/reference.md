@@ -25,19 +25,22 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `midSession` | `{ mode \| whenBusy: "steer" \| "queue" \| "auto", maxQueued }` | [Tools](guides/tools-and-streaming.md) |
 | `resume` | `"automatic"` (default) or `"explicit"`: whether a run a crash cut off continues when the Agent is constructed (needs `persist: { dir }` and the same `sessionId`). See `agent.resume()` / `agent.interrupted()` | [Data](guides/data-and-media.md) |
 | `persist`, `home` | Session saving; base folder (`setHome(dir)` / `AGENT_ACCEL_HOME` / `.agent-accel/`). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
-| `toolChoice` | `"auto"`, `"none"`, `"required"`, `{ tool }` | [Tools](guides/tools-and-streaming.md) |
+| `toolChoice` | `"auto"`, `"none"`, `"required"`, `"validated"` (Google), `{ tool }` | [Tools](guides/tools-and-streaming.md) |
 | `maxOutputTokens` | Output-token cap for one model call | [Agents](guides/agents-and-models.md) |
 | `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
 | `retry`, `fetch`, `env` | Retry policy of one provider call, custom `fetch`, env-var overrides | [Safety](guides/safety-and-ops.md) |
 | `runRetries` | Times a whole run that failed for a transient reason is tried again from where it stopped (default 3, `0` = off) | [Safety](guides/safety-and-ops.md) |
 | `fileAccess`, `captureRaw`, `onFailure` | `{ roots }`, `"redacted"`/`true`/`false`, `"auto"`/`"rollback"`/`"keep"` | [Safety](guides/safety-and-ops.md) |
 | `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
+| `prompts` | `{ [PromptName]: string }` replaces single SDK prompts; unset entries keep `DEFAULT_PROMPTS`. Unknown name or empty text throws `ConfigError`. Workers inherit it | [Prompts](guides/prompts.md) |
 | `allowedModels` | `string[]` of `provider/model`, compared as written. Unset = any model. A model outside the list throws `ConfigError` when the Agent is built (also through `Agent.fromConfig`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text): a persisted session's events (`tool.*`, resume, retry) to `<home>/sessions/<id>/telemetry.ndjson`, everything else to `<home>/telemetry/<date>.ndjson`. Never outside the home. Off by default | [Safety](guides/safety-and-ops.md) |
 | `logger`, `hooks`, `contextManagement` | **Not implemented**; emit `config.unsupported_option`. Use `telemetryBus` | |
 
-**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each worker's own per-run cap, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).
+**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each chat worker's own per-run cap, default none), `scheduledActionBudget` (the same shape, the cap of each scheduled-action run, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).
 **`midSession`**: `mode`, `whenBusy`, `maxQueued` (20).
+**`usageLimit`** (the whole chat, for its whole life, workers included; survives restarts): `maxCostUsd`, `maxTotalTokens`. Reaching it throws `BudgetExceededError` ("Usage limit reached").
+
 **`budget`** (per run, includes workers): `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`.
 **`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). Everything except these three network timeouts is unlimited until set; `0` or `Infinity` turns a timeout off (details: [Safety and operations](guides/safety-and-ops.md#what-is-limited-by-default)). A long-running call (Google long decode, or any `Provider` whose `isLongRunning()` returns true) times each HTTP request only, never the whole call or stream.
 
@@ -67,7 +70,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 
 `finishReason`: `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `stopped` (a tool called `ctx.stop`), `error` (or a provider string; the original stays in `rawFinishReason`).
 
-`usage`: `inputTokens` (includes the cache reads and writes), `outputTokens` (includes `thinkingTokens`), `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`. Without a provider-reported cost, `cost` is estimated per turn from the catalog: fresh input, cache reads and cache writes each at their own price (a missing cache price bills at the input rate), scaled by `serviceTier`.
+`usage`: `inputTokens` (includes the cache reads and writes), `outputTokens` (includes `thinkingTokens`), `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `inputDetails` (`audioTokens`, `videoTokens`) and `outputDetails` (`audioTokens`, `imageTokens`) when OpenRouter reports media tokens (subsets of input and output, for reading only: they never change the cost), optional `cost`. Without a provider-reported cost, `cost` is estimated per turn from the catalog: fresh input, cache reads and cache writes each at their own price (a missing cache price bills at the input rate), scaled by `serviceTier`.
 
 ### Usage report
 
@@ -155,9 +158,13 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `OPENAI_API_KEY`, `OPENAI_BASE_API_KEY` | OpenAI key |
 | `OPENAI_BASE_URL`, `OPENAI_API_BASE` | OpenAI endpoint; when set, a bare `MODEL` routes to OpenAI |
 | `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` | OpenRouter key and endpoint |
+| `OPENROUTER_ORDER`, `_ONLY`, `_IGNORE`, `_ALLOW_FALLBACKS`, `_REQUIRE_PARAMETERS`, `_ZDR`, `_DATA_COLLECTION`, `_SORT` | OpenRouter provider routing (`provider.*` in the request); see the OpenRouter section of the README |
+| `OPENROUTER_PARALLEL_TOOL_CALLS`, `OPENROUTER_REASONING_EXCLUDE`, `OPENROUTER_USER` | OpenRouter `parallel_tool_calls`, `reasoning.exclude` and `user` |
 | `<PREFIX>_API_KEY`, `<PREFIX>_BASE_URL` | Any OpenAI-compatible endpoint (for `PREFIX/model`), e.g. `GROQ_API_KEY` and `GROQ_BASE_URL`. Base URL is required |
 | `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
 | `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |
+| `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS` | Default `usageLimit` for every agent you build (see `configure()` and the safety guide) |
+| `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |
 | `AGENT_CATALOG_REFRESH=off` | Disable automatic model-catalog refresh |
 | `AGENT_ACCEL_HOME` | The single folder for everything the SDK stores (default `.agent-accel/`; `setHome(dir)` does the same in code) |
 | `AGENT_CACHE_DIR` | Overrides only the model catalog cache folder (default `<home>/catalog`) |

@@ -16,6 +16,7 @@ import { zodToJsonSchema } from "./tools/schema.ts";
 import { ValidationError } from "./types/errors.ts";
 import { TRUNCATED_ARGS_KEY } from "./types/tool.ts";
 import { telemetryBus } from "./telemetry.ts";
+import { DEFAULT_PROMPTS, fillPrompt } from "./prompts/prompts.ts";
 
 /** Classification of a canonical capability on a given provider. */
 export type ProviderCapabilityStatus = "NATIVE" | "TRANSLATED" | "AUTOMATIC" | "EMULATED" | "UNSUPPORTED";
@@ -232,6 +233,47 @@ export function warnIgnoredMediaResolution(
   });
 }
 
+/** Warns once per provider/model that a video's `processing` mode is ignored (only Google has one); in: an adapter's request messages, out: telemetry bus only. */
+export function warnIgnoredVideoProcessing(provider: string, messages: Message[], modelRef: string): void {
+  const used = messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "video" && p.processing)
+  );
+  if (!used) return;
+  emitProviderWarning({
+    provider,
+    capability: "video processing",
+    requested: modelRef,
+    reason: "only Google reads a video in a chosen processing mode (static or agentic).",
+    fallback: "the provider's default video handling",
+  });
+}
+
+/** Warns once per provider/model that media a tool returned with `toolContent` is not sent (only Google takes media inside a function result); the model still gets the tool's text; in: an adapter's request messages, out: telemetry bus only. */
+export function warnIgnoredToolMedia(provider: string, messages: Message[], modelRef: string): void {
+  const used = messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "tool_result" && p.parts && p.parts.length > 0)
+  );
+  if (!used) return;
+  emitProviderWarning({
+    provider,
+    capability: "media in tool results",
+    requested: modelRef,
+    reason: "only Google accepts images, audio, video or files inside a function result.",
+    fallback: "the tool's text only (the media is not sent)",
+  });
+}
+
+// Warns once that the `validated` tool choice (Google only) is dropped and the provider default (auto) is used; in: the OpenRouter and OpenAI tool-choice mappers (compat goes through the OpenAI one), out: a provider_warning on the bus.
+function warnValidatedToolChoice(provider: string): void {
+  emitProviderWarning({
+    provider,
+    capability: "tool choice",
+    requested: "validated",
+    reason: "only Google has a validated tool-choice mode.",
+    fallback: "automatic tool choice",
+  });
+}
+
 /** OpenRouter Chat Completions `tool_choice` wire values. */
 export type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 
@@ -243,9 +285,10 @@ export type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "f
  * (`{type:function,name}`): completions nests the name under `function`.
  */
 export function mapToolChoiceToOpenRouterChat(
-  choice: "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
+  choice: "auto" | "none" | "required" | "validated" | { type: "function"; function: { name: string } } | undefined
 ): OpenRouterChatToolChoice | undefined {
   if (!choice || choice === "auto") return undefined;
+  if (choice === "validated") return (warnValidatedToolChoice("openrouter"), undefined);
   if (choice === "none" || choice === "required") return choice;
   const name = choice.function?.name;
   if (name) return { type: "function", function: { name } };
@@ -292,9 +335,11 @@ export type OpenAIToolChoice = "auto" | "none" | "required" | { type: "function"
  * variants are out of scope and never emitted.
  */
 export function mapToolChoiceToOpenAI(
-  choice: "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
+  choice: "auto" | "none" | "required" | "validated" | { type: "function"; function: { name: string } } | undefined,
+  provider = "openai"
 ): OpenAIToolChoice | undefined {
   if (!choice || choice === "auto") return undefined;
+  if (choice === "validated") return (warnValidatedToolChoice(provider), undefined);
   if (choice === "none" || choice === "required") return choice;
   const name = choice.function?.name;
   if (name) return { type: "function", name };
@@ -302,7 +347,7 @@ export function mapToolChoiceToOpenAI(
 }
 
 /** Normalized tool-choice mode shared by provider adapters. */
-export type CanonicalToolChoiceMode = "auto" | "any" | "none";
+export type CanonicalToolChoiceMode = "auto" | "any" | "none" | "validated";
 
 /**
  * Normalizes canonical toolChoice into a provider-neutral mode + optional
@@ -310,13 +355,14 @@ export type CanonicalToolChoiceMode = "auto" | "any" | "none";
  * `{ allowed_tools: { mode, tools? } }` in its own adapter.
  */
 export function normalizeToolChoice(
-  choice: "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined,
+  choice: "auto" | "none" | "required" | "validated" | { type: "function"; function: { name: string } } | undefined,
   availableToolNames: string[]
 ): { mode: CanonicalToolChoiceMode; tools?: string[] } | undefined {
   if (!choice) return undefined;
   if (typeof choice === "string") {
     if (choice === "auto") return undefined; // server default
     if (choice === "none") return { mode: "none" };
+    if (choice === "validated") return { mode: "validated" };
     if (choice === "required") {
       return availableToolNames.length > 0 ? { mode: "any", tools: availableToolNames } : { mode: "any" };
     }
@@ -654,8 +700,11 @@ export function mapOutputToCompatChat(
  *
  * @example `augmentSystemPromptWithStructuredOutput(sys, spec)`
  */
-export function buildStructuredOutputInstruction(spec: StructuredOutputSpec): string {
-  return `Return ONLY valid JSON matching this JSON Schema, with no markdown fences, no commentary, no extra text.\nSchema: ${JSON.stringify(spec.schema)}`;
+export function buildStructuredOutputInstruction(
+  spec: StructuredOutputSpec,
+  template = DEFAULT_PROMPTS.structuredOutput
+): string {
+  return fillPrompt(template, { schema: JSON.stringify(spec.schema) });
 }
 
 /**
@@ -665,11 +714,12 @@ export function buildStructuredOutputInstruction(spec: StructuredOutputSpec): st
  */
 export function augmentSystemPromptWithStructuredOutput(
   systemPrompt: string | undefined,
-  spec: StructuredOutputSpec | undefined
+  spec: StructuredOutputSpec | undefined,
+  template?: string
 ): string | undefined {
   if (!spec) return systemPrompt;
-  const instruction = `[Structured Output]\n${buildStructuredOutputInstruction(spec)}`;
+  const instruction = `[Structured Output]\n${buildStructuredOutputInstruction(spec, template)}`;
   if (!systemPrompt) return instruction;
-  if (systemPrompt.includes("[Structured Output]")) return systemPrompt;
+  if (systemPrompt.includes(instruction)) return systemPrompt;
   return `${systemPrompt}\n\n${instruction}`;
 }

@@ -3,6 +3,10 @@ import { toJsonSafe } from "../utils/serialization.ts";
 import { ConfigError } from "../types/errors.ts";
 import { isTransientError } from "../utils/errors.ts";
 import { isSubagentResult } from "./subagent-result.ts";
+import { isToolContent, type ToolContent } from "./tool-content.ts";
+import { normalizeMediaInput } from "../utils/media.ts";
+import type { ContentPart } from "../types/message.ts";
+import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts";
 import { isTruncatedArguments } from "../types/tool.ts";
 import { telemetryBus } from "../telemetry.ts";
 import type { ToolLogWriter } from "../session/tool-log.ts";
@@ -14,6 +18,8 @@ export interface ExecuteToolsOptions {
   parallel?: boolean;
   signal?: AbortSignal;
   sessionId?: string;
+  /** The refusal texts shown to the model (`AgentConfig.prompts`); the shipped ones when unset. */
+  prompts?: Pick<Prompts, "toolTruncatedArguments" | "toolNotFound" | "toolSchemaError">;
   /** Called the moment EACH call finishes (before the whole batch does), so a caller can save a result before the next tool is done. Never throws into the run. */
   onResult?: (result: ToolResultRecord) => void;
   /** Opens the log file of one call (only when the Agent persists to a folder); the executor writes its steps into it and `ctx.log` writes through it. */
@@ -232,10 +238,11 @@ export function shouldBlockRepeat(
  * machine-readable code lives at `(result as any).errorCode` while the human
  * prefix keeps plain-string consumers working.
  */
-export function makeRepeatBlockedResult(call: ToolCallRecord): ToolResultRecord {
-  const message =
-    `repeat_blocked: Tool '${call.name}' was called again with identical arguments. ` +
-    "The previous result is already available; reuse it or call the tool with different arguments.";
+export function makeRepeatBlockedResult(
+  call: ToolCallRecord,
+  template = DEFAULT_PROMPTS.toolRepeatBlocked
+): ToolResultRecord {
+  const message = fillPrompt(template, { tool: call.name });
   return {
     id: call.id,
     name: call.name,
@@ -477,6 +484,36 @@ async function executeAttempt(
   }
 }
 
+// Turns a `toolContent` result into its text (what every provider sees) and its media as inline data URLs (what Google also sends); in: runSingle for a branded tool result, out: the result record's `result` and `parts`.
+async function resolveToolContent(
+  content: ToolContent,
+  charLimit: number
+): Promise<{ text: string; parts: ContentPart[] }> {
+  const texts: string[] = [];
+  const parts: ContentPart[] = [];
+  const kinds: string[] = [];
+  for (const raw of content.parts) {
+    const part = typeof raw === "string" ? ({ type: "text", text: raw } as const) : raw;
+    if (part.type === "text") {
+      texts.push(part.text);
+      continue;
+    }
+    const value = (part as unknown as Record<string, string | Uint8Array | ArrayBuffer>)[part.type]!;
+    const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType);
+    const filename = (part as { filename?: string }).filename;
+    parts.push({
+      type: part.type,
+      [part.type]: media.dataUrl,
+      mimeType: media.mimeType,
+      ...(filename ? { filename } : {}),
+      ...((part.type === "image" || part.type === "video") && part.resolution ? { resolution: part.resolution } : {}),
+    } as unknown as ContentPart);
+    kinds.push(media.mimeType);
+  }
+  const text = texts.join("\n") || (kinds.length > 0 ? `[media result: ${kinds.join(", ")}]` : "null");
+  return { text: truncateResultString(text, charLimit), parts };
+}
+
 /**
  * Executes one or more tool calls in parallel or sequence, handling errors safely
  */
@@ -496,6 +533,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
     onSubagentEvent,
     onResult,
     openToolLog,
+    prompts = DEFAULT_PROMPTS,
   } = options;
   assertNoToolCollisions(tools);
   const globalSemaphore = new Semaphore(DEFAULT_TOOL_CONCURRENCY);
@@ -534,9 +572,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
       return {
         id: call.id,
         name: call.name,
-        result:
-          `Error: Tool '${call.name}' arguments are truncated or incomplete and could not be parsed. ` +
-          "Call the tool again with the complete JSON arguments. Do not explain the error, just retry the call.",
+        result: fillPrompt(prompts.toolTruncatedArguments, { tool: call.name }),
         isError: true,
         durationMs: elapsedMs(startTime),
       };
@@ -547,11 +583,11 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
 
     if (!toolDef) {
       trace("call_blocked", "warn", { reason: "tool_not_found", suggestion: resolved.suggestion });
-      const suffix = resolved.suggestion ? ` Did you mean '${resolved.suggestion}'?` : "";
+      const suggestion = resolved.suggestion ? ` Did you mean '${resolved.suggestion}'?` : "";
       return {
         id: call.id,
         name: call.name,
-        result: `Error: Tool '${call.name}' not found.${suffix}`,
+        result: fillPrompt(prompts.toolNotFound, { tool: call.name, suggestion }),
         isError: true,
         durationMs: elapsedMs(startTime),
       };
@@ -614,16 +650,12 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
               ? JSON.stringify(toolDef.parameters).slice(0, 800)
               : undefined;
           const detail = parseRes.error.message;
-          const hint = expectedParams ? ` Expected parameters: ${expectedParams}.` : "";
+          const expected = expectedParams ? ` Expected parameters: ${expectedParams}.` : "";
           trace("call_blocked", "warn", { reason: "schema_validation", detail: parseRes.error.message });
           return {
             id: call.id,
             name: call.name,
-            result:
-              `Schema validation error for tool '${call.name}': ${detail}` +
-              ` Received argument keys: [${receivedKeys}].` +
-              hint +
-              ` Fix the arguments and call the tool again with corrected JSON. Do not explain the error, just retry the call.`,
+            result: fillPrompt(prompts.toolSchemaError, { tool: call.name, detail, keys: receivedKeys, expected }),
             isError: true,
             durationMs: elapsedMs(startTime),
           };
@@ -692,6 +724,19 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
       log?.write({ phase: "result", result: isSubagentResult(rawResult) ? rawResult.xml : toJsonSafe(rawResult) });
       const finishOk = (resultChars: number): void =>
         trace("call_succeeded", "info", { attempts: attempt, durationMs: elapsedMs(executionStartTime), resultChars });
+      // Text and media from `toolContent`: the text is the result, the media rides in `parts` (inline data, set only here).
+      if (isToolContent(rawResult)) {
+        const { text, parts } = await resolveToolContent(rawResult, resultCharLimit(toolDef));
+        finishOk(text.length);
+        return {
+          id: call.id,
+          name: resolved.name,
+          result: text,
+          ...(parts.length > 0 ? { parts } : {}),
+          isError: false,
+          durationMs: elapsedMs(executionStartTime),
+        };
+      }
       if (rawResult === undefined) {
         finishOk(4);
         return {

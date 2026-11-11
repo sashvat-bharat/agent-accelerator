@@ -75,7 +75,7 @@ One file per action: the record sits under the `task` key.
 | `schedule.startCookingInAdvance` | string | Duration `DD:HH:MM` before delivery at which the run starts. |
 | `schedule.repeatEvery` | string, optional | Duration `DD:HH:MM` between deliveries; absent = run once. Greater than zero and longer than the lead time. |
 | `schedule.retries` | integer >= 0, optional | Extra attempts after a failed run, only while time remains before delivery. |
-| `schedule.onMissed` | `"skip"` \| `"run"`, optional | What to do when the program was not running at delivery time. Absent: the action becomes `missed` and waits for `runScheduledAction` / `skipScheduledAction`. |
+| `schedule.onMissed` | `"skip"` \| `"run"`, optional | What to do when the program was not running at delivery time. Absent: the action becomes `missed` and waits for `agent.scheduled.run` / `agent.scheduled.skip`. |
 | `state` | see below | Where the action is in its life. |
 | `nextCookAt`, `nextDeliverAt` | time or `null` | When the next run starts and is delivered. `null` for a one-shot that is running or finished. |
 | `current` | object, only while `cooking` | `{ cookStartedAt, deliverAt }` of the run in flight. Required while `state` is `cooking`. |
@@ -192,7 +192,7 @@ Any process may read. Several processes may also **write** the same home: every 
 
 ## Editing the files
 
-Prefer the API (`createScheduledAction`, `updateScheduledAction`, `deleteScheduledAction`, or the `scheduled_actions` tool): it validates and keeps `nextCookAt` / `nextDeliverAt` consistent. Editing by hand is supported for text and tools:
+Prefer the API (`agent.scheduled.create`, `.update`, `.delete`, or the `scheduled_actions` tool): it validates and keeps `nextCookAt` / `nextDeliverAt` consistent. Editing by hand is supported for text and tools:
 
 - **Safe while the program is stopped:** `name`, `role`, `instructions`, `task`, `tools`, `timeoutMs`, `schedule.retries`, `schedule.onMissed`, and deleting a whole record (its run folder stays unless you remove it).
 - **Picked up by a running program** at the next run: the SDK re-reads and validates the file before every run. An edit made at the very moment the SDK writes the same file can be lost, so keep hand edits to a stopped program or to small, quick changes.
@@ -239,5 +239,5 @@ The events on `telemetryBus` (`code`, then `data`) are part of the same contract
 ## For AI agents
 
 - Read each `<id>/task.json` and the run files with plain JSON and the header parser above; never write `state`, `current`, `next*`, `lastRun` or `delivery.json`.
-- To change an action, call `updateScheduledAction` (or the `scheduled_actions` tool, `update` command), not the file.
+- To change an action, call `agent.scheduled.update` (or the `scheduled_actions` tool, `update` command), not the file.
 - A run's cost is in its header: `costUsd` is `unknown` (never 0) when no price is known; check `unpricedTurns` before treating it as exact.

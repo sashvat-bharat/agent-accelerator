@@ -1,0 +1,1 @@
+[worker {{id}}] failed: {{reason}}

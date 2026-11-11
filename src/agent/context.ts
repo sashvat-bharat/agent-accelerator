@@ -143,6 +143,7 @@ export class AgentContext {
             isError: res.isError,
             ...(res.logFile ? { logFile: res.logFile } : {}),
             ...(res.stopped ? { stopped: true } : {}),
+            ...(res.parts && res.parts.length > 0 ? { parts: res.parts } : {}),
           },
         ],
       });

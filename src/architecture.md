@@ -15,6 +15,7 @@ The whole SDK. `index.ts` is the only public entry (`main`/`module`/`types`); ev
 | `tools/`            | `tool()`, schemas, the executor.                                                                                                                                            |
 | `streaming/`        | The event stream and the SSE parser.                                                                                                                                        |
 | `session/`          | Persistence (snapshot + journal), usage accounting, tool logs.                                                                                                              |
+| `prompts/`          | The SDK's own prompts as `.md` files, `DEFAULT_PROMPTS`, `AgentConfig.prompts`.                                                                                             |
 | `scheduler/`        | Scheduled actions.                                                                                                                                                          |
 | `types/`            | Shared contracts (no logic except small helpers).                                                                                                                           |
 | `utils/`            | Small shared helpers (durable writes, home, env, media, retry, safe I/O).                                                                                                   |

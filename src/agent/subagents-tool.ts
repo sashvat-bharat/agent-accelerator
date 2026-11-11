@@ -1,9 +1,8 @@
 /**
  * The model-facing `subagents` tool: one flat tool with a `command` field (`spawn | message | close | list`), a thin
- * wrapper over `agent.workers`. The tool manual lives in `subagents.md`, not in code. Results are plain text with one
+ * wrapper over `agent.workers`. The tool manual lives in `src/prompts/subagents-tool.md`, not in code. Results are plain text with one
  * header line naming the worker; the branded envelope under them carries usage and lineage to the loop.
  */
-import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { Agent } from "./agent.ts";
 import { tool } from "../tools/tool.ts";
@@ -11,20 +10,15 @@ import { makeSubagentResult } from "../tools/subagent-result.ts";
 import { ValidationError } from "../types/errors.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { WorkerReply } from "./workers.ts";
+import { fillPrompt, type Prompts } from "../prompts/prompts.ts";
 
 const COMMANDS = ["spawn", "message", "close", "list"] as const;
 
-let manual: string | undefined;
-/** Read on first use (not at import), so a program that never enables workers never touches the file. */
-function loadManual(): string {
-  return (manual ??= readFileSync(new URL("./subagents.md", import.meta.url), "utf8"));
-}
-
 // One worker reply as the model sees it: a header line naming the worker, then its text; in: a WorkerReply, out: the branded result.
-function asResult(reply: WorkerReply): ReturnType<typeof makeSubagentResult> {
+function asResult(reply: WorkerReply, prompts: Prompts): ReturnType<typeof makeSubagentResult> {
   const text = reply.error
-    ? `[worker ${reply.id}] failed: ${reply.error}`
-    : `[worker ${reply.id}] replied:\n${reply.text}`;
+    ? fillPrompt(prompts.workerFailed, { id: reply.id, reason: reply.error })
+    : fillPrompt(prompts.workerReplied, { id: reply.id, text: reply.text });
   return makeSubagentResult(text, [reply.metadata]);
 }
 
@@ -34,14 +28,12 @@ export function createSubagentsTool(agent: Agent): ToolDefinition {
   const max = agent.dynamicSubagents?.maxSpawn ?? Infinity;
   return tool({
     name: "subagents",
-    description: loadManual()
-      .replace(
-        "{{LIMIT}}",
-        Number.isFinite(max)
-          ? `You can have at most ${max} open workers. Close the ones you are done with.`
-          : "There is no limit on open workers. Close the ones you are done with: each one keeps its whole conversation."
-      )
-      .replace("{{TOOLS}}", poolNames.length > 0 ? poolNames.join(", ") : "none (omit tools)"),
+    description: fillPrompt(agent.prompts.subagentsTool, {
+      LIMIT: Number.isFinite(max)
+        ? `You can have at most ${max} open workers. Close the ones you are done with.`
+        : "There is no limit on open workers. Close the ones you are done with: each one keeps its whole conversation.",
+      TOOLS: poolNames.length > 0 ? poolNames.join(", ") : "none (omit tools)",
+    }),
     input: z.object({
       command: z.enum(COMMANDS),
       id: z.string().optional().describe("The worker's full id (message, close)."),
@@ -89,10 +81,11 @@ export function createSubagentsTool(agent: Agent): ToolDefinition {
                   history: a.history,
                 },
                 opts
-              )
+              ),
+              agent.prompts
             );
           case "message":
-            return asResult(await agent.workers.message(need("id"), need("task"), opts));
+            return asResult(await agent.workers.message(need("id"), need("task"), opts), agent.prompts);
           case "close":
             return `Worker ${agent.workers.close(need("id")).id} closed.`;
           case "list":

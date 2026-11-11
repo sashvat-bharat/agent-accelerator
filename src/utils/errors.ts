@@ -181,9 +181,9 @@ export function assertModalitiesSupported(context: ProviderContext, providerId: 
  * That wire has no video shape — only `input_text`/`input_image`/`input_file`
  * exist in either vendor's Responses docs — so a video part sent as
  * `input_file` lands in the router's document parser and 400s confusingly
- * (`Failed to parse the file ... Provide a PDF document`, observed live on
- * `openrouter/stealth/space-bunny-alpha` under the old Responses skin despite
- * its catalog `video` flag, which is chat-transport oriented). Fail fast with
+ * (`Failed to parse the file ... Provide a PDF document`, observed live under
+ * the old OpenRouter Responses skin despite the catalog `video` flag, which is
+ * chat-transport oriented). Fail fast with
  * a clear one-liner instead; video stays Gemini-only, and OpenRouter Chat
  * Completions carries `video_url` natively (no guard there). Throws a `ValidationError`.
  */

@@ -514,6 +514,13 @@ describe("workerBudget: each worker's own spending cap", () => {
     expect((await open.workers.spawn(spec)).error).toBeUndefined();
   });
 
+  it("a chat worker is not capped by scheduledActionBudget (that cap is for scheduled runs only)", async () => {
+    const parent = mk(tmp(), echo, { dynamicSubagents: { model: "groq/w", scheduledActionBudget: { maxTotalTokens: 1 } } });
+    const r = await parent.workers.spawn({ name: "r", task: "go" });
+    expect(r.error).toBeUndefined();
+    expect(parent.dynamicSubagents?.workerBudget).toBeUndefined();
+  });
+
   it("a worker never borrows the agent's own budget: no workerBudget means no cap at all", async () => {
     const parent = mk(undefined, echo, { budget: { maxTotalTokens: 1, maxCostUsd: 0.0000001 }, dynamicSubagents: { model: "groq/w" } });
     const common = { name: "w", instructions: "", sessionId: "p1-sub-w", tools: {} };
@@ -523,14 +530,17 @@ describe("workerBudget: each worker's own spending cap", () => {
     expect((await parent.workers.spawn(spec)).error).toBeUndefined(); // 4 tokens per turn would break the agent's own cap of 1
   });
 
-  it("is each worker's own budget, passed down to its workers and to one-shot workers", () => {
+  it("is each chat worker's own budget and is passed down to its workers; one-shot workers take scheduledActionBudget instead", () => {
     const parent = capped({ maxTotalTokens: 7, maxCostUsd: 0.5 });
     const common = { name: "w", instructions: "", sessionId: "p1-sub-w", tools: {} };
     const persistent = buildDynamicWorkerConfig(parent, { ...common, persistent: {} });
     expect(persistent.budget).toEqual({ maxTotalTokens: 7, maxCostUsd: 0.5 });
     expect(persistent.dynamicSubagents?.workerBudget).toEqual({ maxTotalTokens: 7, maxCostUsd: 0.5 });
-    expect(buildDynamicWorkerConfig(parent, common).budget).toEqual({ maxTotalTokens: 7, maxCostUsd: 0.5 });
+    expect(buildDynamicWorkerConfig(parent, common).budget).toBeUndefined(); // a one-shot (scheduled) worker is not capped by workerBudget
     expect(buildDynamicWorkerConfig(mk(undefined, echo), common).budget).toBeUndefined();
+    const both = mk(undefined, echo, { dynamicSubagents: { model: "groq/w", workerBudget: { maxTotalTokens: 7 }, scheduledActionBudget: { maxCostUsd: 2 } } });
+    expect(buildDynamicWorkerConfig(both, common).budget).toEqual({ maxCostUsd: 2 });
+    expect(buildDynamicWorkerConfig(both, { ...common, persistent: {} }).budget).toEqual({ maxTotalTokens: 7 });
   });
 
   it("rejects a cap that is not a number above 0", () => {

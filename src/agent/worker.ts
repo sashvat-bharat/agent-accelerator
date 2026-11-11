@@ -246,6 +246,14 @@ export function resolveWorkerCredentials(
   return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
 }
 
+// Configs built by `buildDynamicWorkerConfig`: the Agent constructor checks it so SDK-built workers never take `configure()` or env defaults.
+const workerConfigs = new WeakSet<object>();
+
+/** True for a config made by `buildDynamicWorkerConfig` (a chat worker or a scheduled run), not by the developer. */
+export function isWorkerConfig(config: object): boolean {
+  return workerConfigs.has(config);
+}
+
 /** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise: unlimited. */
 export const DEFAULT_MAX_DEPTH = Infinity;
 
@@ -256,7 +264,7 @@ export const DEFAULT_MAX_DEPTH = Infinity;
  * `persistent` makes a multi-turn worker that keeps its history (saved under `persistent.dir` when given, and
  * continued by `resume()` after a crash, never automatically). A persistent worker with levels left below it
  * (`maxDepth` of the parent, minus one for itself) gets its own `subagents` tool; its children can only be granted
- * the tools it was granted. One-shot workers never spawn. `dynamicSubagents.workerBudget` becomes each worker's own
+ * the tools it was granted. One-shot workers never spawn. `dynamicSubagents.workerBudget` becomes each chat worker's own
  * per-run `budget` (and is passed to its children).
  */
 export function buildDynamicWorkerConfig(
@@ -274,7 +282,7 @@ export function buildDynamicWorkerConfig(
   const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
   const dyn = parent.dynamicSubagents;
   const levelsBelow = (dyn?.maxDepth ?? DEFAULT_MAX_DEPTH) - 1;
-  return {
+  const config: AgentConfig = {
     name: worker.name,
     description: worker.role || `Sub-agent ${worker.name}`,
     instructions: worker.instructions,
@@ -284,7 +292,11 @@ export function buildDynamicWorkerConfig(
     thinkingLevel: parent.dynamicSubagents?.thinkingLevel ?? parent.thinkingConfig?.level,
     sessionId: worker.sessionId,
     tools: worker.tools,
-    ...(dyn?.workerBudget ? { budget: { ...dyn.workerBudget } } : {}),
+    // A chat worker (persistent) is capped by `workerBudget`; a one-shot scheduled run only by `scheduledActionBudget`.
+    ...(() => {
+      const cap = worker.persistent ? dyn?.workerBudget : dyn?.scheduledActionBudget;
+      return cap ? { budget: { ...cap } } : {};
+    })(),
     stateless: !worker.persistent,
     ...(worker.persistent?.dir ? { persist: { dir: worker.persistent.dir }, resume: "explicit" as const } : {}),
     ...(worker.persistent && levelsBelow >= 1
@@ -305,6 +317,8 @@ export function buildDynamicWorkerConfig(
     maxTurns: parent.maxTurns,
     ...parent.inheritableConfig(),
   };
+  workerConfigs.add(config);
+  return config;
 }
 
 // ---------------------------------------------------------------------------

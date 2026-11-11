@@ -1,0 +1,1 @@
+Schema validation error for tool '{{tool}}': {{detail}} Received argument keys: [{{keys}}].{{expected}} Fix the arguments and call the tool again with corrected JSON. Do not explain the error, just retry the call.

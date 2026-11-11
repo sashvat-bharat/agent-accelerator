@@ -1091,6 +1091,77 @@ describe("Google media inputs (documented MIME types, URLs, YouTube)", () => {
     ]);
   });
 
+  it("sends a video's processing mode, and rejects an unknown one before the network", async () => {
+    const seen = captureInput();
+    await send([
+      { type: "video", video: "https://www.youtube.com/watch?v=9hE5-98ZeCg", processing: "agentic", resolution: "low" },
+      { type: "video", video: "https://example.com/clip.mp4", processing: "static" },
+      { type: "video", video: "https://example.com/other.mp4" },
+    ]);
+    expect(seen.body.input).toEqual([
+      { type: "video", uri: "https://www.youtube.com/watch?v=9hE5-98ZeCg", resolution: "low", processing: "agentic" },
+      { type: "video", uri: "https://example.com/clip.mp4", mime_type: "video/mp4", processing: "static" },
+      { type: "video", uri: "https://example.com/other.mp4", mime_type: "video/mp4" },
+    ]);
+    const calls = seen.apiCalls;
+    await expect(send([{ type: "video", video: "https://example.com/clip.mp4", processing: "smart" }])).rejects.toMatchObject({
+      name: "ValidationError",
+    });
+    expect(seen.apiCalls).toBe(calls);
+  });
+
+  it("keeps processing_call and processing_result steps in the replayed history", async () => {
+    const steps = [
+      { type: "thought", signature: "s1", summary: [{ type: "text", text: "Looking at the transcript" }] },
+      { type: "processing_call", id: "call_01", signature: "sig_call_01" },
+      { type: "processing_result", call_id: "call_01", signature: "sig_result_01" },
+      { type: "model_output", content: [{ type: "text", text: "It is about pelicans." }] },
+    ];
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify({ ...TEXT_INTERACTION, id: `v1_${bodies.length}`, steps }), { status: 200 });
+    };
+    const provider = new GoogleInteractionsProvider();
+    const first = await provider.generate("gemini-3.5-flash", { messages: [{ role: "user", content: "summarise" }] }, { apiKey: "k" });
+    expect(first.text).toBe("It is about pelicans.");
+    expect(first.providerSteps?.steps).toEqual(steps);
+    // A reseed (no live chain) replays the stored steps verbatim, processing steps included.
+    clearInteractionChains();
+    await provider.generate(
+      "gemini-3.5-flash",
+      {
+        messages: [
+          { role: "user", content: "summarise" },
+          { role: "assistant", content: "It is about pelicans.", providerSteps: first.providerSteps },
+          { role: "user", content: "again" },
+        ],
+      },
+      { apiKey: "k" }
+    );
+    expect(bodies[1].input.filter((x: any) => x.type.startsWith("processing_") || x.type === "thought")).toEqual(steps.slice(0, 3));
+  });
+
+  it("recognises Files API links on /v1 and /v1beta, but not look-alike hosts or other paths", async () => {
+    // Audio is never fetched by Google, so only a real Files API link can travel as a uri; anything else is downloaded and inlined.
+    const seen = captureInput({
+      "https://generativelanguage.googleapis.com.evil.example/v1beta/files/x": { body: "ID3abc", type: "audio/mpeg" },
+      "https://generativelanguage.googleapis.com/v1beta/models/x": { body: "ID3abc", type: "audio/mpeg" },
+    });
+    await send([
+      { type: "audio", audio: "https://generativelanguage.googleapis.com/v1/files/abc123", mimeType: "audio/wav" },
+      { type: "audio", audio: "https://generativelanguage.googleapis.com/v1beta/files/def456", mimeType: "audio/wav" },
+      { type: "audio", audio: "https://generativelanguage.googleapis.com.evil.example/v1beta/files/x" },
+      { type: "audio", audio: "https://generativelanguage.googleapis.com/v1beta/models/x" },
+    ]);
+    const [a, b, c, d] = seen.body.input as Array<Record<string, unknown>>;
+    expect(a).toEqual({ type: "audio", uri: "https://generativelanguage.googleapis.com/v1/files/abc123", mime_type: "audio/wav" });
+    expect(b).toEqual({ type: "audio", uri: "https://generativelanguage.googleapis.com/v1beta/files/def456", mime_type: "audio/wav" });
+    expect(c!["data"]).toBeDefined();
+    expect(c!["uri"]).toBeUndefined();
+    expect(d!["data"]).toBeDefined();
+  });
+
   it("downloads and inlines audio URLs (Google never fetches audio) and bare MIME parameters", async () => {
     const seen = captureInput({
       "https://example.com/talk.mp3": { body: "ID3abc", type: "audio/mpeg" },
@@ -1487,5 +1558,45 @@ describe("Google per-media resolution (media-resolution.md, api-ref MediaResolut
     );
     expect(body.input.map((b: any) => b.resolution)).toEqual(["ultra_high", "low", undefined]);
     expect(body.input[1]).toEqual({ type: "video", uri: "https://www.youtube.com/watch?v=9hE5-98ZeCg", resolution: "low" });
+  });
+});
+
+describe("Google inline size checks (implemented, not wired in yet)", () => {
+  const MB = 1024 * 1024;
+  // 4 base64 characters decode to 3 bytes, so this is exactly n MB (n divisible by 3 only matters for padding: none here).
+  const b64 = (mb: number) => "A".repeat((mb * MB * 4) / 3);
+
+  it("accepts inline media under the limits and counts decoded bytes, not base64 length", async () => {
+    const { assertGoogleInlineSizes } = await import("../src/providers/google.ts");
+    const big = b64(48);
+    expect(() =>
+      assertGoogleInlineSizes([{ type: "user_input", content: [{ type: "document", mime_type: "application/pdf", data: big }] }], "gemini-3.5-flash")
+    ).not.toThrow(); // 48 MB decoded, though its base64 text is 64 MB
+  });
+
+  it("rejects a PDF over 50 MB, even when the request total is fine", async () => {
+    const { assertGoogleInlineSizes } = await import("../src/providers/google.ts");
+    expect(() =>
+      assertGoogleInlineSizes([{ type: "document", mime_type: "application/pdf", data: b64(51) }], "gemini-3.5-flash")
+    ).toThrow(/PDF of 51\.0 MB.*Files API/);
+    expect(() => assertGoogleInlineSizes([{ type: "image", mime_type: "image/png", data: b64(51) }], "gemini-3.5-flash")).not.toThrow();
+  });
+
+  it("rejects a request whose inline media adds up to more than 100 MB, including blocks nested in steps", async () => {
+    const { assertGoogleInlineSizes } = await import("../src/providers/google.ts");
+    const half = b64(51); // one string shared by both blocks
+    const input = [
+      { type: "user_input", content: [{ type: "image", mime_type: "image/png", data: half }] },
+      { type: "function_result", name: "t", call_id: "c", result: [{ type: "image", mime_type: "image/png", data: half }] },
+    ];
+    expect(() => assertGoogleInlineSizes(input, "gemini-3.5-flash")).toThrow(/102\.0 MB.*100\.0 MB/);
+    expect(() => assertGoogleInlineSizes(input.slice(0, 1), "gemini-3.5-flash")).not.toThrow();
+  });
+
+  it("ignores uri blocks and plain text", async () => {
+    const { assertGoogleInlineSizes } = await import("../src/providers/google.ts");
+    expect(() =>
+      assertGoogleInlineSizes([{ type: "user_input", content: [{ type: "text", text: "x".repeat(1000) }, { type: "video", uri: "gs://b/v.mp4" }] }], "m")
+    ).not.toThrow();
   });
 });

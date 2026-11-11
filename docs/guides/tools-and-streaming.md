@@ -41,7 +41,22 @@ How a call is executed, in order:
 7. **Tool log**: with `persist: { dir }` the call also gets `tool-logs/<n>-<tool>.ndjson` in the session folder (input, attempts, retries, full result or error, duration, plus your `ctx.log(message, data?)` lines, each flushed as written; never sent to the model; the result carries `logFile`). Without `persist: { dir }`, `ctx.log` is a no-op.
 8. **Repeat guard**: the 3rd identical call in a row is answered with `repeat_blocked`; `repeatable`/`idempotent` tools are exempt.
 
-`toolChoice` (agent or per run): `"auto"`, `"none"` (whole run), `"required"` or `{ tool: "name" }` (these two apply to the **first turn only**, otherwise a run could never finish). Also exported: `executeToolCalls`, `toStandardToolDeclarations`, `zodToJsonSchema`, `cleanJsonSchema`, `stripSchemaForGoogle`, `assertValidToolName`. Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; ambiguous names fail at construction.
+**Returning media.** When the model should see a file (a chart, a scanned page), return `toolContent([...])` instead of text:
+
+```ts
+import { tool, toolContent } from "agent-accelerator";
+
+const chart = tool({
+  description: "Draws a chart and shows it to the model.",
+  input: z.object({ metric: z.string() }),
+  execute: async ({ metric }) =>
+    toolContent([`chart of ${metric}`, { type: "image", image: await renderPng(metric), mimeType: "image/png" }]),
+});
+```
+
+Text parts become the call's result (what every provider sees). Media (bytes, a data URL, a path or a URL: your own tool code is trusted with them) is read once and kept as inline data. **Google** (Gemini 3 and later) receives the media inside the function result; other providers get the text only, with one `provider_warning`. Only a value made by `toolContent` counts: JSON a tool fetched from the web can never become media. The media is saved with the session (inline, not in `media/`), counts toward Google's inline size limits, and is not cut by `maxResultChars`.
+
+`toolChoice` (agent or per run): `"auto"`, `"none"` (whole run), `"validated"` (Google only, whole run), `"required"` or `{ tool: "name" }` (these two apply to the **first turn only**, otherwise a run could never finish). `"validated"` forces nothing: the model still decides whether to call a tool, but every call it makes is kept valid against the tool's schema (Google's `validated` mode); other providers ignore it with one warning. Also exported: `executeToolCalls`, `toStandardToolDeclarations`, `zodToJsonSchema`, `cleanJsonSchema`, `stripSchemaForGoogle`, `assertValidToolName`. Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; ambiguous names fail at construction.
 
 **Recommendations**
 - ✅ Write descriptions like instructions to a colleague; `.describe()` every field.

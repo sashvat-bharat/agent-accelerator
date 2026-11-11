@@ -8,14 +8,14 @@
  *
  *   1. Turn it on: dynamicSubagents.allowScheduledActions (off by default).
  *   2. Read the clock and schedule an action from YOUR code
- *      (createScheduledAction): it starts working about 1 minute from now and
+ *      (agent.scheduled.create): it starts working about 1 minute from now and
  *      delivers about 2 minutes from now.
- *   3. Look at it (listScheduledActions) and, while the clock runs, try
- *      runScheduledAction (run it right now).
+ *   3. Look at it (agent.scheduled.list) and, while the clock runs, try
+ *      agent.scheduled.run (run it right now).
  *   4. Let the MODEL schedule one: it reads the clock itself (get_datetime)
  *      and uses the same timing (scheduled_actions tool).
  *   5. Watch the REAL scheduled deliveries arrive and read the result files.
- *   6. Clean up (deleteScheduledAction).
+ *   6. Clean up (agent.scheduled.delete).
  *
  * Run:
  *   bun run examples/14-scheduled-actions.ts           (about 3 minutes: waits for the real deliveries)
@@ -35,15 +35,7 @@
  */
 
 import * as fs from "node:fs";
-import {
-  Agent,
-  tool,
-  telemetryBus,
-  createScheduledAction,
-  listScheduledActions,
-  runScheduledAction,
-  deleteScheduledAction,
-} from "agent-accelerator";
+import { Agent, tool, telemetryBus } from "agent-accelerator";
 import { z } from "zod";
 import { fail } from "./_shared";
 
@@ -129,9 +121,9 @@ function nextDelivery(id: string, ms: number): Promise<Delivery> {
 }
 
 /** Removes every action in the demo-only folder (force: abort a run in flight; purge: delete its run files). */
-async function removeDemoActions(say: (t: string) => void): Promise<void> {
-  for (const a of listScheduledActions({ home: HOME })) {
-    const r = await deleteScheduledAction(a.id, { home: HOME, force: true, purge: true });
+async function removeDemoActions(agent: Agent, say: (t: string) => void): Promise<void> {
+  for (const a of agent.scheduled.list()) {
+    const r = await agent.scheduled.delete(a.id, { force: true, purge: true });
     say(`  delete ${a.id}: ${r.ok ? "removed" : JSON.stringify(r)}`);
   }
 }
@@ -159,10 +151,10 @@ async function main(): Promise<void> {
   info(`Tools the model sees: ${Object.keys(agent.tools).join(", ")}`);
   // This folder is only for the demo: drop leftovers of an earlier run you interrupted,
   // and clean up if you press Ctrl+C during the wait.
-  await removeDemoActions(() => {});
+  await removeDemoActions(agent, () => {});
   process.once("SIGINT", () => {
     console.log(`\n${Y}Interrupted: removing the demo's actions...${R}`);
-    removeDemoActions(info).finally(() => process.exit(130));
+    removeDemoActions(agent, info).finally(() => process.exit(130));
   });
 
   // 2. Read the clock, schedule from your code ---------------------------------
@@ -170,7 +162,7 @@ async function main(): Promise<void> {
   const now = new Date();
   info(`Your computer's clock says ${clock(now)}.`);
   const slot = inMinutes(2); // deliver at least 2 minutes from now
-  const action = createScheduledAction(agent, {
+  const action = agent.scheduled.create({
     instructions: "You write a very short, sourced AI news brief.",
     task: "Call recent_news, then write a 3-bullet brief from it.",
     tools: ["recent_news"],
@@ -192,12 +184,12 @@ async function main(): Promise<void> {
 
   // 3. Look at it, run it now -------------------------------------------------
   head("3. List it, and try run-now while the clock runs");
-  for (const a of listScheduledActions({ home: HOME })) {
+  for (const a of agent.scheduled.list()) {
     info(`  ${a.id}  state=${a.state}  running=${a.running}  next delivery ${a.nextDeliverAt}`);
   }
   info("run_now does not move the schedule; its result is delivered on the next clock tick...");
   const nowDelivery = nextDelivery(action.id, 180_000);
-  runScheduledAction(action.id, { home: HOME });
+  agent.scheduled.run(action.id);
   const first = await nowDelivery;
   // Known quirk: a run_now result is reported "late" (it finishes after its "due now" time).
   // The flag is meaningful for scheduled deliveries (see step 5).
@@ -228,7 +220,7 @@ async function main(): Promise<void> {
     },
   });
   console.log(`\n${DIM}(${res.turns} turns, ${res.usage.inputTokens} in / ${res.usage.outputTokens} out)${R}`);
-  const mine = listScheduledActions({ home: HOME }).filter((a) => a.id !== action.id);
+  const mine = agent.scheduled.list().filter((a) => a.id !== action.id);
   if (mine.length === 0)
     info("The model did not schedule anything this time. Try running again or rephrase the request.");
   for (const a of mine) {
@@ -255,7 +247,7 @@ async function main(): Promise<void> {
 
   // 6. Clean up -----------------------------------------------------------------
   head("6. Clean up");
-  await removeDemoActions(info);
+  await removeDemoActions(agent, info);
   ok("\nDone. In your own program, keep the Agent referenced and listen for scheduled_action.delivered.");
 }
 

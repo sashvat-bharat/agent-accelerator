@@ -6,7 +6,7 @@
  * never in the canonical layer (`src/providers.ts`).
  *
  * Wire contract: `references/testings/openrouter/CONTRACT.md` (docs + live
- * captures on `stealth/space-bunny-alpha`, 2026-09-24). Capability matrix:
+ * captures, 2026-09-24). Capability matrix:
  * `references/testings/openrouter/CAPABILITY-MATRIX.md`.
  *
  * This is the STABLE transport. The beta Responses skin
@@ -24,9 +24,10 @@
  * - IDs are provider-generated (`gen-…` generations, `call_…`/uuid tool ids)
  *   and echoed verbatim (`tool_call_id`). The `call_${random}` fallback in
  *   parsers is a local canonical correlation id only; it is never sent.
- * - Prior-turn reasoning is NOT resent (chat history is messages + tool
- *   calls only). This matches the Responses adapter behavior and avoids 400s
- *   on strict routes; documented in the capability matrix.
+ * - Prior-turn reasoning is resent as `reasoning_details` exactly as returned (kept on the assistant message as
+ *   `providerSteps`), which tool turns need (reasoning-tokens.md, "Preserving Reasoning"). Plain `reasoning` text alone is
+ *   never resent. Parsed-PDF `file` annotations ride the same way and go back as `annotations`, so the router does not parse
+ *   the same PDF again (pdf-inputs.md, "Skip Parsing Costs").
  */
 import type {
   Provider,
@@ -47,6 +48,7 @@ import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { ConfigError, isAbortError } from "../types/errors.ts";
+import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
 import {
   newToolCallId,
   redactedHeaders,
@@ -84,6 +86,8 @@ import {
   augmentSystemPromptWithStructuredOutput,
   emitProviderWarning,
   warnIgnoredMediaResolution,
+  warnIgnoredVideoProcessing,
+  warnIgnoredToolMedia,
 } from "../providers.ts";
 
 // ---------------------------------------------------------------------------
@@ -108,6 +112,8 @@ type ChatMessage =
         type: "function";
         function: { name: string; arguments: string };
       }>;
+      reasoning_details?: unknown[];
+      annotations?: unknown[];
       name?: string;
     }
   | { role: "tool"; content: string; tool_call_id: string; name?: string }
@@ -118,7 +124,10 @@ interface ChatRequestBody {
   messages: ChatMessage[];
   tools?: Array<Record<string, unknown>>;
   tool_choice?: string | { type: "function"; function: { name: string } };
-  reasoning?: { effort: string };
+  reasoning?: { effort?: string; exclude?: boolean };
+  provider?: Record<string, unknown>;
+  parallel_tool_calls?: boolean;
+  user?: string;
   service_tier?: string;
   session_id?: string;
   cache_control?: { type: "ephemeral"; ttl: "5m" | "1h" };
@@ -135,8 +144,13 @@ interface ChatUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
-  prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
-  completion_tokens_details?: { reasoning_tokens?: number };
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+    audio_tokens?: number;
+    video_tokens?: number;
+  };
+  completion_tokens_details?: { reasoning_tokens?: number; audio_tokens?: number; image_tokens?: number };
   cost?: number;
   [k: string]: unknown;
 }
@@ -186,6 +200,71 @@ const RETRYABLE_ERROR_TYPE_STATUS: Record<string, number> = {
 function midStreamStatus(code: unknown, errorType: unknown): number | undefined {
   if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) return code;
   return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
+}
+
+// OpenRouter options that come from env vars, never from AgentConfig (provider routing, `parallel_tool_calls`, `reasoning.exclude`, `user`). A per-Agent `env` wins over the process env; nothing is sent when no variable is set; a bad value is a ConfigError before any network call. NOT supported on purpose (the owner does not want them for now): `reasoning.max_tokens` and `trace`; in: buildBody, out: the extra body fields.
+const ROUTING_LISTS = { OPENROUTER_ORDER: "order", OPENROUTER_ONLY: "only", OPENROUTER_IGNORE: "ignore" } as const;
+const ROUTING_FLAGS = {
+  OPENROUTER_ALLOW_FALLBACKS: "allow_fallbacks",
+  OPENROUTER_REQUIRE_PARAMETERS: "require_parameters",
+  OPENROUTER_ZDR: "zdr",
+} as const;
+function openRouterEnvOptions(options?: ProviderRequestOptions): {
+  provider?: Record<string, unknown>;
+  parallel_tool_calls?: boolean;
+  reasoning_exclude?: boolean;
+  user?: string;
+} {
+  const read = (name: string): string | undefined => {
+    const own = options?.env?.[name]?.trim();
+    return own ? own : getEnv(name);
+  };
+  const bad = (name: string, value: string, expected: string): never => {
+    throw new ConfigError(`[Agent Accelerator] Invalid ${name} ${JSON.stringify(value)}: expected ${expected}.`);
+  };
+  const flag = (name: string): boolean | undefined => {
+    const v = read(name);
+    if (v === undefined) return undefined;
+    const t = v.toLowerCase();
+    if (t === "true" || t === "1") return true;
+    if (t === "false" || t === "0") return false;
+    return bad(name, v, "true or false");
+  };
+  const provider: Record<string, unknown> = {};
+  for (const [name, field] of Object.entries(ROUTING_LISTS)) {
+    const v = read(name);
+    if (v === undefined) continue;
+    const list = v
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (list.length === 0) bad(name, v, "a comma-separated list of provider slugs");
+    provider[field] = list;
+  }
+  for (const [name, field] of Object.entries(ROUTING_FLAGS)) {
+    const v = flag(name);
+    if (v !== undefined) provider[field] = v;
+  }
+  const collection = read("OPENROUTER_DATA_COLLECTION");
+  if (collection !== undefined) {
+    if (collection !== "allow" && collection !== "deny") bad("OPENROUTER_DATA_COLLECTION", collection, "allow or deny");
+    provider["data_collection"] = collection;
+  }
+  const sort = read("OPENROUTER_SORT");
+  if (sort !== undefined) {
+    if (sort !== "price" && sort !== "throughput" && sort !== "latency")
+      bad("OPENROUTER_SORT", sort, "price, throughput or latency");
+    provider["sort"] = sort;
+  }
+  const parallel = flag("OPENROUTER_PARALLEL_TOOL_CALLS");
+  const exclude = flag("OPENROUTER_REASONING_EXCLUDE");
+  const user = read("OPENROUTER_USER");
+  return {
+    ...(Object.keys(provider).length > 0 ? { provider } : {}),
+    ...(parallel !== undefined ? { parallel_tool_calls: parallel } : {}),
+    ...(exclude !== undefined ? { reasoning_exclude: exclude } : {}),
+    ...(user ? { user } : {}),
+  };
 }
 
 // Canonical tool declarations as Chat Completions function tools; in: options.tools, out: request `tools`.
@@ -311,6 +390,48 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
   return blocks;
 }
 
+// Folds one streamed `reasoning_details` chunk into the turn's blocks: chunks with the same index (else id) are one block whose text, summary, data and signature are concatenated or filled in, in order; in: the stream handler, out: the blocks replayed on the next request.
+function mergeReasoningDetails(blocks: Array<Record<string, unknown>>, chunk: unknown): void {
+  if (!chunk || typeof chunk !== "object" || Array.isArray(chunk)) return;
+  const c = chunk as Record<string, unknown>;
+  const same = blocks.find((b) =>
+    typeof c["index"] === "number" ? b["index"] === c["index"] : c["id"] != null && b["id"] === c["id"]
+  );
+  if (!same) {
+    blocks.push({ ...c });
+    return;
+  }
+  for (const [k, v] of Object.entries(c)) {
+    if (v === null || v === undefined) continue;
+    if ((k === "text" || k === "summary" || k === "data") && typeof v === "string" && typeof same[k] === "string")
+      same[k] = (same[k] as string) + v;
+    else same[k] = v;
+  }
+}
+
+// Adds a streamed `file` annotation (a parsed PDF) once per `file.hash`; in: the stream handler, out: the annotations replayed on the next request.
+function mergeAnnotation(blocks: Array<Record<string, unknown>>, chunk: unknown): void {
+  if (!chunk || typeof chunk !== "object" || (chunk as { type?: unknown }).type !== "file") return;
+  const hash = (chunk as { file?: { hash?: unknown } }).file?.hash;
+  if (typeof hash === "string" && blocks.some((b) => (b as { file?: { hash?: unknown } }).file?.hash === hash)) return;
+  blocks.push(chunk as Record<string, unknown>);
+}
+
+// The reasoning blocks and the parsed-PDF annotations of an assistant turn as OpenRouter returned them (both live in `providerSteps`, told apart by `type: "file"`); in: a stored assistant message, out: fullHistoryMessages.
+function storedReplay(m: { providerSteps?: { provider: string; steps: unknown[] } }): {
+  reasoning_details?: unknown[];
+  annotations?: unknown[];
+} {
+  if (m.providerSteps?.provider !== "openrouter") return {};
+  const isFile = (x: unknown): boolean => (x as { type?: unknown } | null)?.type === "file";
+  const annotations = m.providerSteps.steps.filter(isFile);
+  const details = m.providerSteps.steps.filter((x) => !isFile(x));
+  return {
+    ...(details.length > 0 ? { reasoning_details: details } : {}),
+    ...(annotations.length > 0 ? { annotations } : {}),
+  };
+}
+
 // A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
 function resultToOutput(result: unknown): string {
   if (typeof result === "string") return result;
@@ -323,7 +444,10 @@ function resultToOutput(result: unknown): string {
  * carries everything. Assistant items carry no provider `id`/`status`
  * requirements (unlike the discontinued Responses skin).
  */
-async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessage[]> {
+async function fullHistoryMessages(
+  context: ProviderContext,
+  bridge = DEFAULT_PROMPTS.toolBridge
+): Promise<ChatMessage[]> {
   // Map assistant tool_call ids so tool results pair even though the
   // executor keys results by the call id.
   const pairing = new Map<string, string>();
@@ -354,7 +478,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
       // Strict routes reject `user` directly after `tool`: bridge with a
       // synthetic assistant turn (pi api/openai-completions.ts:1233).
       if (lastRole === "tool") {
-        messages.push({ role: "assistant", content: "I have processed the tool results." });
+        messages.push({ role: "assistant", content: bridge });
       }
       if (typeof m.content === "string") {
         if (m.content) {
@@ -369,9 +493,10 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         }
       }
     } else if (m.role === "assistant") {
+      const replay = storedReplay(m);
       if (typeof m.content === "string") {
         if (m.content) {
-          messages.push({ role: "assistant", content: m.content });
+          messages.push({ role: "assistant", content: m.content, ...replay });
         }
         continue;
       }
@@ -387,8 +512,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         } else if (part.type === "text" && part.text) {
           texts.push(part.text);
         }
-        // Prior-turn reasoning is NOT resent: chat history is messages +
-        // tool calls only (documented decision; avoids strict-route 400s).
+        // Reasoning is not rebuilt from text: the stored `reasoning_details` blocks are replayed verbatim below.
       }
       // Skip empty assistant turns (no text + no tool calls): strict
       // routes reject them, and they carry no signal (pi drop rule).
@@ -397,6 +521,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
         role: "assistant",
         content: texts.length > 0 ? texts.join("\n") : null,
         ...(calls.length > 0 ? { tool_calls: calls } : {}),
+        ...replay,
       });
       lastRole = "assistant";
     } else if (m.role === "tool") {
@@ -448,6 +573,25 @@ function mapUsage(raw?: ChatUsage): TokenUsage {
     cacheWriteTokens: raw?.prompt_tokens_details?.cache_write_tokens ?? 0,
     thinkingTokens: raw?.completion_tokens_details?.reasoning_tokens ?? 0,
   };
+  // Media tokens are listed only when the provider reported more than zero of them.
+  const count = (n: unknown): number | undefined =>
+    typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
+  const inDet = {
+    audioTokens: count(raw?.prompt_tokens_details?.audio_tokens),
+    videoTokens: count(raw?.prompt_tokens_details?.video_tokens),
+  };
+  const outDet = {
+    audioTokens: count(raw?.completion_tokens_details?.audio_tokens),
+    imageTokens: count(raw?.completion_tokens_details?.image_tokens),
+  };
+  const keep = (d: Record<string, number | undefined>): Record<string, number> | undefined => {
+    const kept = Object.fromEntries(Object.entries(d).filter(([, v]) => v !== undefined)) as Record<string, number>;
+    return Object.keys(kept).length > 0 ? kept : undefined;
+  };
+  const inKept = keep(inDet);
+  const outKept = keep(outDet);
+  if (inKept) usage.inputDetails = inKept;
+  if (outKept) usage.outputDetails = outKept;
   if (typeof raw?.cost === "number" && raw.cost >= 0) {
     // an explicit 0 (a free model, a response-cache hit) is a known cost, not a missing one
     usage.cost = { totalCost: raw.cost };
@@ -502,6 +646,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       `openrouter/${modelId}`
     );
     warnIgnoredMediaResolution("openrouter", context.messages, `openrouter/${modelId}`, ["video"]);
+    warnIgnoredVideoProcessing("openrouter", context.messages, `openrouter/${modelId}`);
+    warnIgnoredToolMedia("openrouter", context.messages, `openrouter/${modelId}`);
 
     // Structured outputs: native `response_format` when supported, else
     // emulated via system-prompt instruction + client validation (catalog
@@ -519,7 +665,11 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       outputEmulated = true;
       effectiveContext = {
         ...context,
-        systemPrompt: augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec),
+        systemPrompt: augmentSystemPromptWithStructuredOutput(
+          context.systemPrompt,
+          outputSpec,
+          options?.prompts?.structuredOutput
+        ),
       };
       emitProviderWarning({
         provider: "openrouter",
@@ -530,7 +680,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         fallback: "emulated JSON instruction + client validation (no response_format is sent)",
       });
     }
-    const messages = await fullHistoryMessages(effectiveContext);
+    const messages = await fullHistoryMessages(effectiveContext, options?.prompts?.toolBridge);
     const body: ChatRequestBody = {
       model: modelId,
       messages,
@@ -538,11 +688,17 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     };
     const orTools = toOpenRouterTools(tools);
     if (orTools) body.tools = orTools;
-    const toolChoice = mapToolChoiceToOpenRouterChat(
-      options?.toolChoice as "auto" | "none" | "required" | { type: "function"; function: { name: string } } | undefined
-    );
+    const toolChoice = mapToolChoiceToOpenRouterChat(options?.toolChoice);
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
-    if (effort) body.reasoning = { effort };
+    const env = openRouterEnvOptions(options);
+    if (effort || env.reasoning_exclude !== undefined)
+      body.reasoning = {
+        ...(effort ? { effort } : {}),
+        ...(env.reasoning_exclude !== undefined ? { exclude: env.reasoning_exclude } : {}),
+      };
+    if (env.provider) body.provider = env.provider;
+    if (env.parallel_tool_calls !== undefined && orTools) body.parallel_tool_calls = env.parallel_tool_calls;
+    if (env.user) body.user = env.user;
     if (serviceTier) body.service_tier = serviceTier;
     if (cache === "5m" || cache === "1h") body.cache_control = { type: "ephemeral", ttl: cache };
     // Documented Chat Completions generation controls (only those the caller set).
@@ -653,6 +809,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         provider: "openrouter",
         raw: res.raw,
         durationMs: res.durationMs,
+        providerSteps: res.providerSteps,
       };
     } catch (err) {
       // A stream reports its own generic abort; the caller's reason (`interrupt(new Error("..."))`) is what the run should carry.
@@ -748,6 +905,10 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         // Index of the most recent tool-call delta: unindexed chunks continue
         // it (falling back to calls.size would fork a phantom call per chunk).
         let lastToolIndex = 0;
+        // The turn's reasoning blocks exactly as returned, replayed on the next request (tool turns need them).
+        const reasoningBlocks: Array<Record<string, unknown>> = [];
+        // Parsed PDFs (`file` annotations) of the turn: sent back so OpenRouter does not parse the same file again.
+        const annotationBlocks: Array<Record<string, unknown>> = [];
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
         let sawFinishReason = false;
@@ -812,6 +973,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           const details = delta["reasoning_details"];
           if (Array.isArray(details)) {
             for (const block of details) {
+              mergeReasoningDetails(reasoningBlocks, block);
               const t = (block as { text?: string })?.text;
               if (typeof t === "string" && t) {
                 thinking += t;
@@ -833,6 +995,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
               partialThinking: thinking,
             });
           }
+          if (Array.isArray(delta["annotations"]))
+            for (const a of delta["annotations"]) mergeAnnotation(annotationBlocks, a);
           // Tool-call deltas accumulate per choice index.
           const deltaCalls = delta["tool_calls"];
           if (Array.isArray(deltaCalls)) {
@@ -942,6 +1106,9 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
           },
           durationMs: Date.now() - startTime,
+          ...(reasoningBlocks.length + annotationBlocks.length > 0
+            ? { providerSteps: { provider: "openrouter", steps: [...reasoningBlocks, ...annotationBlocks] } }
+            : {}),
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);

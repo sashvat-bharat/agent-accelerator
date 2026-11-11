@@ -153,6 +153,8 @@ export interface ToolResultRecord {
   logFile?: string;
   /** The tool ended the run with `ctx.stop(reason)`; `result` is the reason. */
   stopped?: boolean;
+  /** Media returned with `toolContent`, as inline data URLs (`result` is its text). Set only by the executor. */
+  parts?: import("./message.ts").ContentPart[];
 }
 
 /**

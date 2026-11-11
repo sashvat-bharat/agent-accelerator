@@ -31,6 +31,10 @@ export {
 } from "./tools/tool.ts";
 export type { CreateToolOptions } from "./tools/tool.ts";
 export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
+export { toolContent } from "./tools/tool-content.ts";
+export { DEFAULT_PROMPTS } from "./prompts/prompts.ts";
+export type { PromptName, PromptOverrides } from "./prompts/prompts.ts";
+export type { ToolContent, ToolContentPart } from "./tools/tool-content.ts";
 /**
  * @deprecated Internal executor surface. Prefer `Agent` runs; for direct
  * execution import from the future `/internal` entry.
@@ -60,17 +64,12 @@ export {
 export type { AgentAsToolTarget, SubAgentTrace } from "./agent/delegation.ts";
 export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOptions } from "./agent/workers.ts";
 
-// Scheduled actions: dynamic sub-agents that run later and save their answer to a file
-export {
-  createScheduledAction,
-  listScheduledActions,
-  updateScheduledAction,
-  runScheduledAction,
-  skipScheduledAction,
-  deleteScheduledAction,
-} from "./scheduler/scheduler.ts";
+// Scheduled actions: dynamic sub-agents that run later and save their answer to a file (use `agent.scheduled`)
+export type { ScheduledActions } from "./scheduler/scheduler.ts";
 export { getDatetimeTool } from "./scheduler/tool.ts";
 export { setHome, resolveHome } from "./utils/home.ts";
+export { configure } from "./agent/defaults.ts";
+export type { AgentDefaults } from "./agent/defaults.ts";
 export type {
   ScheduledActionInput,
   ScheduledActionPatch,
@@ -323,6 +322,7 @@ export type {
   ProviderContext,
   ProviderSteps,
   MediaResolution,
+  VideoProcessing,
 } from "./types/message.ts";
 
 export type {

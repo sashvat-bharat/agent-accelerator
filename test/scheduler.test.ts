@@ -11,19 +11,23 @@ import {
   tool,
   telemetryBus,
   executeToolCalls,
-  createScheduledAction,
-  listScheduledActions,
-  updateScheduledAction,
-  runScheduledAction,
-  skipScheduledAction,
-  deleteScheduledAction,
   getDatetimeTool,
   type AgentConfig,
   type ScheduledActionInput,
   type TelemetryEvent,
 } from "../src/index.ts";
 import { z } from "zod";
-import { getScheduler, resetSchedulers, type Scheduler } from "../src/scheduler/scheduler.ts";
+import {
+  getScheduler,
+  resetSchedulers,
+  createScheduledAction,
+  listScheduledActions,
+  updateScheduledAction,
+  runScheduledAction,
+  skipScheduledAction,
+  deleteScheduledAction,
+  type Scheduler,
+} from "../src/scheduler/scheduler.ts";
 import { createScheduledActionsTool } from "../src/scheduler/tool.ts";
 import { resolveHome } from "../src/utils/home.ts";
 import { scheduledRunTimeoutMs } from "../src/agent/worker.ts";
@@ -723,8 +727,9 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toMatch(/no longer in the pool: gone_tool/);
   });
 
-  // A parent whose scheduled runs use `extra` (budget / workerBudget); the pool and worker model are the harness defaults.
-  const withBudgets = (h: Harness, fn: typeof fetch, extra: { budget?: AgentConfig["budget"]; workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number } }) =>
+  // A parent whose scheduled runs use `extra` (budget / workerBudget / scheduledActionBudget); the pool and worker model are the harness defaults.
+  type Cap = { maxCostUsd?: number; maxTotalTokens?: number };
+  const withBudgets = (h: Harness, fn: typeof fetch, extra: { budget?: AgentConfig["budget"]; workerBudget?: Cap; scheduledActionBudget?: Cap }) =>
     h.agent(fn, {
       ...(extra.budget ? { budget: extra.budget } : {}),
       dynamicSubagents: {
@@ -732,6 +737,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
         model: "groq/test-model",
         allowScheduledActions: true,
         ...(extra.workerBudget ? { workerBudget: extra.workerBudget } : {}),
+        ...(extra.scheduledActionBudget ? { scheduledActionBudget: extra.scheduledActionBudget } : {}),
         tools: { recent_news: tool({ description: "news", input: z.object({}), execute: () => "n" }) },
       },
     });
@@ -742,15 +748,33 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     return fs.readFileSync(path.join(h.home, "scheduled", readDeliveries(h.home)[0]!.file), "utf8");
   };
 
-  it("a scheduled run is capped by workerBudget: going over records a failed run", async () => {
+  it("a scheduled run is capped by scheduledActionBudget: going over records a failed run", async () => {
     const h = harness();
-    createScheduledAction(withBudgets(h, mockFetch(() => chatReply()).fn, { workerBudget: { maxTotalTokens: 3 } }), input()); // one model turn = 15 tokens
+    createScheduledAction(withBudgets(h, mockFetch(() => chatReply()).fn, { scheduledActionBudget: { maxTotalTokens: 3 } }), input()); // one model turn = 15 tokens
     const text = await runText(h);
     expect(text).toContain("status: failed");
     expect(text).toContain("Token budget exceeded");
   });
 
-  it("without workerBudget a scheduled run has no cap, and the agent's own budget is not borrowed", async () => {
+  it("workerBudget (the cap of chat workers) does not apply to a scheduled run", async () => {
+    const h = harness();
+    createScheduledAction(withBudgets(h, mockFetch(() => chatReply("fine")).fn, { workerBudget: { maxTotalTokens: 3, maxCostUsd: 0.0000001 } }), input());
+    const text = await runText(h);
+    expect(text).toContain("status: ok");
+    expect(text).toContain("fine");
+  });
+
+  it("scheduledActionBudget is validated like workerBudget", () => {
+    const h = harness();
+    for (const bad of [0, -1, "5", NaN, Infinity]) {
+      expect(() => withBudgets(h, mockFetch(() => chatReply()).fn, { scheduledActionBudget: { maxCostUsd: bad as number } })).toThrow(
+        "dynamicSubagents.scheduledActionBudget.maxCostUsd"
+      );
+    }
+    expect(withBudgets(h, mockFetch(() => chatReply()).fn, { scheduledActionBudget: { maxTotalTokens: 7 } }).dynamicSubagents?.scheduledActionBudget).toEqual({ maxTotalTokens: 7 });
+  });
+
+  it("without scheduledActionBudget a scheduled run has no cap, and the agent's own budget is not borrowed", async () => {
     const h = harness();
     createScheduledAction(withBudgets(h, mockFetch(() => chatReply("fine")).fn, { budget: { maxTotalTokens: 1, maxCostUsd: 0.0000001 } }), input());
     const text = await runText(h);
@@ -1144,10 +1168,49 @@ describe("list / update / run_now / skip / delete", () => {
     expect(skipScheduledAction(once.id, { home: h.home })).toMatchObject({ state: "done", nextDeliverAt: null, nextCookAt: null });
   });
 
-  it("the old kill names are gone from the public API (no alias)", async () => {
+  it("the scheduled-action functions are not exported any more: the API is `agent.scheduled`", async () => {
     const mod = (await import("../src/index.ts")) as Record<string, unknown>;
-    expect(typeof mod.deleteScheduledAction).toBe("function");
-    expect(mod.killScheduledAction).toBeUndefined();
+    for (const name of ["createScheduledAction", "listScheduledActions", "updateScheduledAction", "runScheduledAction", "skipScheduledAction", "deleteScheduledAction", "killScheduledAction"]) {
+      expect(mod[name]).toBeUndefined();
+    }
+    expect(typeof mod.getDatetimeTool).toBe("object");
+  });
+
+  it("agent.scheduled works on the agent's own home, with no { home } anywhere", async () => {
+    const other = harness(); // a second home (made first: each harness resets the schedulers): its actions must stay invisible
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    const agent = h.agent(fn);
+    const rec = agent.scheduled.create(input());
+    expect(rec.id).toStartWith("check-portfolio-");
+    expect(agent.scheduled.list().map((t) => t.id)).toEqual([rec.id]);
+    expect(listScheduledActions({ home: other.home })).toEqual([]);
+    expect(agent.scheduled.update(rec.id, { task: "A new task." }).task).toBe("A new task.");
+    expect(agent.scheduled.list()[0]!.task).toBe("A new task.");
+    const once = agent.scheduled.create(input({ id: "once-only" }));
+    // The process was "down" past the delivery time: after a restart the first tick marks the runs missed.
+    h.boot();
+    h.set(20, 0);
+    const back = h.agent(fn);
+    h.s.tick();
+    expect(back.scheduled.list().find((t) => t.id === once.id)!.state).toBe("missed");
+    expect(back.scheduled.skip(once.id).state).toBe("done");
+    expect(await back.scheduled.delete(rec.id, { purge: true })).toEqual({ ok: true });
+    expect(await back.scheduled.delete(rec.id)).toEqual({ ok: false, reason: "not_found" });
+    expect(back.scheduled.list().map((t) => t.id)).toEqual([once.id]);
+  });
+
+  it("agent.scheduled.run runs the action now, and create throws a ConfigError when scheduling is off", async () => {
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    const agent = h.agent(fn);
+    const rec = agent.scheduled.create(input());
+    const started = agent.scheduled.run(rec.id);
+    expect(started.state).toBe("cooking");
+    await h.settle();
+    const off = h.agent(fn, { dynamicSubagents: { enabled: false, model: "groq/test-model" } });
+    expect(() => off.scheduled.create(input({ id: "nope" }))).toThrow(ConfigError);
+    expect(off.scheduled.list().length).toBe(1); // reading never needs the switch
   });
 
   it("delete: not found, idle, running (needs force), force aborts without a run file, purge removes the folder", async () => {

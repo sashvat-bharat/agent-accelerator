@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
-import { Agent, tool, listScheduledActions, runScheduledAction } from "../src/index.ts";
+import { Agent, tool } from "../src/index.ts";
+import { listScheduledActions, runScheduledAction } from "../src/scheduler/scheduler.ts";
 import { getScheduler, resetSchedulers } from "../src/scheduler/scheduler.ts";
 
 // Real kill -9 matrix: a child process is SIGKILLed at a chosen point, then a fresh Agent (this process) restarts from the
@@ -33,7 +34,7 @@ function tmp(): string {
 
 // Runs `body` in a child process (the prelude supplies the SDK and a hanging/scripted fetch), waits until it prints "ready", then kills it with SIGKILL; in: the child's code + env, out: everything it printed before the kill.
 async function crashChild(body: string, env: Record<string, string>): Promise<string> {
-  const code = `import { Agent, tool, createScheduledAction, runScheduledAction } from ${JSON.stringify(srcIndex)};\nimport { z } from "zod";\nimport * as fs from "node:fs";\n${body}`;
+  const code = `import { Agent, tool } from ${JSON.stringify(srcIndex)};\nimport { z } from "zod";\nimport * as fs from "node:fs";\n${body}`;
   const child = Bun.spawn(["bun", "-e", code], { cwd: repo, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
   children.push(child);
   const reader = child.stdout.getReader();
@@ -149,9 +150,9 @@ describe("kill -9 matrix", () => {
     const home = tmp();
     const out = await crashChild(`${HANG}
       const agent = new Agent({ ${CHILD_AGENT}, home: process.env.HOME_DIR, fetch: hang, dynamicSubagents: { allowScheduledActions: true, model: "groq/test-model" } });
-      const rec = createScheduledAction(agent, { instructions: "i", task: "t", scheduled_action: { name: "Job", id: "job", timeToDeliver: "01:07:00", meridiem: "AM" } });
+      const rec = agent.scheduled.create({ instructions: "i", task: "t", scheduled_action: { name: "Job", id: "job", timeToDeliver: "01:07:00", meridiem: "AM" } });
       console.log("id:" + rec.id);
-      runScheduledAction(rec.id, { home: process.env.HOME_DIR });`, { HOME_DIR: home });
+      agent.scheduled.run(rec.id);`, { HOME_DIR: home });
     const id = /id:(\S+)/.exec(out)![1]!;
     const agent = new Agent({
       ...config(home, () => textReply("job done")),

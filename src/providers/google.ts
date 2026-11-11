@@ -29,7 +29,14 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, ContentPart, ProviderSteps, ToolResultPart, MediaResolution } from "../types/message.ts";
+import type {
+  ProviderContext,
+  ContentPart,
+  ProviderSteps,
+  ToolResultPart,
+  MediaResolution,
+  VideoProcessing,
+} from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -156,7 +163,8 @@ export const GOOGLE_INLINE_MIME_ALIASES: Readonly<Record<string, string>> = {
   "audio/wave": "audio/wav",
   "image/jpg": "image/jpeg",
 };
-// Documented size limits. Not enforced yet: oversized inputs get Google's own error.
+// Documented size limits (file-input-methods.md). `assertGoogleInlineSizes` below checks them, but it is NOT called yet:
+// the owner is not sure how Files API uploads should be handled, so oversized inputs still get Google's own error for now.
 /** Max inline payload per request (bytes). */
 export const GOOGLE_MAX_INLINE_REQUEST_BYTES = 100 * 1024 * 1024;
 /** Max inline PDF size (bytes). */
@@ -217,7 +225,8 @@ const INLINE_MIME: Record<MediaBlockType, readonly string[]> = {
   document: GOOGLE_DOCUMENT_MIME,
 };
 
-const FILES_API_PREFIX = "https://generativelanguage.googleapis.com/v1beta/files/";
+// A Google Files API link on either API version (`/v1/files/<id>` or `/v1beta/files/<id>`); the host is exact, so no other URL counts.
+const FILES_API_URL = /^https:\/\/generativelanguage\.googleapis\.com\/v1(?:beta)?\/files\/[^/\s]+/;
 const YOUTUBE_URL = /^https:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
 
 // ---------------------------------------------------------------------------
@@ -230,6 +239,7 @@ type MediaBlock = {
   data?: string;
   uri?: string;
   resolution?: MediaResolution;
+  processing?: VideoProcessing;
 };
 type InteractionContentBlock = { type: "text"; text: string } | MediaBlock;
 
@@ -499,7 +509,7 @@ function uriBlock(type: MediaBlockType, value: string, mimeType?: string): Media
   const withMime = (mime?: string): MediaBlock => ({ type, uri: value, ...(mime ? { mime_type: mime } : {}) });
   if (type === "video" && YOUTUBE_URL.test(value)) return withMime(explicit);
   const mime = explicit ?? bareMime(inferMimeType(value, ""));
-  if (value.startsWith(FILES_API_PREFIX) || value.startsWith("gs://")) return withMime(mime);
+  if (FILES_API_URL.test(value) || value.startsWith("gs://")) return withMime(mime);
   return value.startsWith("https://") && mime && (GOOGLE_URL_MIME as readonly string[]).includes(mime)
     ? withMime(mime)
     : undefined;
@@ -535,9 +545,61 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionCo
     const block = uri ?? (await inlineBlock(type, value, part.mimeType));
     // Per-item detail level (image and video blocks only, api-ref `MediaResolution`).
     const resolution = part.type === "image" || part.type === "video" ? part.resolution : undefined;
-    blocks.push(resolution ? { ...block, resolution } : block);
+    // Per-video processing mode (`static` | `agentic`, api-ref `MediaProcessing`): the model may then add `processing_call` / `processing_result` steps, which the raw-steps replay keeps like any other step.
+    const processing = part.type === "video" ? part.processing : undefined;
+    if (processing !== undefined && processing !== "static" && processing !== "agentic")
+      throw new ValidationError(
+        `[Agent Accelerator] Invalid video processing ${JSON.stringify(processing)}: expected "static" or "agentic".`
+      );
+    blocks.push({ ...block, ...(resolution ? { resolution } : {}), ...(processing ? { processing } : {}) });
   }
   return blocks;
+}
+
+// Decoded size in bytes of a base64 string, without decoding it; in: assertGoogleInlineSizes, out: a byte count.
+function base64Bytes(b64: string): number {
+  const clean = b64.replace(/\s/g, "");
+  const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((clean.length * 3) / 4) - padding);
+}
+
+// Every inline media block (`data` + `mime_type`) found anywhere in a request `input`, including blocks inside steps and function results; in: assertGoogleInlineSizes, out: the blocks.
+function inlineBlocks(
+  value: unknown,
+  out: Array<{ mime?: string; bytes: number }> = []
+): Array<{ mime?: string; bytes: number }> {
+  if (Array.isArray(value)) {
+    for (const v of value) inlineBlocks(v, out);
+  } else if (value && typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    if (typeof o["data"] === "string" && typeof o["mime_type"] === "string")
+      out.push({ mime: bareMime(o["mime_type"]), bytes: base64Bytes(o["data"]) });
+    else for (const v of Object.values(o)) inlineBlocks(v, out);
+  }
+  return out;
+}
+
+/**
+ * Fails before the network when the inline media of one request is over Google's documented limits: 100 MB in total and
+ * 50 MB for each PDF (larger files go through the Files API). Counts decoded bytes, over the whole `input` (the full
+ * history on a reseed). NOT called by the adapter yet (see the call sites in `generate` and `stream`).
+ */
+export function assertGoogleInlineSizes(input: unknown, modelId: string): void {
+  const blocks = inlineBlocks(input);
+  const mb = (n: number): string => `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  for (const b of blocks) {
+    if (b.mime === "application/pdf" && b.bytes > GOOGLE_MAX_INLINE_PDF_BYTES) {
+      throw new ValidationError(
+        `[Agent Accelerator] [google/${modelId}] A PDF of ${mb(b.bytes)} is over Google's ${mb(GOOGLE_MAX_INLINE_PDF_BYTES)} limit for inline PDFs. Upload it with the Files API and pass its link instead.`
+      );
+    }
+  }
+  const total = blocks.reduce((n, b) => n + b.bytes, 0);
+  if (total > GOOGLE_MAX_INLINE_REQUEST_BYTES) {
+    throw new ValidationError(
+      `[Agent Accelerator] [google/${modelId}] The inline media of this request is ${mb(total)}, over Google's ${mb(GOOGLE_MAX_INLINE_REQUEST_BYTES)} limit per request. Upload the large files with the Files API and pass their links instead.`
+    );
+  }
 }
 
 // Keeps a turn's model-generated steps exactly as received (input echoes and empty signatures dropped); in: REST `steps` or assembled stream steps, out: ProviderGenerateResult.providerSteps.
@@ -575,13 +637,14 @@ function resultToText(result: unknown): string {
   return safeStringify(result);
 }
 
-// Builds the documented `function_result` step (`is_error` only when the tool failed); in: a canonical tool_result part, out: chained or full-history `input`.
-function functionResultStep(part: ToolResultPart): InteractionInputStep {
+// Builds the documented `function_result` step (`is_error` only when the tool failed); text first, then the media the tool returned with `toolContent` (Gemini 3 accepts image and document blocks in `result`); in: a canonical tool_result part, out: chained or full-history `input`.
+async function functionResultStep(part: ToolResultPart): Promise<InteractionInputStep> {
+  const media = part.parts && part.parts.length > 0 ? await contentPartsToBlocks(part.parts) : [];
   return {
     type: "function_result",
     name: part.name,
     call_id: part.id,
-    result: [{ type: "text", text: resultToText(part.result) }],
+    result: [{ type: "text", text: resultToText(part.result) }, ...media],
     ...(part.isError ? { is_error: true } : {}),
   };
 }
@@ -625,7 +688,7 @@ async function latestTurnInput(
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push(functionResultStep(part));
+          steps.push(await functionResultStep(part));
         }
       }
     } else if (m.role === "user") {
@@ -715,7 +778,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push(functionResultStep(part));
+          steps.push(await functionResultStep(part));
         }
       }
     }
@@ -901,7 +964,11 @@ export class GoogleInteractionsProvider implements Provider {
       let effectiveSystemPrompt = context.systemPrompt;
       if (outputSpec && !modelSupportsStructuredOutput("google", modelId)) {
         outputEmulated = true;
-        effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec);
+        effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(
+          context.systemPrompt,
+          outputSpec,
+          options?.prompts?.structuredOutput
+        );
         emitProviderWarning({
           provider: "google",
           capability: "structured output",
@@ -1108,6 +1175,8 @@ export class GoogleInteractionsProvider implements Provider {
     const sessionId = options?.sessionId;
     const tools = options?.tools as StandardToolDeclaration[] | undefined;
     let body = await this.buildBody(clean, context, options, sessionId, tools, false);
+    // Size limits are implemented but switched off for now (the owner is unsure about Files API handling yet):
+    // assertGoogleInlineSizes(body.input, clean);
 
     const makeRawRequest = (b: InteractionRequestBody): ProviderRawData["request"] => ({
       url,
@@ -1220,6 +1289,8 @@ export class GoogleInteractionsProvider implements Provider {
         const sessionId = options?.sessionId;
         const tools = options?.tools as StandardToolDeclaration[] | undefined;
         const body = await this.buildBody(clean, context, options, sessionId, tools, true);
+        // Size limits are implemented but switched off for now (the owner is unsure about Files API handling yet):
+        // assertGoogleInlineSizes(body.input, clean);
         evictSessionId = sessionId;
         usedChain = body.previous_interaction_id !== undefined;
 

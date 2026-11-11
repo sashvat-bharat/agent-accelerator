@@ -23,7 +23,7 @@ import {
   type WorkerRunResult,
 } from "./delegation.ts";
 import { finishedTurns, historyUpTo, type Turn } from "./turns.ts";
-import { modelName, readUsage, type UsageNode } from "../session/usage.ts";
+import { mergeUsage, modelName, readUsage, type UsageNode } from "../session/usage.ts";
 
 /** What `spawn` needs to start a worker. */
 export interface WorkerSpec {
@@ -155,6 +155,17 @@ function readSavedWorker(dir: string | undefined): {
     }
   }
   return { model: session?.session.model || "unknown", totals: readUsage(session?.session.usage), workers };
+}
+
+/** What a saved session folder and every worker saved below it spent in total (read from disk): the starting point of a chat-wide usage cap after a restart; in: Agent.beginChat, out: usage totals. */
+export function savedSpend(dir: string): ReturnType<typeof readUsage> {
+  const total = readUsage(undefined);
+  const add = (node: { totals: ReturnType<typeof readUsage>; workers: UsageNode[] }): void => {
+    mergeUsage(total, node.totals);
+    for (const w of node.workers) add(w);
+  };
+  add(readSavedWorker(dir));
+  return total;
 }
 
 /** The workers of one parent `Agent` (`agent.workers`). */
@@ -384,6 +395,7 @@ export class WorkerRegistry {
       })
     );
     (agent as unknown as { parentSessionId?: string }).parentSessionId = this.parent.sessionId;
+    agent.chat = this.parent.chat; // the worker's turns count into the chat-wide cap and are checked against it
     // A cut-off run was already loaded by the constructor; otherwise bring back what the worker said so far.
     const saved = entry.dir && agent.context.messages.length === 0 ? loadSessionDir(entry.dir)?.session : undefined;
     if (saved) agent.importSession(saved);

@@ -2,12 +2,13 @@
 
 Defining tools and running them.
 
-| File                 | What it is                                                                                                                                                     |
-| :------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool.ts`            | `tool()` factory, name validation, `toStandardToolDeclarations`, option normalizers.                                                                           |
-| `schema.ts`          | Zod to JSON Schema, `$ref` resolution, `stripSchemaForGoogle`.                                                                                                 |
-| `executor.ts`        | `executeToolCalls`: validation, concurrency (8 global + per-tool), attempts, timeout, result cap, error scrubbing, `ctx.stop`, `tool.*` events, per-call logs. |
-| `subagent-result.ts` | The private-Symbol brand that marks a result as made by the SDK's delegation tools.                                                                            |
+| File                 | What it is                                                                                                                                                                                               |
+| :------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool.ts`            | `tool()` factory, name validation, `toStandardToolDeclarations`, option normalizers.                                                                                                                     |
+| `schema.ts`          | Zod to JSON Schema, `$ref` resolution, `stripSchemaForGoogle`.                                                                                                                                           |
+| `executor.ts`        | `executeToolCalls`: validation, concurrency (8 global + per-tool), attempts, timeout, result cap, error scrubbing, `ctx.stop`, `tool.*` events, per-call logs.                                           |
+| `tool-content.ts`    | `toolContent([...])`: a branded (private Symbol) tool result of text and media. The executor turns it into `result` (text) plus `parts` (inline data URLs), so only a tool's own code can produce media. |
+| `subagent-result.ts` | The private-Symbol brand that marks a result as made by the SDK's delegation tools.                                                                                                                      |
 
 ## Invariants
 
