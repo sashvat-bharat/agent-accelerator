@@ -225,6 +225,15 @@ export interface AgentConfig {
   /** Run + network limits. Turn/budget caps unlimited by default; network timeouts finite. */
   limits?: AgentRunLimits;
   /**
+   * A spending cap for the WHOLE chat, for its whole life: what the agent, all its workers (the `subagents` tool,
+   * `agent.workers` at any depth, fixed `subagents`) and their model calls cost, added up. It survives restarts: a
+   * persisted agent starts from what its saved sessions already spent. Once the total reaches `maxCostUsd` or
+   * `maxTotalTokens`, the next model call anywhere in the chat throws a `BudgetExceededError` ("Usage limit reached").
+   * Unlike `budget` (per run) it never resets. Scheduled actions are separate and never count. Models with unknown
+   * pricing add tokens but $0 to the cost. Unset = no cap.
+   */
+  usageLimit?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
+  /**
    * The only models this agent may use, as `provider/model` strings compared as written. Unset (default) = any model.
    * Checked when the Agent is built (also for a config an agent edited through {@link Agent.fromConfig}); a model
    * outside the list throws a `ConfigError`. Workers and `subagentModel` are not affected.

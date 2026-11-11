@@ -15,6 +15,7 @@ import { nowMs } from "../utils/session.ts";
 import { newRunId } from "../utils/session.ts";
 import { newTurnId } from "../utils/session.ts";
 import { sanitizeToolName, createLiveWorker } from "./worker.ts";
+import type { UsageLimit } from "./usage-limit.ts";
 
 /** Builds a random child session id that fits the 64-char provider limit, embedding a hash of the parent when it must be cut; in: a parent id + tag from scheduled runs, out: the worker's session id. */
 export function createChildSessionId(parentId: string, tag: string): string {
@@ -631,7 +632,7 @@ export interface AgentAsToolTarget {
  *
  * @example `const researchTool = researcher.asTool("research");`
  */
-export function agentToTool(input: Agent | AgentAsToolTarget): ToolDefinition {
+export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: UsageLimit }): ToolDefinition {
   const agentInstance = "agent" in input ? input.agent : input;
   const rawName =
     ("name" in input && (input as any).name) ||
@@ -679,6 +680,7 @@ export function agentToTool(input: Agent | AgentAsToolTarget): ToolDefinition {
           typeof (agentInstance as Agent).fork === "function"
             ? agentInstance.fork(subSessionId, parentSessionId)
             : agentInstance;
+        if (worker !== agentInstance && opts?.chat) worker.chat = opts.chat; // this call counts into the parent chat's cap
         const workerStream = worker.stream(task, {
           signal: ctx?.signal,
           sessionId: subSessionId,
@@ -729,12 +731,15 @@ export function agentToTool(input: Agent | AgentAsToolTarget): ToolDefinition {
  *
  * @example `const tools = buildAgentTools([researcher, reviewer]);`
  */
-export function buildAgentTools(agents?: (Agent | AgentAsToolTarget)[]): Record<string, ToolDefinition> {
+export function buildAgentTools(
+  agents?: (Agent | AgentAsToolTarget)[],
+  opts?: { chat?: UsageLimit }
+): Record<string, ToolDefinition> {
   if (!agents || agents.length === 0) return {};
 
   const tools: Record<string, ToolDefinition> = {};
   for (const item of agents) {
-    const t = agentToTool(item);
+    const t = agentToTool(item, opts);
     if (t.name) {
       let finalName = t.name;
       let n = 1;

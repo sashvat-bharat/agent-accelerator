@@ -69,10 +69,13 @@ Sources: [OpenAI, Background mode](https://developers.openai.com/api/docs/guides
 | `limits.maxToolCallsPerRun` | unlimited | tool calls in one run |
 | `limits.maxTotalTokens` | unlimited | tokens in one run |
 | `budget` (`maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`) | unlimited | one run of this agent, workers included |
+| `usageLimit` (`maxCostUsd`, `maxTotalTokens`) | unlimited | the whole chat for its whole life: this agent and all its workers, added up; survives restarts |
 | `dynamicSubagents.workerBudget` | unlimited | the run of each worker (and of each scheduled-action run) |
 | `dynamicSubagents.maxSpawn` | unlimited | workers open at the same time (`maxSpawn: 3` caps it) |
 | `dynamicSubagents.workerTimeoutMs` | unlimited | how long one scheduled-action run may take (an action's own `timeoutMs` can only be shorter) |
 | `dynamicSubagents.maxDepth` | unlimited | levels of workers below the agent (`maxDepth: 2` lets a worker start workers, and no deeper) |
+
+**`usageLimit` is the spending cap of a chat.** It adds up every model call of the agent and of all its workers (the `subagents` tool, `agent.workers` at any depth, fixed `subagents`) and never resets, so it is the cap to use for "this conversation may cost at most $5". When the total reaches `maxCostUsd` or `maxTotalTokens`, the next model call anywhere in the chat throws a `BudgetExceededError` ("Usage limit reached"); a worker that is asked to run after that answers with the same message and never reaches the provider. A persisted chat starts from what its saved sessions already spent: continue it the usual way (`importSession(loadSessionDir(...).session)`) and the count carries on. Models with unknown pricing add tokens but $0 to the cost, like `budget`. Scheduled actions are not part of the chat and never count.
 
 A scheduled-action run is capped by `workerBudget` only. It never borrows the agent's own `budget`, which is for the agent's own runs; with no `workerBudget` a scheduled run has no cap.
 

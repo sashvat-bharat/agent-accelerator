@@ -2,18 +2,19 @@
 
 The agent and everything that runs under it.
 
-| File                | What it is                                                                                                                                                                               | Used by                      |
-| :------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------- |
-| `agent.ts`          | `Agent`: `run`/`stream`/`ask`, `steer`/`queue`/`interrupt`, persistence hooks, `resume()`/`interrupted()`, `usageReport()`, `fork()`, `toConfig()`/`fromConfig()`, the `workers` getter. | callers, workers, scheduler  |
-| `loop.ts`           | `runAgentLoop` / `streamAgentLoop`: per turn budget, pairing repair, file access, provider call, tool execution, repeat guard. Also `ensureToolPairing`, `accumulateUsage`.              | `Agent`                      |
-| `context.ts`        | `AgentContext`: the validated message list with checkpoint/rollback.                                                                                                                     | `Agent`, loops               |
-| `delegation.ts`     | Fixed workers (`agentToTool`, `buildAgentTools`), the live worker trace store, session-id helpers, budget helpers, `openWorkerTrace`/`workerMetadata`.                                   | `Agent`, `workers.ts`        |
-| `worker.ts`         | Worker core: model/tool normalization, `buildDynamicWorkerConfig` (shared preset), `createLiveWorker`.                                                                                   | `Agent`, registry, scheduler |
-| `workers.ts`        | `WorkerRegistry` (`agent.workers`): persistent multi-turn workers.                                                                                                                       | `Agent`, `subagents` tool    |
-| `subagents-tool.ts` | The one model-facing `subagents` tool; its description is the `subagentsTool` prompt (`../prompts/subagents-tool.md`).                                                                   | `Agent` constructor          |
-| `subagent.ts`       | `SubAgent` class and `agentFromEnv` (thin, kept for compatibility).                                                                                                                      | callers                      |
-| `turns.ts`          | Pure grouping of messages into finished turns (history cut for workers).                                                                                                                 | `workers.ts`                 |
-| `config-blocks.ts`  | RSI blocks: only `model`, `instructions`, `tools` are editable; `allowedModels` check.                                                                                                   | `Agent`                      |
+| File                | What it is                                                                                                                                                                                     | Used by                                |
+| :------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------- |
+| `agent.ts`          | `Agent`: `run`/`stream`/`ask`, `steer`/`queue`/`interrupt`, persistence hooks, `resume()`/`interrupted()`, `usageReport()`, `fork()`, `toConfig()`/`fromConfig()`, the `workers` getter.       | callers, workers, scheduler            |
+| `loop.ts`           | `runAgentLoop` / `streamAgentLoop`: per turn budget, pairing repair, file access, provider call, tool execution, repeat guard. Also `ensureToolPairing`, `accumulateUsage`.                    | `Agent`                                |
+| `context.ts`        | `AgentContext`: the validated message list with checkpoint/rollback.                                                                                                                           | `Agent`, loops                         |
+| `delegation.ts`     | Fixed workers (`agentToTool`, `buildAgentTools`), the live worker trace store, session-id helpers, budget helpers, `openWorkerTrace`/`workerMetadata`.                                         | `Agent`, `workers.ts`                  |
+| `worker.ts`         | Worker core: model/tool normalization, `buildDynamicWorkerConfig` (shared preset), `createLiveWorker`.                                                                                         | `Agent`, registry, scheduler           |
+| `workers.ts`        | `WorkerRegistry` (`agent.workers`): persistent multi-turn workers.                                                                                                                             | `Agent`, `subagents` tool              |
+| `subagents-tool.ts` | The one model-facing `subagents` tool; its description is the `subagentsTool` prompt (`../prompts/subagents-tool.md`).                                                                         | `Agent` constructor                    |
+| `subagent.ts`       | `SubAgent` class and `agentFromEnv` (thin, kept for compatibility).                                                                                                                            | callers                                |
+| `turns.ts`          | Pure grouping of messages into finished turns (history cut for workers).                                                                                                                       | `workers.ts`                           |
+| `usage-limit.ts`    | `UsageLimit`: the chat-wide cap (`AgentConfig.usageLimit`). The root agent owns it, registry and fixed workers share it (`agent.chat`); every model turn adds to it and is checked against it. | `Agent`, `workers.ts`, `delegation.ts` |
+| `config-blocks.ts`  | RSI blocks: only `model`, `instructions`, `tools` are editable; `allowedModels` check.                                                                                                         | `Agent`                                |
 
 ## Invariants
 
@@ -23,5 +24,6 @@ The agent and everything that runs under it.
 - A worker is never less constrained than its parent (`inheritableConfig()`); its children draw only from the tools it was granted.
 - Exactly-once worker calls rest on the call key (parent run mark id + tool call id) and `meta.last`.
 - Only results branded by `makeSubagentResult` have their usage metadata trusted.
+- A chat-wide cap (`usageLimit`) counts every model turn of the root and of all workers through one shared `UsageLimit`; its starting point is read once per process from the saved sessions. Scheduled workers never get it.
 - Each Agent records only its own model turns; never sum `AgentResponse.usage` for totals.
 - `reset()` clears the conversation (messages, run marks, the run's saved tool results) but never the spending totals.

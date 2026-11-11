@@ -39,6 +39,8 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 
 **`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each worker's own per-run cap, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).
 **`midSession`**: `mode`, `whenBusy`, `maxQueued` (20).
+**`usageLimit`** (the whole chat, for its whole life, workers included; survives restarts): `maxCostUsd`, `maxTotalTokens`. Reaching it throws `BudgetExceededError` ("Usage limit reached").
+
 **`budget`** (per run, includes workers): `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`.
 **`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). Everything except these three network timeouts is unlimited until set; `0` or `Infinity` turns a timeout off (details: [Safety and operations](guides/safety-and-ops.md#what-is-limited-by-default)). A long-running call (Google long decode, or any `Provider` whose `isLongRunning()` returns true) times each HTTP request only, never the whole call or stream.
 

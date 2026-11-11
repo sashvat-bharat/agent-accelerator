@@ -28,7 +28,7 @@ import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
-import { WorkerRegistry } from "./workers.ts";
+import { WorkerRegistry, savedSpend } from "./workers.ts";
 import { DEFAULT_MAX_DEPTH, normalizeToolMap, resolveDynamicModelInput, resolveMainModel } from "./worker.ts";
 import * as path from "node:path";
 import { registerAgent, ScheduledActions } from "../scheduler/scheduler.ts";
@@ -37,6 +37,7 @@ import { persistTelemetry, registerSessionFolder, unregisterSessionFolder } from
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { fillPrompt, resolvePrompts, type Prompts } from "../prompts/prompts.ts";
+import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
 import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
@@ -327,6 +328,10 @@ export class Agent {
   /** The resume in flight, so a second `resume()` returns the same promise. */
   private resuming?: Promise<AgentResponse | undefined>;
   private workerRegistry?: WorkerRegistry;
+  /** The chat-wide spending cap this agent counts into and checks against: its own (`usageLimit`) or the root's, handed down to workers. @internal */
+  chat?: UsageLimit;
+  /** True for the agent that created `chat` from its own `usageLimit` (the root of the chat). */
+  private ownsChat = false;
   private scheduledActions?: ScheduledActions;
 
   /**
@@ -354,6 +359,12 @@ export class Agent {
     // DX1: only instructions (no systemPrompt alias)
     this.instructions = config.instructions || "";
     this.prompts = resolvePrompts(config.prompts);
+    if (config.usageLimit !== undefined) {
+      const problem = checkUsageLimitConfig(config.usageLimit);
+      if (problem) throw new ConfigError(`[Agent Accelerator] Invalid usageLimit: ${problem}.`);
+      this.chat = new UsageLimit({ ...config.usageLimit });
+      this.ownsChat = true;
+    }
     // Unified model resolution (shared with SubAgent/workers): supports
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
@@ -524,7 +535,7 @@ export class Agent {
     }
 
     if (Array.isArray(config.subagents)) {
-      const subagentTools = buildAgentTools(config.subagents);
+      const subagentTools = buildAgentTools(config.subagents, { chat: this.chat });
       for (const [toolName, toolDef] of Object.entries(subagentTools)) {
         this.tools[toolName] = toolDef;
       }
@@ -631,15 +642,14 @@ export class Agent {
   // Puts saved spending totals back after a restart or import (zeros when the file has none); in: a loaded session's `usage`, out: this.usageTotals.
   private restoreUsage(saved: unknown): void {
     Object.assign(this.usageTotals, readUsage(saved));
+    if (this.ownsChat) this.chat!.restart(); // a restored session changes the starting point of the chat total
   }
 
   // Records one model call of THIS agent (priced per turn, with the service tier); in: the loop's onTurnUsage, out: this.usageTotals (saved by the next persist).
   private recordTurnUsage(usage: TokenUsage, spec: Parameters<typeof priceUsage>[1]): void {
-    addTurn(
-      this.usageTotals,
-      usage,
-      priceUsage(usage, spec, this.serviceTier ? { serviceTier: this.serviceTier } : undefined)
-    );
+    const priced = priceUsage(usage, spec, this.serviceTier ? { serviceTier: this.serviceTier } : undefined);
+    addTurn(this.usageTotals, usage, priced);
+    this.chat?.add((usage.inputTokens || 0) + (usage.outputTokens || 0), priced?.breakdown.totalMicroUSD ?? 0);
   }
 
   /** Adds another agent's spending to this one (a fixed worker's per-call copy into its template). @internal */
@@ -1359,13 +1369,34 @@ export class Agent {
     return new Agent(applyEditable(editable, base));
   }
 
+  // Takes the chat total's starting point (what the saved sessions of this agent and its workers already spent) once, before the first turn of the chat's root agent; in: the run starters, out: this.chat.
+  private beginChat(): void {
+    if (!this.ownsChat) return;
+    this.chat!.begin(() => {
+      // A persisted chat starts from its saved sessions (this agent's and every worker's); a memory-only one from what it holds now.
+      const root = this.persistConfig?.dir;
+      if (root && !this.stateless) {
+        try {
+          const saved = savedSpend(sessionDirFor(root, this.sessionId));
+          return { tokens: saved.inputTokens + saved.outputTokens, microUSD: saved.costMicroUSD.total };
+        } catch {
+          // not a usable session folder name: nothing was saved there
+        }
+      }
+      const total = this.usageReport().total;
+      return { tokens: total.tokens.total, microUSD: Math.round((total.cost.totalUsd ?? 0) * 1_000_000) };
+    });
+  }
+
   /** Budgets are per run: counters restart whenever a new run begins. */
   private resetBudgetState(): void {
+    this.beginChat();
     if (this.budget) this.budgetState = { spawned: 0, totalTokens: 0, totalCostUsd: 0, startedAtMs: nowMs() };
   }
 
   /** Loop hook: charge `usage` (when given) and throw `BudgetExceededError` once any cap is passed. */
   private enforceBudget(usage?: TokenUsage): void {
+    this.chat?.check(); // the chat-wide cap: before every turn and right after each one
     if (!this.budget) return;
     if (usage) chargeBudgetUsage(this as unknown as Parameters<typeof chargeBudgetUsage>[0], usage);
     checkBudget(this.budget, this.budgetState);
@@ -1457,7 +1488,7 @@ export class Agent {
         ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
         onFailure: this.onFailure,
         ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
-        ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
+        ...(this.budget || this.chat ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
         onProgress: () => this.persistNow(),
         onTurnUsage: (u: TokenUsage, spec: Parameters<typeof priceUsage>[1]) => this.recordTurnUsage(u, spec),
         onToolResult: (r: ToolResultRecord) => this.recordTool(r),
@@ -1554,7 +1585,7 @@ export class Agent {
       ...(this.fileAccess ? { fileAccess: this.fileAccess } : {}),
       onFailure: this.onFailure,
       ...(this.captureRaw !== undefined ? { captureRaw: this.captureRaw } : {}),
-      ...(this.budget ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
+      ...(this.budget || this.chat ? { enforceBudget: (u?: TokenUsage) => this.enforceBudget(u) } : {}),
       onProgress: () => this.persistNow(),
       onTurnUsage: (u: TokenUsage, spec: Parameters<typeof priceUsage>[1]) => this.recordTurnUsage(u, spec),
       onToolResult: (r: ToolResultRecord) => this.recordTool(r),
