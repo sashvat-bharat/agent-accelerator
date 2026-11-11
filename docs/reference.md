@@ -163,6 +163,8 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `<PREFIX>_API_KEY`, `<PREFIX>_BASE_URL` | Any OpenAI-compatible endpoint (for `PREFIX/model`), e.g. `GROQ_API_KEY` and `GROQ_BASE_URL`. Base URL is required |
 | `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
 | `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |
+| `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS` | Default `usageLimit` for every agent you build (see `configure()` and the safety guide) |
+| `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |
 | `AGENT_CATALOG_REFRESH=off` | Disable automatic model-catalog refresh |
 | `AGENT_ACCEL_HOME` | The single folder for everything the SDK stores (default `.agent-accel/`; `setHome(dir)` does the same in code) |
 | `AGENT_CACHE_DIR` | Overrides only the model catalog cache folder (default `<home>/catalog`) |

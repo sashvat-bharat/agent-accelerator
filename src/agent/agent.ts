@@ -29,7 +29,13 @@ import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry, savedSpend } from "./workers.ts";
-import { DEFAULT_MAX_DEPTH, normalizeToolMap, resolveDynamicModelInput, resolveMainModel } from "./worker.ts";
+import {
+  DEFAULT_MAX_DEPTH,
+  isWorkerConfig,
+  normalizeToolMap,
+  resolveDynamicModelInput,
+  resolveMainModel,
+} from "./worker.ts";
 import * as path from "node:path";
 import { registerAgent, ScheduledActions } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../utils/home.ts";
@@ -38,6 +44,7 @@ import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { fillPrompt, resolvePrompts, type Prompts } from "../prompts/prompts.ts";
 import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
+import { mergeCap } from "./defaults.ts";
 import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
@@ -361,10 +368,15 @@ export class Agent {
     // DX1: only instructions (no systemPrompt alias)
     this.instructions = config.instructions || "";
     this.prompts = resolvePrompts(config.prompts);
+    // Workers and scheduled runs the SDK builds never take developer defaults (`configure()`, env vars).
+    const takesDefaults = !isWorkerConfig(config);
     if (config.usageLimit !== undefined) {
       const problem = checkUsageLimitConfig(config.usageLimit);
       if (problem) throw new ConfigError(`[Agent Accelerator] Invalid usageLimit: ${problem}.`);
-      this.chat = new UsageLimit({ ...config.usageLimit });
+    }
+    const chatCap = mergeCap("usageLimit", config.usageLimit, takesDefaults);
+    if (chatCap) {
+      this.chat = new UsageLimit(chatCap);
       this.ownsChat = true;
     }
     // Unified model resolution (shared with SubAgent/workers): supports
@@ -406,7 +418,11 @@ export class Agent {
         return raw;
       };
       const rawBudget = checkBudgetKeys("workerBudget");
-      const rawScheduledBudget = checkBudgetKeys("scheduledActionBudget");
+      const rawScheduledBudget = mergeCap(
+        "scheduledActionBudget",
+        checkBudgetKeys("scheduledActionBudget") as { maxCostUsd?: number; maxTotalTokens?: number } | undefined,
+        takesDefaults
+      );
       // Open workers are unlimited unless the developer sets a cap (a number >= 1; Infinity also means unlimited).
       const rawMax = (dynRaw as { maxSpawn?: unknown }).maxSpawn;
       if (rawMax !== undefined && (typeof rawMax !== "number" || Number.isNaN(rawMax))) {

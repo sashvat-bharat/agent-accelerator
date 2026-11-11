@@ -246,6 +246,14 @@ export function resolveWorkerCredentials(
   return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
 }
 
+// Configs built by `buildDynamicWorkerConfig`: the Agent constructor checks it so SDK-built workers never take `configure()` or env defaults.
+const workerConfigs = new WeakSet<object>();
+
+/** True for a config made by `buildDynamicWorkerConfig` (a chat worker or a scheduled run), not by the developer. */
+export function isWorkerConfig(config: object): boolean {
+  return workerConfigs.has(config);
+}
+
 /** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise: unlimited. */
 export const DEFAULT_MAX_DEPTH = Infinity;
 
@@ -274,7 +282,7 @@ export function buildDynamicWorkerConfig(
   const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
   const dyn = parent.dynamicSubagents;
   const levelsBelow = (dyn?.maxDepth ?? DEFAULT_MAX_DEPTH) - 1;
-  return {
+  const config: AgentConfig = {
     name: worker.name,
     description: worker.role || `Sub-agent ${worker.name}`,
     instructions: worker.instructions,
@@ -309,6 +317,8 @@ export function buildDynamicWorkerConfig(
     maxTurns: parent.maxTurns,
     ...parent.inheritableConfig(),
   };
+  workerConfigs.add(config);
+  return config;
 }
 
 // ---------------------------------------------------------------------------

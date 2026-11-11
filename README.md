@@ -1172,6 +1172,7 @@ The model catalog is synced from [models.dev](https://models.dev) into a local c
 
 - **Automated 12-hour validation**: `.run()`, `.ask()` and `.stream()` check `<home>/catalog/models.dev.json`. Within 12 hours it reads from disk with no network delay. After that the expired catalog is served immediately and refreshed from `https://models.dev/api.json` in the background (8 s timeout). Only a cold start, with nothing loaded yet, waits for the download. A failed refresh pauses automatic refreshes for 10 minutes.
 - **Git & Package Safety**: The cache lives in the single Agent Accelerator home (`<home>/catalog/models.dev.json`, `.agent-accel/` by default and gitignored), never inside the package or scattered in the project.
+- **Spending-cap defaults**: `configure({ usageLimit, scheduledActionBudget })` sets the two caps for every agent you build (one call at startup, like `setHome()`; each call replaces the last, `configure({})` clears it). The env vars `AGENT_ACCEL_USAGE_LIMIT_USD` / `_TOKENS` and `AGENT_ACCEL_SCHEDULED_BUDGET_USD` / `_TOKENS` do the same. Precedence, field by field: the Agent's own config, then `configure()`, then env, then no cap. Workers and scheduled runs built by the SDK never take them.
 - **Environment**: `setHome(dir)` / `AGENT_ACCEL_HOME` move the whole home; `AGENT_CACHE_DIR` moves only the cache (for read-only or serverless filesystems). `AGENT_CATALOG_REFRESH=off` disables automatic refreshes; `bun run update-models` and `refreshModelCatalog()` still work.
 
 ### Developer Catalog Controls

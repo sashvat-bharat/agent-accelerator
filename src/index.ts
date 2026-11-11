@@ -68,6 +68,8 @@ export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOpt
 export type { ScheduledActions } from "./scheduler/scheduler.ts";
 export { getDatetimeTool } from "./scheduler/tool.ts";
 export { setHome, resolveHome } from "./utils/home.ts";
+export { configure } from "./agent/defaults.ts";
+export type { AgentDefaults } from "./agent/defaults.ts";
 export type {
   ScheduledActionInput,
   ScheduledActionPatch,
