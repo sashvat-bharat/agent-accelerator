@@ -6,6 +6,7 @@ import { isSubagentResult } from "./subagent-result.ts";
 import { isToolContent, type ToolContent } from "./tool-content.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import type { ContentPart } from "../types/message.ts";
+import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts";
 import { isTruncatedArguments } from "../types/tool.ts";
 import { telemetryBus } from "../telemetry.ts";
 import type { ToolLogWriter } from "../session/tool-log.ts";
@@ -17,6 +18,8 @@ export interface ExecuteToolsOptions {
   parallel?: boolean;
   signal?: AbortSignal;
   sessionId?: string;
+  /** The refusal texts shown to the model (`AgentConfig.prompts`); the shipped ones when unset. */
+  prompts?: Pick<Prompts, "toolTruncatedArguments" | "toolNotFound" | "toolSchemaError">;
   /** Called the moment EACH call finishes (before the whole batch does), so a caller can save a result before the next tool is done. Never throws into the run. */
   onResult?: (result: ToolResultRecord) => void;
   /** Opens the log file of one call (only when the Agent persists to a folder); the executor writes its steps into it and `ctx.log` writes through it. */
@@ -235,10 +238,11 @@ export function shouldBlockRepeat(
  * machine-readable code lives at `(result as any).errorCode` while the human
  * prefix keeps plain-string consumers working.
  */
-export function makeRepeatBlockedResult(call: ToolCallRecord): ToolResultRecord {
-  const message =
-    `repeat_blocked: Tool '${call.name}' was called again with identical arguments. ` +
-    "The previous result is already available; reuse it or call the tool with different arguments.";
+export function makeRepeatBlockedResult(
+  call: ToolCallRecord,
+  template = DEFAULT_PROMPTS.toolRepeatBlocked
+): ToolResultRecord {
+  const message = fillPrompt(template, { tool: call.name });
   return {
     id: call.id,
     name: call.name,
@@ -529,6 +533,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
     onSubagentEvent,
     onResult,
     openToolLog,
+    prompts = DEFAULT_PROMPTS,
   } = options;
   assertNoToolCollisions(tools);
   const globalSemaphore = new Semaphore(DEFAULT_TOOL_CONCURRENCY);
@@ -567,9 +572,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
       return {
         id: call.id,
         name: call.name,
-        result:
-          `Error: Tool '${call.name}' arguments are truncated or incomplete and could not be parsed. ` +
-          "Call the tool again with the complete JSON arguments. Do not explain the error, just retry the call.",
+        result: fillPrompt(prompts.toolTruncatedArguments, { tool: call.name }),
         isError: true,
         durationMs: elapsedMs(startTime),
       };
@@ -580,11 +583,11 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
 
     if (!toolDef) {
       trace("call_blocked", "warn", { reason: "tool_not_found", suggestion: resolved.suggestion });
-      const suffix = resolved.suggestion ? ` Did you mean '${resolved.suggestion}'?` : "";
+      const suggestion = resolved.suggestion ? ` Did you mean '${resolved.suggestion}'?` : "";
       return {
         id: call.id,
         name: call.name,
-        result: `Error: Tool '${call.name}' not found.${suffix}`,
+        result: fillPrompt(prompts.toolNotFound, { tool: call.name, suggestion }),
         isError: true,
         durationMs: elapsedMs(startTime),
       };
@@ -647,16 +650,12 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
               ? JSON.stringify(toolDef.parameters).slice(0, 800)
               : undefined;
           const detail = parseRes.error.message;
-          const hint = expectedParams ? ` Expected parameters: ${expectedParams}.` : "";
+          const expected = expectedParams ? ` Expected parameters: ${expectedParams}.` : "";
           trace("call_blocked", "warn", { reason: "schema_validation", detail: parseRes.error.message });
           return {
             id: call.id,
             name: call.name,
-            result:
-              `Schema validation error for tool '${call.name}': ${detail}` +
-              ` Received argument keys: [${receivedKeys}].` +
-              hint +
-              ` Fix the arguments and call the tool again with corrected JSON. Do not explain the error, just retry the call.`,
+            result: fillPrompt(prompts.toolSchemaError, { tool: call.name, detail, keys: receivedKeys, expected }),
             isError: true,
             durationMs: elapsedMs(startTime),
           };

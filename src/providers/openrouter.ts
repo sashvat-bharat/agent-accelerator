@@ -48,6 +48,7 @@ import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { ConfigError, isAbortError } from "../types/errors.ts";
+import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
 import {
   newToolCallId,
   redactedHeaders,
@@ -443,7 +444,10 @@ function resultToOutput(result: unknown): string {
  * carries everything. Assistant items carry no provider `id`/`status`
  * requirements (unlike the discontinued Responses skin).
  */
-async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessage[]> {
+async function fullHistoryMessages(
+  context: ProviderContext,
+  bridge = DEFAULT_PROMPTS.toolBridge
+): Promise<ChatMessage[]> {
   // Map assistant tool_call ids so tool results pair even though the
   // executor keys results by the call id.
   const pairing = new Map<string, string>();
@@ -474,7 +478,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
       // Strict routes reject `user` directly after `tool`: bridge with a
       // synthetic assistant turn (pi api/openai-completions.ts:1233).
       if (lastRole === "tool") {
-        messages.push({ role: "assistant", content: "I have processed the tool results." });
+        messages.push({ role: "assistant", content: bridge });
       }
       if (typeof m.content === "string") {
         if (m.content) {
@@ -661,7 +665,11 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       outputEmulated = true;
       effectiveContext = {
         ...context,
-        systemPrompt: augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec),
+        systemPrompt: augmentSystemPromptWithStructuredOutput(
+          context.systemPrompt,
+          outputSpec,
+          options?.prompts?.structuredOutput
+        ),
       };
       emitProviderWarning({
         provider: "openrouter",
@@ -672,7 +680,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         fallback: "emulated JSON instruction + client validation (no response_format is sent)",
       });
     }
-    const messages = await fullHistoryMessages(effectiveContext);
+    const messages = await fullHistoryMessages(effectiveContext, options?.prompts?.toolBridge);
     const body: ChatRequestBody = {
       model: modelId,
       messages,

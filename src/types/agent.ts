@@ -4,6 +4,7 @@ import type { ThinkingLevel, CacheOption, ServiceTier } from "./core.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
 import type { Agent } from "../agent/agent.ts";
 import type { z } from "zod";
+import type { PromptOverrides } from "../prompts/prompts.ts";
 
 // ---------------------------------------------------------------------------
 // Canonical option types (all additive; nothing renamed).
@@ -229,6 +230,14 @@ export interface AgentConfig {
    * outside the list throws a `ConfigError`. Workers and `subagentModel` are not affected.
    */
   allowedModels?: string[];
+  /**
+   * Replaces single prompts the SDK puts in front of the model (the reasoning directive, tool refusals, the worker
+   * headers, the tool manuals ...). Every prompt you leave out keeps its default; see `DEFAULT_PROMPTS` for the names, the
+   * shipped text and the `{{placeholders}}` the SDK fills in. Keeping the original text is recommended: it is what the SDK
+   * is tested with, and a good reference for writing your own. Workers inherit it. A prompt is part of the cached prompt
+   * prefix when it is in the system prompt or a tool description, so change it once, not per run.
+   */
+  prompts?: PromptOverrides;
 }
 
 /**

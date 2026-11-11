@@ -401,6 +401,21 @@ Every function except `createScheduledAction` finds the home folder through `set
 * **Missed runs.** If the process was down when a run was due, the SDK emits `scheduled_action.missed` once. By default it runs nothing by itself and the action waits as `missed`: pick `run_now` or `skip`. Set `scheduled_action.onMissed` per action to decide in advance: `"skip"` moves on to the next time (a one-shot is `done`; a `skipped` event follows), `"run"` runs it as soon as the program is back (delivered when it finishes, marked `late`). The same applies to a run a crash cut off. An action whose creating Agent is gone stays `missed` whatever `onMissed` says (nothing can run it). A result saved before the process exited is simply delivered (marked `late`) on the first tick after start. `late` means the result was delivered more than two ticks after its time, finished after its delivery second, or replaced a missed run. A `run_now` result is delivered when it finishes: it is `late` only when it replaces a missed run (a `run_now` on a `missed` action, or `onMissed: "run"`), never for an ordinary early run.
 
 ---
+## Prompts
+
+The SDK's own prompts (the reasoning directive, tool refusals, worker reply headers, the manuals of the `subagents` and `scheduled_actions` tools) are plain `.md` files in `src/prompts/`, exported as `DEFAULT_PROMPTS`. `AgentConfig.prompts` replaces single ones for an agent and its workers; the rest keep their defaults. `{{name}}` marks values the SDK fills in.
+
+```ts
+import { Agent, DEFAULT_PROMPTS } from "agent-accelerator";
+
+const agent = new Agent({
+  model: "google/gemini-3.5-flash-lite",
+  prompts: { toolNotFound: "Unknown tool '{{tool}}'.{{suggestion}} Use only the tools you were given." },
+});
+```
+
+**Keeping the original prompt is recommended**: it is what the SDK is tested with, and `DEFAULT_PROMPTS` is the reference for writing your own. Names, placeholders and where each prompt appears: [the prompts guide](docs/guides/prompts.md).
+
 ## Tools
 
 ```ts
@@ -1489,7 +1504,8 @@ bun run update-models # refresh model catalog cache (supports --force, --ttl=24h
 ```text
 src/
 ├── agent/      # Agent, context, loop, delegation, subagent
-├── scheduler/  # Scheduled actions: clock, store, tool + its manual (scheduled-actions.md)
+├── scheduler/  # Scheduled actions: clock, store, tool
+├── prompts/    # The SDK's own prompts as .md files, DEFAULT_PROMPTS, AgentConfig.prompts
 ├── session/    # Session persistence + telemetry (snapshots, hit rates, .session.json store)
 ├── providers/  # native REST adapters (google/openai/openrouter/openai-compat) + registry + canonical contract
 ├── models/     # Dynamic catalog cache, parser, verified overrides

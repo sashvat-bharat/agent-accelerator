@@ -60,6 +60,7 @@ import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
+import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
 import {
   parseArguments,
   normalizeThinkingParts,
@@ -404,7 +405,10 @@ function resultToOutput(result: unknown): string {
  * `google` (or untagged legacy). Signatures minted by other providers never
  * leak onto this transport.
  */
-async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessage[]> {
+async function fullHistoryMessages(
+  context: ProviderContext,
+  bridge = DEFAULT_PROMPTS.toolBridge
+): Promise<ChatMessage[]> {
   const pairing = new Map<string, string>();
   for (const m of context.messages) {
     if (m.role === "assistant" && Array.isArray(m.content)) {
@@ -425,7 +429,7 @@ async function fullHistoryMessages(context: ProviderContext): Promise<ChatMessag
     if (m.role === "system") continue;
     if (m.role === "user") {
       if (lastRole === "tool") {
-        messages.push({ role: "assistant", content: "I have processed the tool results." });
+        messages.push({ role: "assistant", content: bridge });
       }
       if (typeof m.content === "string") {
         if (m.content) {
@@ -745,7 +749,11 @@ export class OpenAICompatibleChatProvider implements Provider {
       outputEmulated = true;
       effectiveContext = {
         ...context,
-        systemPrompt: augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec),
+        systemPrompt: augmentSystemPromptWithStructuredOutput(
+          context.systemPrompt,
+          outputSpec,
+          options?.prompts?.structuredOutput
+        ),
       };
       emitProviderWarning({
         provider: this.prefix,
@@ -756,7 +764,7 @@ export class OpenAICompatibleChatProvider implements Provider {
         fallback: "emulated JSON instruction + client validation (no response_format is sent)",
       });
     }
-    const messages = await fullHistoryMessages(effectiveContext);
+    const messages = await fullHistoryMessages(effectiveContext, options?.prompts?.toolBridge);
     const body: ChatRequestBody = {
       model: modelId,
       messages,

@@ -39,6 +39,7 @@ console.log(res.usage);
 | Split work across helper agents, or run work later on a schedule | [Multi-agent and scheduling](guides/multi-agent.md) |
 | Save/resume chats, send images and PDFs, track cost, manage the model catalog | [Data and media](guides/data-and-media.md) |
 | Set limits, budgets, retries; handle errors; observe; keep things safe | [Safety and operations](guides/safety-and-ops.md) |
+| Read or replace the prompts the SDK sends (tool refusals, worker headers, tool manuals) | [Prompts](guides/prompts.md) |
 
 ## Pages
 

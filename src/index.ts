@@ -32,6 +32,8 @@ export {
 export type { CreateToolOptions } from "./tools/tool.ts";
 export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
 export { toolContent } from "./tools/tool-content.ts";
+export { DEFAULT_PROMPTS } from "./prompts/prompts.ts";
+export type { PromptName, PromptOverrides } from "./prompts/prompts.ts";
 export type { ToolContent, ToolContentPart } from "./tools/tool-content.ts";
 /**
  * @deprecated Internal executor surface. Prefer `Agent` runs; for direct

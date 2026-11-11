@@ -568,7 +568,11 @@ export class OpenAIResponsesProvider implements Provider {
     }
     if (outputSpec && !modelSupportsStructuredOutput("openai", modelId)) {
       outputEmulated = true;
-      effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec);
+      effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(
+        context.systemPrompt,
+        outputSpec,
+        options?.prompts?.structuredOutput
+      );
       emitProviderWarning({
         provider: "openai",
         capability: "structured output",

@@ -1,0 +1,2 @@
+[worker {{id}}] replied:
+{{text}}

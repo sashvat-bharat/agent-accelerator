@@ -24,6 +24,7 @@
 | Redirect a busy agent | `steer()`, `queue()`, `interrupt()`, `interrupt(message)` | [Tools and streaming](guides/tools-and-streaming.md) |
 | Save / resume / survive a crash | `persist: { dir }` + same `sessionId` (cut-off runs resume by themselves), `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
+| Change a prompt the SDK sends (tool refusal, worker header, tool manual) | `prompts: { name: "text with {{placeholders}}" }`; keep the original unless you must | [Prompts](guides/prompts.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
 | What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
 | Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, `allowedModels` | [Agents](guides/agents-and-models.md#self-improving-agents) |

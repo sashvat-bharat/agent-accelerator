@@ -964,7 +964,11 @@ export class GoogleInteractionsProvider implements Provider {
       let effectiveSystemPrompt = context.systemPrompt;
       if (outputSpec && !modelSupportsStructuredOutput("google", modelId)) {
         outputEmulated = true;
-        effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(context.systemPrompt, outputSpec);
+        effectiveSystemPrompt = augmentSystemPromptWithStructuredOutput(
+          context.systemPrompt,
+          outputSpec,
+          options?.prompts?.structuredOutput
+        );
         emitProviderWarning({
           provider: "google",
           capability: "structured output",

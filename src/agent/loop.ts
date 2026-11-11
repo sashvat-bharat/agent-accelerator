@@ -32,6 +32,7 @@ import { isSubagentResult, normalizeSubagentMetadata } from "../tools/subagent-r
 import { BudgetExceededError, TimeoutError } from "../types/errors.ts";
 import { applyCaptureRaw, type CaptureRawMode } from "../utils/raw-capture.ts";
 import { previewPrompt } from "../utils/session.ts";
+import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
 
 /** One mid-session steer request buffered while a run is active. */
@@ -98,6 +99,8 @@ export interface AgentLoopConfig {
   steerInbox?: SteerEntry[];
   /** Called after steer entries are injected (streaming loops also push `steer_injected` events). */
   onSteerInjected?: (injectedPrompts: string[]) => void;
+  /** The SDK prompts for this run (`AgentConfig.prompts` resolved); the shipped ones when unset. */
+  prompts?: Prompts;
   /**
    * Canonical structured-output request (raw `AgentConfig.output`).
    * Normalized per turn for the provider wire; validated once at the end
@@ -111,7 +114,7 @@ export interface AgentLoopConfig {
  * Returns display previews for events/telemetry. Never throws: invalid
  * entries are skipped so one bad steer cannot fail the active turn.
  */
-function drainSteerInbox(context: AgentContext, inbox?: SteerEntry[]): string[] {
+function drainSteerInbox(context: AgentContext, inbox?: SteerEntry[], prompts: Prompts = DEFAULT_PROMPTS): string[] {
   if (!inbox || inbox.length === 0) return [];
   const injected: string[] = [];
   while (inbox.length > 0) {
@@ -121,7 +124,7 @@ function drainSteerInbox(context: AgentContext, inbox?: SteerEntry[]): string[] 
       const opts = entry.options;
       if (Array.isArray(prompt) && prompt.length === 0) continue;
       if (opts?.additionalContext) {
-        const prefix = `[Additional Context]\n${opts.additionalContext}\n\n`;
+        const prefix = `${fillPrompt(prompts.additionalContext, { context: opts.additionalContext })}\n\n`;
         if (typeof prompt === "string") prompt = prefix + prompt;
         else prompt = [{ type: "text", text: prefix } as ContentPart, ...prompt];
       }
@@ -275,7 +278,7 @@ function warnMaxTurnsHit(agentName: string | undefined, maxTurns: number, pendin
  * - drops results whose id the model never issued.
  * Open-weight models that reuse one id for several calls keep one result per call.
  */
-export function ensureToolPairing(context: AgentContext): void {
+export function ensureToolPairing(context: AgentContext, prompts: Prompts = DEFAULT_PROMPTS): void {
   try {
     type ToolResultPart = Extract<ContentPart, { type: "tool_result" }>;
     const messages = context.messages;
@@ -316,7 +319,7 @@ export function ensureToolPairing(context: AgentContext): void {
                 type: "tool_result",
                 id: p.id,
                 name,
-                result: `Error: tool_call '${name}' (${p.id}) has no result because the run was interrupted before it completed (recovered by ensureToolPairing). It may have partially executed: check the tool trace before repeating side-effecting work.`,
+                result: fillPrompt(prompts.toolInterrupted, { tool: name, id: p.id }),
                 isError: true,
               },
             ],
@@ -568,6 +571,7 @@ async function executeToolCallsWithRepeatGuard(options: {
   openToolLog?: ExecuteToolsOptions["openToolLog"];
   previousFingerprints: Set<string>;
   repeatCounts: Map<string, number>;
+  prompts?: Prompts;
   agentName?: string;
   signal?: AbortSignal;
   sessionId?: string;
@@ -601,7 +605,7 @@ async function executeToolCallsWithRepeatGuard(options: {
         { agentName: options.agentName, sessionId: options.sessionId },
         { reason: "repeat_blocked" }
       );
-      blocked.set(call.id, makeRepeatBlockedResult(call));
+      blocked.set(call.id, makeRepeatBlockedResult(call, options.prompts?.toolRepeatBlocked));
     } else {
       executable.push(call);
     }
@@ -621,6 +625,7 @@ async function executeToolCallsWithRepeatGuard(options: {
           onSubagentEvent: options.onSubagentEvent,
           onResult: options.onResult,
           openToolLog: options.openToolLog,
+          prompts: options.prompts,
         })
       : [];
   const byId = new Map<string, ToolResultRecord[]>();
@@ -704,6 +709,7 @@ async function finishInterruptedTools(
         sessionId: config.runOptions?.sessionId || config.options?.sessionId,
         onResult: config.onToolResult,
         openToolLog: config.openToolLog,
+        prompts: config.prompts,
       })
     : [];
   const ran = new Map(executed.map((r) => [r.id, r]));
@@ -787,7 +793,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       checkDeadline(startTime, limits.deadlineMs);
       config.enforceBudget?.();
       // Repair orphan tool pairs before every request.
-      ensureToolPairing(context);
+      ensureToolPairing(context, config.prompts);
       if (config.fileAccess?.roots) await enforceFileAccess(context.messages, config.fileAccess.roots);
       turns++;
 
@@ -891,7 +897,9 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       // inject them now. Tool turns still execute first (see below) so the
       // current action finishes before redirection.
       const noToolSteered =
-        !genResult.toolCalls || genResult.toolCalls.length === 0 ? drainSteerInbox(context, config.steerInbox) : [];
+        !genResult.toolCalls || genResult.toolCalls.length === 0
+          ? drainSteerInbox(context, config.steerInbox, config.prompts)
+          : [];
 
       // If no tool calls, generation is complete — unless steered, in which
       // case the injected message extends the SAME run (no new response).
@@ -929,6 +937,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         sessionId: runOptions?.sessionId || options?.sessionId,
         onResult: config.onToolResult,
         openToolLog: config.openToolLog,
+        prompts: config.prompts,
       });
       const results = guarded.results;
       previousToolCallFingerprints = guarded.fingerprints;
@@ -975,7 +984,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       // Steer drain AFTER tool results so call/result pairs stay adjacent.
       // The next loop iteration sends the injected user message to the model
       // within the same run (same usage/turn budget).
-      const toolSteered = drainSteerInbox(context, config.steerInbox);
+      const toolSteered = drainSteerInbox(context, config.steerInbox, config.prompts);
       if (toolSteered.length > 0) {
         try {
           config.onSteerInjected?.(toolSteered);
@@ -1191,7 +1200,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
         checkDeadline(streamStartTime, streamLimits.deadlineMs);
         config.enforceBudget?.();
-        ensureToolPairing(context);
+        ensureToolPairing(context, config.prompts);
         if (config.fileAccess?.roots) await enforceFileAccess(context.messages, config.fileAccess.roots);
         turns++;
 
@@ -1351,7 +1360,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 
         const noToolSteered =
           !turnResponse.toolCalls || turnResponse.toolCalls.length === 0
-            ? drainSteerInbox(context, config.steerInbox)
+            ? drainSteerInbox(context, config.steerInbox, config.prompts)
             : [];
         if (!turnResponse.toolCalls || turnResponse.toolCalls.length === 0) {
           emitTurn(runOptions, { turns, text: turnResponse.text, thinking: turnResponse.thinking });
@@ -1399,6 +1408,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           sessionId: runOptions?.sessionId || options?.sessionId,
           onResult: config.onToolResult,
           openToolLog: config.openToolLog,
+          prompts: config.prompts,
           onSubagentEvent: (ev) => {
             try {
               outerStream.push({
@@ -1470,7 +1480,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           emitProgress(config);
           break;
         }
-        const toolSteered = drainSteerInbox(context, config.steerInbox);
+        const toolSteered = drainSteerInbox(context, config.steerInbox, config.prompts);
         if (toolSteered.length > 0) {
           for (const preview of toolSteered) {
             try {

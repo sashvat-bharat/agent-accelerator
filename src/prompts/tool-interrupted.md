@@ -1,0 +1,1 @@
+Error: tool_call '{{tool}}' ({{id}}) has no result because the run was interrupted before it completed (recovered by ensureToolPairing). It may have partially executed: check the tool trace before repeating side-effecting work.

@@ -2,6 +2,7 @@ import type { ThinkingConfig, CacheOption, ServiceTier, TokenUsage } from "./cor
 import type { ProviderContext, ProviderSteps } from "./message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "./tool.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import type { Prompts } from "../prompts/prompts.ts";
 
 // ---------------------------------------------------------------------------
 // Provider identity — battle-tested: matches models.dev provider keys
@@ -187,6 +188,8 @@ export interface ProviderRequestOptions {
   maxOutputTokens?: number;
   /** `fetch` implementation used for the provider request (defaults to global `fetch`). */
   fetch?: typeof fetch;
+  /** The SDK prompts adapters put in a request (`AgentConfig.prompts`); defaults when unset. */
+  prompts?: Pick<Prompts, "structuredOutput" | "toolBridge">;
   /** Base backoff delay in ms for provider retries (default 250). */
   retryBaseDelayMs?: number;
   /** Total time budget in ms for provider retries (default 30000). */

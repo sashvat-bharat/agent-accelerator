@@ -16,6 +16,7 @@ import { zodToJsonSchema } from "./tools/schema.ts";
 import { ValidationError } from "./types/errors.ts";
 import { TRUNCATED_ARGS_KEY } from "./types/tool.ts";
 import { telemetryBus } from "./telemetry.ts";
+import { DEFAULT_PROMPTS, fillPrompt } from "./prompts/prompts.ts";
 
 /** Classification of a canonical capability on a given provider. */
 export type ProviderCapabilityStatus = "NATIVE" | "TRANSLATED" | "AUTOMATIC" | "EMULATED" | "UNSUPPORTED";
@@ -699,8 +700,11 @@ export function mapOutputToCompatChat(
  *
  * @example `augmentSystemPromptWithStructuredOutput(sys, spec)`
  */
-export function buildStructuredOutputInstruction(spec: StructuredOutputSpec): string {
-  return `Return ONLY valid JSON matching this JSON Schema, with no markdown fences, no commentary, no extra text.\nSchema: ${JSON.stringify(spec.schema)}`;
+export function buildStructuredOutputInstruction(
+  spec: StructuredOutputSpec,
+  template = DEFAULT_PROMPTS.structuredOutput
+): string {
+  return fillPrompt(template, { schema: JSON.stringify(spec.schema) });
 }
 
 /**
@@ -710,11 +714,12 @@ export function buildStructuredOutputInstruction(spec: StructuredOutputSpec): st
  */
 export function augmentSystemPromptWithStructuredOutput(
   systemPrompt: string | undefined,
-  spec: StructuredOutputSpec | undefined
+  spec: StructuredOutputSpec | undefined,
+  template?: string
 ): string | undefined {
   if (!spec) return systemPrompt;
-  const instruction = `[Structured Output]\n${buildStructuredOutputInstruction(spec)}`;
+  const instruction = `[Structured Output]\n${buildStructuredOutputInstruction(spec, template)}`;
   if (!systemPrompt) return instruction;
-  if (systemPrompt.includes("[Structured Output]")) return systemPrompt;
+  if (systemPrompt.includes(instruction)) return systemPrompt;
   return `${systemPrompt}\n\n${instruction}`;
 }

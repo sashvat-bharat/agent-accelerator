@@ -36,6 +36,7 @@ import { resolveHome } from "../utils/home.ts";
 import { persistTelemetry, registerSessionFolder, unregisterSessionFolder } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
+import { fillPrompt, resolvePrompts, type Prompts } from "../prompts/prompts.ts";
 import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
@@ -197,6 +198,8 @@ export class Agent {
   readonly description: string;
   /** Stable system instructions. */
   instructions: string;
+  /** The SDK prompts in use: the shipped defaults with `AgentConfig.prompts` applied. */
+  readonly prompts: Prompts;
   /** Original model string or catalog spec used for resolution. */
   readonly modelStringOrSpec: string | any;
   /** Configured dynamic sub-agent model, if enabled. */
@@ -349,6 +352,7 @@ export class Agent {
     this.description = config.description || "AI Agent powered by Agent Accelerator";
     // DX1: only instructions (no systemPrompt alias)
     this.instructions = config.instructions || "";
+    this.prompts = resolvePrompts(config.prompts);
     // Unified model resolution (shared with SubAgent/workers): supports
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
@@ -771,12 +775,8 @@ export class Agent {
     let out = base;
     const isThinkingEnabled =
       this.thinkingConfig?.enabled !== false && this.thinkingConfig?.level && this.thinkingConfig?.level !== "none";
-    if (isThinkingEnabled && !out.includes("[Reasoning Directive]")) {
-      const guidance =
-        "[Reasoning Directive]\n" +
-        "1. Use internal reasoning strictly for private planning and step-by-step thinking.\n" +
-        "2. Never attempt to execute tools or output final user deliverables inside reasoning.\n" +
-        "3. Once your reasoning is complete, output your final response or function calls directly in the standard response output.";
+    const guidance = this.prompts.reasoningDirective;
+    if (isThinkingEnabled && !out.includes(guidance)) {
       out = out ? `${out}\n\n${guidance}` : guidance;
     }
     return out || undefined;
@@ -1301,6 +1301,7 @@ export class Agent {
     const d = this.callDefaults;
     return {
       limits: { ...this.runLimits },
+      ...(this.forkConfig.prompts ? { prompts: { ...this.forkConfig.prompts } } : {}),
       ...(d.retry ? { retry: d.retry } : {}),
       ...(d.env ? { env: d.env } : {}),
       ...(d.fetch ? { fetch: d.fetch } : {}),
@@ -1392,6 +1393,7 @@ export class Agent {
       serviceTier: this.serviceTier,
       sessionId,
       ...(this.outputSpec ? { output: this.outputSpec } : {}),
+      prompts: { structuredOutput: this.prompts.structuredOutput, toolBridge: this.prompts.toolBridge },
       ...(this.googleTier ? { googleTier: this.googleTier } : {}),
       ...(toolChoice !== undefined ? { toolChoice } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
@@ -1459,6 +1461,7 @@ export class Agent {
         onSteerInjected: () => this.persistNow(),
         // Loop enforces these (plus local timeout races).
         limits: { ...this.runLimits },
+        prompts: this.prompts,
         ...(this.output !== undefined ? { output: this.output } : {}),
       };
 
@@ -1554,6 +1557,7 @@ export class Agent {
       onSteerInjected: () => this.persistNow(),
       // Loop enforces these (plus local timeout races).
       limits: { ...this.runLimits },
+      prompts: this.prompts,
       ...(this.output !== undefined ? { output: this.output } : {}),
     };
 
@@ -1900,7 +1904,7 @@ export class Agent {
     if (options?.additionalContext) {
       // Preserve stable instructions as systemPrompt
       ctx.systemPrompt = fullInstructions;
-      const prefix = `[Additional Context]\n${options.additionalContext}\n\n`;
+      const prefix = `${fillPrompt(this.prompts.additionalContext, { context: options.additionalContext })}\n\n`;
       if (typeof prompt === "string") {
         prompt = prefix + prompt;
       } else if (Array.isArray(prompt)) {
