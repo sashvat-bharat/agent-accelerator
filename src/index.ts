@@ -64,15 +64,8 @@ export {
 export type { AgentAsToolTarget, SubAgentTrace } from "./agent/delegation.ts";
 export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOptions } from "./agent/workers.ts";
 
-// Scheduled actions: dynamic sub-agents that run later and save their answer to a file
-export {
-  createScheduledAction,
-  listScheduledActions,
-  updateScheduledAction,
-  runScheduledAction,
-  skipScheduledAction,
-  deleteScheduledAction,
-} from "./scheduler/scheduler.ts";
+// Scheduled actions: dynamic sub-agents that run later and save their answer to a file (use `agent.scheduled`)
+export type { ScheduledActions } from "./scheduler/scheduler.ts";
 export { getDatetimeTool } from "./scheduler/tool.ts";
 export { setHome, resolveHome } from "./utils/home.ts";
 export type {

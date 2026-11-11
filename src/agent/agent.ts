@@ -31,7 +31,7 @@ import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry } from "./workers.ts";
 import { DEFAULT_MAX_DEPTH, normalizeToolMap, resolveDynamicModelInput, resolveMainModel } from "./worker.ts";
 import * as path from "node:path";
-import { registerAgent } from "../scheduler/scheduler.ts";
+import { registerAgent, ScheduledActions } from "../scheduler/scheduler.ts";
 import { resolveHome } from "../utils/home.ts";
 import { persistTelemetry, registerSessionFolder, unregisterSessionFolder } from "../telemetry-file.ts";
 import { lockFolder } from "../utils/durable.ts";
@@ -327,6 +327,7 @@ export class Agent {
   /** The resume in flight, so a second `resume()` returns the same promise. */
   private resuming?: Promise<AgentResponse | undefined>;
   private workerRegistry?: WorkerRegistry;
+  private scheduledActions?: ScheduledActions;
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -561,6 +562,11 @@ export class Agent {
   /** The persistent sub-agent workers of this agent: `spawn`, `message`, `close`, `list`, `turns` (see `WorkerRegistry`). */
   get workers(): WorkerRegistry {
     return (this.workerRegistry ??= new WorkerRegistry(this));
+  }
+
+  /** The scheduled actions of this agent's home: `create`, `list`, `update`, `run`, `skip`, `delete` (see `ScheduledActions`). */
+  get scheduled(): ScheduledActions {
+    return (this.scheduledActions ??= new ScheduledActions(this));
   }
 
   // Takes the one-process lock of the folder this Agent persists to: its own session folder, or the folder of a single `persist.file`; throws ConfigError when another live process holds it; in: the constructor and importSession (a new session id is a new folder), out: a `.lock` file there.

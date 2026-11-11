@@ -20,7 +20,7 @@
 | JSON result | `output: zodSchema`, read `res.parsed` | [Agents](guides/agents-and-models.md) |
 | Specialist helpers | `subagents: [agentA, agentB]` | [Multi-agent](guides/multi-agent.md) |
 | Model-invented helpers | `dynamicSubagents: { model, tools }` | [Multi-agent](guides/multi-agent.md) |
-| Work later or on repeat | `dynamicSubagents.allowScheduledActions` + `createScheduledAction` | [Multi-agent](guides/multi-agent.md) |
+| Work later or on repeat | `dynamicSubagents.allowScheduledActions` + `agent.scheduled.create(...)` | [Multi-agent](guides/multi-agent.md) |
 | Redirect a busy agent | `steer()`, `queue()`, `interrupt()`, `interrupt(message)` | [Tools and streaming](guides/tools-and-streaming.md) |
 | Save / resume / survive a crash | `persist: { dir }` + same `sessionId` (cut-off runs resume by themselves), `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |

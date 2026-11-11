@@ -11,19 +11,23 @@ import {
   tool,
   telemetryBus,
   executeToolCalls,
-  createScheduledAction,
-  listScheduledActions,
-  updateScheduledAction,
-  runScheduledAction,
-  skipScheduledAction,
-  deleteScheduledAction,
   getDatetimeTool,
   type AgentConfig,
   type ScheduledActionInput,
   type TelemetryEvent,
 } from "../src/index.ts";
 import { z } from "zod";
-import { getScheduler, resetSchedulers, type Scheduler } from "../src/scheduler/scheduler.ts";
+import {
+  getScheduler,
+  resetSchedulers,
+  createScheduledAction,
+  listScheduledActions,
+  updateScheduledAction,
+  runScheduledAction,
+  skipScheduledAction,
+  deleteScheduledAction,
+  type Scheduler,
+} from "../src/scheduler/scheduler.ts";
 import { createScheduledActionsTool } from "../src/scheduler/tool.ts";
 import { resolveHome } from "../src/utils/home.ts";
 import { scheduledRunTimeoutMs } from "../src/agent/worker.ts";
@@ -1144,10 +1148,49 @@ describe("list / update / run_now / skip / delete", () => {
     expect(skipScheduledAction(once.id, { home: h.home })).toMatchObject({ state: "done", nextDeliverAt: null, nextCookAt: null });
   });
 
-  it("the old kill names are gone from the public API (no alias)", async () => {
+  it("the scheduled-action functions are not exported any more: the API is `agent.scheduled`", async () => {
     const mod = (await import("../src/index.ts")) as Record<string, unknown>;
-    expect(typeof mod.deleteScheduledAction).toBe("function");
-    expect(mod.killScheduledAction).toBeUndefined();
+    for (const name of ["createScheduledAction", "listScheduledActions", "updateScheduledAction", "runScheduledAction", "skipScheduledAction", "deleteScheduledAction", "killScheduledAction"]) {
+      expect(mod[name]).toBeUndefined();
+    }
+    expect(typeof mod.getDatetimeTool).toBe("object");
+  });
+
+  it("agent.scheduled works on the agent's own home, with no { home } anywhere", async () => {
+    const other = harness(); // a second home (made first: each harness resets the schedulers): its actions must stay invisible
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    const agent = h.agent(fn);
+    const rec = agent.scheduled.create(input());
+    expect(rec.id).toStartWith("check-portfolio-");
+    expect(agent.scheduled.list().map((t) => t.id)).toEqual([rec.id]);
+    expect(listScheduledActions({ home: other.home })).toEqual([]);
+    expect(agent.scheduled.update(rec.id, { task: "A new task." }).task).toBe("A new task.");
+    expect(agent.scheduled.list()[0]!.task).toBe("A new task.");
+    const once = agent.scheduled.create(input({ id: "once-only" }));
+    // The process was "down" past the delivery time: after a restart the first tick marks the runs missed.
+    h.boot();
+    h.set(20, 0);
+    const back = h.agent(fn);
+    h.s.tick();
+    expect(back.scheduled.list().find((t) => t.id === once.id)!.state).toBe("missed");
+    expect(back.scheduled.skip(once.id).state).toBe("done");
+    expect(await back.scheduled.delete(rec.id, { purge: true })).toEqual({ ok: true });
+    expect(await back.scheduled.delete(rec.id)).toEqual({ ok: false, reason: "not_found" });
+    expect(back.scheduled.list().map((t) => t.id)).toEqual([once.id]);
+  });
+
+  it("agent.scheduled.run runs the action now, and create throws a ConfigError when scheduling is off", async () => {
+    const h = harness();
+    const fn = mockFetch(() => chatReply()).fn;
+    const agent = h.agent(fn);
+    const rec = agent.scheduled.create(input());
+    const started = agent.scheduled.run(rec.id);
+    expect(started.state).toBe("cooking");
+    await h.settle();
+    const off = h.agent(fn, { dynamicSubagents: { enabled: false, model: "groq/test-model" } });
+    expect(() => off.scheduled.create(input({ id: "nope" }))).toThrow(ConfigError);
+    expect(off.scheduled.list().length).toBe(1); // reading never needs the switch
   });
 
   it("delete: not found, idle, running (needs force), force aborts without a run file, purge removes the folder", async () => {

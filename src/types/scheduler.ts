@@ -18,12 +18,12 @@ export interface ScheduleSpec {
   /**
    * What happens when the host program was not running at a delivery time. `"skip"`: move on to the next time (a one-shot
    * is done). `"run"`: run it as soon as the program is back. Omitted: the action is marked `missed` and waits for
-   * `runScheduledAction` or `skipScheduledAction`.
+   * `agent.scheduled.run` or `agent.scheduled.skip`.
    */
   onMissed?: "skip" | "run";
 }
 
-/** What `createScheduledAction` receives: dynamic sub-agent fields plus the schedule. */
+/** What `agent.scheduled.create` receives: dynamic sub-agent fields plus the schedule. */
 export interface ScheduledActionInput {
   role?: string;
   instructions: string;
@@ -40,7 +40,7 @@ export interface ScheduledActionInput {
   };
 }
 
-/** What `updateScheduledAction` may change. `id` and the creating agent are immutable. */
+/** What `agent.scheduled.update` may change. `id` and the creating agent are immutable. */
 export type ScheduledActionPatch = Partial<Omit<ScheduledActionInput, "scheduled_action">> & {
   scheduled_action?: Partial<Omit<ScheduledActionInput["scheduled_action"], "id">>;
 };
@@ -81,7 +81,7 @@ export interface ScheduledDelivery {
   late: boolean;
 }
 
-/** Result of `deleteScheduledAction`. */
+/** Result of `agent.scheduled.delete`. */
 export type DeleteResult =
   | { ok: true }
   | { ok: false; reason: "not_found" }

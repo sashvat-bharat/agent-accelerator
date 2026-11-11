@@ -354,9 +354,9 @@ The Main Agent then gets two tools, fixed by config so the prompt cache stays st
 The same code is available to your program:
 
 ```ts
-import { createScheduledAction, telemetryBus } from "agent-accelerator";
+import { telemetryBus } from "agent-accelerator";
 
-createScheduledAction(agent, {
+agent.scheduled.create({
   instructions: "You write a short, sourced AI research brief.",
   task: "Summarize the most important AI news of the last day in 5 bullets.",
   tools: ["recent_news"], // names from the worker pool
@@ -377,16 +377,16 @@ telemetryBus.onEvent((e) => {
 });
 ```
 
-| Function | What it does |
+| `agent.scheduled` | What it does |
 | --- | --- |
-| `createScheduledAction(agent, input)` | Schedule a new action. Throws one `ValidationError` listing every problem. |
-| `listScheduledActions({ home? })` | Every action with its metadata, state (`waiting`, `cooking`, `missed`, `done`), `lastRun` and a `running` flag. |
-| `updateScheduledAction(id, patch, { home? })` | Change instructions, task, tools, timeout, role or any schedule field. Schedule changes are refused while it is cooking. |
-| `runScheduledAction(id, { home? })` | Run now, outside the schedule (also resolves a missed run). Needs the creating `Agent` alive. |
-| `skipScheduledAction(id, { home? })` | Ignore a missed run and wait for the next scheduled time. |
-| `deleteScheduledAction(id, { force?, purge?, home? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
+| `create(input)` | Schedule a new action under this agent. Throws one `ValidationError` listing every problem, and a `ConfigError` when `allowScheduledActions` is off. |
+| `list()` | Every action in the agent's home with its metadata, state (`waiting`, `cooking`, `missed`, `done`), `lastRun` and a `running` flag. |
+| `update(id, patch)` | Change instructions, task, tools, timeout, role or any schedule field. Schedule changes are refused while it is cooking. |
+| `run(id)` | Run now, outside the schedule (also resolves a missed run). Needs the creating `Agent` alive. |
+| `skip(id)` | Ignore a missed run and wait for the next scheduled time. |
+| `delete(id, { force?, purge? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
 
-Every function except `createScheduledAction` finds the home folder through `setHome()`, `AGENT_ACCEL_HOME`, or `.agent-accel/` in the working directory. If you built the Agent with its own `home`, pass the same `{ home }` to these calls (the model's `scheduled_actions` tool already does).
+Every method works on **the agent's own home** (`home` option, else `setHome()`, `AGENT_ACCEL_HOME`, or `.agent-accel/`), so nothing needs a `{ home }` argument. `list`, `update`, `run`, `skip` and `delete` see every action in that home, like the model's `scheduled_actions` tool does.
 
 **How it behaves**
 

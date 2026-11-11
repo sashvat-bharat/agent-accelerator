@@ -114,7 +114,7 @@ const agent = new Agent({
   },
 });
 
-const action = createScheduledAction(agent, {
+const action = agent.scheduled.create({
   instructions: "You write a short, sourced AI news brief.",
   task: "Call recent_news and write 3 bullets.",
   tools: ["recent_news"],
@@ -136,7 +136,7 @@ telemetryBus.onEvent((e) => {
 });
 ```
 
-Also exported: `listScheduledActions`, `updateScheduledAction`, `runScheduledAction` (run now), `skipScheduledAction`, `deleteScheduledAction(id, { force, purge })`, `getDatetimeTool`. All of them except `createScheduledAction` accept `{ home }`: pass it when the Agent was built with its own `home`, otherwise they use `setHome()`, `AGENT_ACCEL_HOME` or `.agent-accel/` in the working directory. The model gets the same power through the `scheduled_actions` tool (`create | list | get | update | delete | run_now | skip`) and reads the machine clock with `get_datetime`.
+`agent.scheduled` has `create(input)`, `list()`, `update(id, patch)`, `run(id)` (run now), `skip(id)` and `delete(id, { force, purge })`; all work on the agent's own home (`home` option), so no `{ home }` argument is needed. `getDatetimeTool` is also exported.
 
 How it works:
 - **Time format.** `timeToDeliver` is `DD:HH:MM`: `DD` days from today (`00` today, `01` tomorrow, no upper limit), `HH:MM` on a 12-hour clock with `meridiem`. `startCookingInAdvance` and `repeatEvery` are durations (`HH` 00–23). Delivery has **one-minute resolution**. Repeats use calendar days, so 7:00 AM stays 7:00 AM. The lead time must be shorter than the repeat gap.
@@ -152,7 +152,7 @@ How it works:
 ## For AI agents
 
 - Fixed: `new Agent({ subagents: [a, b] })`. Dynamic: `dynamicSubagents: { model, tools, maxSpawn }` (the model gets the `subagents` tool). Scheduling: `dynamicSubagents.allowScheduledActions: true` + a worker model, else `SubAgentModelError`.
-- `createScheduledAction(agent, input)` throws one `ValidationError` listing every problem; `scheduled_action.id` must be lowercase kebab-case (≤48 chars); `timeToDeliver` HH is 01–12.
+- `agent.scheduled.create(input)` throws one `ValidationError` listing every problem; `scheduled_action.id` must be lowercase kebab-case (≤48 chars); `timeToDeliver` HH is 01–12.
 - Never expose model/level choice to the LLM for workers; they are developer settings.
 - Workers that keep a conversation: `agent.workers.spawn / message / close / list` (pass `callId` for exactly-once after a crash); they need a worker model, and `persist: { dir }` on the parent to survive a restart.
 - Track workers with `track`/`listTrackedSubAgents`/`subscribeToSubAgent`; do not poll files.
