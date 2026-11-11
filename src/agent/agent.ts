@@ -221,6 +221,8 @@ export class Agent {
     maxDepth: number;
     /** Per-run spending cap of each worker (unset = unlimited). */
     workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
+    /** Per-run spending cap of each scheduled-action run (unset = unlimited). */
+    scheduledActionBudget?: { maxCostUsd?: number; maxTotalTokens?: number };
   };
   /** Home folder for everything written to disk (`sessions/`, `scheduled/`, `telemetry/`). */
   readonly home: string;
@@ -390,15 +392,21 @@ export class Agent {
           `[Agent Accelerator] Invalid dynamicSubagents.maxDepth ${JSON.stringify(rawDepth)}: expected a whole number >= 1, or omit it for no limit; set dynamicSubagents.enabled: false to turn workers off.`
         );
       }
-      const rawBudget = (dynRaw as { workerBudget?: { maxCostUsd?: unknown; maxTotalTokens?: unknown } }).workerBudget;
-      for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
-        const v = rawBudget?.[key];
-        if (v !== undefined && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
-          throw new ConfigError(
-            `[Agent Accelerator] Invalid dynamicSubagents.workerBudget.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`
-          );
+      type RawBudget = { maxCostUsd?: unknown; maxTotalTokens?: unknown } | undefined;
+      const checkBudgetKeys = (name: "workerBudget" | "scheduledActionBudget"): RawBudget => {
+        const raw = (dynRaw as Record<string, RawBudget>)[name];
+        for (const key of ["maxCostUsd", "maxTotalTokens"] as const) {
+          const v = raw?.[key];
+          if (v !== undefined && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
+            throw new ConfigError(
+              `[Agent Accelerator] Invalid dynamicSubagents.${name}.${key} ${JSON.stringify(v)}: expected a number greater than 0, or omit it for no limit.`
+            );
+          }
         }
-      }
+        return raw;
+      };
+      const rawBudget = checkBudgetKeys("workerBudget");
+      const rawScheduledBudget = checkBudgetKeys("scheduledActionBudget");
       // Open workers are unlimited unless the developer sets a cap (a number >= 1; Infinity also means unlimited).
       const rawMax = (dynRaw as { maxSpawn?: unknown }).maxSpawn;
       if (rawMax !== undefined && (typeof rawMax !== "number" || Number.isNaN(rawMax))) {
@@ -432,6 +440,9 @@ export class Agent {
         allowScheduledActions: dynRaw.allowScheduledActions === true,
         maxDepth: (rawDepth as number | undefined) ?? DEFAULT_MAX_DEPTH,
         ...(rawBudget ? { workerBudget: { ...(rawBudget as { maxCostUsd?: number; maxTotalTokens?: number }) } } : {}),
+        ...(rawScheduledBudget
+          ? { scheduledActionBudget: { ...(rawScheduledBudget as { maxCostUsd?: number; maxTotalTokens?: number }) } }
+          : {}),
       };
     }
     this.apiKey = (rawModel as any)?.apiKey || config.apiKey;

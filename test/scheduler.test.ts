@@ -727,8 +727,9 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     expect(fs.readFileSync(path.join(h.home, "scheduled", pending!.file), "utf8")).toMatch(/no longer in the pool: gone_tool/);
   });
 
-  // A parent whose scheduled runs use `extra` (budget / workerBudget); the pool and worker model are the harness defaults.
-  const withBudgets = (h: Harness, fn: typeof fetch, extra: { budget?: AgentConfig["budget"]; workerBudget?: { maxCostUsd?: number; maxTotalTokens?: number } }) =>
+  // A parent whose scheduled runs use `extra` (budget / workerBudget / scheduledActionBudget); the pool and worker model are the harness defaults.
+  type Cap = { maxCostUsd?: number; maxTotalTokens?: number };
+  const withBudgets = (h: Harness, fn: typeof fetch, extra: { budget?: AgentConfig["budget"]; workerBudget?: Cap; scheduledActionBudget?: Cap }) =>
     h.agent(fn, {
       ...(extra.budget ? { budget: extra.budget } : {}),
       dynamicSubagents: {
@@ -736,6 +737,7 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
         model: "groq/test-model",
         allowScheduledActions: true,
         ...(extra.workerBudget ? { workerBudget: extra.workerBudget } : {}),
+        ...(extra.scheduledActionBudget ? { scheduledActionBudget: extra.scheduledActionBudget } : {}),
         tools: { recent_news: tool({ description: "news", input: z.object({}), execute: () => "n" }) },
       },
     });
@@ -746,15 +748,33 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     return fs.readFileSync(path.join(h.home, "scheduled", readDeliveries(h.home)[0]!.file), "utf8");
   };
 
-  it("a scheduled run is capped by workerBudget: going over records a failed run", async () => {
+  it("a scheduled run is capped by scheduledActionBudget: going over records a failed run", async () => {
     const h = harness();
-    createScheduledAction(withBudgets(h, mockFetch(() => chatReply()).fn, { workerBudget: { maxTotalTokens: 3 } }), input()); // one model turn = 15 tokens
+    createScheduledAction(withBudgets(h, mockFetch(() => chatReply()).fn, { scheduledActionBudget: { maxTotalTokens: 3 } }), input()); // one model turn = 15 tokens
     const text = await runText(h);
     expect(text).toContain("status: failed");
     expect(text).toContain("Token budget exceeded");
   });
 
-  it("without workerBudget a scheduled run has no cap, and the agent's own budget is not borrowed", async () => {
+  it("workerBudget (the cap of chat workers) does not apply to a scheduled run", async () => {
+    const h = harness();
+    createScheduledAction(withBudgets(h, mockFetch(() => chatReply("fine")).fn, { workerBudget: { maxTotalTokens: 3, maxCostUsd: 0.0000001 } }), input());
+    const text = await runText(h);
+    expect(text).toContain("status: ok");
+    expect(text).toContain("fine");
+  });
+
+  it("scheduledActionBudget is validated like workerBudget", () => {
+    const h = harness();
+    for (const bad of [0, -1, "5", NaN, Infinity]) {
+      expect(() => withBudgets(h, mockFetch(() => chatReply()).fn, { scheduledActionBudget: { maxCostUsd: bad as number } })).toThrow(
+        "dynamicSubagents.scheduledActionBudget.maxCostUsd"
+      );
+    }
+    expect(withBudgets(h, mockFetch(() => chatReply()).fn, { scheduledActionBudget: { maxTotalTokens: 7 } }).dynamicSubagents?.scheduledActionBudget).toEqual({ maxTotalTokens: 7 });
+  });
+
+  it("without scheduledActionBudget a scheduled run has no cap, and the agent's own budget is not borrowed", async () => {
     const h = harness();
     createScheduledAction(withBudgets(h, mockFetch(() => chatReply("fine")).fn, { budget: { maxTotalTokens: 1, maxCostUsd: 0.0000001 } }), input());
     const text = await runText(h);

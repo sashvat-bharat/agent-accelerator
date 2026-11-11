@@ -70,16 +70,17 @@ Sources: [OpenAI, Background mode](https://developers.openai.com/api/docs/guides
 | `limits.maxTotalTokens` | unlimited | tokens in one run |
 | `budget` (`maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`) | unlimited | one run of this agent, workers included |
 | `usageLimit` (`maxCostUsd`, `maxTotalTokens`) | unlimited | the whole chat for its whole life: this agent and all its workers, added up; survives restarts |
-| `dynamicSubagents.workerBudget` | unlimited | the run of each worker (and of each scheduled-action run) |
+| `dynamicSubagents.workerBudget` | unlimited | the run of each chat worker (a spawn or a message) |
+| `dynamicSubagents.scheduledActionBudget` | unlimited | the run of each scheduled action (retries included) |
 | `dynamicSubagents.maxSpawn` | unlimited | workers open at the same time (`maxSpawn: 3` caps it) |
 | `dynamicSubagents.workerTimeoutMs` | unlimited | how long one scheduled-action run may take (an action's own `timeoutMs` can only be shorter) |
 | `dynamicSubagents.maxDepth` | unlimited | levels of workers below the agent (`maxDepth: 2` lets a worker start workers, and no deeper) |
 
 **`usageLimit` is the spending cap of a chat.** It adds up every model call of the agent and of all its workers (the `subagents` tool, `agent.workers` at any depth, fixed `subagents`) and never resets, so it is the cap to use for "this conversation may cost at most $5". When the total reaches `maxCostUsd` or `maxTotalTokens`, the next model call anywhere in the chat throws a `BudgetExceededError` ("Usage limit reached"); a worker that is asked to run after that answers with the same message and never reaches the provider. A persisted chat starts from what its saved sessions already spent: continue it the usual way (`importSession(loadSessionDir(...).session)`) and the count carries on. Models with unknown pricing add tokens but $0 to the cost, like `budget`. Scheduled actions are not part of the chat and never count.
 
-A scheduled-action run is capped by `workerBudget` only. It never borrows the agent's own `budget`, which is for the agent's own runs; with no `workerBudget` a scheduled run has no cap.
+A scheduled-action run is capped by `scheduledActionBudget` only. Scheduled actions are detached from the chat, so a run never borrows the agent's own `budget`, the chat workers' `workerBudget` or the chat's `usageLimit`; with no `scheduledActionBudget` a scheduled run has no cap.
 
-Unlimited also means unbounded cost and memory when a model keeps starting workers. For unattended runs set `workerBudget`, `maxSpawn` and/or `maxDepth`. The only other default cap is the waiting-prompt buffer: `midSession.maxQueued` / `maxSteers` (20 each), which protects memory and can be raised.
+Unlimited also means unbounded cost and memory when a model keeps starting workers. For unattended runs set `usageLimit`, `workerBudget`, `scheduledActionBudget`, `maxSpawn` and/or `maxDepth`. The only other default cap is the waiting-prompt buffer: `midSession.maxQueued` / `maxSteers` (20 each), which protects memory and can be raised.
 
 ### Network timeouts
 
@@ -180,7 +181,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 
 Be aware (pre-1.0):
 - **One process per session folder.** A session you persist is locked (`<session folder>/.lock`): a second process opening the same session fails fast with a `ConfigError` instead of silently losing updates, while other sessions of the same home stay free; a lock left by a killed process is taken over, and local disks only. Scheduled actions can be shared by several processes (one folder and a short lock per action). Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `task.json`, `delivery.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
-- Scheduled actions: creating Agent held weakly; `run_now` never retries; no spending guardrail except `dynamicSubagents.workerBudget`; no timezone/DST logic; run only while the process lives.
+- Scheduled actions: creating Agent held weakly; `run_now` never retries; no spending guardrail except `dynamicSubagents.scheduledActionBudget`; no timezone/DST logic; run only while the process lives.
 - Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding.
 - Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.
 - The model catalog uses about 18 MB of memory when loaded; the SDK as a whole is not yet tuned for tiny-memory hosts.

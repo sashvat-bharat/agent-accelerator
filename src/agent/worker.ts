@@ -256,7 +256,7 @@ export const DEFAULT_MAX_DEPTH = Infinity;
  * `persistent` makes a multi-turn worker that keeps its history (saved under `persistent.dir` when given, and
  * continued by `resume()` after a crash, never automatically). A persistent worker with levels left below it
  * (`maxDepth` of the parent, minus one for itself) gets its own `subagents` tool; its children can only be granted
- * the tools it was granted. One-shot workers never spawn. `dynamicSubagents.workerBudget` becomes each worker's own
+ * the tools it was granted. One-shot workers never spawn. `dynamicSubagents.workerBudget` becomes each chat worker's own
  * per-run `budget` (and is passed to its children).
  */
 export function buildDynamicWorkerConfig(
@@ -284,7 +284,11 @@ export function buildDynamicWorkerConfig(
     thinkingLevel: parent.dynamicSubagents?.thinkingLevel ?? parent.thinkingConfig?.level,
     sessionId: worker.sessionId,
     tools: worker.tools,
-    ...(dyn?.workerBudget ? { budget: { ...dyn.workerBudget } } : {}),
+    // A chat worker (persistent) is capped by `workerBudget`; a one-shot scheduled run only by `scheduledActionBudget`.
+    ...(() => {
+      const cap = worker.persistent ? dyn?.workerBudget : dyn?.scheduledActionBudget;
+      return cap ? { budget: { ...cap } } : {};
+    })(),
     stateless: !worker.persistent,
     ...(worker.persistent?.dir ? { persist: { dir: worker.persistent.dir }, resume: "explicit" as const } : {}),
     ...(worker.persistent && levelsBelow >= 1
