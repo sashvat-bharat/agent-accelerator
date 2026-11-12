@@ -115,7 +115,7 @@ export {
   type CatalogStatus,
   type RefreshCatalogOptions,
 } from "./models/catalog.ts";
-export { resolveEffectiveThinking } from "./agent/agent.ts";
+export { resolveEffectiveThinking } from "./agent/options.ts";
 export { withRetries, isTransientError } from "./utils/retry.ts";
 export { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOnResponses } from "./utils/errors.ts";
 // Native provider implementations.
@@ -222,7 +222,7 @@ export {
 } from "./types/errors.ts";
 export type { AgentAccelErrorCode, AgentAccelErrorContext } from "./types/errors.ts";
 // Normalized run limits (sub-agents inherit unless overridden)
-export type { AgentRunLimits } from "./agent/agent.ts";
+export type { AgentRunLimits } from "./agent/options.ts";
 
 // Telemetry bus: warnings, anomalies and per-turn thinking traces (attach with `telemetryBus.onEvent`)
 export { telemetryBus } from "./telemetry.ts";
