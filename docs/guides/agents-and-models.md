@@ -105,7 +105,7 @@ try {
 }
 ```
 
-Levels: `none`, `dynamic` (server default), `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. `thinking` wins over the legacy `thinkingLevel`; `{ level, budgetTokens }` is accepted but `budgetTokens` only warns (no adapter forwards it). Levels are validated against the model catalog before any request. Pass `wrapThinking: true` in streaming to print reasoning as `<think>…</think>` (display only; history is untouched). Every thinking turn is also emitted as a `turn.thinking` telemetry event.
+Levels: `none`, `dynamic` (server default), `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. `thinking` wins over the legacy `thinkingLevel`; `{ level, budgetTokens }` is accepted but `budgetTokens` only warns (no adapter forwards it). Levels are validated against the model catalog before any request. Every thinking turn is also emitted as a `turn.thinking` telemetry event.
 
 **Recommendations:** ✅ start at `low`/`medium`; reasoning costs output tokens. ❌ Do not hard-code a level for a model you have not checked: use `getModelThinkingInfo(provider, model)`.
 

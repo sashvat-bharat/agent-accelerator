@@ -107,7 +107,6 @@ When answering research questions:
 const res = await agent
   .run("Research on the latest model and its capability introduced by OpenAI called GPT-6-ASTRA", {
     stream: true,
-    wrapThinking: true,
     onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
     onDelta: (d) => process.stdout.write(d),
     onEvent: (e) => {

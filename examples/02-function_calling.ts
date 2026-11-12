@@ -28,7 +28,6 @@ console.log("→ Checking alice...\n");
 const response = await agent
   .run("Check status for username: alice", {
     stream: true,
-    wrapThinking: true,
     onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
     onDelta: (d) => process.stdout.write(d),
     onEvent: (event) => {

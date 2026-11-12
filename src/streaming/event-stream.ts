@@ -10,7 +10,7 @@ export interface EventStreamOptions {
   /**
    * When false, `partialText`/`partialThinking` cumulative fields are stripped
    * from events before delivery. Default true for compat (providers attach
-   * cumulative partials; consumers like wrapThinking rely on them).
+   * cumulative partials).
    */
   includePartial?: boolean;
   /** Max buffered events when no iterator is attached. Default 1000. Oldest dropped. */

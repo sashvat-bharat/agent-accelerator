@@ -179,7 +179,6 @@ while (true) {
   try {
     const res = await agent.run(q, {
       stream: true,
-      wrapThinking: true,
       thinking: THINKING_LEVEL,
       onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
       onDelta: (d) => process.stdout.write(d),

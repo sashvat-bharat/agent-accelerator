@@ -392,8 +392,6 @@ export interface AgentRunOptions {
   onThinkingDelta?: (delta: string, event: import("./response.ts").StreamEvent) => void;
   /** Called for every stream event (text_delta, thinking_delta, tool_call_complete, subagent_complete, etc.). */
   onEvent?: (event: import("./response.ts").StreamEvent) => void;
-  /** When true, wraps reasoning stream as <think>\n...\n</think>\n\n — no manual isThinking needed. */
-  wrapThinking?: boolean;
   /** Called after every model/tool turn with a turn summary (also drives sub-agent step logs + durable persistence). */
   onTurn?: (turn: AgentTurnEvent) => void;
   // Per-run knobs (all optional, additive; `output` intentionally
