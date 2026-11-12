@@ -35,6 +35,8 @@ import {
   readDeliveries,
   readRun,
   readTasks,
+  indexSize,
+  clearIndex,
   removeTaskFolder,
   updateDeliveries,
   updateTask,
@@ -854,6 +856,78 @@ describe("scheduler tick reads", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // Sets the modification time of every file under scheduled/ (the index only trusts files older than 2 s).
+  const backdate = (home: string, secondsAgo: number): void => {
+    const when = new Date(Date.now() - secondsAgo * 1000);
+    const walk = (dir: string): void => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else fs.utimesSync(full, when, when);
+      }
+    };
+    walk(path.join(home, "scheduled"));
+  };
+  const liveNames = (h: Harness): string[] => (h.s as any).snapshot().live.map((t: any) => t.name);
+
+  it("an idle tick over unchanged files reads none of them (the index serves them)", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    for (let i = 0; i < 12; i++) createScheduledAction(agent, input({ id: `warm-${i}`, timeToDeliver: "05:07:00" }));
+    backdate(h.home, 3600);
+    h.set(15, 0, 5);
+    h.s.tick(); // fills the index
+    h.set(15, 0, 6);
+    const spy = spyOn(fs, "readFileSync");
+    try {
+      h.s.tick();
+      const reads = spy.mock.calls.filter((c) => /(task|delivery)\.json$/.test(String(c[0]))).length;
+      expect(reads).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a changed file is read again: another process or a hand edit shows up on the next snapshot", () => {
+    const h = harness();
+    createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input({ timeToDeliver: "05:07:00" }));
+    backdate(h.home, 3600);
+    expect(liveNames(h)).toEqual(["Check Portfolio"]);
+    // A longer name changes the size; the file is made old again with a DIFFERENT time, so only the signature differs.
+    const id = fs.readdirSync(path.join(h.home, "scheduled"))[0]!;
+    const file = path.join(h.home, "scheduled", id, "task.json");
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("Check Portfolio", "Check Portfolio Daily"));
+    const old = new Date(Date.now() - 7200_000);
+    fs.utimesSync(file, old, old);
+    expect(liveNames(h)).toEqual(["Check Portfolio Daily"]);
+  });
+
+  it("a file edited just now is never served from the index (same-size edit inside the clock tick)", () => {
+    const h = harness();
+    createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input({ timeToDeliver: "05:07:00" }));
+    const id = fs.readdirSync(path.join(h.home, "scheduled"))[0]!;
+    const file = path.join(h.home, "scheduled", id, "task.json");
+    const stamp = new Date(); // whole milliseconds, so it can be set again exactly
+    fs.utimesSync(file, stamp, stamp);
+    expect(liveNames(h)).toEqual(["Check Portfolio"]); // cached, but the file is brand new
+    const before = fs.statSync(file);
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("Check Portfolio", "Check Portfoliz")); // same size, same inode
+    fs.utimesSync(file, before.atime, before.mtime); // and the same modification time: only the file's age can tell it changed
+    expect(liveNames(h)).toEqual(["Check Portfoliz"]);
+  });
+
+  it("a deleted action leaves the index", () => {
+    clearIndex();
+    const h = harness();
+    createScheduledAction(h.agent(mockFetch(() => chatReply()).fn), input({ timeToDeliver: "05:07:00" }));
+    backdate(h.home, 3600);
+    expect(liveNames(h)).toHaveLength(1);
+    expect(indexSize()).toBe(1);
+    fs.rmSync(path.join(h.home, "scheduled"), { recursive: true, force: true });
+    expect(liveNames(h)).toEqual([]);
+    expect(indexSize()).toBe(0); // the entry of the deleted action is dropped, not kept forever
   });
 
   it("a step that changes a file makes the next step of the same tick read fresh files", async () => {

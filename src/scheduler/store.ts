@@ -391,6 +391,107 @@ export function updateDeliveries<T>(home: string, id: string, fn: (pending: Pend
 }
 
 // ---------------------------------------------------------------------------
+// Index (what the scheduler tick reads: parsed and validated once per file version)
+// ---------------------------------------------------------------------------
+
+/** A file touched more recently than this is never served from the index: an in-place edit that keeps its size can land in the same clock tick as the read that cached it. */
+const RACY_MS = 2000;
+
+interface Indexed<T> {
+  /** inode:size:mtime of the file version `value` was read from, taken BEFORE the read (a later change then differs). */
+  sig: string;
+  value: T;
+}
+const taskIndex = new Map<string, Indexed<{ record: ScheduledActionRecord; problem: string | undefined }>>();
+const deliveryIndex = new Map<string, Indexed<Array<{ entry: PendingDelivery; problem: string | undefined }>>>();
+
+/** Forgets every indexed file (test hook: the next read parses everything again). */
+export function clearIndex(): void {
+  taskIndex.clear();
+  deliveryIndex.clear();
+}
+
+/** How many files the index holds (test hook). */
+export function indexSize(): number {
+  return taskIndex.size + deliveryIndex.size;
+}
+
+// One `stat`: the file's version signature and whether it is old enough to trust a cached copy; undefined when the file is missing; in: the indexed readers, out: a cache hit or miss.
+function fileVersion(file: string): { sig: string; trusted: boolean } | undefined {
+  try {
+    const st = fs.statSync(file, { throwIfNoEntry: false }); // most actions have no delivery.json: no exception to build
+    return st ? { sig: `${st.ino}:${st.size}:${st.mtimeMs}`, trusted: Date.now() - st.mtimeMs >= RACY_MS } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Drops index entries under one home that this read did not see (deleted actions); in: the indexed readers, out: the index maps.
+function pruneIndex(home: string, index: Map<string, unknown>, seen: Set<string>): void {
+  const prefix = baseDir(home) + path.sep;
+  for (const key of [...index.keys()]) if (key.startsWith(prefix) && !seen.has(key)) index.delete(key);
+}
+
+/**
+ * Every record with its validation problem (`undefined` = usable), oldest first, for the scheduler tick. A file whose
+ * inode, size and mtime did not change since its last read (and is not racy) comes from the index: no read, no parse,
+ * no validation. The records are shared with the index: read them, never change them (changes go through `updateTask`,
+ * which re-reads the file under the mutex).
+ */
+export function readTasksIndexed(home: string): Array<{ record: ScheduledActionRecord; problem: string | undefined }> {
+  const out: Array<{ record: ScheduledActionRecord; problem: string | undefined }> = [];
+  const seen = new Set<string>();
+  for (const folder of actionFolders(home)) {
+    if (!TASK_ID_PATTERN.test(folder) || folder.length > MAX_TASK_ID_LENGTH) continue;
+    const file = taskFile(taskDir(home, folder));
+    const version = fileVersion(file);
+    if (!version) continue; // no task.json: not an action (a `.bak` never resurrects a deleted one)
+    seen.add(file);
+    let hit = taskIndex.get(file);
+    if (!hit || !version.trusted || hit.sig !== version.sig) {
+      const record = readTask(home, folder);
+      if (!record) {
+        taskIndex.delete(file);
+        continue;
+      }
+      hit = { sig: version.sig, value: { record, problem: validateRecord(record) } };
+      taskIndex.set(file, hit);
+    }
+    out.push(hit.value);
+  }
+  pruneIndex(home, taskIndex, seen);
+  return out.sort((a, b) => byCreation(a.record, b.record));
+}
+
+/** Every saved delivery with its validation problem, soonest first, for the scheduler tick; indexed like {@link readTasksIndexed} (a missing `delivery.json` costs one `stat`). */
+export function readDeliveriesIndexed(home: string): Array<{ entry: PendingDelivery; problem: string | undefined }> {
+  const out: Array<{ entry: PendingDelivery; problem: string | undefined }> = [];
+  const seen = new Set<string>();
+  for (const folder of actionFolders(home)) {
+    if (!TASK_ID_PATTERN.test(folder) || folder.length > MAX_TASK_ID_LENGTH) continue;
+    const file = deliveryFile(taskDir(home, folder));
+    const version = fileVersion(file);
+    if (!version) continue;
+    seen.add(file);
+    let hit = deliveryIndex.get(file);
+    if (!hit || !version.trusted || hit.sig !== version.sig) {
+      const entries = (readShard(file, parsePending) ?? []).filter((e) => inOwnFolder(file, folder, e["id"]));
+      hit = {
+        sig: version.sig,
+        value: entries.map((e) => ({
+          entry: e as unknown as PendingDelivery,
+          problem: validateDelivery(e),
+        })),
+      };
+      deliveryIndex.set(file, hit);
+    }
+    out.push(...hit.value);
+  }
+  pruneIndex(home, deliveryIndex, seen);
+  return out.sort((a, b) => String(a.entry.deliverAt).localeCompare(String(b.entry.deliverAt)));
+}
+
+// ---------------------------------------------------------------------------
 // Record validation (the file is hand/agent-editable, so it is untrusted)
 // ---------------------------------------------------------------------------
 

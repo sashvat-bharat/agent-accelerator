@@ -36,17 +36,17 @@ import {
   createTask,
   deleteTask,
   findRunFile,
-  readDeliveries,
+  readDeliveriesIndexed,
   readHeartbeat,
   readRun,
   readTask,
   readTasks,
+  readTasksIndexed,
   removeTaskFolder,
   runPath,
   touchHeartbeat,
   updateDeliveries,
   updateTask,
-  validateDelivery,
   validateRecord,
   writeHeartbeat,
   writeRunFile,
@@ -341,18 +341,18 @@ export class Scheduler {
     return fresh;
   }
 
-  // Reads and validates every record and delivery from the files; in: snapshot, out: the valid ones.
+  // Takes every valid record and delivery from the file index (unchanged files are not read again); the records are shared, so steps only read them; in: snapshot, out: the valid ones.
   private readSnapshot(): { live: ScheduledActionRecord[]; pending: PendingDelivery[] } {
-    const live = readTasks(this.home).filter((t) => {
-      const problem = validateRecord(t);
-      if (problem) this.warnInvalid(String((t as { id?: unknown }).id), problem);
-      return !problem;
-    });
-    const pending = readDeliveries(this.home).filter((p) => {
-      const problem = validateDelivery(p);
-      if (problem) this.warnInvalid(String((p as { id?: unknown }).id), problem, "delivery.json");
-      return !problem;
-    });
+    const live: ScheduledActionRecord[] = [];
+    for (const { record, problem } of readTasksIndexed(this.home)) {
+      if (problem) this.warnInvalid(String((record as { id?: unknown }).id), problem);
+      else live.push(record);
+    }
+    const pending: PendingDelivery[] = [];
+    for (const { entry, problem } of readDeliveriesIndexed(this.home)) {
+      if (problem) this.warnInvalid(String((entry as { id?: unknown }).id), problem, "delivery.json");
+      else pending.push(entry);
+    }
     return { live, pending };
   }
 
