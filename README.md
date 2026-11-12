@@ -283,7 +283,7 @@ const agent = new Agent({
 });
 ```
 
-One `subagents` tool is injected. It takes `{ command, id?, name?, role?, instructions?, task?, tools?, history? }` and its manual is the tool description (`src/agent/subagents.md`, with the worker pool and the open-worker limit filled in; the system prompt stays untouched):
+One `subagents` tool is injected. It takes `{ command, id?, name?, role?, instructions?, task?, tools?, history? }` and its manual is the tool description (`src/prompts/subagents-tool.md`, with the worker pool and the open-worker limit filled in; the system prompt stays untouched):
 
 - `spawn` starts a worker (`name`, `task`; optional `instructions`, `role`, `tools`, `history`) and waits for its first reply. `message` sends `task` to an open worker `id`, which remembers the whole conversation. `close` frees the slot. `list` shows the open workers and the numbered finished turns that `history: N` can copy into a new worker.
 - Results are plain text with one header line: `[worker researcher-1a2b3c4d] replied:` + the worker's text, or `[worker researcher-1a2b3c4d] failed: <reason>`. Several `spawn` calls in one model turn run in parallel. A bad request comes back as an `Error: ...` line the model can fix.
@@ -349,7 +349,7 @@ const agent = new Agent({
 });
 ```
 
-The Main Agent then gets two tools, fixed by config so the prompt cache stays stable: `scheduled_actions` (one tool, `command` = `create | list | get | update | delete | run_now | skip`) and `get_datetime` (the machine's local date and time, also exported as `getDatetimeTool`). The tool description is exactly [`src/scheduler/scheduled-actions.md`](src/scheduler/scheduled-actions.md) (the worker pool names are filled in), so you can read what the model is told.
+The Main Agent then gets two tools, fixed by config so the prompt cache stays stable: `scheduled_actions` (one tool, `command` = `create | list | get | update | delete | run_now | skip`) and `get_datetime` (the machine's local date and time, also exported as `getDatetimeTool`). The tool description is exactly [`src/prompts/scheduled-actions-tool.md`](src/prompts/scheduled-actions-tool.md) (the worker pool names are filled in), so you can read what the model is told.
 
 The same code is available to your program:
 

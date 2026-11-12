@@ -36,17 +36,17 @@ import {
   createTask,
   deleteTask,
   findRunFile,
-  readDeliveries,
+  readDeliveriesIndexed,
   readHeartbeat,
   readRun,
   readTask,
   readTasks,
+  readTasksIndexed,
   removeTaskFolder,
   runPath,
   touchHeartbeat,
   updateDeliveries,
   updateTask,
-  validateDelivery,
   validateRecord,
   writeHeartbeat,
   writeRunFile,
@@ -267,6 +267,9 @@ export class Scheduler {
   private readonly token = Math.random().toString(36).slice(2, 10);
   private lastDeadSweep = 0;
   private lastBeat = 0;
+  /** True while `tick()` runs; only then is `cache` kept. */
+  private ticking = false;
+  private cache: { live: ScheduledActionRecord[]; pending: PendingDelivery[] } | undefined;
   private readonly warned = new Set<string>();
 
   constructor(readonly home: string) {}
@@ -288,6 +291,7 @@ export class Scheduler {
 
   /** Delivers what is due, starts what is due. Synchronous and never throws. */
   tick(): void {
+    this.ticking = true;
     try {
       const now = this.now();
       const first = !this.swept;
@@ -306,6 +310,9 @@ export class Scheduler {
         `[Agent Accelerator] Scheduler tick failed: ${errText(err)}`,
         {}
       );
+    } finally {
+      this.ticking = false;
+      this.cache = undefined;
     }
   }
 
@@ -321,18 +328,31 @@ export class Scheduler {
     );
   }
 
-  /** Valid records and deliveries (invalid ones are reported once and left untouched in their file). */
+  // Forgets the snapshot of the running tick: every step that changes a file calls it, so a later step of the same tick reads fresh files; in: the mutating steps, out: the next snapshot() reads the disk.
+  private invalidate(): void {
+    this.cache = undefined;
+  }
+
+  /** Valid records and deliveries (invalid ones are reported once and left untouched in their file); read once per tick and again only after a step changed a file. */
   private snapshot(): { live: ScheduledActionRecord[]; pending: PendingDelivery[] } {
-    const live = readTasks(this.home).filter((t) => {
-      const problem = validateRecord(t);
-      if (problem) this.warnInvalid(String((t as { id?: unknown }).id), problem);
-      return !problem;
-    });
-    const pending = readDeliveries(this.home).filter((p) => {
-      const problem = validateDelivery(p);
-      if (problem) this.warnInvalid(String((p as { id?: unknown }).id), problem, "delivery.json");
-      return !problem;
-    });
+    if (this.ticking && this.cache) return this.cache;
+    const fresh = this.readSnapshot();
+    if (this.ticking) this.cache = fresh;
+    return fresh;
+  }
+
+  // Takes every valid record and delivery from the file index (unchanged files are not read again); the records are shared, so steps only read them; in: snapshot, out: the valid ones.
+  private readSnapshot(): { live: ScheduledActionRecord[]; pending: PendingDelivery[] } {
+    const live: ScheduledActionRecord[] = [];
+    for (const { record, problem } of readTasksIndexed(this.home)) {
+      if (problem) this.warnInvalid(String((record as { id?: unknown }).id), problem);
+      else live.push(record);
+    }
+    const pending: PendingDelivery[] = [];
+    for (const { entry, problem } of readDeliveriesIndexed(this.home)) {
+      if (problem) this.warnInvalid(String((entry as { id?: unknown }).id), problem, "delivery.json");
+      else pending.push(entry);
+    }
     return { live, pending };
   }
 
@@ -416,6 +436,7 @@ export class Scheduler {
       delete rec.current;
       rec.state = rec.nextDeliverAt ? "waiting" : "done";
     });
+    this.invalidate();
   }
 
   // Marks a run whose moment passed as missed, then applies the action's onMissed policy: `skip` moves on to the next time, `run` runs it now, unset waits for run_now / skip; only when the action is still in the state the caller saw (`from`), so two processes never both mark it; in: the sweeps, out: task.json + the missed (and skipped / started) events.
@@ -429,6 +450,7 @@ export class Scheduler {
       return true;
     });
     if (!changed) return;
+    this.invalidate();
     const next =
       policy === "skip"
         ? "Skipping it (onMissed: skip)."
@@ -465,6 +487,7 @@ export class Scheduler {
       return true;
     });
     if (!removed) return; // another process took this delivery: exactly one process delivers it
+    this.invalidate();
     const deliverAt = parseLocalIso(entry.deliverAt).getTime();
     const late =
       entry.late === true ||
@@ -576,6 +599,7 @@ export class Scheduler {
         "warn"
       );
     }
+    this.invalidate(); // the record was rewritten above (cooking, or missed without an agent)
     if (!started || !ctx.agent) return undefined;
     emit("started", `"${started.name}" (${id}) started cooking.`, {
       id,
@@ -609,6 +633,7 @@ export class Scheduler {
       t.nextDeliverAt = toLocalIso(deliverAt);
       t.nextCookAt = toLocalIso(cookTime(deliverAt, cookMs));
     });
+    this.invalidate();
     if (ctx.skipped) {
       const { name, deliverAt } = ctx.skipped;
       emit(
@@ -823,6 +848,7 @@ export class Scheduler {
       delete t.current;
       return t;
     });
+    this.invalidate();
     emit("skipped", `"${rec.name}" (${id}) skipped its missed run.`, {
       id,
       name: rec.name,
