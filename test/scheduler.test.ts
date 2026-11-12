@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import type { ScheduledActionRecord } from "../src/types/scheduler.ts";
@@ -834,6 +834,40 @@ describe("scheduler lifecycle (fake clock, manual ticks)", () => {
     h.set(19, 0);
     h.s.tick(); // delivers; the one-shot is done and nothing is pending
     expect((h.s as any).timer).toBeUndefined();
+  });
+});
+
+describe("scheduler tick reads", () => {
+  it("reads each action's task.json once per tick, not once per step", () => {
+    const h = harness();
+    const agent = h.agent(mockFetch(() => chatReply()).fn);
+    const N = 12;
+    for (let i = 0; i < N; i++) createScheduledAction(agent, input({ id: `idle-${i}`, timeToDeliver: "05:07:00" }));
+    h.set(15, 0, 5);
+    h.s.tick(); // first tick: startup sweep and the dead-owner sweep run here
+    h.set(15, 0, 6);
+    const spy = spyOn(fs, "readFileSync");
+    try {
+      h.s.tick(); // an idle tick: nothing is due, nothing changes
+      const taskReads = spy.mock.calls.filter((c) => String(c[0]).endsWith("task.json")).length;
+      expect(taskReads).toBe(N);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a step that changes a file makes the next step of the same tick read fresh files", async () => {
+    const h = harness();
+    const { of } = capture();
+    const { fn } = mockFetch(() => chatReply("done"));
+    const rec = createScheduledAction(h.agent(fn), input());
+    h.set(18, 50);
+    h.s.tick(); // cook starts (startDue changes the record)
+    await h.settle();
+    h.set(19, 0);
+    h.s.tick(); // the saved run is delivered in the same tick that reads it
+    expect(of("scheduled_action.delivered")).toHaveLength(1);
+    expect(readTasks(h.home).find((t) => t.id === rec.id)!.lastRun?.status).toBe("ok");
   });
 });
 
