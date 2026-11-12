@@ -74,72 +74,8 @@ describe("Streaming & SSE Parser", () => {
     expect(finalRes.toJSON().usage.totalTokens).toBe(9);
   });
 
-  it("should handle wrapThinking across multiple turns without state lock", async () => {
-    const { Agent } = await import("../src/agent/agent.ts");
-    const agent = new Agent({
-      name: "MultiTurnTester",
-      model: "google/gemini-2.5-flash",
-    });
-
-    const outputEvents: string[] = [];
-    // Simulate stream with wrapThinking callbacks
-    const fakeStream = new AssistantMessageEventStream();
-    
-    // Simulate what agent.stream wires up
-    let isThinking = false;
-    const openThink = () => {
-      if (!isThinking) {
-        isThinking = true;
-        outputEvents.push("<think>\n");
-      }
-    };
-    const closeThink = () => {
-      if (isThinking) {
-        isThinking = false;
-        outputEvents.push("\n</think>\n\n");
-      }
-    };
-
-    fakeStream.on("thinking_delta", (e: any) => {
-      openThink();
-      outputEvents.push(`[THINK:${e.thinkingDelta}]`);
-    });
-    fakeStream.on("text_delta", (e: any) => {
-      closeThink();
-      outputEvents.push(`[TEXT:${e.delta}]`);
-    });
-    fakeStream.on("tool_result" as any, () => {
-      closeThink();
-    });
-
-    // Turn 1
-    fakeStream.push({ type: "thinking_delta", thinkingDelta: "Plan 1" });
-    fakeStream.push({ type: "text_delta", delta: "Calling tool" });
-    fakeStream.push({ type: "tool_result", toolResult: { id: "c1", name: "tool", result: "ok" } });
-
-    // Turn 2 — should open <think> again and close with text!
-    fakeStream.push({ type: "thinking_delta", thinkingDelta: "Plan 2" });
-    fakeStream.push({ type: "text_delta", delta: "Final report" });
-
-    expect(outputEvents).toEqual([
-      "<think>\n",
-      "[THINK:Plan 1]",
-      "\n</think>\n\n",
-      "[TEXT:Calling tool]",
-      "<think>\n",
-      "[THINK:Plan 2]",
-      "\n</think>\n\n",
-      "[TEXT:Final report]",
-    ]);
-  });
-
-  it("should collapse provider blank-line padding in wrapThinking display without touching cache payloads", async () => {
-    // Regression: Gemini thought summaries trail with blank lines (observed
-    // `"...\n\n\n"`), and the `<think>` wrapper added its own newlines —
-    // rendering blank lines after `<think>`, double blanks between sections,
-    // and blanks before `</think>`. Display normalization must collapse
-    // `\n{3,}` → `\n\n` and keep tag boundaries tight while request bodies
-    // (instructions, chaining, affinity) stay byte-identical.
+  it("stores trimmed thinking and leaves cache payloads untouched", async () => {
+    // Gemini thought summaries trail with blank lines (observed `"...\n\n\n"`): the stored thinking is trimmed and request bodies stay byte-identical.
     const { Agent } = await import("../src/agent/agent.ts");
     const originalFetch = globalThis.fetch;
     const seenBodies: any[] = [];
@@ -181,7 +117,7 @@ describe("Streaming & SSE Parser", () => {
 
     try {
       const agent = new Agent({
-        name: "WrapThinkingHygiene",
+        name: "ThinkingHygiene",
         model: "google/gemini-3.5-flash-lite",
         apiKey: "test-key",
       });
@@ -189,18 +125,10 @@ describe("Streaming & SSE Parser", () => {
       const textOut: string[] = [];
       const res = await agent.run("Hi", {
         stream: true,
-        wrapThinking: true,
         onThinkingDelta: (d) => void thinkingOut.push(d),
         onDelta: (d) => void textOut.push(d),
       });
 
-      const thinkingShown = thinkingOut.join("");
-      expect(thinkingShown).not.toContain("\n\n\n");
-      expect(thinkingShown.startsWith("<think>\nA")).toBe(true);
-      // Trailing provider newlines are buffered and dropped at close: no
-      // blank line before the tag. Close emits a single trailing newline
-      // (display-only; history/request bodies untouched).
-      expect(thinkingShown).toBe("<think>\nA\n\nB\n</think>\n");
       // Stored thinking is trimmed (no provider trailing blanks).
       expect(res.thinking).toBe("A\n\nB");
       expect(textOut.join("")).toContain("Hi");

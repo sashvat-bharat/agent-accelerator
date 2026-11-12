@@ -118,7 +118,6 @@ let response: any;
 try {
   response = await agent.run(prompt, {
     stream: true,
-    wrapThinking: true,
     onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
     onDelta: (d) => process.stdout.write(d),
     onEvent: (event) => {

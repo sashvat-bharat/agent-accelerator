@@ -164,7 +164,6 @@ console.log(`\x1b[32mTopic: ${topic}\x1b[0m\n`);
 const response = await lead
   .run(topic, {
     stream: true,
-    wrapThinking: true,
     onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
     onDelta: (d) => process.stdout.write(d),
     onEvent: (e) => {

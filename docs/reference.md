@@ -60,7 +60,6 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `enqueue` | `"steer"`, `"queue"` or `"interrupt"` when the agent is busy. `"interrupt"` works in every `midSession` mode: it aborts the active run and starts this prompt next, ahead of queued follow-ups |
 | `headers` | Extra request headers |
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
-| `wrapThinking` | Display reasoning inside `<think>…</think>` |
 | `toolChoice`, `maxOutputTokens` | Same as config |
 | `retry`, `fetch`, `env`, `logger` | Same as config |
 

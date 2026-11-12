@@ -1559,8 +1559,7 @@ export class GoogleInteractionsProvider implements Provider {
         // (JSON mocks) where no SSE frames were ever seen.
         const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
         // Trim provider trailing blank lines from finalized thinking (live
-        // deltas already emitted raw; display collapse happens in the
-        // wrapThinking presentation layer). Stateful bodies unaffected.
+        // deltas already emitted raw). Stateful bodies unaffected.
         const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
         const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
         const isSSEPayload =

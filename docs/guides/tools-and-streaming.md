@@ -75,7 +75,6 @@ const abort = new AbortController();
 const res = await agent.run("Explain event loops.", {
   stream: true, // still awaitable; also async-iterable
   signal: abort.signal, // cancels provider, tools and sub-agents
-  wrapThinking: true,
   onThinkingDelta: (d) => process.stdout.write(d),
   onDelta: (d) => process.stdout.write(d),
   onEvent: (e) => {
@@ -87,7 +86,7 @@ console.log(`\n${res.usage.outputTokens} output tokens`);
 
 Three ways: `agent.stream(prompt)` (iterate events), `agent.run(prompt, { stream: true, onDelta… })` (callbacks, awaitable), `agent.ask(prompt, true)` (string deltas). The stream also has `on(type, fn)` / `off`, `result()`, `cancel()`, `onCancel()`, `isCancelled()`; breaking out of `for await` cancels the HTTP request. Event types: `text_delta`, `thinking_delta`, `tool_start`, `tool_call_complete`, `tool_result`, `tool_end`, `subagent_delta`, `subagent_complete`, `steer_injected`, `queued`, `usage`, `done`, `error` (full table in [Reference](../reference.md)). Buffers are bounded (1000 events, ~1 MB per delta; overflow is reported on the telemetry bus). Timeouts: `limits.firstByteTimeoutMs`, `limits.streamIdleTimeoutMs`; transient failures are retried only **before the first byte**.
 
-**Recommendations:** ✅ always provide a `signal` for user-facing streams. ✅ Forward events to browsers with Server-Sent Events. ❌ Don't mutate `event` objects when `wrapThinking` is on (it edits display text in place).
+**Recommendations:** ✅ always provide a `signal` for user-facing streams. ✅ Forward events to browsers with Server-Sent Events.
 
 ## Steer, queue, interrupt
 

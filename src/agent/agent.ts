@@ -10,7 +10,6 @@ import type {
   InterruptedRun,
 } from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
-import type { ProviderRequestOptions } from "../types/model.ts";
 import { normalizeThinkingV2, resolveWhenBusy } from "../tools/tool.ts";
 import type { ToolDefinition, ToolResultRecord } from "../types/tool.ts";
 import { isSubagentResult } from "../tools/subagent-result.ts";
@@ -43,6 +42,18 @@ import { persistTelemetry, registerSessionFolder, unregisterSessionFolder } from
 import { lockFolder } from "../utils/durable.ts";
 import { createScheduledActionsTool, getDatetimeTool } from "../scheduler/tool.ts";
 import { fillPrompt, resolvePrompts, type Prompts } from "../prompts/prompts.ts";
+import {
+  buildProviderOptions,
+  normalizeThinking,
+  type ProviderOptionSource,
+  resolveAgentLimits,
+  resolveEffectiveThinking,
+  type AgentRunLimits,
+} from "./options.ts";
+export { normalizeThinking, resolveEffectiveThinking };
+export type { AgentRunLimits };
+import { NamedSessions } from "./named-sessions.ts";
+import { RunControl, type QueuedPrompt } from "./run-control.ts";
 import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
 import { mergeCap } from "./defaults.ts";
 import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
@@ -98,16 +109,6 @@ import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalo
 import { buildSessionData, type PersistedAgentSession, type SessionTotals } from "../session/store.ts";
 import { SessionTelemetry } from "../session/store.ts";
 
-/**
- * Resolves a per-run thinking override without mutating agent config.
- */
-export function resolveEffectiveThinking(base?: ThinkingConfig, overrideLevel?: string): ThinkingConfig | undefined {
-  if (!overrideLevel) return base;
-  if (overrideLevel === "none") return { enabled: false, level: "none", budgetTokens: 0 };
-  if (overrideLevel === "dynamic") return { enabled: true, level: "dynamic", budgetTokens: -1 };
-  return { enabled: true, level: overrideLevel as ThinkingConfig["level"] };
-}
-
 import { ConfigError, SessionLoadError, ValidationError, isAbortError } from "../types/errors.ts";
 
 /**
@@ -119,43 +120,6 @@ const mergeDisposers = new WeakMap<AbortController, () => void>();
 
 /** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
 export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
-
-/** Max named sessions kept per Agent (LRU). */
-const SESSION_LRU_MAX = 100;
-/** Idle TTL for named sessions. */
-const SESSION_TTL_MS = 60 * 60 * 1000;
-
-/** Normalized per-run limits. Sub-agents inherit these unless overridden. */
-export interface AgentRunLimits {
-  maxTurns?: number;
-  deadlineMs?: number;
-  maxToolCallsPerRun?: number;
-  maxTotalTokens?: number;
-  requestTimeoutMs: number;
-  firstByteTimeoutMs: number;
-  streamIdleTimeoutMs: number;
-}
-
-/** Resolves `(config as any).limits` with defaults (timeouts tolerate reasoning). */
-function resolveAgentLimits(config: { limits?: Record<string, unknown> }): AgentRunLimits {
-  const raw = (config as { limits?: Record<string, unknown> }).limits ?? {};
-  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-  // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
-  const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
-  return {
-    ...(num(raw.maxTurns) !== undefined ? { maxTurns: Math.max(1, Math.floor(num(raw.maxTurns)!)) } : {}),
-    ...(num(raw.deadlineMs) !== undefined ? { deadlineMs: num(raw.deadlineMs)! } : {}),
-    ...(num(raw.maxToolCallsPerRun) !== undefined
-      ? { maxToolCallsPerRun: Math.max(1, Math.floor(num(raw.maxToolCallsPerRun)!)) }
-      : {}),
-    ...(num(raw.maxTotalTokens) !== undefined
-      ? { maxTotalTokens: Math.max(1, Math.floor(num(raw.maxTotalTokens)!)) }
-      : {}),
-    requestTimeoutMs: timeout(raw.requestTimeoutMs) ?? 300_000,
-    firstByteTimeoutMs: timeout(raw.firstByteTimeoutMs) ?? 120_000,
-    streamIdleTimeoutMs: timeout(raw.streamIdleTimeoutMs) ?? 300_000,
-  };
-}
 
 /** Thrown when dynamic sub-agent spawning is enabled without an explicit model. */
 export class SubAgentModelError extends ConfigError {
@@ -297,24 +261,14 @@ export class Agent {
    * request 300s / first-byte 120s / idle 300s (tolerate reasoning).
    */
   readonly runLimits: AgentRunLimits;
-  private currentRun: {
-    steerInbox: SteerEntry[];
-    outerStream?: AssistantMessageEventStream;
-    runPromise?: Promise<AgentResponse>;
-    abortController: AbortController;
-  } | null = null;
-  private pendingQueue: Array<{
-    prompt: string | ContentPart[];
-    options?: AgentRunOptions;
-    isStream: boolean;
-    deferredStream?: AssistantMessageEventStream;
-    resolve: (res: AgentResponse) => void;
-    reject: (err: unknown) => void;
-    /** Put here by `interrupt(message)`: runs before every other waiting prompt. */
-    urgent?: boolean;
-  }> = [];
+  /** The active run and the waiting queue (see `run-control.ts`). */
+  private readonly rc: RunControl;
   /** Named session contexts for `sessionId` runs (LRU 100 + TTL). */
-  private sessions = new Map<string, { context: AgentContext; lastAccess: number }>();
+  private readonly named: NamedSessions = new NamedSessions(
+    () => this.sessionId,
+    () => this.context,
+    () => new AgentContext(this.getFullInstructions())
+  );
   /** Coalesced persistence single-flight flag. */
   private persistScheduled = false;
   /** Step journal of the persisted session folder (dir mode only). */
@@ -493,6 +447,17 @@ export class Agent {
     };
     // Bound on buffered steer entries (default 20).
     this.maxSteers = this.midSessionConfig.maxSteers ?? 20;
+    const self = this;
+    this.rc = new RunControl({
+      persistNow: () => this.persistNow(),
+      run: (prompt, options) => this.run(prompt, options),
+      startNonStreamingRun: (prompt, options) => this.startNonStreamingRun(prompt, options),
+      startStreamingRun: (prompt, options) => this.startStreamingRun(prompt, options),
+      get midSessionConfig() {
+        return self.midSessionConfig;
+      },
+      maxSteers: this.maxSteers,
+    });
     // Run limits (sub-agents inherit unless overridden).
     this.runLimits = resolveAgentLimits(config as unknown as { limits?: Record<string, unknown> });
 
@@ -655,7 +620,7 @@ export class Agent {
     const open = new Set(unfinishedToolCalls(this.context.messages).map((c) => c.id));
     this.toolRecords.splice(0, this.toolRecords.length, ...(session.tools ?? []).filter((t) => open.has(t.id)));
     for (const w of waiting) {
-      this.pendingQueue.push({
+      this.rc.queue.push({
         prompt: w.prompt,
         options: w.additionalContext ? { additionalContext: w.additionalContext } : undefined,
         isStream: false,
@@ -745,7 +710,7 @@ export class Agent {
    */
   resume(): Promise<AgentResponse | undefined> {
     if (this.resuming) return this.resuming;
-    if (this.currentRun)
+    if (this.rc.current)
       throw new ValidationError("[Agent Accelerator] resume() needs an idle agent: a run is already active.");
     const mark = this.runMarks.filter((m) => !m.end && m !== this.activeMark).pop();
     const last = this.context.messages[this.context.messages.length - 1];
@@ -753,7 +718,7 @@ export class Agent {
     if (!mark || (nothingOpen && (last?.role === "assistant" || endsWithStop(this.context.messages)))) {
       // The answer was complete (or a tool had ended the run); only the note that it ended was lost.
       if (mark) this.endRun(mark, endsWithStop(this.context.messages) ? "stopped" : "done");
-      this.pumpQueue();
+      this.rc.pumpQueue();
       return Promise.resolve(undefined);
     }
     telemetryBus.emit({
@@ -859,88 +824,25 @@ export class Agent {
   /** Drops one named session. No-op for unknown ids. */
   disposeSession(id: string): void {
     unregisterSessionFolder(id);
-    try {
-      this.sessions.delete(id);
-    } catch {}
-    try {
-      clearInteractionChains(id);
-    } catch {}
-    try {
-      clearSessionRouting(id);
-    } catch {}
+    this.named.dispose(id);
   }
 
   /** Drops all named sessions except the default context. */
   clearSessions(): void {
-    try {
-      for (const id of [...this.sessions.keys()]) {
-        try {
-          clearInteractionChains(id);
-        } catch {}
-        try {
-          clearSessionRouting(id);
-        } catch {}
-      }
-      this.sessions.clear();
-    } catch {}
+    this.named.clear();
   }
 
-  /** Resolves the context for a `sessionId` run (default session = `this.context`). */
+  // Resolves the context for a `sessionId` run (default session = `this.context`); in: the run starters and session(), out: an AgentContext.
   private getSessionContext(sessionId?: string): AgentContext {
-    const sid = sessionId || this.sessionId;
-    if (sid === this.sessionId) return this.context;
-    const now = Date.now();
-    // TTL eviction.
-    try {
-      for (const [key, entry] of [...this.sessions.entries()]) {
-        if (now - entry.lastAccess > SESSION_TTL_MS) {
-          this.sessions.delete(key);
-          try {
-            clearInteractionChains(key);
-          } catch {}
-          try {
-            clearSessionRouting(key);
-          } catch {}
-        }
-      }
-    } catch {}
-    const existing = this.sessions.get(sid);
-    if (existing) {
-      existing.lastAccess = now;
-      return existing.context;
-    }
-    const fresh = new AgentContext(this.getFullInstructions());
-    this.sessions.set(sid, { context: fresh, lastAccess: now });
-    // LRU eviction (oldest lastAccess first).
-    try {
-      while (this.sessions.size > SESSION_LRU_MAX) {
-        let oldest: string | undefined;
-        let oldestTs = Infinity;
-        for (const [key, entry] of this.sessions) {
-          if (entry.lastAccess < oldestTs) {
-            oldestTs = entry.lastAccess;
-            oldest = key;
-          }
-        }
-        if (!oldest) break;
-        this.sessions.delete(oldest);
-        try {
-          clearInteractionChains(oldest);
-        } catch {}
-        try {
-          clearSessionRouting(oldest);
-        } catch {}
-      }
-    } catch {}
-    return fresh;
+    return this.named.contextFor(sessionId);
   }
 
   /** Rejects + drops all queued follow-ups. Returns the cleared count. */
   clearQueue(): number {
-    const n = this.pendingQueue.length;
+    const n = this.rc.queue.length;
     if (n === 0) return 0;
     const err = Object.assign(new Error("Queue cleared"), { name: "AbortError" });
-    const pending = this.pendingQueue.splice(0);
+    const pending = this.rc.queue.splice(0);
     for (const entry of pending) {
       try {
         entry.reject(err);
@@ -953,44 +855,27 @@ export class Agent {
     return n;
   }
 
-  /** Throws when the steer inbox is at its bound. */
-  private assertSteerRoom(inbox: SteerEntry[]): void {
-    const max = this.maxSteers ?? 20;
-    if (inbox.length >= max) {
-      throw new ValidationError(
-        `[Agent Accelerator] Steer inbox is full (${inbox.length}/${max}). Wait for the active run to drain or increase midSession.maxSteers.`
-      );
-    }
-  }
-
   /**
    * True while a `run()`/`stream()` turn is active on this agent.
    * Use with `steer()` (current-turn redirect) vs `queue()` (next-turn follow-up).
    */
   get isBusy(): boolean {
-    return this.currentRun !== null;
+    return this.rc.current !== null;
   }
 
   /** Number of queued follow-up requests waiting for the active run to finish. */
   get pendingCount(): number {
-    return this.pendingQueue.length;
+    return this.rc.queue.length;
   }
 
   /** Number of steer messages buffered for injection into the active turn. */
   get steerPendingCount(): number {
-    return this.currentRun?.steerInbox.length ?? 0;
+    return this.rc.current?.steerInbox.length ?? 0;
   }
 
   /** Effective mid-session policy (`steer` | `queue` | `auto`). */
   get midSessionMode(): "steer" | "queue" | "auto" {
     return this.midSessionConfig.mode;
-  }
-
-  // Picks steer or queue for a call that arrives while busy: the developer's enforced midSession mode wins over the per-call request; in: run()/stream() `enqueue`, out: their busy branch.
-  private resolveEnqueueMode(requested?: "steer" | "queue"): "steer" | "queue" {
-    const enforced = this.midSessionConfig.mode;
-    if (enforced === "steer" || enforced === "queue") return enforced;
-    return requested === "steer" ? "steer" : "queue";
   }
 
   // Throws synchronously on an empty content-part array so run() and stream() fail at the same moment; in: any prompt entry point, out: nothing.
@@ -1021,28 +906,7 @@ export class Agent {
       }
       return this.run(arg, { ...options, enqueue: "interrupt" });
     }
-    this.abortActive(arg instanceof Error ? arg : undefined);
-  }
-
-  // Aborts the active run (provider request, tools, workers, stream) through its own controller; no-op when idle; in: interrupt and queueUrgent, out: the run settles as AbortError.
-  private abortActive(reason?: Error): void {
-    const active = this.currentRun;
-    if (!active) return;
-    try {
-      active.abortController.abort(reason ?? new Error("Agent interrupted"));
-    } catch {}
-    try {
-      active.outerStream?.cancel(reason);
-    } catch {}
-  }
-
-  // Puts a prompt ahead of everything waiting (behind earlier interrupts) and aborts the active run, so it starts as soon as that run has settled; ignores midSession mode and maxQueued; in: run()/stream() with enqueue "interrupt", out: pendingQueue + the abort.
-  private queueUrgent(entry: Agent["pendingQueue"][number]): void {
-    entry.urgent = true;
-    const firstOrdinary = this.pendingQueue.findIndex((e) => !e.urgent);
-    this.pendingQueue.splice(firstOrdinary < 0 ? this.pendingQueue.length : firstOrdinary, 0, entry);
-    this.persistNow();
-    this.abortActive();
+    this.rc.abortActive(arg instanceof Error ? arg : undefined);
   }
 
   /**
@@ -1068,41 +932,9 @@ export class Agent {
         '[Agent Accelerator] steer() is disabled by midSession.mode "queue". Use queue() or set mode to "auto"/"steer".'
       );
     }
-    const active = this.currentRun;
+    const active = this.rc.current;
     if (!active) return this.run(prompt, options) as Promise<AgentResponse>;
-    return this.steerInto(active, prompt, options);
-  }
-
-  /**
-   * Buffers a steer prompt into the active run and returns a promise for ITS
-   * reply: the active run's response when the prompt is injected, or (if the
-   * run ends first and the prompt becomes a queued follow-up) the follow-up
-   * run's response, so a late steer's answer is never lost.
-   */
-  private steerInto(
-    active: NonNullable<Agent["currentRun"]>,
-    prompt: string | ContentPart[],
-    options?: AgentRunOptions
-  ): Promise<AgentResponse> {
-    this.assertSteerRoom(active.steerInbox);
-    const runDone = active.runPromise ?? active.outerStream?.result();
-    if (!runDone) return this.run(prompt, options) as Promise<AgentResponse>;
-    const entry: SteerEntry = { prompt, options };
-    const reply = new Promise<AgentResponse>((resolve, reject) => {
-      entry.settle = { resolve, reject };
-    });
-    reply.catch(() => {}); // a fire-and-forget caller must not trigger an unhandled rejection
-    active.steerInbox.push(entry);
-    this.persistNow();
-    runDone.then(
-      (res) => {
-        if (!entry.settle?.deferredToQueue) entry.settle?.resolve(res);
-      },
-      (err) => {
-        if (!entry.settle?.deferredToQueue) entry.settle?.reject(err);
-      }
-    );
-    return reply;
+    return this.rc.steerInto(active, prompt, options);
   }
 
   /**
@@ -1126,155 +958,24 @@ export class Agent {
         '[Agent Accelerator] queue() is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
       );
     }
-    if (!this.currentRun) return this.run(prompt, options) as Promise<AgentResponse>;
+    if (!this.rc.current) return this.run(prompt, options) as Promise<AgentResponse>;
     const max = this.midSessionConfig.maxQueued ?? 20;
-    if (this.pendingQueue.length >= max) {
+    if (this.rc.queue.length >= max) {
       throw new ValidationError(
-        `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
+        `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
       );
     }
     return new Promise<AgentResponse>((resolve, reject) => {
-      this.pendingQueue.push({ prompt, options, isStream: false, resolve, reject });
+      this.rc.queue.push({ prompt, options, isStream: false, resolve, reject });
       this.persistNow();
       try {
-        this.currentRun?.outerStream?.push({
+        this.rc.current?.outerStream?.push({
           type: "queued",
           queuedPrompt: previewPrompt(prompt),
-          queueLength: this.pendingQueue.length,
+          queueLength: this.rc.queue.length,
         } as any);
       } catch {}
     });
-  }
-
-  // Starts the next waiting prompt (urgent ones first, aborted ones rejected) as a streaming or non-streaming run once the agent is idle; in: finishCurrentRun and queue changes, out: a new run whose result settles the queued caller.
-  private pumpQueue(): void {
-    if (this.currentRun !== null) return;
-    const next = this.pendingQueue.shift();
-    if (!next) return;
-    this.persistNow();
-    // Reject queued items whose signal aborted before start.
-    try {
-      if ((next.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
-        const reason = ((next.options as { signal?: AbortSignal }).signal as unknown as { reason?: unknown })?.reason;
-        const abortErr = Object.assign(
-          reason instanceof Error ? reason : new Error("Queued run aborted before start"),
-          { name: "AbortError" }
-        );
-        try {
-          next.reject(abortErr);
-        } catch {}
-        try {
-          next.deferredStream?.fail(abortErr instanceof Error ? abortErr : new Error(String(abortErr)));
-        } catch {}
-        queueMicrotask(() => this.pumpQueue());
-        return;
-      }
-    } catch {}
-    if (next.isStream && next.deferredStream) {
-      const deferred = next.deferredStream;
-      try {
-        const real = this.startStreamingRun(next.prompt, next.options);
-        try {
-          (deferred as any).__piped = true;
-        } catch {}
-        const forward = (e: StreamEvent) => {
-          try {
-            deferred.push(e);
-          } catch {}
-        };
-        real.on("*", forward as any);
-        try {
-          deferred.onCancel(() => {
-            try {
-              real.cancel();
-            } catch {}
-          });
-        } catch {}
-        real.result().then(
-          (res) => {
-            try {
-              next.resolve(res);
-            } catch {}
-            try {
-              deferred.end(res);
-            } catch {}
-          },
-          (err) => {
-            try {
-              next.reject(err);
-            } catch {}
-            // Pipe failures into the deferred stream so for-await sees them.
-            try {
-              deferred.fail(err instanceof Error ? err : new Error(String(err)));
-            } catch {}
-          }
-        );
-      } catch (err) {
-        try {
-          next.reject(err);
-        } catch {}
-        try {
-          deferred.fail(err instanceof Error ? err : new Error(String(err)));
-        } catch {}
-        // Keep draining even if starting failed.
-        queueMicrotask(() => this.pumpQueue());
-      }
-      return;
-    }
-    this.startNonStreamingRun(next.prompt, next.options).then(next.resolve, next.reject);
-  }
-
-  // Ends the active run slot: leftover steers become follow-ups at the FRONT of the queue (behind urgent ones), then the queue is pumped; in: a settled run, out: pendingQueue + persistNow.
-  private finishCurrentRun(): void {
-    // Leftover steer entries become queued follow-ups instead of dropping.
-    let leftover: SteerEntry[] = [];
-    try {
-      leftover = this.currentRun?.steerInbox?.splice(0) ?? [];
-    } catch {
-      leftover = [];
-    }
-    this.currentRun = null;
-    if (leftover.length > 0) {
-      try {
-        const max = this.midSessionConfig.maxQueued ?? 20;
-        // Late steers were typed BEFORE anything already queued: they go to the front, in the order they arrived.
-        const lateSteers: Agent["pendingQueue"] = [];
-        for (const entry of leftover) {
-          try {
-            if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
-              entry.settle?.reject(
-                Object.assign(new Error("Steer aborted before it could run"), { name: "AbortError" })
-              );
-              continue;
-            }
-          } catch {
-            continue;
-          }
-          if (this.pendingQueue.length + lateSteers.length >= max) {
-            entry.settle?.reject(
-              new ValidationError("[Agent Accelerator] Steer dropped: the follow-up queue is full.")
-            );
-            continue;
-          }
-          // The steer was never injected: it now runs as a follow-up, and the
-          // caller's promise resolves with that run's response.
-          if (entry.settle) entry.settle.deferredToQueue = true;
-          lateSteers.push({
-            prompt: entry.prompt,
-            options: entry.options,
-            isStream: false,
-            resolve: entry.settle?.resolve ?? (() => {}),
-            reject: entry.settle?.reject ?? (() => {}),
-          });
-        }
-        // ...but behind an interrupt(message), which is the newest and most urgent instruction.
-        const firstOrdinary = this.pendingQueue.findIndex((e) => !e.urgent);
-        this.pendingQueue.splice(firstOrdinary < 0 ? this.pendingQueue.length : firstOrdinary, 0, ...lateSteers);
-      } catch {}
-    }
-    this.persistNow();
-    // Defer pump so the completing run's .then handlers settle first.
-    queueMicrotask(() => this.pumpQueue());
   }
 
   // Removes the abort listener a run's merged signal fallback installed; in: a settled run's controller, out: nothing.
@@ -1435,38 +1136,20 @@ export class Agent {
     return level ? { ...runOptions, thinkingLevel: level } : runOptions;
   }
 
-  /**
-   * Single place that turns agent config + per-run options into the options
-   * every provider call receives. Per-run values override agent defaults
-   * (objects such as `retry` and `env` merge key by key).
-   */
-  private buildProviderOptions(runOptions: AgentRunOptions | undefined): ProviderRequestOptions {
-    const d = this.callDefaults;
-    const sessionId = runOptions?.sessionId || this.sessionId;
-    const toolChoice = normalizeToolChoiceOption(runOptions?.toolChoice ?? d.toolChoice);
-    const retry = { ...d.retry, ...runOptions?.retry };
-    const env = { ...d.env, ...runOptions?.env };
-    const maxOutputTokens = runOptions?.maxOutputTokens ?? d.maxOutputTokens;
-    const fetchImpl = runOptions?.fetch ?? d.fetch;
+  // The settings `buildProviderOptions` reads, as one object; in: both run starters, out: options.ts.
+  private optionSource(): ProviderOptionSource {
     return {
       apiKey: this.apiKey,
       baseUrl: this.baseUrl,
-      headers: { ...(this.customHeaders ?? {}), ...(runOptions?.headers ?? {}) },
-      thinking: resolveEffectiveThinking(this.thinkingConfig, runOptions?.thinkingLevel),
-      ...(this.cache ? { cache: this.cache } : {}),
+      customHeaders: this.customHeaders,
+      thinkingConfig: this.thinkingConfig,
+      cache: this.cache,
       serviceTier: this.serviceTier,
-      sessionId,
-      ...(this.outputSpec ? { output: this.outputSpec } : {}),
-      prompts: { structuredOutput: this.prompts.structuredOutput, toolBridge: this.prompts.toolBridge },
-      ...(this.googleTier ? { googleTier: this.googleTier } : {}),
-      ...(toolChoice !== undefined ? { toolChoice } : {}),
-      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-      ...(Object.keys(env).length > 0 ? { env } : {}),
-      ...(fetchImpl ? { fetch: fetchImpl } : {}),
-      ...(retry.maxRetries !== undefined ? { maxRetries: retry.maxRetries } : {}),
-      ...(retry.maxDelayMs !== undefined ? { maxRetryDelayMs: retry.maxDelayMs } : {}),
-      ...(retry.baseDelayMs !== undefined ? { retryBaseDelayMs: retry.baseDelayMs } : {}),
-      ...(retry.budgetMs !== undefined ? { retryBudgetMs: retry.budgetMs } : {}),
+      sessionId: this.sessionId,
+      outputSpec: this.outputSpec,
+      prompts: this.prompts,
+      googleTier: this.googleTier,
+      callDefaults: this.callDefaults,
     };
   }
 
@@ -1501,7 +1184,7 @@ export class Agent {
       }
       this.persistNow();
 
-      const providerOptions = this.buildProviderOptions(runOptions);
+      const providerOptions = buildProviderOptions(this.optionSource(), runOptions);
 
       const loopConfig = {
         agentName: this.name,
@@ -1565,7 +1248,7 @@ export class Agent {
       return res;
     })();
 
-    this.currentRun = { steerInbox, abortController: runController, runPromise: task };
+    this.rc.current = { steerInbox, abortController: runController, runPromise: task };
     task.then(
       (res) => this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done"),
       (err) => this.endRun(mark, isAbortError(err) ? "aborted" : "failed")
@@ -1574,7 +1257,7 @@ export class Agent {
       try {
         this.cleanupMerge(runController);
       } catch {}
-      if (this.currentRun?.runPromise === task) this.finishCurrentRun();
+      if (this.rc.current?.runPromise === task) this.rc.finishCurrentRun();
     };
     task.then(cleanup, cleanup);
     return task;
@@ -1598,7 +1281,7 @@ export class Agent {
     const runOptions = this.withResolvedThinking({ ...options, signal: mergedSignal });
     const steerInbox: SteerEntry[] = [];
 
-    const providerOptions = this.buildProviderOptions(runOptions);
+    const providerOptions = buildProviderOptions(this.optionSource(), runOptions);
 
     const loopConfig = {
       agentName: this.name,
@@ -1626,7 +1309,7 @@ export class Agent {
     };
 
     const s = streamAgentLoop(loopConfig);
-    this.currentRun = { steerInbox, outerStream: s, abortController: runController };
+    this.rc.current = { steerInbox, outerStream: s, abortController: runController };
     s.result().then(
       (res) => {
         this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done");
@@ -1641,14 +1324,14 @@ export class Agent {
           targetContext.messages = [];
           targetContext.thoughtSignatures = [];
         }
-        if (this.currentRun?.outerStream === s) this.finishCurrentRun();
+        if (this.rc.current?.outerStream === s) this.rc.finishCurrentRun();
       },
       (err) => {
         this.endRun(mark, isAbortError(err) ? "aborted" : "failed");
         try {
           this.cleanupMerge(runController);
         } catch {}
-        if (this.currentRun?.outerStream === s) this.finishCurrentRun();
+        if (this.rc.current?.outerStream === s) this.rc.finishCurrentRun();
       }
     );
     return s;
@@ -1675,7 +1358,7 @@ export class Agent {
 
   /** Session ids whose spawned workers this agent may inspect (default + named sessions). */
   private ownedSessionIds(): ReadonlySet<string> {
-    return new Set<string>([this.sessionId, ...this.sessions.keys()]);
+    return new Set<string>([this.sessionId, ...this.named.ids()]);
   }
 
   /** Lists TrackingIDs of worker traces visible to this agent (deduped). */
@@ -1998,7 +1681,7 @@ export class Agent {
       prompt: e.prompt,
       ...(e.options?.additionalContext ? { additionalContext: e.options.additionalContext } : {}),
     });
-    return { steer: (this.currentRun?.steerInbox ?? []).map(pack), queue: this.pendingQueue.map(pack) };
+    return { steer: (this.rc.current?.steerInbox ?? []).map(pack), queue: this.rc.queue.map(pack) };
   }
 
   /**
@@ -2042,10 +1725,10 @@ export class Agent {
     }
 
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn), or stops the active run and starts this prompt (interrupt).
-    if (this.currentRun) {
+    if (this.rc.current) {
       if (options?.enqueue === "interrupt") {
         return new Promise<AgentResponse>((resolve, reject) =>
-          this.queueUrgent({ prompt, options, isStream: false, resolve, reject })
+          this.rc.queueUrgent({ prompt, options, isStream: false, resolve, reject })
         );
       }
       const enforced = this.midSessionConfig.mode;
@@ -2055,10 +1738,10 @@ export class Agent {
           `[Agent Accelerator] enqueue "${requested}" is disabled by midSession.mode "${enforced}". Use ${enforced}() or set mode to "auto"/"${requested}".`
         );
       }
-      const mode = this.resolveEnqueueMode(requested);
+      const mode = this.rc.resolveEnqueueMode(requested);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
-        return this.steerInto(this.currentRun, prompt, options);
+        return this.rc.steerInto(this.rc.current, prompt, options);
       } else {
         if (this.midSessionConfig.mode === "steer") {
           throw new ConfigError(
@@ -2067,19 +1750,19 @@ export class Agent {
         }
         this.assertPromptValid(prompt);
         const max = this.midSessionConfig.maxQueued ?? 20;
-        if (this.pendingQueue.length >= max) {
+        if (this.rc.queue.length >= max) {
           throw new ValidationError(
-            `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
+            `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
           );
         }
         return new Promise<AgentResponse>((resolve, reject) => {
-          this.pendingQueue.push({ prompt, options, isStream: false, resolve, reject });
+          this.rc.queue.push({ prompt, options, isStream: false, resolve, reject });
           this.persistNow();
           try {
-            this.currentRun?.outerStream?.push({
+            this.rc.current?.outerStream?.push({
               type: "queued",
               queuedPrompt: previewPrompt(prompt),
-              queueLength: this.pendingQueue.length,
+              queueLength: this.rc.queue.length,
             } as any);
           } catch {}
         });
@@ -2153,7 +1836,7 @@ export class Agent {
     // Same sync validation timing as run().
     this.assertPromptValid(prompt);
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
-    if (this.currentRun) {
+    if (this.rc.current) {
       const enforcedStream = this.midSessionConfig.mode;
       const urgent = options?.enqueue === "interrupt"; // stops the active run and goes first, in every mode and whatever the queue holds
       const requestedStream = options?.enqueue === "interrupt" ? undefined : options?.enqueue;
@@ -2166,13 +1849,13 @@ export class Agent {
           `[Agent Accelerator] enqueue "${requestedStream}" is disabled by midSession.mode "${enforcedStream}". Use ${enforcedStream}() or set mode to "auto"/"${requestedStream}".`
         );
       }
-      const mode = urgent ? "queue" : this.resolveEnqueueMode(requestedStream);
+      const mode = urgent ? "queue" : this.rc.resolveEnqueueMode(requestedStream);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
-        this.assertSteerRoom(this.currentRun.steerInbox);
-        this.currentRun.steerInbox.push({ prompt, options });
+        this.rc.assertSteerRoom(this.rc.current.steerInbox);
+        this.rc.current.steerInbox.push({ prompt, options });
         this.persistNow();
-        const activeStream = this.currentRun.outerStream;
+        const activeStream = this.rc.current.outerStream;
         if (activeStream) {
           this.wireStreamCallbacks(activeStream, options);
           return activeStream;
@@ -2181,7 +1864,7 @@ export class Agent {
         // with the same final response so streaming callers still get events.
         const stub = new AssistantMessageEventStream();
         this.wireStreamCallbacks(stub, options);
-        const activePromise = this.currentRun.runPromise;
+        const activePromise = this.rc.current.runPromise;
         if (activePromise) {
           activePromise.then(
             (res) => {
@@ -2218,9 +1901,9 @@ export class Agent {
       }
       this.assertPromptValid(prompt);
       const max = this.midSessionConfig.maxQueued ?? 20;
-      if (!urgent && this.pendingQueue.length >= max) {
+      if (!urgent && this.rc.queue.length >= max) {
         throw new ValidationError(
-          `[Agent Accelerator] Queue is full (${this.pendingQueue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
+          `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
         );
       }
       const deferred = new AssistantMessageEventStream();
@@ -2228,10 +1911,10 @@ export class Agent {
       // Notify the active stream (if any) that a follow-up was queued.
       if (!urgent) {
         try {
-          this.currentRun.outerStream?.push({
+          this.rc.current.outerStream?.push({
             type: "queued",
             queuedPrompt: previewPrompt(prompt),
-            queueLength: this.pendingQueue.length + 1,
+            queueLength: this.rc.queue.length + 1,
           } as any);
         } catch {}
       }
@@ -2262,9 +1945,9 @@ export class Agent {
       // Forward cancellation before start: drop from queue and fail.
       deferred.onCancel(() => {
         try {
-          const idx = this.pendingQueue.indexOf(queuedEntry as any);
+          const idx = this.rc.queue.indexOf(queuedEntry as any);
           if (idx >= 0) {
-            this.pendingQueue.splice(idx, 1);
+            this.rc.queue.splice(idx, 1);
             queuedEntry.reject(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
             try {
               deferred.fail(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
@@ -2273,9 +1956,9 @@ export class Agent {
         } catch {}
       });
       if (urgent) {
-        this.queueUrgent(queuedEntry as Agent["pendingQueue"][number]);
+        this.rc.queueUrgent(queuedEntry as QueuedPrompt);
       } else {
-        this.pendingQueue.push(queuedEntry as any);
+        this.rc.queue.push(queuedEntry as any);
         this.persistNow();
       }
       // Attach deferred completion to queued promise without exposing it.
@@ -2313,213 +1996,11 @@ export class Agent {
     return s;
   }
 
-  // Attaches onEvent/onDelta/onThinkingDelta to a stream and, with wrapThinking, adds display-only <think> tags and whitespace hygiene on the outer events; in: stream()/pumpQueue, out: listeners on the stream.
+  // Attaches the caller's onEvent/onDelta/onThinkingDelta callbacks to a stream; in: stream()/pumpQueue, out: listeners on the stream.
   private wireStreamCallbacks(s: AssistantMessageEventStream, options?: AgentRunOptions): void {
-    // Wire one-liner callbacks so `stream:true` + onDelta is enough — no manual for-await needed
-    if (options?.wrapThinking) {
-      // Auto-wrap reasoning as <think>…</think> per-turn — clean boundaries across multi-turn agent runs.
-      //
-      // Display-only whitespace hygiene (cache-safe): provider thought
-      // summaries routinely carry edge blank lines (observed `"...\n\n\n"`),
-      // and the wrapper itself adds newlines around the span. Without care
-      // this renders as blank lines after `<think>`, double blanks between
-      // sections, and a stray blank line before `</think>`. The buffering
-      // below touches ONLY the presented strings/callback args and synthetic
-      // tag events — never provider accumulation, AgentContext history, or
-      // request bodies — so prefix-cache affinity is untouched.
-      //
-      // Trailing-newline buffering: each chunk's trailing `\n` run is
-      // withheld and prepended to the next chunk (or dropped at close), so
-      // emitted display text never ends with `\n` and `</think>` never gets
-      // a preceding blank line. Interior breaks are preserved (collapsed to
-      // a single blank line at most).
-      let isThinking = false;
-      let emittedAny = false;
-      let pendingNewlines = "";
-      // True once text has been emitted without a trailing newline: the next
-      // <think> open tag then needs its own leading newline, otherwise it
-      // glues onto the streamed text mid-line. False at stream start and
-      // after every tag (both end with newlines), preserving the exact
-      // "<think>\n...\n</think>\n" contract for thinking-first streams.
-      let needThinkNewline = false;
-      // Set on every think close; consumed by the next text_delta(s) to strip
-      // model-leading blank lines display-only (cache-safe: outer events only).
-      // Stays set until non-empty text is emitted so split "\n" | "\nText"
-      // chunks cannot leak a blank line.
-      let justClosedThink = false;
-      const collapseBlankLines = (s: string): string => s.replace(/\n{3,}/g, "\n\n");
-      const userOnThinking = options.onThinkingDelta;
-      const userOnDelta = options.onDelta;
-      const userOnEvent = options.onEvent;
-      if (userOnEvent) s.on("*", userOnEvent as any);
-
-      const openThink = (e?: any) => {
-        if (!isThinking) {
-          isThinking = true;
-          emittedAny = false;
-          pendingNewlines = "";
-          const tag = (needThinkNewline ? "\n" : "") + "<think>\n";
-          needThinkNewline = false;
-          if (userOnThinking) userOnThinking(tag, e);
-          else if (userOnDelta) userOnDelta(tag, e as any);
-        }
-      };
-
-      const closeThink = (e?: any) => {
-        if (isThinking) {
-          isThinking = false;
-          // Drop any withheld trailing newlines: the span ends cleanly and
-          // the tag supplies its own single line break. Empty spans still close.
-          pendingNewlines = "";
-          const close = emittedAny ? "\n</think>\n" : "</think>\n";
-          emittedAny = false;
-          justClosedThink = true;
-          if (userOnThinking) userOnThinking(close, e);
-          else if (userOnDelta) userOnDelta(close, e as any);
-        }
-      };
-
-      /**
-       * Strips model-leading blank lines after a think close, display-only.
-       * Mutates `e.delta` in place so `for-await` consumers see the same clean
-       * text; safe because loop context derives from the provider result, not
-       * these outer events. Returns the display string (`""` when nothing
-       * displayable yet — caller skips the callback but keeps the flag set so
-       * a split newline-only chunk cannot leak a blank line).
-       */
-      const stripLeadingAfterClose = (e: any): string => {
-        const raw: string = e.delta ?? "";
-        if (!justClosedThink) return raw;
-        const stripped = raw.replace(/^\n+/, "");
-        try {
-          e.delta = stripped;
-        } catch {}
-        if (!stripped) return "";
-        justClosedThink = false;
-        return stripped;
-      };
-
-      /** Buffers one raw thinking chunk, returning the display string to
-       * emit now (`""` when nothing displayable yet). Mutates the event in
-       * place so manual `for-await` consumers see the same clean text; safe
-       * because loop context derives from the provider result, not these
-       * outer events. */
-      const bufferThinkingEvent = (e: any): string => {
-        const raw: string = e.thinkingDelta ?? "";
-        let chunk = collapseBlankLines(pendingNewlines + raw);
-        pendingNewlines = "";
-        if (!emittedAny) {
-          chunk = chunk.replace(/^\n+/, "");
-        }
-        if (!chunk) return "";
-        const m = chunk.match(/\n+$/);
-        if (m) {
-          pendingNewlines = m[0];
-          chunk = chunk.slice(0, -m[0].length);
-          if (!chunk) return "";
-        }
-        emittedAny = true;
-        e.thinkingDelta = chunk;
-        if (typeof e.partialThinking === "string") {
-          e.partialThinking = collapseBlankLines(e.partialThinking);
-        }
-        return chunk;
-      };
-
-      if (userOnThinking || userOnDelta) {
-        s.on("thinking_delta", (e: any) => {
-          openThink(e);
-          const chunk = bufferThinkingEvent(e);
-          if (!chunk) return;
-          if (userOnThinking) userOnThinking(chunk, e);
-          else if (userOnDelta) userOnDelta(chunk, e as any);
-        });
-        s.on("text_delta", (e: any) => {
-          closeThink(e);
-          const display = stripLeadingAfterClose(e);
-          if (!display) {
-            needThinkNewline = false;
-            return;
-          }
-          needThinkNewline = !display.endsWith("\n");
-          if (userOnDelta) userOnDelta(display, e);
-          else if (userOnThinking) userOnThinking(display, e as any);
-        });
-        // Close thinking tag and reset turn state before tool/subagent execution or results
-        s.on("tool_call_start" as any, (e: any) => closeThink(e));
-        s.on("tool_call_complete" as any, (e: any) => closeThink(e));
-        s.on("tool_result" as any, (e: any) => closeThink(e));
-        s.on("subagent_complete" as any, (e: any) => closeThink(e));
-        s.on("done", (e: any) => {
-          closeThink(e || ({ type: "done" } as any));
-        });
-      } else {
-        // No callbacks but wrapThinking true — still emit tags as events for manual iteration.
-        // Same display hygiene as above (in-place event normalization is safe:
-        // loop context derives from the provider result, not outer events).
-        const closeSynthetic = () => {
-          if (isThinking) {
-            isThinking = false;
-            pendingNewlines = "";
-            const tag = emittedAny ? "\n</think>\n" : "</think>\n";
-            emittedAny = false;
-            justClosedThink = true;
-            s.push({ type: "thinking_delta", thinkingDelta: tag, __synthetic: true } as any);
-          }
-        };
-        s.on("thinking_delta", (e: any) => {
-          // Ignore our own synthetic tags: push() redelivers events to
-          // listeners synchronously, so without this guard the handler
-          // re-enters on every tag it emits (duplicate <think> spans and
-          // mutated queued events).
-          if ((e as any).__synthetic) return;
-          if (!isThinking) {
-            isThinking = true;
-            emittedAny = false;
-            pendingNewlines = "";
-            const openTag = (needThinkNewline ? "\n" : "") + "<think>\n";
-            needThinkNewline = false;
-            s.push({ type: "thinking_delta", thinkingDelta: openTag, __synthetic: true } as any);
-          }
-          const chunk = bufferThinkingEvent(e);
-          if (!chunk) {
-            e.thinkingDelta = "";
-          }
-        });
-        s.on("text_delta", (e: any) => {
-          closeSynthetic();
-          if (justClosedThink) {
-            const stripped: string = (e.delta ?? "").replace(/^\n+/, "");
-            try {
-              e.delta = stripped;
-            } catch {}
-            if (!stripped) return;
-            justClosedThink = false;
-          }
-          needThinkNewline = !(e.delta ?? "").endsWith("\n");
-        });
-        s.on("tool_call_start" as any, () => {
-          closeSynthetic();
-        });
-        s.on("tool_call_complete" as any, () => {
-          closeSynthetic();
-        });
-        s.on("tool_result" as any, () => {
-          closeSynthetic();
-        });
-        s.on("subagent_complete" as any, () => {
-          closeSynthetic();
-        });
-        s.on("done", () => {
-          closeSynthetic();
-        });
-        if (userOnEvent) s.on("*", userOnEvent as any);
-      }
-    } else {
-      if (options?.onEvent) s.on("*", options.onEvent as any);
-      if (options?.onDelta) s.on("text_delta", (e: any) => options.onDelta!(e.delta!, e));
-      if (options?.onThinkingDelta) s.on("thinking_delta", (e: any) => options.onThinkingDelta!(e.thinkingDelta!, e));
-    }
+    if (options?.onEvent) s.on("*", options.onEvent as any);
+    if (options?.onDelta) s.on("text_delta", (e: any) => options.onDelta!(e.delta!, e));
+    if (options?.onThinkingDelta) s.on("thinking_delta", (e: any) => options.onThinkingDelta!(e.thinkingDelta!, e));
   }
 }
 
@@ -2550,58 +2031,4 @@ function withFailedAttempts(res: AgentResponse, failed: FailedAttempt[]): AgentR
     turns: res.turns + failed.reduce((n, f) => n + (typeof f.turns === "number" ? f.turns : 0), 0),
     providerSteps: res.providerSteps,
   });
-}
-
-/** Normalizes the public `thinkingLevel` flag into provider-neutral thinking settings. */
-export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): ThinkingConfig | undefined {
-  // DX4: only thinkingLevel, values: none, dynamic, minimal, low, medium, high, xhigh, max
-  // `thinking` (canonical) wins over legacy `thinkingLevel`; `{ level }` objects are unwrapped.
-  const rawLevel = normalizeThinkingV2(config.thinking, config.thinkingLevel) ?? fallbackLevel;
-  if (typeof config.thinking === "object" && config.thinking?.budgetTokens !== undefined) {
-    // No provider maps an explicit token budget yet: say so instead of ignoring it silently.
-    telemetryBus.emitWarning(
-      "config.thinking_budget_ignored",
-      "[Agent Accelerator] thinking.budgetTokens is not forwarded by any provider adapter yet; the level alone is used.",
-      { budgetTokens: config.thinking.budgetTokens }
-    );
-  }
-  const level = rawLevel as ThinkingLevel | undefined;
-
-  if (!level) return undefined;
-
-  // Validate model thinking from catalog if model is configured
-  if (config.model) {
-    try {
-      const rawModel: any = (config.model as any)?.model ? (config.model as any).model : config.model;
-      const modelStr = typeof rawModel === "string" ? rawModel : rawModel?.id || "";
-      const provStr =
-        typeof rawModel === "object" && rawModel?.provider
-          ? rawModel.provider
-          : modelStr.includes("/")
-            ? modelStr.split("/")[0]
-            : "";
-      const actualModelId = modelStr.includes("/") ? modelStr.split("/").slice(1).join("/") : modelStr;
-      if (actualModelId) {
-        validateModelThinking(provStr || "openrouter", actualModelId, level);
-      }
-    } catch (e) {
-      throw e;
-    }
-  }
-
-  if (level === "none") {
-    return { enabled: false, level: "none", budgetTokens: 0 };
-  }
-  if (level === "dynamic") {
-    return { enabled: true, level: "dynamic", budgetTokens: -1 };
-  }
-  return { enabled: true, level };
-}
-
-/** Maps the public `toolChoice` option onto the provider wire-neutral form. */
-function normalizeToolChoiceOption(choice: ToolChoiceOption | undefined): ProviderRequestOptions["toolChoice"] {
-  if (!choice) return undefined;
-  if (typeof choice === "string") return choice;
-  if (choice.tool) return { type: "function", function: { name: choice.tool } };
-  return choice.mode;
 }

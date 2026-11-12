@@ -173,7 +173,6 @@ Use `ContentPart[]` when sending images, audio, or video alongside text.
 | `onDelta(delta, event)`         | Called for each text chunk. Use to render answers live.                                                                                         |
 | `onThinkingDelta(delta, event)` | Called for each reasoning chunk. Use to render reasoning separately.                                                                            |
 | `onEvent(event)`                | Called for every event: `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `subagent_delta`, `usage`, `done`, and `error`. |
-| `wrapThinking`                  | Wraps reasoning as `<think>\n...\n</think>\n`, allowing UIs to render it without maintaining separate state.                                  |
 | `onTurn(turn)`                  | Called after every model/tool turn with `{ turns, text?, thinking?, toolCalls?, toolResults? }`. Drives sub-agent step logs and persistence.   |
 | `additionalContext`             | Added only to the current user turn. Keeps the system prompt stable for better caching.                                                         |
 | `sessionId`                     | Per-run session override.                                                                                                                       |
@@ -188,7 +187,6 @@ Use `ContentPart[]` when sending images, audio, or video alongside text.
 ```ts
 const res = await agent.run("Design an append-only log", {
   stream: true,
-  wrapThinking: true,
   onThinkingDelta: (d) => process.stdout.write(d),
   onDelta: (d) => process.stdout.write(d),
   onEvent: (e) => {
