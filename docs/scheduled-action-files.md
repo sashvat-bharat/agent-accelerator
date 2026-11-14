@@ -10,6 +10,7 @@ Everything lives under one folder, `<home>/scheduled/` (`home` is `Agent({ home 
     task.json            the action (definition + schedule + state)
     delivery.json        its results saved but not yet delivered (only while there are any)
     27-october-2026.md   one file per run: a header, then the result
+    definitions/         what the runs were built from: one <hash>.json per distinct definition (see "Definitions")
     .mutex               a short lock, present only while the SDK changes this action
     .heartbeat           present while a process is running the action: its pid, host and a token; the file's modification time is refreshed every 5 s
 ```
@@ -118,6 +119,7 @@ startedAt: 2026-10-27T06:59:30
 finishedAt: 2026-10-27T06:59:48
 deliverAt: 2026-10-27T07:00:00
 late: false
+definition: 9f3a1c2b4d5e
 model: google/gemini-3.5-flash-lite
 turns: 2
 tokens: 5120
@@ -143,6 +145,7 @@ The header sits between two `---` lines, one `key: value` per line, values on a 
 | `status` | `ok` or `failed`. |
 | `startedAt`, `finishedAt`, `deliverAt` | Times. `deliverAt` of a `run_now` is its finish time. |
 | `late` | `true` when the run finished after its delivery second or replaced a missed occurrence. |
+| `definition` (optional) | 12-character fingerprint of what the run was built from (role, instructions, task, tools). Two runs with the same value used the same definition. The exact text is in `definitions/<definition>.json` (see below). Missing in run files written before 0.6.9. |
 | `model` (optional) | `provider/model` of the worker; only for `ok` runs. |
 | `turns`, `tokens`, `inputTokens`, `freshInputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outputTokens`, `thinkingTokens` (optional) | Exact spending, the numbers `usageReport()` keeps for workers: model calls made, tokens (`tokens` = input + output; `inputTokens` = fresh + cache read + cache write; thinking is part of output). Cover **every attempt** of the run; also written for failed runs that spent something. |
 | `cacheHitRate` (optional) | `cacheReadTokens / inputTokens`, 0 to 1; left out when nothing was sent. |
@@ -152,6 +155,27 @@ The header sits between two `---` lines, one `key: value` per line, values on a 
 | `error` (optional) | Why a `failed` run failed. |
 
 The body after the header is the worker's text, `[The worker returned no text.]`, or `The run failed: <reason>`.
+
+## Definitions
+
+The action's `id` stays the same when you change its instructions, so each run header carries a `definition` fingerprint, and the exact text it stands for is saved once per distinct definition as `<action id>/definitions/<definition>.json`:
+
+```json
+{
+  "version": 1,
+  "hash": "9f3a1c2b4d5e",
+  "role": "analyst",
+  "instructions": "You write a short, sourced AI research brief.",
+  "task": "Summarize the most important AI news of the last day in 5 bullets.",
+  "tools": ["recent_news"]
+}
+```
+
+- The fingerprint is the first 12 hex characters of the SHA-256 of `role` (empty when absent), `instructions`, `task` and `tools` (sorted, so their order does not matter). It does not cover the model or the thinking level: they come from the program's configuration, and the run header already has `model`.
+- A definition file is written before the run file, once, and never rewritten: ten runs of one definition leave one file. Editing the instructions makes the next run write a second file, so every definition that ever ran stays readable. The files hold the instructions in plain text, like `task.json`: never put secrets in them.
+- A run describes the action **as it was when the run started**, not as it is now.
+- Deleting an action keeps its run files and its `definitions/` folder; `purge: true` removes them with the action's folder.
+- To see why two results differ, compare the `definition` of their run files, then diff the two definition files.
 
 ## Reading the files
 
@@ -186,6 +210,13 @@ function readRun(file: string): { header: Record<string, string>; body: string }
 
 const last = tasks.find((t) => t.lastRun)?.lastRun;
 if (last) console.log(readRun(last.file).header.costUsd);
+
+// Which definition did a run use? (missing in run files from before 0.6.9)
+const hash = last && readRun(last.file).header.definition;
+if (last && hash) {
+  const [id] = last.file.split("/");
+  console.log(JSON.parse(readFileSync(join(dir, id!, "definitions", `${hash}.json`), "utf8")).instructions);
+}
 ```
 
 Any process may read. Several processes may also **write** the same home: every change to an action takes that action's short `.mutex`, so two processes never overwrite each other's update. Which process acts on an action: only the one that registered its `Agent` starts it, delivers it and recovers it (a process that does not own it leaves it alone until its delivery time has passed with no run started, then marks it `missed` with reason `no_agent`). A run's owner keeps `<id>/.heartbeat` fresh; a run whose owner died is recovered by another process that owns the Agent.
@@ -229,6 +260,7 @@ The events on `telemetryBus` (`code`, then `data`) are part of the same contract
 
 | SDK version | Change |
 |---|---|
+| 0.6.9 | Added (additive, the format version stays 2): the optional `definition` key of the run header, and the `<id>/definitions/<hash>.json` files it points to. Run files written before this release have no `definition` key. |
 | 0.5.8 | Several processes can share one home: the home-wide `.lock` is no longer taken by scheduled actions or telemetry (sessions lock only their own folder). |
 | 0.5.8 | **Format version 2: one folder per action.** `tasks.json` and `deliveries.json` are gone; each action has `<home>/scheduled/<id>/task.json` (`{ "version": 2, "task": { ... } }`, the record fields are unchanged) and, while results wait for their delivery time, `<id>/delivery.json` (`{ "version": 2, "pending": [...] }`, the entry fields are unchanged). Run files keep their path. While a run is in flight its owner keeps `<id>/.heartbeat` fresh, which is how other processes tell a live run from a dead one. **Nothing is converted for you:** actions saved in an old `tasks.json` are not read; create them again. |
 | 0.5.8 | The folder is renamed from `<home>/scheduled_actions/` to `<home>/scheduled/`. **Nothing is moved for you:** an existing folder must be renamed once by hand (`mv .agent-accel/scheduled_actions .agent-accel/scheduled`), otherwise the new folder starts empty. The automatic rename of the pre-0.5.0 `scheduled_tasks/` folder is gone. File formats, the tool name `scheduled_actions` and the `scheduled_action.*` events are unchanged. |

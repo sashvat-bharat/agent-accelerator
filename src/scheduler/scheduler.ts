@@ -34,6 +34,7 @@ import {
   TASK_ID_PATTERN,
   clearHeartbeat,
   createTask,
+  definitionOf,
   deleteTask,
   findRunFile,
   readDeliveriesIndexed,
@@ -48,6 +49,7 @@ import {
   updateDeliveries,
   updateTask,
   validateRecord,
+  writeDefinition,
   writeHeartbeat,
   writeRunFile,
   type PendingDelivery,
@@ -753,7 +755,7 @@ export class Scheduler {
     }
   }
 
-  // Writes a finished run: run file, then the `delivery.json` entry, then `task.json` (a crash in between is repaired on start); a manual run is due when it finishes and is late only if it replaced a missed occurrence, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
+  // Writes a finished run: definition file (once per definition), run file, then the `delivery.json` entry, then `task.json` (a crash in between is repaired on start); a manual run is due when it finishes and is late only if it replaced a missed occurrence, a scheduled one is late only past its second; in: runWorker, out: the files and the ready/failed event.
   private finish(
     task: ScheduledActionRecord,
     outcome: Outcome,
@@ -766,6 +768,7 @@ export class Scheduler {
     const finishedAt = toLocalIso(now);
     const due = run.manual ? now : deliverAt;
     const late = run.missed || secondOf(now) > secondOf(due);
+    const definition = definitionOf(task); // what this run was built from: the record as the run started, not as it is now
     const header: RunHeader = {
       id: task.id,
       name: task.name,
@@ -774,11 +777,13 @@ export class Scheduler {
       finishedAt,
       deliverAt: toLocalIso(due),
       late,
+      definition: definition.hash,
       ...(ok ? { model: `${outcome.res.provider}/${outcome.res.model}` } : {}),
       ...usageFields(outcome.usage),
       ...(ok ? {} : { error: outcome.error }),
     };
     const body = ok ? outcome.res.text.trim() || "[The worker returned no text.]" : `The run failed: ${outcome.error}`;
+    writeDefinition(this.home, task.id, definition); // before the run file, so a header never names a missing definition
     const file = writeRunFile(this.home, task.id, deliverAt, header, body);
     updateDeliveries(this.home, task.id, (pending) => {
       pending.push({
