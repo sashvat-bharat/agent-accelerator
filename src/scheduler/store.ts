@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { readWithBackup, withFileMutex, writeFileDurable } from "../utils/durable.ts";
 import { telemetryBus } from "../telemetry.ts";
@@ -49,6 +50,8 @@ export interface RunHeader {
   deliverAt: string;
   /** The run finished after its delivery time. */
   late: boolean;
+  /** Fingerprint of what the run was built from (role, instructions, task, tools); the exact text is in `<id>/definitions/<definition>.json`. */
+  definition?: string;
   model?: string;
   /** Model calls the run made (all attempts), and what they spent: the same numbers `usageReport()` keeps for workers. */
   turns?: number;
@@ -553,6 +556,39 @@ export function validateDelivery(raw: unknown): string | undefined {
   return parsed.success
     ? undefined
     : parsed.error.issues.map((i) => `${i.path.join(".") || "entry"}: ${i.message}`).join("; ");
+}
+
+// ---------------------------------------------------------------------------
+// Definitions (what a run was built from, saved once per distinct definition)
+// ---------------------------------------------------------------------------
+
+/** The parts of an action a run is built from, and their fingerprint. */
+export interface Definition {
+  /** First 12 hex characters of the SHA-256 of the fields below. */
+  hash: string;
+  /** The content of `<id>/definitions/<hash>.json`. */
+  file: { version: 1; hash: string; role?: string; instructions: string; task: string; tools: string[] };
+}
+
+/** Fingerprints the role, instructions, task and tools of a record (tools sorted, so their order does not matter); in: the record a run started from, out: finish's header and definition file. */
+export function definitionOf(rec: Pick<ScheduledActionRecord, "role" | "instructions" | "task" | "tools">): Definition {
+  const tools = [...rec.tools].sort();
+  const role = rec.role || undefined;
+  const hash = createHash("sha256")
+    .update(JSON.stringify({ role: role ?? "", instructions: rec.instructions, task: rec.task, tools }))
+    .digest("hex")
+    .slice(0, 12);
+  return {
+    hash,
+    file: { version: 1, hash, ...(role ? { role } : {}), instructions: rec.instructions, task: rec.task, tools },
+  };
+}
+
+/** Saves a definition as `<id>/definitions/<hash>.json` unless it is already there, so ten runs of one definition leave one file; in: finish, before the run file, out: the file. */
+export function writeDefinition(home: string, id: string, def: Definition): void {
+  const file = path.join(taskDir(home, id), "definitions", `${def.hash}.json`);
+  if (fs.existsSync(file)) return;
+  writeFileDurable(file, JSON.stringify(def.file, null, 2) + "\n", { backup: false }); // content-addressed: never rewritten
 }
 
 // ---------------------------------------------------------------------------

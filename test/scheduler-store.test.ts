@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createTask, deleteTask, readDeliveries, readTask, readTasks, updateDeliveries, updateTask, writeRunFile } from "../src/scheduler/store.ts";
+import { createTask, definitionOf, deleteTask, readDeliveries, readTask, readTasks, updateDeliveries, updateTask, writeDefinition, writeRunFile } from "../src/scheduler/store.ts";
 import type { PendingDelivery } from "../src/scheduler/store.ts";
 import { telemetryBus } from "../src/telemetry.ts";
 
@@ -165,5 +165,40 @@ describe("leftovers of a killed writer", () => {
     updateTask(h, "a-aaaaaa", () => 1);
     for (const f of dead) expect(fs.existsSync(path.join(dir, f))).toBe(false);
     for (const f of live) expect(fs.existsSync(path.join(dir, f))).toBe(true);
+  });
+});
+
+describe("definitions (what a run was built from)", () => {
+  const base = { role: "analyst", instructions: "You write briefs.", task: "Summarize the news.", tools: ["b_tool", "a_tool"] };
+
+  it("the hash is stable, 12 hex characters, and ignores the order of the tools", () => {
+    const a = definitionOf(base);
+    expect(a.hash).toMatch(/^[0-9a-f]{12}$/);
+    expect(definitionOf({ ...base, tools: ["a_tool", "b_tool"] }).hash).toBe(a.hash);
+    expect(definitionOf({ ...base }).hash).toBe(a.hash);
+    expect(a.file).toEqual({ version: 1, hash: a.hash, role: "analyst", instructions: base.instructions, task: base.task, tools: ["a_tool", "b_tool"] });
+  });
+
+  it("changes when the instructions, the task, the role or the tools change", () => {
+    const a = definitionOf(base).hash;
+    expect(definitionOf({ ...base, instructions: "You write long briefs." }).hash).not.toBe(a);
+    expect(definitionOf({ ...base, task: "Summarize the week." }).hash).not.toBe(a);
+    expect(definitionOf({ ...base, role: "editor" }).hash).not.toBe(a);
+    expect(definitionOf({ ...base, tools: ["a_tool"] }).hash).not.toBe(a);
+    expect(definitionOf({ ...base, role: undefined }).file.role).toBeUndefined();
+  });
+
+  it("writeDefinition saves the exact text once per hash and never rewrites it", () => {
+    const h = home();
+    createTask(h, () => "brief-aaaaaa", (id) => rec(id));
+    const def = definitionOf(base);
+    writeDefinition(h, "brief-aaaaaa", def);
+    const file = path.join(h, "scheduled", "brief-aaaaaa", "definitions", `${def.hash}.json`);
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual(def.file);
+    const m = fs.statSync(file).mtimeMs;
+    writeDefinition(h, "brief-aaaaaa", def);
+    expect(fs.statSync(file).mtimeMs).toBe(m);
+    expect(fs.readdirSync(path.dirname(file))).toEqual([`${def.hash}.json`]);
+    expect(() => writeDefinition(h, "../escape", def)).toThrow(/not a scheduled action id/);
   });
 });

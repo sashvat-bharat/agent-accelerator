@@ -12,7 +12,7 @@ Scheduled actions: a worker that runs later (once or repeating) and saves its an
 ## Invariants
 
 - The files are the truth: every write re-reads first and goes through the durable writer. The file format is a stable public contract: see `docs/scheduled-action-files.md` and add a changelog row for any change.
-- Write order when a run ends: run file, then `<id>/delivery.json`, then `<id>/task.json`. A crash in between is repaired by the dead-owner recovery (`recoverCooking`, at start and every 15 s): the delivery is rebuilt from the run file, or the run is marked `missed` when no run file exists.
+- Write order when a run ends: definition file (`<id>/definitions/<hash>.json`, only when missing), run file, then `<id>/delivery.json`, then `<id>/task.json`. The run header's `definition` fingerprint (role, instructions, task, sorted tools of the record the run STARTED from; `definitionOf` in `store.ts`) always names an existing file; definition files are content-addressed and never rewritten. A crash in between is repaired by the dead-owner recovery (`recoverCooking`, at start and every 15 s): the delivery is rebuilt from the run file, or the run is marked `missed` when no run file exists.
 - `startCook` advances the next times BEFORE the run starts; a run still cooking when the next is due is skipped, never stacked.
 - Runs are fresh stateless workers built by `buildDynamicWorkerConfig`; their spending guardrail is `dynamicSubagents.scheduledActionBudget` only (never `workerBudget`, `budget` or `usageLimit`).
 - The Agent registry holds `WeakRef`s by name: keep every Agent that owns actions referenced, or its runs become `missed`.

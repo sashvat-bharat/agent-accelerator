@@ -1496,7 +1496,7 @@ describe("scheduled action files (stable contract)", () => {
   const dirOf = (h: Harness): string => path.join(h.home, "scheduled");
   const json = (h: Harness, name: string): any => JSON.parse(fs.readFileSync(path.join(dirOf(h), name), "utf8"));
   const sorted = (o: object): string[] => Object.keys(o).sort();
-  const HEADER_ORDER = ["id", "name", "status", "startedAt", "finishedAt", "deliverAt", "late", "model", "turns", "tokens", "inputTokens", "freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "thinkingTokens", "cacheHitRate", "costUsd", "costSource", "unpricedTurns"];
+  const HEADER_ORDER = ["id", "name", "status", "startedAt", "finishedAt", "deliverAt", "late", "definition", "model", "turns", "tokens", "inputTokens", "freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "thinkingTokens", "cacheHitRate", "costUsd", "costSource", "unpricedTurns"];
   const doc = fs.readFileSync(path.join(import.meta.dir, "..", "docs", "scheduled-action-files.md"), "utf8");
 
   // The header parser exactly as the page shows it.
@@ -1507,6 +1507,58 @@ describe("scheduled action files (stable contract)", () => {
     const header = Object.fromEntries(m[1]!.split("\n").map((l) => [l.slice(0, l.indexOf(": ")), l.slice(l.indexOf(": ") + 2)]));
     return { header, body: m[2]!.trimEnd() };
   }
+
+  it("each run names the definition it was built from, and the exact text is saved once per definition", async () => {
+    const h = harness();
+    const rec = createScheduledAction(h.agent(mockFetch(() => chatReply("A")).fn), input({}, { role: "analyst" }));
+    const runs = (): string[] => fs.readdirSync(runDir(h, rec.id)).filter((f) => f.endsWith(".md")).sort();
+    const defs = (): string[] => {
+      const d = path.join(runDir(h, rec.id), "definitions");
+      return fs.existsSync(d) ? fs.readdirSync(d).sort() : [];
+    };
+    const hash = (file: string): string => readRunLikeTheDocs(runDir(h, rec.id), file).header["definition"]!;
+
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const first = hash(runs()[0]!);
+    expect(first).toMatch(/^[0-9a-f]{12}$/);
+    expect(defs()).toEqual([`${first}.json`]);
+    expect(JSON.parse(fs.readFileSync(path.join(runDir(h, rec.id), "definitions", `${first}.json`), "utf8"))).toEqual({
+      version: 1, hash: first, role: "analyst", instructions: "You write briefs.", task: "Write the brief.", tools: ["recent_news"],
+    });
+
+    runScheduledAction(rec.id, { home: h.home }); // same definition again: a new run file, no new definition file
+    await h.settle();
+    expect(runs()).toHaveLength(2);
+    expect(runs().map(hash)).toEqual([first, first]);
+    expect(defs()).toEqual([`${first}.json`]);
+
+    updateScheduledAction(rec.id, { instructions: "You write long briefs." }, { home: h.home }); // the id stays the same
+    runScheduledAction(rec.id, { home: h.home });
+    await h.settle();
+    const hashes = runs().map(hash);
+    expect(hashes).toHaveLength(3);
+    const second = hashes.find((x) => x !== first)!;
+    expect(hashes.filter((x) => x === first)).toHaveLength(2);
+    expect(defs().sort()).toEqual([`${first}.json`, `${second}.json`].sort());
+    expect(JSON.parse(fs.readFileSync(path.join(runDir(h, rec.id), "definitions", `${second}.json`), "utf8")).instructions).toBe("You write long briefs.");
+    expect(JSON.parse(fs.readFileSync(path.join(runDir(h, rec.id), "definitions", `${first}.json`), "utf8")).instructions).toBe("You write briefs."); // the old text is kept
+  });
+
+  it("a failed run names its definition too, and a run file from before this key still reads", async () => {
+    const h = harness();
+    const rec = createScheduledAction(h.agent(mockFetch(() => badReply()).fn, { runRetries: 0 } as never), input());
+    h.set(18, 50);
+    h.s.tick();
+    await h.settle();
+    const file = fs.readdirSync(runDir(h, rec.id)).find((f) => f.endsWith(".md"))!;
+    const { header } = readRunLikeTheDocs(runDir(h, rec.id), file);
+    expect(header["status"]).toBe("failed");
+    expect(header["definition"]).toMatch(/^[0-9a-f]{12}$/);
+    fs.writeFileSync(path.join(runDir(h, rec.id), "old.md"), "---\nid: x\nstatus: ok\n---\n\nOld result.\n");
+    expect(readRunLikeTheDocs(runDir(h, rec.id), "old.md")).toEqual({ header: { id: "x", status: "ok" }, body: "Old result." });
+  });
 
   it("<id>/task.json: the version, the exact fields of a minimal and of a full record, and the states", () => {
     const h = harness();
