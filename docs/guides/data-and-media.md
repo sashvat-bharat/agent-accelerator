@@ -109,7 +109,17 @@ console.log(telemetry.totals); // { input, output, cacheRead, cacheWrite, reason
 
 ## Model catalog
 
-The SDK reads limits, prices, modalities and reasoning options from a cached copy of models.dev (`<home>/catalog/models.dev.json`, or `AGENT_CACHE_DIR`).
+The SDK reads limits, prices, modalities and reasoning options from a small cached extract of models.dev: one file per provider in `<home>/catalog/` (or `AGENT_CACHE_DIR`), read on first use, plus `meta.json`. The full models.dev payload is never saved.
+
+| Provider | Kept in `<home>/catalog/<provider>/models.json` |
+| --- | --- |
+| `google` | `gemini-3*` and newer (`gemini-4*` ...) |
+| `openai` | `gpt-5*` and newer (`gpt-6*` ...) |
+| `anthropic` | `claude-*-5*` and newer (kept ready for the native Anthropic provider) |
+| `openrouter` | every model whose only output is text |
+
+Only the fields the SDK reads are saved (limits, prices, modalities, reasoning options, flags). Any other model or provider is **unknown** to the catalog: no price (cost stays unknown), permissive thinking levels, no modality guard. Use `registerModel()` to describe one. A model only OpenRouter lists, such as `openai/gpt-4o`, is found through its OpenRouter entry.
+
 
 ```bash
 bun run update-models            # refresh if expired
@@ -130,14 +140,14 @@ registerModel({
 });
 ```
 
-Behavior: the default TTL is 12 h; an expired catalog is used **immediately** and refreshed in the background (8 s timeout, 10 minute backoff after a failure); a cold start waits for the download; invalid payloads never overwrite a good cache. Set `AGENT_CATALOG_REFRESH=off` for air-gapped hosts and tests. Other helpers: `refreshModelCatalog`, `ensureModelCatalogFresh`, `getCatalogStatus`, `setCatalogTTL`, `getModelsForProvider`, `getModelThinkingInfo`, `validateModelThinking`, `modelSupportsStructuredOutput`, `getModelSource`, `clearCustomModels`. Custom prefixes never borrow another provider's price or abilities. Never hand-edit the cache file.
+Behavior: the default TTL is 12 h; an expired catalog is used **immediately** and refreshed in the background (8 s timeout, 10 minute backoff after a failure); a cold start waits for the download; invalid payloads never overwrite a good cache. Set `AGENT_CATALOG_REFRESH=off` for air-gapped hosts and tests. Other helpers: `refreshModelCatalog`, `ensureModelCatalogFresh`, `getCatalogStatus`, `setCatalogTTL`, `getModelsForProvider`, `getCacheDir`, `getCacheFilePath`, `getModelThinkingInfo`, `validateModelThinking`, `modelSupportsStructuredOutput`, `getModelSource`, `clearCustomModels`. Custom prefixes never borrow another provider's price or abilities. Never hand-edit the cache file.
 
-**Recommendations:** ✅ `registerModel` for private models; ✅ read-only deployments: set `AGENT_CACHE_DIR` to a writable path. ⚠️ Loading the catalog costs roughly 18 MB of memory.
+**Recommendations:** ✅ `registerModel` for private models; ✅ read-only deployments: set `AGENT_CACHE_DIR` to a writable path. The catalog costs almost no memory at start (only `meta.json` is read); a provider's file, a few MB at most, is read on its first lookup.
 
 ## For AI agents
 
 - Crash recovery: `persist: { dir }` + the same `sessionId`; `resume: "automatic" | "explicit"`, `agent.interrupted()`, `agent.resume()`. Manual resume of a finished chat: `findLatestSessionDir` → `loadSessionDir` → `agent.importSession(saved.session)`.
 - Prompt is `string | ContentPart[]`; part keys: `image`, `audio`, `video`, `file` (+ `filename`, `mimeType`).
 - Cost may be `undefined`; handle it. Use `SessionTelemetry` for running totals.
-- Never edit `<home>/catalog/models.dev.json`; use `registerModel`.
+- Never edit the files in `<home>/catalog/`; use `registerModel`. Older models (gemini-2, gpt-4, claude-4 ...) are not in the catalog.
 - See also: [`examples/15-durable-agent.ts`](../../examples/15-durable-agent.ts) (crash, resume, approval, tool logs), [Agents and models](agents-and-models.md), [Safety and operations](safety-and-ops.md), [`examples/05-chat.ts`](../../examples/05-chat.ts), [`examples/06-multimodal_image.ts`](../../examples/06-multimodal_image.ts), [`examples/09-multimodal_document.ts`](../../examples/09-multimodal_document.ts).

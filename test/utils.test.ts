@@ -87,17 +87,17 @@ describe("modality guard (catalog-driven)", () => {
 
   it("rejects image for a catalog text-only model before any network call", () => {
     expect(() =>
-      assertModalitiesSupported(ctx({ type: "text", text: "x" }, { type: "image", image: "https://x/y.png" }), "openrouter", "z-ai/glm-5.2:free")
+      assertModalitiesSupported(ctx({ type: "text", text: "x" }, { type: "image", image: "https://x/y.png" }), "openrouter", "z-ai/glm-5.1")
     ).toThrow(/unsupported image input.*supports: text/);
   });
 
   it("rejects video naming the supported set", () => {
     expect(() =>
-      assertModalitiesSupported(ctx({ type: "video", video: "https://x/y.mp4" }), "openrouter", "z-ai/glm-5.2:free")
+      assertModalitiesSupported(ctx({ type: "video", video: "https://x/y.mp4" }), "openrouter", "z-ai/glm-5.1")
     ).toThrow(/unsupported video input/);
   });
 
-  it("accepts image+audio+pdf on gpt-4o via verified override", () => {
+  it("accepts image+audio+pdf on a catalog model that lists all three", () => {
     expect(() =>
       assertModalitiesSupported(
         ctx(
@@ -105,17 +105,17 @@ describe("modality guard (catalog-driven)", () => {
           { type: "audio", audio: "data:audio/mp3;base64,xx" },
           { type: "file", file: "data:application/pdf;base64,xx", mimeType: "application/pdf" }
         ),
-        "openai",
-        "gpt-4o"
+        "google",
+        "gemini-3.5-flash"
       )
     ).not.toThrow();
   });
 
   it("does not gate files on the catalog's pdf flag for OpenRouter, but still does for other providers", () => {
     const withFile = ctx({ type: "file", file: "https://x/d.pdf", mimeType: "application/pdf" });
-    // z-ai/glm-5.2:free is a catalog model without "pdf" input.
-    expect(() => assertModalitiesSupported(withFile, "openrouter", "z-ai/glm-5.2:free")).not.toThrow();
-    expect(() => assertModalitiesSupported(ctx({ type: "file", file: "https://x/d.pdf" }, { type: "image", image: "https://x/y.png" }), "openrouter", "z-ai/glm-5.2:free")).toThrow(/unsupported image input/);
+    // z-ai/glm-5.1 is a catalog model without "pdf" input.
+    expect(() => assertModalitiesSupported(withFile, "openrouter", "z-ai/glm-5.1")).not.toThrow();
+    expect(() => assertModalitiesSupported(ctx({ type: "file", file: "https://x/d.pdf" }, { type: "image", image: "https://x/y.png" }), "openrouter", "z-ai/glm-5.1")).toThrow(/unsupported image input/);
     expect(() => assertModalitiesSupported(withFile, "openai", "gpt-5-nano")).toThrow(/unsupported pdf input/);
   });
 

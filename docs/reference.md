@@ -166,7 +166,7 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |
 | `AGENT_CATALOG_REFRESH=off` | Disable automatic model-catalog refresh |
 | `AGENT_ACCEL_HOME` | The single folder for everything the SDK stores (default `.agent-accel/`; `setHome(dir)` does the same in code) |
-| `AGENT_CACHE_DIR` | Overrides only the model catalog cache folder (default `<home>/catalog`) |
+| `AGENT_CACHE_DIR` | Overrides only the model catalog cache folder (default `<home>/catalog`, one `<provider>/models.json` per provider plus `meta.json`) |
 | `MODELS_DEV_SHA256` | Optional checksum pin for the downloaded catalog |
 
 Library functions read `process.env` only. Pass `env: { ... }` in config or run options to override per agent.

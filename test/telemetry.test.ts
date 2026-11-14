@@ -97,7 +97,7 @@ describe("telemetry bus is the single sink", () => {
         `import { refreshModelCatalog, telemetryBus } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/index.ts"))};
 const seen = [];
 telemetryBus.onEvent((e) => seen.push(e.code));
-const mk = () => ({ models: { m: { id: "m", name: "m" } } });
+const mk = () => ({ models: { "gemini-3-x": { id: "gemini-3-x", name: "m" } } });
 globalThis.fetch = async () => new Response(JSON.stringify({ google: mk(), openai: mk(), openrouter: mk() }), { status: 200 });
 const st = await refreshModelCatalog({ force: true });
 console.log(JSON.stringify({ loaded: st.loaded, seen }));`

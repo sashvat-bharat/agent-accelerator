@@ -5,6 +5,7 @@ import { getEnv } from "../utils/env.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { onHomeChange, resolveHome } from "../utils/home.ts";
 import { writeFileDurable } from "../utils/durable.ts";
+import { buildShards, isShard, CATALOG_PROVIDERS, type CatalogProvider, type SlimModel } from "./catalog-shards.ts";
 
 /** Default TTL: 12 Hours (in milliseconds). */
 export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
@@ -30,12 +31,14 @@ export function getCatalogTTL(): number {
   return globalCatalogTtlMs;
 }
 
-export interface CatalogCacheFile {
+/** `<cache>/meta.json`: written LAST after a refresh (the commit marker); the shards it counts are read lazily. */
+export interface CatalogMeta {
+  version: 2;
   fetchedAt: number;
   ttlMs: number;
   source: string;
-  version: string;
-  data: Record<string, any>;
+  /** Models kept per provider. */
+  counts: Record<CatalogProvider, number>;
 }
 
 export interface CatalogStatus {
@@ -90,24 +93,27 @@ export function getCacheDir(): string {
   return path.join(resolveHome(), "catalog");
 }
 
-/** Cache file path: `<cacheDir>/models.dev.json`, honoring AGENT_CACHE_DIR. */
-export function getCacheFilePath(): string {
-  return path.join(getCacheDir(), "models.dev.json");
+/** Shard path: `<cacheDir>/<provider>/models.json`, honoring AGENT_CACHE_DIR. */
+export function getCacheFilePath(provider: CatalogProvider): string {
+  return path.join(getCacheDir(), provider, "models.json");
 }
 
-// Reads and parses a JSON file, null when missing or damaged; in: the cache loader, out: the parsed value.
+// `<cacheDir>/meta.json`, the marker that says which refresh the shards belong to; in: the loaders and refresh, out: its path.
+function metaPath(): string {
+  return path.join(getCacheDir(), "meta.json");
+}
+
+// Reads and parses a JSON file, null when missing or damaged; in: the cache loaders, out: the parsed value.
 function readJsonFileSync(filePath: string): any {
   try {
-    if (!fs.existsSync(filePath)) return null;
-    const content = fs.readFileSync(filePath, "utf-8");
-    return JSON.parse(content);
+    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
   } catch {
     return null;
   }
 }
 
-// Writes the catalog cache durably but without a `.bak` (it is re-downloadable); in: path + payload from refreshModelCatalog, out: the cache file.
-function writeJsonFileSync(filePath: string, data: any): void {
+// Writes a cache file durably but without a `.bak` (everything here is re-downloadable); in: path + payload from refreshModelCatalog, out: the file.
+function writeJsonFileSync(filePath: string, data: unknown): void {
   writeFileDurable(filePath, JSON.stringify(data), { backup: false });
 }
 
@@ -128,80 +134,69 @@ const BACKGROUND_REFRESH_TIMEOUT_MS = 8_000;
 
 let inFlightRefresh: Promise<CatalogStatus> | null = null;
 
-// In-memory catalog state
-let activeCatalog: Record<string, any> = {};
-let activeFetchedAt: number | undefined = undefined;
-let activeTtlMs: number = globalCatalogTtlMs;
+// In-memory state: only the tiny meta file is read at import; a provider's models are read from its shard on first use.
+let activeMeta: CatalogMeta | undefined;
+/** Shards read so far (`null` = looked for and not usable, so a missing file is not re-read on every lookup). */
+const shardCache = new Map<CatalogProvider, Record<string, SlimModel> | null>();
 let activeFromCache = false;
 
-// Synchronous bootstrap: load <home>/catalog/models.dev.json if present
-function initializeCatalogSync(): void {
-  const cachePath = getCacheFilePath();
-  const cached = readJsonFileSync(cachePath);
-  if (cached && typeof cached === "object") {
-    if (cached.data && typeof cached.data === "object") {
-      activeCatalog = cached.data;
-      activeFetchedAt = cached.fetchedAt;
-      activeTtlMs = cached.ttlMs || globalCatalogTtlMs;
-      activeFromCache = true;
-      return;
-    }
-    if (cached.google || cached.openai) {
-      activeCatalog = cached;
-      activeFetchedAt = fs.statSync(cachePath).mtimeMs || Date.now();
-      activeTtlMs = globalCatalogTtlMs;
-      activeFromCache = true;
-      return;
-    }
-  }
-
-  activeCatalog = {};
-  activeFetchedAt = undefined;
-  activeTtlMs = globalCatalogTtlMs;
-  activeFromCache = false;
+// A parsed meta.json that has the expected shape, else undefined; in: the loaders, out: CatalogMeta.
+function readMeta(): CatalogMeta | undefined {
+  const raw = readJsonFileSync(metaPath()) as Partial<CatalogMeta> | null;
+  if (!raw || raw.version !== 2 || typeof raw.fetchedAt !== "number" || !raw.counts || typeof raw.counts !== "object")
+    return undefined;
+  return raw as CatalogMeta;
 }
 
-initializeCatalogSync();
+// Adopts the meta on disk (or none) and forgets the shards read so far; in: import, home change, refresh, out: activeMeta.
+function loadMeta(fromCache: boolean): void {
+  activeMeta = readMeta();
+  activeFromCache = fromCache && activeMeta !== undefined;
+  shardCache.clear();
+}
+
+loadMeta(true);
 // `setHome()` moves the cache folder: reload from the new place.
 onHomeChange(() => {
-  initializeCatalogSync();
+  loadMeta(true);
   notifyUpdateListeners();
 });
 
-/** Returns the active in-memory catalog data. */
-export function getActiveCatalog(): Record<string, any> {
-  return activeCatalog;
+/**
+ * The models of one catalog provider (`id` -> slim entry), read from its shard on first use, or undefined when the
+ * provider is not kept (custom prefixes) or has no usable shard. Shared with the catalog: read it, never change it.
+ */
+export function getShardModels(provider: string): Record<string, SlimModel> | undefined {
+  if (!(CATALOG_PROVIDERS as readonly string[]).includes(provider)) return undefined;
+  const key = provider as CatalogProvider;
+  if (!shardCache.has(key)) {
+    const raw = activeMeta ? readJsonFileSync(getCacheFilePath(key)) : null;
+    shardCache.set(key, isShard(raw, key) ? raw.models : null);
+  }
+  return shardCache.get(key) ?? undefined;
 }
 
 /** Checks whether the active model catalog has expired based on its TTL. */
 export function isCatalogExpired(): boolean {
-  if (!activeFetchedAt) return true;
-  const age = Date.now() - activeFetchedAt;
-  return age < 0 || age >= activeTtlMs;
+  if (!activeMeta) return true;
+  const age = Date.now() - activeMeta.fetchedAt;
+  return age < 0 || age >= activeMeta.ttlMs;
 }
 
-/** Returns diagnostic metadata about the current model catalog status. */
+/** Returns diagnostic metadata about the current model catalog status (counts come from the meta file: no shard is read). */
 export function getCatalogStatus(): CatalogStatus {
-  const providerCount = Object.keys(activeCatalog).length;
-  let modelCount = 0;
-  for (const prov of Object.values(activeCatalog)) {
-    if (prov && typeof prov === "object" && prov.models) {
-      modelCount += Object.keys(prov.models).length;
-    }
-  }
-
-  const isExpired = !activeFetchedAt || Date.now() - activeFetchedAt >= activeTtlMs;
-
+  const counts = activeMeta ? Object.values(activeMeta.counts).filter((n) => n > 0) : [];
+  const ttlMs = activeMeta?.ttlMs ?? globalCatalogTtlMs;
   return {
-    loaded: providerCount > 0,
+    loaded: counts.length > 0,
     fromCache: activeFromCache,
-    isExpired,
-    fetchedAt: activeFetchedAt,
-    ttlMs: activeTtlMs,
-    expiresAt: activeFetchedAt ? activeFetchedAt + activeTtlMs : undefined,
-    cachePath: getCacheFilePath(),
-    providerCount,
-    modelCount,
+    isExpired: isCatalogExpired(),
+    fetchedAt: activeMeta?.fetchedAt,
+    ttlMs,
+    expiresAt: activeMeta ? activeMeta.fetchedAt + ttlMs : undefined,
+    cachePath: getCacheDir(),
+    providerCount: counts.length,
+    modelCount: counts.reduce((a, b) => a + b, 0),
   };
 }
 
@@ -226,27 +221,34 @@ export function isValidCatalogPayload(data: unknown): data is Record<string, any
   return providersWithModels >= 3;
 }
 
+// Removes the single models.dev.json of releases before 0.6.8 (the full payload is no longer kept); in: a successful refresh, out: nothing.
+function removeLegacyCache(): void {
+  for (const name of ["models.dev.json", "models.dev.json.bak"]) {
+    try {
+      fs.rmSync(path.join(getCacheDir(), name), { force: true });
+    } catch {
+      // why: an undeletable leftover is harmless; it is never read.
+    }
+  }
+}
+
 /**
- * Refreshes the model catalog by downloading from models.dev
- * into `<home>/catalog/models.dev.json` with a 12-hour TTL.
+ * Refreshes the model catalog: downloads models.dev, keeps only the supported providers' newest series as one small
+ * shard per provider (`<home>/catalog/<provider>/models.json`) plus `meta.json` (written last), and drops the rest. The
+ * full payload is never saved. Default TTL 12 hours.
  */
 export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): Promise<CatalogStatus> {
   const effectiveTtl = options.ttlMs ?? globalCatalogTtlMs;
   const apiUrl = options.apiUrl || "https://models.dev/api.json";
   const timeoutMs = options.timeoutMs ?? 30000;
-  const cachePath = getCacheFilePath();
 
   // Return existing cache if still within TTL and not forcing
   if (!options.force) {
-    const cached = readJsonFileSync(cachePath);
-    if (cached && typeof cached === "object" && cached.data) {
-      const age = Date.now() - (cached.fetchedAt || 0);
-      const fileTtl = cached.ttlMs || effectiveTtl;
-      if (age >= 0 && age < fileTtl) {
-        activeCatalog = cached.data;
-        activeFetchedAt = cached.fetchedAt;
-        activeTtlMs = fileTtl;
-        activeFromCache = true;
+    const cached = readMeta();
+    if (cached) {
+      const age = Date.now() - cached.fetchedAt;
+      if (age >= 0 && age < (cached.ttlMs || effectiveTtl)) {
+        loadMeta(true);
         notifyUpdateListeners();
         return getCatalogStatus();
       }
@@ -258,14 +260,11 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let freshData: Record<string, any>;
 
+  // A failed refresh keeps whatever is on disk (it may be newer than memory when another process refreshed).
   const fallbackToDiskCache = (): void => {
     lastRefreshFailureAt = Date.now();
-    const existing = readJsonFileSync(cachePath);
-    if (existing && existing.data) {
-      activeCatalog = existing.data;
-      activeFetchedAt = existing.fetchedAt;
-      activeTtlMs = existing.ttlMs || effectiveTtl;
-      activeFromCache = true;
+    if (readMeta()) {
+      loadMeta(true);
       notifyUpdateListeners();
     }
   };
@@ -323,34 +322,39 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
   }
 
   lastRefreshFailureAt = 0;
-  const fetchedAt = Date.now();
-  const cachePayload: CatalogCacheFile = {
-    fetchedAt,
+  const shards = buildShards(freshData);
+  freshData = undefined as never; // the 6 MB payload is not needed any more
+  const meta: CatalogMeta = {
+    version: 2,
+    fetchedAt: Date.now(),
     ttlMs: effectiveTtl,
     source: apiUrl,
-    version: "1.0",
-    data: freshData,
+    counts: Object.fromEntries(CATALOG_PROVIDERS.map((p) => [p, Object.keys(shards[p].models).length])) as Record<
+      CatalogProvider,
+      number
+    >,
   };
 
-  // Update in-memory state FIRST so a read-only filesystem still serves the
-  // fresh catalog for this process; disk persistence below is best-effort.
-  // A real download is NOT from cache.
-  activeCatalog = freshData;
-  activeFetchedAt = fetchedAt;
-  activeTtlMs = effectiveTtl;
-  activeFromCache = false;
-
-  // Save to <home>/catalog/models.dev.json (or the AGENT_CACHE_DIR override)
+  // Disk persistence is best-effort (a read-only filesystem still serves this process): shards first, `meta.json` last.
+  let written = true;
   try {
-    writeJsonFileSync(cachePath, cachePayload);
+    for (const p of CATALOG_PROVIDERS) writeJsonFileSync(getCacheFilePath(p), shards[p]);
+    writeJsonFileSync(metaPath(), meta);
+    removeLegacyCache();
   } catch (err) {
-    activeFromCache = false;
+    written = false;
     telemetryBus.emitWarning(
       "catalog_cache_write_failed",
       `[Agent Accelerator] Could not write model catalog cache (${err instanceof Error ? err.message : String(err)}). Continuing with the in-memory catalog.`,
-      { path: cachePath }
+      { path: getCacheDir() }
     );
   }
+
+  // Adopt the fresh data. When the disk could not take it, this process keeps the shards in memory instead.
+  activeMeta = meta;
+  activeFromCache = false;
+  shardCache.clear();
+  if (!written) for (const p of CATALOG_PROVIDERS) shardCache.set(p, shards[p].models);
 
   notifyUpdateListeners();
   return getCatalogStatus();

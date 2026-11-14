@@ -150,9 +150,25 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
 
   test("thinking preflight: catalog-known non-reasoning throws, unknown is permissive", async () => {
     const { validateModelThinking } = await import("../src/index.ts");
-    // groq/llama-3.3-70b-versatile exists in models.dev with reasoning:false → strict is correct.
-    expect(() => validateModelThinking("groq", "llama-3.3-70b-versatile", "none")).not.toThrow();
-    expect(() => validateModelThinking("groq", "llama-3.3-70b-versatile", "medium")).toThrow();
+    // A model the catalog knows as non-reasoning stays strict (registered here: every model the catalog keeps today reasons).
+    const { registerModel, clearCustomModels } = await import("../src/index.ts");
+    registerModel({
+      id: "plain-llm",
+      provider: "openai",
+      name: "plain-llm",
+      contextWindow: 1000,
+      maxOutputTokens: 100,
+      reasoning: false,
+      capabilities: { supportsThinking: false },
+    } as any);
+    try {
+      expect(() => validateModelThinking("openai", "plain-llm", "none")).not.toThrow();
+      expect(() => validateModelThinking("openai", "plain-llm", "medium")).toThrow();
+    } finally {
+      clearCustomModels();
+    }
+    // A model outside the catalog (any custom prefix) is permissive.
+    expect(() => validateModelThinking("groq", "llama-3.3-70b-versatile", "medium")).not.toThrow();
     // Brand-new / private ids have no catalog entry → permissive (any level allowed).
     expect(() => validateModelThinking("cerebras", "anything-brand-new-xyz", "high")).not.toThrow();
     expect(() => validateModelThinking("myproxy", "my-private-model-v9", "medium")).not.toThrow();
