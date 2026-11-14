@@ -1,11 +1,12 @@
 /**
  * Model catalog: the single source of truth (models.dev) for context limits, prices, modalities and reasoning options.
- * The data is cached in `<home>/catalog/models.dev.json` (or `AGENT_CACHE_DIR`) with a 12 hour TTL and refreshed in the
- * background (see `catalog-cache.ts`). `GOOGLE_MODELS`, `OPENAI_MODELS` and `OPENROUTER_MODELS` are views of it,
- * rebuilt in place whenever it changes.
+ * The data is cached as one small file per provider, `<home>/catalog/<provider>/models.json` (or `AGENT_CACHE_DIR`), with a
+ * 12 hour TTL, refreshed in the background and read lazily, one provider at a time (see `catalog-cache.ts` and
+ * `catalog-shards.ts`). `GOOGLE_MODELS`, `OPENAI_MODELS`, `ANTHROPIC_MODELS` and `OPENROUTER_MODELS` are lazy views of it.
  */
 
-import { getActiveCatalog, registerCatalogUpdateListener } from "./catalog-cache.ts";
+import { getShardModels, registerCatalogUpdateListener } from "./catalog-cache.ts";
+import { CATALOG_PROVIDERS } from "./catalog-shards.ts";
 import type { ModelSpec, ProviderId, ModelLimit, ModelCost, ModelModalities } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
@@ -15,20 +16,17 @@ import { ConfigError, ValidationError } from "../types/errors.ts";
 // battle-tested: google covers vertex variants
 // ---------------------------------------------------------------------------
 const PROVIDER_ALIASES: Record<string, string[]> = {
-  google: ["google", "google-vertex", "google-vertex-anthropic"],
+  google: ["google"],
   openrouter: ["openrouter"],
   openai: ["openai"],
+  anthropic: ["anthropic"],
 };
 
 // Verified modality corrections — models.dev lags on some inputs (e.g. gpt-4o
 // accepts audio). Keyed `provider/model`, merged over upstream data so
 // `npm run update-models` never wipes them. Add entries here, not in the JSON.
 const MODALITY_OVERRIDES: Record<string, { input?: string[]; output?: string[] }> = {
-  "openai/gpt-4o": { input: ["text", "image", "audio", "pdf"] },
-  "openai/gpt-4o-mini": { input: ["text", "image", "audio", "pdf"] },
-  // OpenRouter routes this free model to an endpoint that parses PDFs,
-  // verified end-to-end via examples/08. If routing changes, the runtime
-  // 404 still surfaces as a one-line error.
+  // Empty for now: the catalog only keeps the newest series (gemini-3+, gpt-5+, claude-5+), which models.dev lists correctly.
 };
 
 // Applies the verified modality corrections over the catalog's input/output lists; in: mapModelSpec, out: ModelModalities.
@@ -221,9 +219,8 @@ let globalIndex: Map<string, IndexEntry> | null = null;
 function getGlobalIndex(): Map<string, IndexEntry> {
   if (globalIndex) return globalIndex;
   globalIndex = new Map();
-  const catalog = getActiveCatalog();
-  for (const [p, providerData] of Object.entries(catalog as Record<string, any>)) {
-    const models = (providerData as any)?.models;
+  for (const p of CATALOG_PROVIDERS) {
+    const models = getShardModels(p);
     if (!models) continue;
     for (const [key, raw] of Object.entries(models as Record<string, any>)) {
       const entry: IndexEntry = { provider: p as ProviderId, key, raw };
@@ -268,11 +265,10 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
   const tryProviders = [
     ...new Set([...aliasProviders, provider, provider.replace("-zen", ""), provider.replace("-go", "")]),
   ];
-  const catalog = getActiveCatalog();
 
   for (const p of tryProviders) {
-    const providerData: any = (catalog as any)[p];
-    if (!providerData?.models) continue;
+    const providerData: any = { models: getShardModels(p) };
+    if (!providerData.models) continue;
     const candidates = [
       modelId,
       normalizeModelIdForLookup(modelId),
@@ -550,10 +546,9 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
   const aliases = PROVIDER_ALIASES[provider] || [provider];
   const seen = new Set<string>();
   const out: ModelSpec[] = [];
-  const catalog = getActiveCatalog();
   for (const alias of aliases) {
-    const data: any = (catalog as any)[alias];
-    if (!data?.models) continue;
+    const data: any = { models: getShardModels(alias) };
+    if (!data.models) continue;
     for (const [key, raw] of Object.entries(data.models as Record<string, any>)) {
       if (seen.has(key)) continue;
       seen.add(key);
@@ -575,26 +570,42 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
   return [...out];
 }
 
-export const GOOGLE_MODELS: ModelSpec[] = [...getModelsForProvider("google")];
-export const OPENAI_MODELS: ModelSpec[] = [...getModelsForProvider("openai")];
-export const OPENROUTER_MODELS: ModelSpec[] = [...getModelsForProvider("openrouter")];
-
-// Rebuilds the GOOGLE/OPENAI/OPENROUTER_MODELS arrays in place after a catalog change; in: the update listener, out: those exports.
-function refreshExportedModels(): void {
-  GOOGLE_MODELS.length = 0;
-  GOOGLE_MODELS.push(...getModelsForProvider("google"));
-  OPENAI_MODELS.length = 0;
-  OPENAI_MODELS.push(...getModelsForProvider("openai"));
-  OPENROUTER_MODELS.length = 0;
-  OPENROUTER_MODELS.push(...getModelsForProvider("openrouter"));
+// A model list that reads its provider's shard on first use and follows catalog changes: every array operation is forwarded to the cached list, so importing the SDK loads no model data.
+function lazyModelList(provider: string): ModelSpec[] {
+  const list = (): ModelSpec[] => {
+    if (!providerModelsCache.has(provider)) getModelsForProvider(provider);
+    return providerModelsCache.get(provider)!;
+  };
+  return new Proxy([] as ModelSpec[], {
+    get: (_t, key) => {
+      const target = list() as unknown as Record<PropertyKey, unknown>;
+      const value = target[key];
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+    has: (_t, key) => key in list(),
+    ownKeys: () => Reflect.ownKeys(list()),
+    getOwnPropertyDescriptor: (_t, key) => {
+      const d = Reflect.getOwnPropertyDescriptor(list(), key);
+      return d ? { ...d, configurable: true } : undefined;
+    },
+    getPrototypeOf: () => Array.prototype,
+  });
 }
 
-// Invalidate caches and refresh exported models whenever the catalog updates
+/** Google models of the catalog (gemini-3 and newer); read from disk on first use. */
+export const GOOGLE_MODELS: ModelSpec[] = lazyModelList("google");
+/** OpenAI models of the catalog (gpt-5 and newer); read from disk on first use. */
+export const OPENAI_MODELS: ModelSpec[] = lazyModelList("openai");
+/** Anthropic models of the catalog (claude 5 and newer); read from disk on first use. */
+export const ANTHROPIC_MODELS: ModelSpec[] = lazyModelList("anthropic");
+/** OpenRouter models of the catalog (text output only); read from disk on first use. */
+export const OPENROUTER_MODELS: ModelSpec[] = lazyModelList("openrouter");
+
+// Drops every derived cache whenever the catalog changes (the lazy `*_MODELS` lists rebuild on their next use)
 registerCatalogUpdateListener(() => {
   lookupCache.clear();
   providerModelsCache.clear();
   globalIndex = null;
-  refreshExportedModels();
 });
 
 // Re-export cache management utilities

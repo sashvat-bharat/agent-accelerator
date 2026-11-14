@@ -8,9 +8,23 @@ const SRC_INDEX = path.resolve(import.meta.dir, "../src/index.ts");
 
 const catalog = () => ({
   google: { models: { "gemini-3.5-flash-lite": { id: "gemini-3.5-flash-lite", name: "G" } } },
-  openai: { models: { "gpt-4o": { id: "gpt-4o", name: "O" } } },
-  openrouter: { models: { "x/y": { id: "x/y", name: "R" } } },
+  openai: { models: { "gpt-5": { id: "gpt-5", name: "O" } } },
+  openrouter: { models: { "x/y": { id: "x/y", name: "R", modalities: { input: ["text"], output: ["text"] } } } },
 });
+
+/** Writes a catalog cache the way a refresh does: one shard per provider, then meta.json. */
+function writeCache(dir: string, fetchedAt: number, ttlMs: number): void {
+  const data = catalog() as Record<string, { models: Record<string, unknown> }>;
+  const counts: Record<string, number> = { anthropic: 0 };
+  for (const p of ["google", "openai", "openrouter"]) {
+    fs.mkdirSync(path.join(dir, p), { recursive: true });
+    fs.writeFileSync(path.join(dir, p, "models.json"), JSON.stringify({ version: 1, provider: p, models: data[p]!.models }));
+    counts[p] = Object.keys(data[p]!.models).length;
+  }
+  fs.mkdirSync(path.join(dir, "anthropic"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "anthropic", "models.json"), JSON.stringify({ version: 1, provider: "anthropic", models: {} }));
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ version: 2, fetchedAt, ttlMs, source: "test", counts }));
+}
 
 /** Runs `body` in a fresh Bun process (catalog state is module-global) and returns its JSON line. */
 async function inSubprocess(cacheDir: string, body: string): Promise<any> {
@@ -47,10 +61,7 @@ describe("ensureModelCatalogFresh: stale-while-revalidate + failure backoff", ()
   it("an expired but loaded catalog never delays the caller, and a failed refresh is not retried for 10 minutes", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-cat-"));
     try {
-      fs.writeFileSync(
-        path.join(dir, "models.dev.json"),
-        JSON.stringify({ fetchedAt: Date.now() - 3_600_000, ttlMs: 1000, source: "test", version: "1.0", data: catalog() })
-      );
+      writeCache(dir, Date.now() - 3_600_000, 1000);
       const res = await inSubprocess(
         dir,
         `
@@ -107,10 +118,7 @@ console.log(JSON.stringify({ before: before.loaded, after: s.loaded, waited: Dat
   it("AGENT_CATALOG_REFRESH=off never touches the network automatically", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-cat-"));
     try {
-      fs.writeFileSync(
-        path.join(dir, "models.dev.json"),
-        JSON.stringify({ fetchedAt: 1, ttlMs: 1000, source: "test", version: "1.0", data: catalog() })
-      );
+      writeCache(dir, 1, 1000);
       const res = await inSubprocess(
         dir,
         `
@@ -123,6 +131,92 @@ console.log(JSON.stringify({ loaded: s.loaded, expired: s.isExpired, calls }));
 `
       );
       expect(res).toEqual({ loaded: true, expired: true, calls: 0 });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("catalog shards on disk", () => {
+  const full = () => ({
+    google: { models: { "gemini-2.5-flash": { id: "gemini-2.5-flash" }, "gemini-3.5-flash": { id: "gemini-3.5-flash", name: "G", description: "big text" } } },
+    openai: { models: { "gpt-4o": { id: "gpt-4o" }, "gpt-5": { id: "gpt-5" } } },
+    anthropic: { models: { "claude-opus-4-8": { id: "claude-opus-4-8" }, "claude-opus-5": { id: "claude-opus-5" } } },
+    openrouter: { models: { "x/y": { id: "x/y", modalities: { input: ["text"], output: ["text"] } }, "x/img": { id: "x/img", modalities: { input: ["text"], output: ["text", "image"] } } } },
+    groq: { models: { llama: { id: "llama" } } },
+  });
+
+  it("a refresh writes one shard per provider plus meta.json, never the full payload, and removes the old single file", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-cat-"));
+    try {
+      fs.writeFileSync(path.join(dir, "models.dev.json"), "{}"); // left by a release before 0.6.8
+      const res = await inSubprocess(
+        dir,
+        `
+globalThis.fetch = async () => new Response(JSON.stringify(${JSON.stringify(full())}), { status: 200 });
+const s = await ensureModelCatalogFresh();
+console.log(JSON.stringify({ loaded: s.loaded, providers: s.providerCount, models: s.modelCount }));
+`
+      );
+      expect(res).toEqual({ loaded: true, providers: 4, models: 4 });
+      const read = (p: string) => JSON.parse(fs.readFileSync(path.join(dir, p), "utf8"));
+      expect(Object.keys(read("google/models.json").models)).toEqual(["gemini-3.5-flash"]);
+      expect(read("google/models.json").models["gemini-3.5-flash"].description).toBeUndefined();
+      expect(Object.keys(read("openai/models.json").models)).toEqual(["gpt-5"]);
+      expect(Object.keys(read("anthropic/models.json").models)).toEqual(["claude-opus-5"]);
+      expect(Object.keys(read("openrouter/models.json").models)).toEqual(["x/y"]);
+      expect(read("meta.json").counts).toEqual({ google: 1, openai: 1, anthropic: 1, openrouter: 1 });
+      expect(fs.existsSync(path.join(dir, "models.dev.json"))).toBe(false);
+      expect(fs.existsSync(path.join(dir, "groq"))).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("only meta.json is read at start: a shard is read on its first lookup (a damaged one then reads as unknown)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-cat-"));
+    try {
+      writeCache(dir, Date.now(), 3_600_000);
+      fs.writeFileSync(path.join(dir, "google", "models.json"), "{ not json");
+      const res = await inSubprocess(
+        dir,
+        `
+import { getModelFromCatalog } from ${JSON.stringify(SRC_INDEX)};
+const status = getCatalogStatus();
+console.log(JSON.stringify({ loaded: status.loaded, models: status.modelCount, google: !!getModelFromCatalog("google", "gemini-3.5-flash-lite"), openai: !!getModelFromCatalog("openai", "gpt-5") }));
+`
+      );
+      expect(res).toEqual({ loaded: true, models: 3, google: false, openai: true });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an old models.dev.json alone is not a catalog (cold start), and a failed download keeps what is on disk", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-cat-"));
+    try {
+      fs.writeFileSync(path.join(dir, "models.dev.json"), JSON.stringify({ fetchedAt: Date.now(), ttlMs: 1e9, data: full() }));
+      const res = await inSubprocess(
+        dir,
+        `
+import { refreshModelCatalog } from ${JSON.stringify(SRC_INDEX)};
+globalThis.fetch = async () => { throw new Error("offline"); };
+const before = getCatalogStatus().loaded;
+const after = (await refreshModelCatalog({ force: true })).loaded;
+console.log(JSON.stringify({ before, after }));
+`
+      );
+      expect(res).toEqual({ before: false, after: false });
+      writeCache(dir, Date.now(), 3_600_000);
+      const kept = await inSubprocess(
+        dir,
+        `
+import { refreshModelCatalog } from ${JSON.stringify(SRC_INDEX)};
+globalThis.fetch = async () => { throw new Error("offline"); };
+console.log(JSON.stringify({ loaded: (await refreshModelCatalog({ force: true })).loaded }));
+`
+      );
+      expect(kept.loaded).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

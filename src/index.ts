@@ -115,6 +115,8 @@ export {
   type CatalogStatus,
   type RefreshCatalogOptions,
 } from "./models/catalog.ts";
+export { CATALOG_PROVIDERS } from "./models/catalog-shards.ts";
+export type { CatalogProvider } from "./models/catalog-shards.ts";
 export { resolveEffectiveThinking } from "./agent/options.ts";
 export { withRetries, isTransientError } from "./utils/retry.ts";
 export { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOnResponses } from "./utils/errors.ts";
@@ -179,6 +181,7 @@ export type {
 export {
   GOOGLE_MODELS,
   OPENAI_MODELS,
+  ANTHROPIC_MODELS,
   OPENROUTER_MODELS,
   modelSupportsStructuredOutput,
 } from "./models/catalog.ts";

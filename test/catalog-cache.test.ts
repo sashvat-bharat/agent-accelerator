@@ -11,11 +11,11 @@ import {
 } from "../src/index.ts";
 
 describe("Model Catalog Dynamic Cache & 12h TTL", () => {
-  it("should resolve cache directory and path to <home>/catalog by default", () => {
+  it("should resolve cache directory and one shard per provider under <home>/catalog by default", () => {
     const dir = getCacheDir();
-    const filePath = getCacheFilePath();
     expect(dir).toContain(".agent-accel/catalog");
-    expect(filePath).toContain(".agent-accel/catalog/models.dev.json");
+    for (const p of ["google", "openai", "anthropic", "openrouter"] as const)
+      expect(getCacheFilePath(p)).toContain(`.agent-accel/catalog/${p}/models.json`);
   });
 
   it("should have a default TTL of 12 hours", () => {
@@ -64,7 +64,7 @@ describe("Model Catalog Dynamic Cache & 12h TTL", () => {
     expect(
       isValidCatalogPayload({
         google: { models: { "gemini-3.5-flash-lite": { id: "gemini-3.5-flash-lite" } } },
-        openai: { models: { "gpt-4o": { id: "gpt-4o" } } },
+        openai: { models: { "gpt-5": { id: "gpt-5" } } },
         openrouter: { models: { "x/y": { id: "x/y" } } },
       })
     ).toBe(true);

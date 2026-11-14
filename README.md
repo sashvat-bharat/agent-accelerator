@@ -1166,10 +1166,19 @@ const res = await agent.run([...]).catch(fail);
 ---
 ## Model Catalog & Dynamic 12-Hour TTL Sync
 
-The model catalog is synced from [models.dev](https://models.dev) into a local cache, so the multi-megabyte snapshot never ships in the package. The cache has a **12-hour TTL**:
+The model catalog is synced from [models.dev](https://models.dev) into a small local cache, so the multi-megabyte snapshot never ships in the package. The full models.dev payload is downloaded, filtered and thrown away: it is never saved, and importing the SDK loads no model data. Each provider is one small file read on its first lookup (`<home>/catalog/<provider>/models.json`, about 200 KB in all, `meta.json` beside them). The cache has a **12-hour TTL**:
 
-- **Automated 12-hour validation**: `.run()`, `.ask()` and `.stream()` check `<home>/catalog/models.dev.json`. Within 12 hours it reads from disk with no network delay. After that the expired catalog is served immediately and refreshed from `https://models.dev/api.json` in the background (8 s timeout). Only a cold start, with nothing loaded yet, waits for the download. A failed refresh pauses automatic refreshes for 10 minutes.
-- **Git & Package Safety**: The cache lives in the single Agent Accelerator home (`<home>/catalog/models.dev.json`, `.agent-accel/` by default and gitignored), never inside the package or scattered in the project.
+| Provider | Kept in `<home>/catalog/<provider>/models.json` |
+| --- | --- |
+| `google` | `gemini-3*` and newer (`gemini-4*` ...) |
+| `openai` | `gpt-5*` and newer (`gpt-6*` ...) |
+| `anthropic` | `claude-*-5*` and newer (kept ready for the native Anthropic provider) |
+| `openrouter` | every model whose only output is text |
+
+Only the fields the SDK reads are saved (limits, prices, modalities, reasoning options, flags). Any other model or provider is **unknown** to the catalog: no price (cost stays unknown), permissive thinking levels, no modality guard. Use `registerModel()` to describe one. A model only OpenRouter lists, such as `openai/gpt-4o`, is found through its OpenRouter entry.
+
+- **Automated 12-hour validation**: `.run()`, `.ask()` and `.stream()` check `<home>/catalog/meta.json`. Within 12 hours it reads from disk with no network delay. After that the expired catalog is served immediately and refreshed from `https://models.dev/api.json` in the background (8 s timeout). Only a cold start, with nothing loaded yet, waits for the download. A failed refresh pauses automatic refreshes for 10 minutes.
+- **Git & Package Safety**: The cache lives in the single Agent Accelerator home (`<home>/catalog/`, `.agent-accel/` by default and gitignored), never inside the package or scattered in the project.
 - **Spending-cap defaults**: `configure({ usageLimit, scheduledActionBudget })` sets the two caps for every agent you build (one call at startup, like `setHome()`; each call replaces the last, `configure({})` clears it). The env vars `AGENT_ACCEL_USAGE_LIMIT_USD` / `_TOKENS` and `AGENT_ACCEL_SCHEDULED_BUDGET_USD` / `_TOKENS` do the same. Precedence, field by field: the Agent's own config, then `configure()`, then env, then no cap. Workers and scheduled runs built by the SDK never take them.
 - **Environment**: `setHome(dir)` / `AGENT_ACCEL_HOME` move the whole home; `AGENT_CACHE_DIR` moves only the cache (for read-only or serverless filesystems). `AGENT_CATALOG_REFRESH=off` disables automatic refreshes; `bun run update-models` and `refreshModelCatalog()` still work.
 
@@ -1203,7 +1212,7 @@ bun src/update-models.ts --force  # Force re-download
 bun src/update-models.ts --ttl=24h # Refresh with custom TTL
 ```
 
-Upstream data lags on some inputs (e.g. `gpt-4o` accepts audio). Record
+Upstream data can lag on some inputs. Record
 verified corrections in `MODALITY_OVERRIDES` in `src/models/catalog.ts`
 (keyed `provider/model`, merged over the snapshot) — never edit the JSON
 directly, a refresh would wipe it.
@@ -1211,7 +1220,8 @@ directly, a refresh would wipe it.
 ### Catalog Helpers
 
 * `getModelFromCatalog(provider, modelId)` → `ModelSpec | undefined`, including alias and global fallback handling. Use it for context-window, pricing, and modality checks.
-* `getModelsForProvider(provider)` → returns `ModelSpec[]`.
+* `getModelsForProvider(provider)` → returns `ModelSpec[]`. `GOOGLE_MODELS`, `OPENAI_MODELS`, `ANTHROPIC_MODELS` and `OPENROUTER_MODELS` are lazy arrays of the same (read on first use).
+* `getCacheDir()` and `getCacheFilePath(provider)` → where the cache and one provider's shard live.
 * `refreshModelCatalog(options?)` → programmatically sync with upstream models.dev.
 * `getCatalogStatus()` → diagnostic info on active catalog, provider count, and TTL expiry.
 

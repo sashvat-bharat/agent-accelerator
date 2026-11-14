@@ -6,6 +6,10 @@ import {
   getModelFromCatalog,
   getModelThinkingInfo,
   computeSessionTurnCost,
+  GOOGLE_MODELS,
+  ANTHROPIC_MODELS,
+  OPENAI_MODELS,
+  OPENROUTER_MODELS,
 } from "../src/index.ts";
 
 describe("Model Resolution & Providers", () => {
@@ -42,14 +46,17 @@ describe("Model Resolution & Providers", () => {
     expect((ModelProvider as any).OpenCode).toBeUndefined();
   });
 
-  it("should validate thinking options against models.dev.json", () => {
+  it("should validate thinking options against the catalog", () => {
     const { validateModelThinking, getModelThinkingInfo } = require("../src/index.ts");
     
-    // Model without reasoning (e.g. gpt-4o)
-    const gpt4oInfo = getModelThinkingInfo("openai", "gpt-4o");
-    expect(gpt4oInfo.supportsThinking).toBe(false);
-    expect(() => validateModelThinking("openai", "gpt-4o", "high")).toThrow(/does not support thinking\/reasoning/);
-    expect(() => validateModelThinking("openai", "gpt-4o", "none")).not.toThrow();
+    // Model without reasoning (registered: every model the catalog keeps today reasons)
+    const { registerModel, clearCustomModels } = require("../src/index.ts");
+    registerModel({ id: "plain-llm", provider: "openai", name: "plain-llm", contextWindow: 1000, maxOutputTokens: 100, reasoning: false, capabilities: { supportsThinking: false } });
+    const plainInfo = getModelThinkingInfo("openai", "plain-llm");
+    expect(plainInfo.supportsThinking).toBe(false);
+    expect(() => validateModelThinking("openai", "plain-llm", "high")).toThrow(/does not support thinking\/reasoning/);
+    expect(() => validateModelThinking("openai", "plain-llm", "none")).not.toThrow();
+    clearCustomModels();
 
     // Model with effort reasoning (e.g. gemini-3.7-flash)
     const geminiInfo = getModelThinkingInfo("google", "gemini-3.7-flash");
@@ -78,30 +85,46 @@ describe("Model Resolution & Providers", () => {
 
 describe("catalog lookups do not bleed across providers", () => {
   it("a custom prefix never inherits another provider's entry that shares its id", () => {
-    // gpt-4o is a hosted OpenAI model; a self-hosted endpoint serving a model of
+    // gpt-5 is a hosted OpenAI model; a self-hosted endpoint serving a model of
     // the same name must not pick up its price, modalities or reasoning flags.
-    expect(getModelFromCatalog("openai", "gpt-4o")).toBeDefined();
-    expect(getModelFromCatalog("ollama", "gpt-4o")).toBeUndefined();
-    expect(getModelFromCatalog("my-private-endpoint", "gpt-4o")).toBeUndefined();
+    expect(getModelFromCatalog("openai", "gpt-5")).toBeDefined();
+    expect(getModelFromCatalog("ollama", "gpt-5")).toBeUndefined();
+    expect(getModelFromCatalog("my-private-endpoint", "gpt-5")).toBeUndefined();
   });
 
   it("first-class providers and explicit bare-id lookups still resolve globally", () => {
-    expect(getModelFromCatalog("gpt-4o", "gpt-4o")).toBeDefined();
-    expect(getModelFromCatalog("OpenAI", "gpt-4o")).toBeDefined();
+    expect(getModelFromCatalog("gpt-5", "gpt-5")).toBeDefined();
+    expect(getModelFromCatalog("OpenAI", "gpt-5")).toBeDefined();
+    expect(getModelFromCatalog("anthropic", "claude-opus-5")).toBeDefined();
     expect(getModelFromCatalog("google", "gemini-3.5-flash-lite")).toBeDefined();
   });
 
   it("custom-prefix cost stays unknown (0) while the hosted model is priced", () => {
     const usage = { inputTokens: 1_000_000, outputTokens: 1_000_000, totalTokens: 2_000_000 };
-    expect(computeSessionTurnCost(usage, "openai/gpt-4o")).toBeGreaterThan(0);
-    expect(computeSessionTurnCost(usage, "ollama/gpt-4o")).toBe(0);
+    expect(computeSessionTurnCost(usage, "openai/gpt-5")).toBeGreaterThan(0);
+    expect(computeSessionTurnCost(usage, "ollama/gpt-5")).toBe(0);
   });
 
   it("thinking validation for a custom prefix is permissive (no borrowed reasoning flags)", () => {
-    const info = getModelThinkingInfo("ollama", "gpt-4o");
+    const info = getModelThinkingInfo("ollama", "gpt-5");
     expect(info.supportsThinking).toBe(true);
     expect(info.allowedLevels).toContain("high");
-    // The hosted non-reasoning model keeps its strict answer.
-    expect(getModelThinkingInfo("openai", "gpt-4o").supportsThinking).toBe(false);
+    // The hosted model keeps the levels its catalog entry lists, not the permissive generic set.
+    expect(getModelThinkingInfo("openai", "gpt-5").allowedLevels).not.toContain("max");
+  });
+});
+
+describe("lazy model lists", () => {
+  it("behave like arrays of the newest series of each provider", () => {
+    for (const list of [GOOGLE_MODELS, OPENAI_MODELS, ANTHROPIC_MODELS, OPENROUTER_MODELS]) {
+      expect(Array.isArray(list)).toBe(true);
+      expect(list.length).toBeGreaterThan(0);
+      expect([...list].length).toBe(list.length);
+    }
+    expect(GOOGLE_MODELS.every((m) => /^gemini-[3-9]/.test(m.id))).toBe(true);
+    expect(OPENAI_MODELS.every((m) => /^gpt-[5-9]/.test(m.id))).toBe(true);
+    expect(ANTHROPIC_MODELS.every((m) => /^claude-[a-z]+-[5-9]/.test(m.id))).toBe(true);
+    expect(OPENROUTER_MODELS.every((m) => m.modalities?.output.join() === "text")).toBe(true);
+    expect(GOOGLE_MODELS.find((m) => m.id === "gemini-3.5-flash-lite")?.provider).toBe("google");
   });
 });

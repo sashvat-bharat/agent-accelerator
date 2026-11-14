@@ -186,7 +186,7 @@ Be aware (pre-1.0):
 - Scheduled actions: creating Agent held weakly; `run_now` never retries; no spending guardrail except `dynamicSubagents.scheduledActionBudget`; no timezone/DST logic; run only while the process lives.
 - Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding.
 - Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.
-- The model catalog uses about 18 MB of memory when loaded; the SDK as a whole is not yet tuned for tiny-memory hosts.
+- An idle process that imported the SDK uses about 40 MB (Bun itself 17 MB, `zod` 10 MB, the SDK 12 MB; the model catalog is read lazily and is tiny). 100 parallel streaming runs add about 20 MB at their peak (`bun run bench` measures both). The SDK is not yet tuned further for tiny-memory hosts.
 - The SSRF guard resolves DNS before `fetch` (a DNS-rebinding window remains). Local disk only; no network drives.
 - A major robustness and scale refactor (multi-process safety, durability, memory diet) is planned.
 
