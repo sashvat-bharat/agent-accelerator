@@ -24,7 +24,7 @@ import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type StreamEvent, type SubAgentExecutionMetadata } from "../types/response.ts";
 import { AssistantMessageEventStream, type StreamEventListener } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
-import { resolveModel, resolveModelUnchecked } from "../providers/registry.ts";
+import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry, savedSpend } from "./workers.ts";
@@ -53,11 +53,13 @@ import {
 export { normalizeThinking, resolveEffectiveThinking };
 export type { AgentRunLimits };
 import { NamedSessions } from "./named-sessions.ts";
+import { checkModelAllowed, importSessionInto } from "./agent-session.ts";
+import { doPersist, persistNow } from "./agent-persist.ts";
+import { listTrackedSubAgents, mergeSubagentTraces, trackSubAgent } from "./agent-tracking.ts";
 import { RunControl, isPiped, type QueuedPrompt } from "./run-control.ts";
 import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
 import { mergeCap } from "./defaults.ts";
 import { applyEditable, toEditableConfig } from "./config-blocks.ts";
-import { assertModelAllowed } from "../config/models.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
   runAgentLoop,
@@ -69,14 +71,7 @@ import {
 } from "./loop.ts";
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
 import { createSessionId, nowMs, newRunId, previewPrompt } from "../utils/session.ts";
-import {
-  chargeBudgetUsage,
-  checkBudget,
-  getSubAgentTraceForSessions,
-  subscribeToSubAgentForSessions,
-  listSubAgentTraceIdsForSessions,
-  type SubAgentTrace,
-} from "./delegation.ts";
+import { chargeBudgetUsage, checkBudget, subscribeToSubAgentForSessions, type SubAgentTrace } from "./delegation.ts";
 import {
   addTurn,
   buildUsageReport,
@@ -89,10 +84,8 @@ import {
   type UsageTotals,
 } from "../session/usage.ts";
 import {
-  saveSessionFile,
   sessionDirFor,
   loadSessionDir,
-  findInvalidMessage,
   priceUsage,
   telemetryBus,
   type SessionRunMark,
@@ -102,7 +95,6 @@ import {
 } from "../session/store.ts";
 import { SessionJournal } from "../session/journal.ts";
 import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
-import { isLocalPathInput } from "../utils/safe-io.ts";
 import { clearSessionRouting, normalizeStructuredOutput } from "../providers.ts";
 import type { ModelSpec, StructuredOutputSpec } from "../types/model.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
@@ -111,7 +103,7 @@ import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalo
 import { buildSessionData, type PersistedAgentSession, type SessionTotals } from "../session/store.ts";
 import { SessionTelemetry } from "../session/store.ts";
 
-import { ConfigError, SessionLoadError, ValidationError, isAbortError } from "../types/errors.ts";
+import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (fallback when
@@ -120,23 +112,8 @@ import { ConfigError, SessionLoadError, ValidationError, isAbortError } from "..
  */
 const mergeDisposers = new WeakMap<AbortController, () => void>();
 
-/** A type with its `readonly` markers removed (the typed view `importSession` assigns through). */
-type Writable<T> = { -readonly [K in keyof T]: T[K] };
-
 /** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
 export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
-
-// Throws ModelNotAllowedError when `model` resolves to a model outside the program's list (`setModels`); a model that cannot be resolved at all is left to the run, which reports it; in: the Agent constructor and importSession, out: nothing or the error.
-function checkModelAllowed(model: unknown): void {
-  if (!model) return;
-  let resolved: ReturnType<typeof resolveModelUnchecked>;
-  try {
-    resolved = resolveModelUnchecked(model as string);
-  } catch {
-    return;
-  }
-  assertModelAllowed(resolved.provider.id, resolved.modelId);
-}
 
 /** Thrown when dynamic sub-agent spawning is enabled without an explicit model. */
 export class SubAgentModelError extends ConfigError {
@@ -287,9 +264,9 @@ export class Agent {
     () => new AgentContext(this.getFullInstructions())
   );
   /** Coalesced persistence single-flight flag. */
-  private persistScheduled = false;
+  persistScheduled = false;
   /** Step journal of the persisted session folder (dir mode only). */
-  private journal?: SessionJournal;
+  journal?: SessionJournal;
   /** Log files of tool calls in the persisted session folder (dir mode only). */
   private toolLogs?: ToolLogs;
   private toolLogsDir?: string;
@@ -600,7 +577,7 @@ export class Agent {
   }
 
   // Takes the one-process lock of the folder this Agent persists to: its own session folder, or the folder of a single `persist.file`; throws ConfigError when another live process holds it; in: the constructor and importSession (a new session id is a new folder), out: a `.lock` file there.
-  private lockSessionFolder(): void {
+  lockSessionFolder(): void {
     const cfg = this.persistConfig;
     if (!cfg || this.stateless) return;
     if (cfg.dir) {
@@ -617,7 +594,7 @@ export class Agent {
   }
 
   // Tells the telemetry sink where this Agent's session folder is (only for a session persisted to a folder), so its events are written next to its journal; in: the constructor and importSession, out: the telemetry routing map.
-  private registerTelemetryFolder(): void {
+  registerTelemetryFolder(): void {
     const root = this.persistConfig?.dir;
     if (!root || this.stateless) return;
     try {
@@ -659,7 +636,7 @@ export class Agent {
   }
 
   // Puts saved spending totals back after a restart or import (zeros when the file has none); in: a loaded session's `usage`, out: this.usageTotals.
-  private restoreUsage(saved: unknown): void {
+  restoreUsage(saved: unknown): void {
     Object.assign(this.usageTotals, readUsage(saved));
     if (this.ownsChat) this.chat!.restart(); // a restored session changes the starting point of the chat total
   }
@@ -805,7 +782,7 @@ export class Agent {
   }
 
   // Builds the system prompt: the developer's instructions plus, when thinking is on, the fixed Reasoning Directive; in: this.instructions + thinkingConfig, out: every AgentContext.systemPrompt.
-  private getFullInstructions(): string | undefined {
+  getFullInstructions(): string | undefined {
     const base = this.instructions || "";
     let out = base;
     const isThinkingEnabled =
@@ -1398,40 +1375,17 @@ export class Agent {
    * @example `const trace = agent.track("RAM-RESEARCH-AGENT-9f2c…");`
    */
   track(trackingId: string): SubAgentTrace | undefined {
-    if (!trackingId) return undefined;
-    try {
-      const hit = this.subagentTraces[trackingId];
-      if (hit) return { ...hit, steps: hit.steps.map((s) => ({ ...s })) };
-    } catch {}
-    // Process-wide store, filtered to sessions THIS agent owns: another
-    // agent's workers (e.g. a different tenant) are never reachable.
-    return getSubAgentTraceForSessions(trackingId, this.ownedSessionIds());
+    return trackSubAgent(this, trackingId);
   }
 
-  /** Session ids whose spawned workers this agent may inspect (default + named sessions). */
-  private ownedSessionIds(): ReadonlySet<string> {
+  /** Session ids whose spawned workers this agent may inspect (default + named sessions); read by `agent-tracking.ts`. */
+  ownedSessionIds(): ReadonlySet<string> {
     return new Set<string>([this.sessionId, ...this.named.ids()]);
   }
 
   /** Lists TrackingIDs of worker traces visible to this agent (deduped). */
   listTrackedSubAgents(): string[] {
-    const rawOf = (id: string): string => {
-      const tail = id.split("-").pop() ?? "";
-      return /^[0-9a-f]{32}$/.test(tail) ? tail : id;
-    };
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const id of [
-      ...Object.keys(this.subagentTraces),
-      ...listSubAgentTraceIdsForSessions(this.ownedSessionIds()),
-    ]) {
-      const raw = rawOf(id);
-      if (!seen.has(raw)) {
-        seen.add(raw);
-        out.push(raw);
-      }
-    }
-    return out;
+    return listTrackedSubAgents(this);
   }
 
   /**
@@ -1454,18 +1408,7 @@ export class Agent {
    * coalesced via a `queueMicrotask` single flight.
    */
   persistNow(): void {
-    const cfg = this.persistConfig;
-    if (!cfg || (!cfg.dir && !cfg.file)) return;
-    // No stateless persist by default.
-    try {
-      if (this.stateless && !cfg.allowStateless) return;
-    } catch {}
-    if (this.persistScheduled) return;
-    this.persistScheduled = true;
-    queueMicrotask(() => {
-      this.persistScheduled = false;
-      this.doPersist();
-    });
+    persistNow(this);
   }
 
   // Opens the log file of one tool call when this Agent persists its default session to a folder, else nothing; in: the executor, once per call, out: a writer for `tool-logs/<n>-<tool>.ndjson`.
@@ -1480,65 +1423,14 @@ export class Agent {
     return this.toolLogs!.open(call);
   }
 
-  /** The step journal of this session's folder (recreated when `sessionId` changes). */
-  private journalFor(root: string): SessionJournal {
-    const dir = sessionDirFor(root, this.sessionId);
-    if (this.journal?.dir !== dir) this.journal = new SessionJournal(dir);
-    return this.journal;
-  }
-
   /** Synchronous persistence write behind the coalesced `persistNow()` gate. */
   private doPersist(): void {
-    const cfg = this.persistConfig;
-    if (!cfg || (!cfg.dir && !cfg.file)) return;
-    try {
-      if (this.stateless && !cfg.allowStateless) return;
-    } catch {}
-    try {
-      if (cfg.dir) this.journalFor(cfg.dir).sync(this);
-      else if (cfg.file) saveSessionFile(cfg.file, this, null);
-    } catch (err) {
-      // Surface via hook instead of swallowing silently.
-      try {
-        cfg.onPersistError?.(err);
-      } catch {}
-    }
+    doPersist(this);
   }
 
   /** Merges completed worker metadata (incl. steps) into this agent's trace registry. */
   private mergeSubagentTraces(subagents: SubAgentExecutionMetadata[]): void {
-    if (!subagents || subagents.length === 0) return;
-    const rawOf = (id?: string): string | undefined => {
-      if (!id) return undefined;
-      const tail = id.split("-").pop() ?? "";
-      return /^[0-9a-f]{32}$/.test(tail) ? tail : id;
-    };
-    try {
-      const registry = this.subagentTraces;
-      for (const s of subagents) {
-        const raw = rawOf(s.trackingId);
-        const key = raw || s.name;
-        const existing = registry[key] ?? (raw ? registry[s.trackingId ?? ""] : undefined);
-        if (existing) {
-          existing.status = "done";
-          if (s.steps && s.steps.length > 0 && existing.steps.length === 0) {
-            existing.steps = s.steps.map((x) => ({ ...x }));
-          }
-          if (raw && !registry[raw]) registry[raw] = existing;
-        } else if (raw) {
-          registry[raw] = {
-            trackingId: raw,
-            name: s.name,
-            sessionId: s.sessionId || "",
-            parentSessionId: s.parentSessionId || this.sessionId,
-            status: "done",
-            task: s.task,
-            turns: 0,
-            steps: (s.steps ?? []).map((x) => ({ ...x })),
-          };
-        }
-      }
-    } catch {}
+    mergeSubagentTraces(this, subagents);
   }
 
   /**
@@ -1560,115 +1452,7 @@ export class Agent {
    * @example `const saved = loadSessionFile(".session.json"); if (saved) agent.importSession(saved);`
    */
   importSession(data?: PersistedAgentSession | null): void {
-    if (!data) return;
-    const badIndex = findInvalidMessage(data.messages ?? []);
-    if (badIndex !== -1) {
-      throw new SessionLoadError(
-        `[Agent Accelerator] Cannot import session: messages[${badIndex}] is not a valid message (expected role system|user|assistant|tool and string or part-array content).`
-      );
-    }
-    this.warnOnLocalMediaPaths(data.messages ?? []);
-    checkModelAllowed(data.model); // an imported session may not smuggle in a model outside the list
-    checkModelAllowed(data.subagentModel);
-    const prevSid = this.sessionId;
-    const self: Writable<Agent> = this; // the restored fields are read-only for callers; this typed view lets the class assign them
-    if (data.sessionId) self.sessionId = data.sessionId;
-    if (this.sessionId !== prevSid) {
-      try {
-        this.lockSessionFolder();
-      } catch (err) {
-        self.sessionId = prevSid; // the session belongs to another process: keep ours untouched
-        throw err;
-      }
-      unregisterSessionFolder(prevSid);
-      this.registerTelemetryFolder();
-    }
-    if (data.parentSessionId) this.parentSessionId = data.parentSessionId;
-    if (data.subagents && typeof data.subagents === "object") {
-      try {
-        this.subagentTraces = JSON.parse(JSON.stringify(data.subagents));
-      } catch {
-        this.subagentTraces = { ...data.subagents } as unknown as Record<string, SubAgentTrace>;
-      }
-    }
-    if (data.model) self.modelStringOrSpec = data.model;
-    if (data.thinkingLevel) {
-      const lvl = String(data.thinkingLevel) as ThinkingLevel;
-      self.thinkingConfig =
-        lvl === "none"
-          ? { enabled: false, level: "none", budgetTokens: 0 }
-          : lvl === "dynamic"
-            ? { enabled: true, level: "dynamic", budgetTokens: -1 }
-            : { enabled: true, level: lvl };
-    }
-    if (typeof data.instructions === "string") this.instructions = data.instructions;
-    if (data.cache) self.cache = data.cache;
-    if (data.subagentModel) {
-      self.subagentModel = data.subagentModel;
-      const dyn = this.dynamicSubagents;
-      if (dyn) dyn.model = data.subagentModel;
-    }
-    try {
-      this.context.messages = Array.isArray(data.messages)
-        ? typeof structuredClone === "function"
-          ? structuredClone(data.messages)
-          : JSON.parse(JSON.stringify(data.messages))
-        : [];
-    } catch {
-      this.context.messages = Array.isArray(data.messages) ? [...data.messages] : [];
-    }
-    this.context.thoughtSignatures = [];
-    this.runMarks.splice(
-      0,
-      this.runMarks.length,
-      ...(data.runs ?? []).filter((r) => r.i < this.context.messages.length)
-    );
-    this.restoreUsage(data.usage);
-    if (data.systemPrompt) {
-      this.context.systemPrompt = data.systemPrompt;
-    } else {
-      this.context.systemPrompt = this.getFullInstructions();
-    }
-    // Importing a snapshot invalidates prior provider chaining/routing
-    // for both the previous and the restored session.
-    try {
-      clearInteractionChains(prevSid);
-    } catch {}
-    try {
-      clearSessionRouting(prevSid);
-    } catch {}
-    try {
-      clearInteractionChains(this.sessionId);
-    } catch {}
-    try {
-      clearSessionRouting(this.sessionId);
-    } catch {}
-  }
-
-  /**
-   * A loaded session may reference local files (`image: "/home/me/x.png"`)
-   * that the next turn would read and upload. Without a `fileAccess.roots`
-   * policy that is silent, so surface it once on the telemetry bus.
-   */
-  private warnOnLocalMediaPaths(messages: ReadonlyArray<{ content?: unknown }>): void {
-    if (this.fileAccess?.roots) return; // enforced every turn by the loop
-    const paths: string[] = [];
-    for (const m of messages) {
-      if (!Array.isArray(m.content)) continue;
-      for (const part of m.content as Array<Record<string, unknown>>) {
-        const key = ["image", "audio", "video", "file"].find((k) => k === part?.type);
-        const value = key ? part[key] : undefined;
-        if (isLocalPathInput(value) && !value.startsWith("media/")) paths.push(value);
-      }
-    }
-    if (paths.length === 0) return;
-    try {
-      telemetryBus.emitWarning(
-        "session.local_media_paths",
-        `[Agent Accelerator] Imported session references ${paths.length} local file path(s) that will be read and sent to the provider on the next turn. Set fileAccess.roots to restrict them.`,
-        { count: paths.length, examples: paths.slice(0, 3) }
-      );
-    } catch {}
+    importSessionInto(this, data);
   }
 
   // Adds the user prompt to the target context (fresh context when stateless, stable system prompt, additionalContext as a user prefix) and marks the run start for the default session; in: a run start, out: the new SessionRunMark.
