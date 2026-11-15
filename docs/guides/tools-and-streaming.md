@@ -29,7 +29,7 @@ const res = await agent.run("Where is order A-1001?");
 console.log(res.text, res.toolCalls.length);
 ```
 
-`tool()` options (all in [Reference](../reference.md)): `name`, `description`, `input` (Zod or JSON Schema), `parameters`, `strict`, `timeoutMs`, `maxTries` / `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError` / `redact`, `retry`, `tags`, `output`, `execute`. The executor **enforces** `input`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`. `strict` is passed to providers. `retry`, `tags` and `output` are stored only. `execute` also receives a context with `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `runId`, `emit`, `logger`, `log` and `stop` (see *Asking permission* below).
+`tool()` options (all in [Reference](../reference.md)): `name`, `description`, `input` (Zod or JSON Schema), `parameters`, `strict`, `timeoutMs`, `maxTries` / `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError` / `redact`, `execute`. The executor **enforces** `input`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`. `strict` is passed to providers. Every option above does something (`retry`, `tags` and `output` were removed in 0.7.0). `execute` also receives a context with `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `log` and `stop` (see *Asking permission* below).
 
 How a call is executed, in order:
 1. **Name**: matched exactly, then case/format-insensitively; a near miss returns "Did you mean …?" to the model.
@@ -166,7 +166,7 @@ agent.tools["subagents"] = {
 
 - Define: `tool({ description, input: z.object({...}), execute })`; register: `tools: { name: def }` (record key becomes the name).
 - Defaults: 1 attempt (3 if `idempotent`), result cap 20000 chars, global concurrency 8, repeat guard at the 3rd identical consecutive call.
-- Do not assume `retry`, `tags` or `output` change behavior. There is no `needsApproval`: ask inside `execute` and call `ctx.stop(reason)` to refuse.
+- There is no `needsApproval`: ask inside `execute` and call `ctx.stop(reason)` to refuse.
 - `ctx.stop(reason)` throws (never returns), saves `reason` as the call's result, lets the rest of the batch finish, and ends the run with `finishReason: "stopped"` and no more model turns.
 - Streaming: `agent.stream()` returns an `AssistantMessageEventStream`; always `await stream.result()` for the final `AgentResponse`.
 - `steer`/`queue`/`interrupt` only make sense while `agent.isBusy`.

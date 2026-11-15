@@ -79,7 +79,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 
 | Do not use | Why / instead |
 |---|---|
-| `hooks`, `contextManagement`, `logger` config | Placeholders that only warn. Use `telemetryBus` |
+| `hooks` config | Placeholder that only warns. Use `telemetryBus` (`logger` and `contextManagement` were removed) |
 | `needsApproval` | Removed. Ask inside `execute` and refuse with `ctx.stop(reason)` |
 | Tool `retry` / `tags` / `output` | Stored but not enforced |
 | `thinking.budgetTokens` | Not forwarded by any adapter |

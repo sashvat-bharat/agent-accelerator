@@ -34,7 +34,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
 | `prompts` | `{ [PromptName]: string }` replaces single SDK prompts; unset entries keep `DEFAULT_PROMPTS`. Unknown name or empty text throws `ConfigError`. Workers inherit it | [Prompts](guides/prompts.md) |
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text): a persisted session's events (`tool.*`, resume, retry) to `<home>/sessions/<id>/telemetry.ndjson`, everything else to `<home>/telemetry/<date>.ndjson`. Never outside the home. Off by default | [Safety](guides/safety-and-ops.md) |
-| `logger`, `hooks`, `contextManagement` | **Not implemented**; emit `config.unsupported_option`. Use `telemetryBus` | |
+| `hooks` | **Not implemented**; emits `config.unsupported_option`. Use `telemetryBus`. (`logger` and `contextManagement` were removed in 0.7.0.) | |
 
 **`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each chat worker's own per-run cap, default none), `scheduledActionBudget` (the same shape, the cap of each scheduled-action run, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).
 **`midSession`**: `mode`, `whenBusy`, `maxQueued` (20).
@@ -60,7 +60,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `headers` | Extra request headers |
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
 | `toolChoice`, `maxOutputTokens` | Same as config |
-| `retry`, `fetch`, `env`, `logger` | Same as config |
+| `retry`, `fetch`, `env` | Same as config |
 
 ## Response
 
@@ -94,13 +94,11 @@ Every event has `type` and `schemaVersion`.
 
 ## Tool definition
 
-`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `retry`, `repeatable`, `maxResultChars`, `redactError`, `redact`, `tags`, `output`, `execute`. `__brand` is internal; never set it.
+`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`, `redact`, `execute`. (`retry`, `tags` and `output` were removed in 0.7.0: they were stored and never used.) `__brand` is internal; never set it.
 
-| Enforced by the executor | Stored only (no effect today) |
-|---|---|
-| `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`/`redact`; `strict` goes to the provider | `retry`, `tags`, `output` |
+The executor enforces `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars` and `redactError`/`redact`; `strict` goes to the provider. Every tool option does something.
 
-`execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `runId`, `emit`, `logger`, `stop(reason)` (ends the run after this batch with `finishReason: "stopped"`; the reason is the call's result; throws, never retried), `log(message, data?)` (writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the Agent persists to a folder, else a no-op). A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
+`execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `stop(reason)` (ends the run after this batch with `finishReason: "stopped"`; the reason is the call's result; throws, never retried), `log(message, data?)` (writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the Agent persists to a folder, else a no-op). A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
 
 ## Telemetry codes
 

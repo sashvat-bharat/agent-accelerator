@@ -259,7 +259,7 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 Be aware (pre-1.0):
 - **One process per session folder.** A session you persist is locked (`<session folder>/.lock`): a second process opening the same session fails fast with a `ConfigError` instead of silently losing updates, while other sessions of the same home stay free; a lock left by a killed process is taken over, and local disks only. Scheduled actions can be shared by several processes (one folder and a short lock per action). Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `task.json`, `delivery.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
 - Scheduled actions: creating Agent held weakly; `run_now` never retries; no spending guardrail except `dynamicSubagents.scheduledActionBudget`; no timezone/DST logic; run only while the process lives.
-- Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding.
+- Not implemented: the `hooks` config key (it only warns); `thinking.budgetTokens` forwarding.
 - Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.
 - An idle process that imported the SDK uses about 40 MB (Bun itself 17 MB, `zod` 10 MB, the SDK 12 MB; the model catalog is read lazily and is tiny). 100 parallel streaming runs add about 20 MB at their peak (`bun run bench` measures both). The SDK is not yet tuned further for tiny-memory hosts.
 - The SSRF guard resolves DNS before `fetch` (a DNS-rebinding window remains). Local disk only; no network drives.
@@ -269,7 +269,7 @@ Be aware (pre-1.0):
 
 - Set `maxTurns`, `limits.deadlineMs` and `budget` for anything that runs unattended; pass `signal` per call.
 - Branch on error classes, not message text; `err.partial` holds progress; `err.retryable` tells you whether to retry.
-- Do not rely on `hooks` or `logger`; subscribe to `telemetryBus` instead. To require approval for a tool, ask inside `execute` and refuse with `ctx.stop(reason)`.
+- Do not rely on `hooks`; subscribe to `telemetryBus` instead. To require approval for a tool, ask inside `execute` and refuse with `ctx.stop(reason)`.
 - Keep `captureRaw` at `"redacted"` unless debugging locally.
 - Default to `fileAccess: { roots: [...] }` whenever file paths or sessions come from outside your program.
 - See also: [Tools and streaming](tools-and-streaming.md), [Multi-agent and scheduling](multi-agent.md), [Reference](../reference.md).

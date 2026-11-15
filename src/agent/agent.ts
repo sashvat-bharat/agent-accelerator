@@ -514,15 +514,13 @@ export class Agent {
     this.forkConfig = { ...config };
     this.captureRaw = config.captureRaw;
     this.budget = config.budget ? { ...config.budget } : undefined;
-    for (const key of ["hooks", "contextManagement", "logger"] as const) {
-      if (config[key] !== undefined) {
-        // Declared for forward compatibility only: say so instead of silently ignoring.
-        telemetryBus.emitWarning(
-          "config.unsupported_option",
-          `[Agent Accelerator] AgentConfig.${key} is accepted for forward compatibility but is not implemented yet; it has no effect. Attach to telemetryBus.onEvent for observability.`,
-          { option: key }
-        );
-      }
+    if (config.hooks !== undefined) {
+      // Declared for forward compatibility only: say so instead of silently ignoring.
+      telemetryBus.emitWarning(
+        "config.unsupported_option",
+        "[Agent Accelerator] AgentConfig.hooks is accepted for forward compatibility but is not implemented yet; it has no effect. Attach to telemetryBus.onEvent for observability.",
+        { option: "hooks" }
+      );
     }
     if (config.telemetry?.persist) persistTelemetry(this.home);
     this.googleTier = config.googleTier === "paid" || config.googleTier === "free" ? config.googleTier : undefined;

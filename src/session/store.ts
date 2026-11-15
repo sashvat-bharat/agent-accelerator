@@ -1561,23 +1561,3 @@ export function priceUsage(
     },
   };
 }
-
-/**
- * Computes and attaches catalog pricing to a usage snapshot.
- * Keeps provider-reported costs untouched; returns the cost (or undefined
- * when unknown). Never fabricates a 0 object for unknown pricing.
- */
-export function addCostToUsage(
-  usage: TokenUsage,
-  spec?: ModelSpec,
-  opts?: { serviceTier?: ServiceTier | string }
-): TokenUsage["cost"] | undefined {
-  if (usage?.cost && typeof usage.cost.totalCost === "number" && usage.cost.totalCost >= 0) {
-    return usage.cost;
-  }
-  const priced = priceUsage(usage, spec, opts);
-  if (!priced) return usage.cost;
-  const { source: _source, breakdown: _breakdown, ...cost } = priced;
-  usage.cost = cost;
-  return usage.cost;
-}

@@ -35,14 +35,6 @@ export interface RetryPolicyConfig {
   budgetMs?: number;
 }
 
-/** Minimal logger surface for Agent/loop telemetry. */
-export interface AgentLogger {
-  debug?: (...args: unknown[]) => void;
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-}
-
 /** Canonical tool-selection control. String form is the portable subset. */
 export type ToolChoiceOption =
   | "auto"
@@ -180,12 +172,8 @@ export interface AgentConfig {
   fetch?: typeof fetch;
   /** Provider/env overrides forwarded to key resolution. */
   env?: Record<string, string>;
-  /** @deprecated Not implemented yet; subscribe with `telemetryBus.onEvent` instead. Passing it emits a `config.unsupported_option` warning. */
-  logger?: AgentLogger;
   /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   hooks?: unknown;
-  /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
-  contextManagement?: unknown;
   /**
    * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning text). An event
    * that belongs to a persisted session (`data.sessionId`: tool events, resume and retry events) goes to
@@ -400,8 +388,6 @@ export interface AgentRunOptions {
   fetch?: typeof fetch;
   /** Per-run env overrides. */
   env?: Record<string, string>;
-  /** Per-run logger. */
-  logger?: AgentLogger;
 }
 
 /** Turn summary emitted to `AgentRunOptions.onTurn` after each loop turn. */

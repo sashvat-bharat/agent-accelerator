@@ -341,7 +341,6 @@ export type {
   ToolCallRecord,
   ToolResultRecord,
   StandardToolDeclaration,
-  ToolLogger,
   ToolEmitFn,
 } from "./types/tool.ts";
 
@@ -376,7 +375,6 @@ export type {
   ThinkingOption,
   StructuredOutputOption,
   RetryPolicyConfig,
-  AgentLogger,
   ToolChoiceOption,
   Budget,
   BudgetState,

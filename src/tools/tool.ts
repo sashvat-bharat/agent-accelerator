@@ -118,18 +118,6 @@ export interface CreateToolOptions<TInput = any, TOutput = any> {
    * `redactError` wins.
    */
   redact?: (err: unknown) => string;
-  /**
-   * Explicit retry policy. Preferred over bare `maxTries` for new
-   * code; the executor reads via `(toolDef as any).retry`.
-   */
-  retry?: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number };
-  /** Free-form tags for grouping/filtering tools (e.g. `["web", "readonly"]`). */
-  tags?: string[];
-  /**
-   * Optional output schema (Zod or JSON Schema, stored as `unknown` so `zod`
-   * stays optional for type-only consumers).
-   */
-  output?: unknown;
   /** Implementation invoked with validated input and execution metadata. */
   execute: ToolExecuteFn<TInput, TOutput>;
 }
@@ -165,8 +153,7 @@ export function tool<TInput = any, TOutput = any>(
 ): ToolDefinition<TInput, TOutput> {
   // Names are validated at registration (record-key fallback included).
   if (options.name !== undefined) assertValidToolName(options.name);
-  // ToolDefinition (src/types/tool.ts) carries the v2 policies as typed
-  // optionals; the executor additionally reads them via `(toolDef as any).*`.
+  // ToolDefinition (src/types/tool.ts) carries the policies as typed optionals; the executor enforces them.
   return {
     name: options.name,
     description: options.description,
@@ -183,9 +170,6 @@ export function tool<TInput = any, TOutput = any>(
     ...(options.redactError !== undefined ? { redactError: options.redactError } : {}),
     ...(options.redactError === undefined && options.redact !== undefined ? { redactError: options.redact } : {}),
     ...(options.redact !== undefined ? { redact: options.redact } : {}),
-    ...(options.retry !== undefined ? { retry: options.retry } : {}),
-    ...(options.tags !== undefined ? { tags: options.tags } : {}),
-    ...(options.output !== undefined ? { output: options.output } : {}),
     ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
   } as ToolDefinition<TInput, TOutput>;
 }
