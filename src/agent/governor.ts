@@ -5,6 +5,27 @@
  * has passed. The loops reach it through `withProviderSlot`.
  */
 import { readRetryAfterMs } from "../utils/retry.ts";
+import { telemetryBus } from "../telemetry.ts";
+
+// A one-line problem with a `concurrency` setting, or undefined when it is valid; in: configure(), out: its ConfigError.
+export function checkConcurrencyConfig(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw))
+    return "expected an object like { maxRequests: 8, perProvider: { google: 4 } }";
+  const r = raw as Record<string, unknown>;
+  const whole = (v: unknown): boolean => typeof v === "number" && Number.isInteger(v) && v >= 1;
+  for (const k of Object.keys(r)) {
+    if (k !== "maxRequests" && k !== "perProvider") return `unknown key "${k}" (use maxRequests or perProvider)`;
+  }
+  if (r["maxRequests"] !== undefined && !whole(r["maxRequests"])) return "maxRequests must be a whole number >= 1";
+  const per = r["perProvider"];
+  if (per !== undefined) {
+    if (!per || typeof per !== "object" || Array.isArray(per))
+      return "perProvider must be an object like { google: 4 }";
+    for (const [name, n] of Object.entries(per))
+      if (!whole(n)) return `perProvider.${name} must be a whole number >= 1`;
+  }
+  return undefined;
+}
 
 /** What the governor limits; every key is optional and unset means unlimited. */
 export interface GovernorLimits {
@@ -91,6 +112,12 @@ export class Governor {
     const until = this.clock.now() + Math.min(ms, MAX_PAUSE_MS);
     if (until <= (this.pausedUntil.get(provider) ?? 0)) return;
     this.pausedUntil.set(provider, until);
+    telemetryBus.emit({
+      code: "concurrency.paused",
+      message: `[Agent Accelerator] ${provider} answered 429: no new calls to it for ${until - this.clock.now()} ms.`,
+      level: "warn",
+      data: { provider, ms: until - this.clock.now(), waiting: this.queue.length },
+    });
     this.wake.get(provider)?.();
     this.wake.set(
       provider,
@@ -99,6 +126,11 @@ export class Governor {
         this.pump();
       }, until - this.clock.now())
     );
+  }
+
+  /** The providers that are paused right now. */
+  pausedProviders(): string[] {
+    return [...this.pausedUntil.keys()].filter((p) => this.isPaused(p));
   }
 
   /** Cancels the pending wake-ups (the governor was replaced). */
@@ -169,6 +201,11 @@ export class Governor {
       };
       signal?.addEventListener("abort", waiter.onAbort, { once: true });
       this.queue.push(waiter);
+      telemetryBus.emit({
+        code: "concurrency.queued",
+        message: `[Agent Accelerator] a ${provider} call waits for a free slot (${this.queue.length} waiting, ${this.active} running).`,
+        data: { provider, waiting: this.queue.length, active: this.active, paused: this.isPaused(provider) },
+      });
     });
   }
 }
@@ -215,4 +252,15 @@ export async function withProviderSlot<T>(
   } finally {
     release();
   }
+}
+
+/** What the concurrency limit is doing right now: whether limits are set, calls running and waiting (overall and per provider), and the providers paused after a 429. */
+export function getConcurrencyStatus(): {
+  limited: boolean;
+  active: number;
+  waiting: number;
+  byProvider: Record<string, number>;
+  paused: string[];
+} {
+  return { limited: current.limited, ...current.status(), paused: current.pausedProviders() };
 }

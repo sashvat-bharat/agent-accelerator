@@ -55,3 +55,15 @@ await Promise.all(
 clearInterval(sampler);
 row(`peak with ${streams} streams in flight`, peak, `${(performance.now() - t0).toFixed(0)} ms, +${((peak - afterImport) / 1048576).toFixed(1)} MB over import`);
 row("after they finished (gc)", rss());
+
+// The same streams again with the concurrency limit on: at most 10 in flight, the rest wait in line (cheap: a waiter is a small object).
+sdk.configure({ concurrency: { maxRequests: 10 } });
+peak = 0;
+const sampler2 = setInterval(() => (peak = Math.max(peak, process.memoryUsage().rss)), 5);
+const t1 = performance.now();
+await Promise.all(
+  Array.from({ length: streams }, (_, i) => agent.fork(`bench-l-${i}`).stream("hi", { sessionId: `bench-l-${i}` }).result())
+);
+clearInterval(sampler2);
+row(`peak, ${streams} streams, limit 10`, peak, `${(performance.now() - t1).toFixed(0)} ms, ${JSON.stringify(sdk.getConcurrencyStatus())}`);
+sdk.configure({});

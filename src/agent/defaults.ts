@@ -1,22 +1,25 @@
 /**
- * Developer defaults for the spending caps, set in code (`configure()`) or through env vars, so one place can cap every
- * agent of a program. Precedence, per field (`maxCostUsd`, `maxTotalTokens`): the Agent's own config, then `configure()`,
+ * Developer defaults for the spending caps (and the program-wide concurrency limit), set in code (`configure()`) or, for the caps, through env
+ * vars, so one place can cap every agent of a program. Precedence, per field (`maxCostUsd`, `maxTotalTokens`): the Agent's own config, then `configure()`,
  * then the env var, then no cap. Only agents YOU construct take defaults: the workers and scheduled runs the SDK builds
  * itself never do (a chat worker joins its parent's cap; a scheduled run has its own).
  */
 import { ConfigError } from "../types/errors.ts";
 import { getEnv } from "../utils/env.ts";
 import { checkUsageLimitConfig, type UsageLimitConfig } from "./usage-limit.ts";
+import { checkConcurrencyConfig, setGovernorLimits, type GovernorLimits } from "./governor.ts";
 
-/** What `configure()` can set; every key is optional and has the same meaning as the Agent option of the same name. */
+/** What `configure()` can set; every key is optional. The caps mean the same as the Agent option of the same name; `concurrency` is program-wide. */
 export interface AgentDefaults {
   /** Default for `AgentConfig.usageLimit` (the chat-wide cap). Env: `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS`. */
   usageLimit?: UsageLimitConfig;
   /** Default for `dynamicSubagents.scheduledActionBudget`. Env: `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS`. */
   scheduledActionBudget?: UsageLimitConfig;
+  /** How many provider calls may run at once: `{ maxRequests, perProvider: { google: 4 } }`. Unset = no limit. Calls over the limit wait in line; a 429 with a `Retry-After` pauses that provider. See `getConcurrencyStatus()`. */
+  concurrency?: GovernorLimits;
 }
 
-type CapName = keyof AgentDefaults;
+type CapName = "usageLimit" | "scheduledActionBudget";
 
 const ENV: Record<CapName, { maxCostUsd: string; maxTotalTokens: string }> = {
   usageLimit: { maxCostUsd: "AGENT_ACCEL_USAGE_LIMIT_USD", maxTotalTokens: "AGENT_ACCEL_USAGE_LIMIT_TOKENS" },
@@ -40,21 +43,23 @@ export function configure(defaults: AgentDefaults = {}): void {
     throw new ConfigError("[Agent Accelerator] configure() expects an object like { usageLimit: { maxCostUsd: 5 } }.");
   }
   for (const key of Object.keys(defaults)) {
-    if (!(key in ENV)) {
+    if (!(key in ENV) && key !== "concurrency") {
       throw new ConfigError(
-        `[Agent Accelerator] configure(): unknown setting "${key}" (known: ${Object.keys(ENV).join(", ")}).`
+        `[Agent Accelerator] configure(): unknown setting "${key}" (known: ${[...Object.keys(ENV), "concurrency"].join(", ")}).`
       );
     }
     const value = (defaults as Record<string, unknown>)[key];
     if (value === undefined) continue;
-    const problem = checkUsageLimitConfig(value);
+    const problem = key === "concurrency" ? checkConcurrencyConfig(value) : checkUsageLimitConfig(value);
     if (problem) throw new ConfigError(`[Agent Accelerator] configure(): invalid ${key}: ${problem}.`);
   }
+  const { concurrency, ...caps } = defaults;
   configured = Object.fromEntries(
-    Object.entries(defaults)
+    Object.entries(caps)
       .filter(([, v]) => v !== undefined)
       .map(([k, v]) => [k, { ...(v as UsageLimitConfig) }])
   ) as AgentDefaults;
+  setGovernorLimits(concurrency ? { ...concurrency, perProvider: { ...concurrency.perProvider } } : {});
 }
 
 // Reads one cap field from its env var: undefined when unset, a ConfigError naming the variable when it is not a number above 0; in: mergeCap, out: the value.

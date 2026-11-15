@@ -125,6 +125,8 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed / resuming (or a prompt that was waiting) failed |
 | `worker.invalid` | A saved `worker.json` is damaged and that worker is skipped |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
+| `concurrency.queued` | A provider call had to wait for a free slot (`provider`, `waiting`, `active`, `paused`); only with `configure({ concurrency })` |
+| `concurrency.paused` | A provider answered 429 with a `Retry-After`: no new calls to it for `ms` (`provider`, `ms`, `waiting`) |
 | `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle; payloads in [Scheduled action files](scheduled-action-files.md#events) |
 
 ## Errors
@@ -162,6 +164,7 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `<PREFIX>_API_KEY`, `<PREFIX>_BASE_URL` | Any OpenAI-compatible endpoint (for `PREFIX/model`), e.g. `GROQ_API_KEY` and `GROQ_BASE_URL`. Base URL is required |
 | `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
 | `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |
+| `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | Code only (no env var): limit provider calls in flight, see [Safety](guides/safety-and-ops.md#concurrency-limit) |
 | `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS` | Default `usageLimit` for every agent you build (see `configure()` and the safety guide) |
 | `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |
 | `AGENT_CATALOG_REFRESH=off` | Disable automatic model-catalog refresh |

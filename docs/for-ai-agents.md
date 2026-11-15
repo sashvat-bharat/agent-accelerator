@@ -26,6 +26,7 @@
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
 | Change a prompt the SDK sends (tool refusal, worker header, tool manual) | `prompts: { name: "text with {{placeholders}}" }`; keep the original unless you must | [Prompts](guides/prompts.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
+| Limit provider calls running at once (many agents, workers, 429s) | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | [Safety](guides/safety-and-ops.md#concurrency-limit) |
 | What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
 | Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, `allowedModels` | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | Observe | `telemetryBus.onEvent` |

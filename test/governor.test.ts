@@ -313,3 +313,51 @@ describe("429 pause", () => {
     expect(ran).toBe(true);
   });
 });
+
+describe("public setting", () => {
+  test("configure({ concurrency }) sets the limits, configure({}) clears them", async () => {
+    const { configure, getConcurrencyStatus } = await import("../src/index.ts");
+    configure({ concurrency: { maxRequests: 2, perProvider: { google: 1 } } });
+    expect(getConcurrencyStatus()).toEqual({ limited: true, active: 0, waiting: 0, byProvider: {}, paused: [] });
+    const r = await withProviderSlot("google", undefined, async () => getConcurrencyStatus());
+    expect(r.active).toBe(1);
+    expect(r.byProvider).toEqual({ google: 1 });
+    configure({});
+    expect(getConcurrencyStatus().limited).toBe(false);
+  });
+
+  test("a bad concurrency value is a ConfigError naming the problem", async () => {
+    const { configure } = await import("../src/index.ts");
+    for (const bad of [{ maxRequests: 0 }, { maxRequests: 1.5 }, { perProvider: { a: -1 } }, { perProvider: [] }, { nope: 1 }, 5]) {
+      expect(() => configure({ concurrency: bad as never })).toThrow(/configure\(\): invalid concurrency/);
+    }
+  });
+
+  test("queueing and pausing are reported on the telemetry bus", async () => {
+    const { telemetryBus } = await import("../src/index.ts");
+    const seen: Array<{ code: string; data: any }> = [];
+    const off = telemetryBus.onEvent((e) => e.code.startsWith("concurrency.") && seen.push({ code: e.code, data: e.data }));
+    const clock = fakeClock();
+    const g = new Governor({ maxRequests: 1 }, clock);
+    const first = await g.acquire("a");
+    const second = g.acquire("a");
+    g.pause("a", 1_000);
+    first();
+    clock.advance(1_000);
+    (await second)();
+    off();
+    expect(seen.map((e) => e.code)).toEqual(["concurrency.queued", "concurrency.paused"]);
+    expect(seen[0]!.data).toMatchObject({ provider: "a", waiting: 1, active: 1 });
+    expect(seen[1]!.data).toMatchObject({ provider: "a", ms: 1_000 });
+  });
+
+  test("getConcurrencyStatus lists paused providers", async () => {
+    const { getConcurrencyStatus } = await import("../src/index.ts");
+    const clock = fakeClock();
+    setGovernorLimits({ maxRequests: 3 }, clock);
+    getGovernor().pause("openai", 2_000);
+    expect(getConcurrencyStatus().paused).toEqual(["openai"]);
+    clock.advance(2_000);
+    expect(getConcurrencyStatus().paused).toEqual([]);
+  });
+});

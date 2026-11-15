@@ -84,6 +84,24 @@ A scheduled-action run is capped by `scheduledActionBudget` only. Scheduled acti
 
 Unlimited also means unbounded cost and memory when a model keeps starting workers. For unattended runs set `usageLimit`, `workerBudget`, `scheduledActionBudget`, `maxSpawn` and/or `maxDepth`. The only other default cap is the waiting-prompt buffer: `midSession.maxQueued` / `maxSteers` (20 each), which protects memory and can be raised.
 
+### Concurrency limit
+
+Many agents, workers and scheduled runs can ask a provider for answers at the same moment, and providers answer a flood with 429. Set how many provider calls may run at once, in code, once at startup:
+
+```ts
+import { configure, getConcurrencyStatus } from "agent-accelerator";
+
+configure({ concurrency: { maxRequests: 8, perProvider: { google: 4 } } });
+console.log(getConcurrencyStatus()); // { limited, active, waiting, byProvider, paused }
+```
+
+- Off until you set it (no limit). `maxRequests` is the limit across every provider, `perProvider` one limit per provider id (`google`, `openai`, `openrouter`, or a custom prefix). Whole numbers, 1 or more; a wrong value throws a `ConfigError`.
+- It covers every model call of every agent in the process, workers and scheduled runs included. A call over the limit waits in line, in the order it arrived. A call that waits only for its own provider's limit never holds back calls to other providers.
+- A slot is held from the request until the answer ends, the call fails or the stream is cancelled. Time spent waiting does not count toward `requestTimeoutMs`, `firstByteTimeoutMs` or `streamIdleTimeoutMs`, which start once the call really begins. Aborting a run (signal, `interrupt()`) also ends its wait.
+- A call that fails with HTTP 429 and a `Retry-After` pauses that provider: no new call to it starts until the wait has passed (never more than 60 s). Calls already running are not touched and other providers keep going.
+- `configure()` replaces the previous call, so `configure({})` removes the limit. It is one setting for the whole process, not per agent.
+- Events on `telemetryBus`: `concurrency.queued` (a call had to wait: `provider`, `waiting`, `active`, `paused`) and `concurrency.paused` (`provider`, `ms`, `waiting`).
+
 ### Network timeouts
 
 The only limits that are on by default are three network timeouts. They are not budgets: they exist so a silent connection fails instead of hanging forever. Change them in `limits` (agent level; workers and scheduled runs inherit them):
@@ -163,7 +181,7 @@ const off = telemetryBus.onEvent((e) => {
 
 Tool calls emit `tool.*` lifecycle events (`call_started`, `progress`, `call_failed`, ...). To keep a crash-proof trace, set `telemetry: { persist: true }`: every event (except reasoning text) is appended, one line each: an event of a persisted session (the `tool.*` events, `agent.resumed`, `agent.run_retry`) to `<home>/sessions/<id>/telemetry.ndjson` next to that session's journal and tool logs (a worker's events to its own folder), everything else to `<home>/telemetry/<date>.ndjson`. Nothing is ever written outside the home: a session saved to a `persist.dir` outside it logs to the daily file. A `tool.call_started` with no ending event was in flight when the process died; the last `tool.progress` shows how far it got. Nothing is written unless you opt in.
 
-The bus is in-process, delivers synchronously, isolates listener errors and prints nothing by default. Events: provider warnings (`provider_warning`), Google chain anomalies, stream anomalies, `cache_clamp`, catalog and session notices, `config.*` warnings, `agent.max_turns_truncated`, `turn.thinking`, and `scheduled_action.*` (full list in [Reference](../reference.md)). `AgentResponse.raw` and the stream `start` event show the wire exchange according to `captureRaw`.
+The bus is in-process, delivers synchronously, isolates listener errors and prints nothing by default. Events: provider warnings (`provider_warning`), Google chain anomalies, stream anomalies, `cache_clamp`, catalog and session notices, `config.*` warnings, `agent.max_turns_truncated`, `turn.thinking`, and `concurrency.*` and `scheduled_action.*` (full list in [Reference](../reference.md)). `AgentResponse.raw` and the stream `start` event show the wire exchange according to `captureRaw`.
 
 ## Security
 
