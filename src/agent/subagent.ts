@@ -4,6 +4,7 @@ import type { ToolDefinition } from "../types/tool.ts";
 import { agentToTool } from "./delegation.ts";
 import { resolveSubAgentModel } from "./worker.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
+import { chosenModel } from "../config/models.ts";
 
 /** AgentConfig alias for a delegated worker agent. */
 export interface SubAgentConfig extends AgentConfig {}
@@ -19,7 +20,7 @@ export interface SubAgentConfig extends AgentConfig {}
 export function agentFromEnv(config?: Omit<AgentConfig, "model"> & { model?: AgentConfig["model"] }): Agent {
   return new Agent({
     ...config,
-    model: config?.model ?? getModel() ?? getSubModel(),
+    model: config?.model ?? chosenModel() ?? getModel() ?? getSubModel(),
   } as AgentConfig);
 }
 

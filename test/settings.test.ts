@@ -1,9 +1,22 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { ConfigError, SettingNotEditableError, getConfigs, setConfig, setConfigs } from "../src/index.ts";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { ConfigError, SettingNotEditableError, getConfigs, setConfig, setConfigs, setHome } from "../src/index.ts";
 import { getSetting, parseConfigs, resetConfigs } from "../src/config/settings.ts";
 import { isRetryableRun } from "../src/utils/retry.ts";
 
-afterEach(() => resetConfigs());
+// Every test works in its own home, so the user's configs.json never lands in the repo.
+let home = "";
+beforeEach(() => {
+  home = fs.mkdtempSync(path.join(os.tmpdir(), "settings-"));
+  setHome(home);
+});
+afterEach(() => {
+  resetConfigs();
+  setHome(undefined);
+  fs.rmSync(home, { recursive: true, force: true });
+});
 
 // The message of the ConfigError a bad configs value throws.
 const problems = (json: unknown): string => {

@@ -9,8 +9,14 @@
  * Every setting is `hidden` unless its key is listed in `editable`. A hidden setting only ever has the developer's value.
  * An editable one has the user's value when they set one, else the developer's value, else the built-in default.
  * With no `setConfigs` call at all there is no developer policy: every setting is editable.
+ *
+ * The user's values live in `<home>/configs.json` (see `user-file.ts`): `setConfig` saves there, and a hand edit is read
+ * the next time the process starts (or the home changes). A value in the file that is unknown, invalid or for a hidden
+ * setting is ignored with a warning on the telemetry bus.
  */
 import { ConfigError, SettingNotEditableError } from "../types/errors.ts";
+import { currentUserFile, invalidateUserFile, saveUserFile, warnOnce, configsPath } from "./user-file.ts";
+import { resolveHome } from "../utils/home.ts";
 
 /** One value-checking rule: returns the cleaned value, or a one-line problem. */
 type Check = (v: unknown) => { value: unknown } | { problem: string };
@@ -190,7 +196,9 @@ export function parseConfigs(json: unknown): Policy {
 }
 
 let policy: Policy | undefined;
-const user = new Map<SettingKey, unknown>();
+// Bumped whenever the developer's policy changes, so the checked user values are rebuilt.
+let generation = 0;
+let memo: { file: object; generation: number; values: Map<SettingKey, unknown> } | undefined;
 
 /**
  * Sets the program's settings from the exact `configs.json` shape (see the file header): `values` are the developer's
@@ -199,6 +207,44 @@ const user = new Map<SettingKey, unknown>();
  */
 export function setConfigs(json: unknown): void {
   policy = parseConfigs(json);
+  generation++;
+}
+
+// The user's saved setting values that pass the checks (known key, valid value, not hidden), warning once about each that does not; memoized per file version and policy; in: getSetting and getConfigs, out: key -> frozen value.
+function userValues(): Map<SettingKey, unknown> {
+  const file = currentUserFile();
+  if (memo?.file === file && memo.generation === generation) return memo.values;
+  const values = new Map<SettingKey, unknown>();
+  const at = configsPath(resolveHome());
+  for (const [key, raw] of Object.entries(file.settings)) {
+    if (!KEYS.includes(key as SettingKey)) {
+      warnOnce("config.file_ignored_key", `${at}: "${key}" is not a known setting and is ignored.`, {
+        key,
+        reason: "unknown",
+      });
+      continue;
+    }
+    const k = key as SettingKey;
+    if (!isEditable(k)) {
+      warnOnce(
+        "config.file_ignored_key",
+        `${at}: "${key}" is not editable in this program, so the value in the file is ignored.`,
+        { key, reason: "hidden" }
+      );
+      continue;
+    }
+    const r = checkValue(k, raw);
+    if ("problem" in r) {
+      warnOnce("config.file_ignored_key", `${at}: ${r.problem} The value in the file is ignored.`, {
+        key,
+        reason: "invalid",
+      });
+      continue;
+    }
+    values.set(k, freeze(r.value));
+  }
+  memo = { file, generation, values };
+  return values;
 }
 
 // True when the end user may change this setting: always without a developer policy, else only when listed in `editable`; in: getConfigs, setConfig and the readers, out: a boolean.
@@ -209,8 +255,9 @@ function isEditable(key: SettingKey): boolean {
 /** The value of one setting as the SDK reads it, or `undefined` for "built-in default": a hidden setting has only the developer's value; an editable one the user's, else the developer's. Internal. */
 export function getSetting<K extends SettingKey>(key: K): unknown {
   const dev = policy?.values[key];
+  const mine = userValues(); // also reports file entries the program does not allow
   if (!isEditable(key)) return dev;
-  return user.has(key) ? user.get(key) : dev;
+  return mine.has(key) ? mine.get(key) : dev;
 }
 
 /** The settings the end user may change, with their current value (`null` = not set: the built-in default applies). Hidden settings never appear. */
@@ -221,9 +268,9 @@ export function getConfigs(): Readonly<Partial<Record<SettingKey, unknown>>> {
 }
 
 /**
- * Changes one editable setting. `null` (or `undefined`) removes the user's value, so the developer's value or the built-in
- * default applies again. Throws a `ConfigError` for an unknown key or a bad value, and a `SettingNotEditableError` when the
- * program keeps the setting hidden; nothing changes in either case.
+ * Changes one editable setting and saves it in `<home>/configs.json` (the folder is created on the first write). `null` (or `undefined`) removes the user's value, so the developer's value or the built-in
+ * default applies again. Throws a `ConfigError` for an unknown key, a bad value or a file that cannot be written, and a
+ * `SettingNotEditableError` when the program keeps the setting hidden; nothing changes in any of these cases.
  */
 export function setConfig(key: string, value: unknown): void {
   if (!KEYS.includes(key as SettingKey))
@@ -235,16 +282,17 @@ export function setConfig(key: string, value: unknown): void {
       `[Agent Accelerator] Setting "${key}" is not editable: the program keeps it hidden.`
     );
   if (value === null || value === undefined) {
-    user.delete(k);
+    saveUserFile((f) => void delete f.settings[k]);
     return;
   }
   const r = checkValue(k, value);
   if ("problem" in r) throw new ConfigError(`[Agent Accelerator] Invalid value for ${r.problem}`);
-  user.set(k, freeze(r.value));
+  saveUserFile((f) => void (f.settings[k] = r.value));
 }
 
-/** Forgets the developer's settings and every user value (tests only; not exported from the barrel). */
+/** Forgets the developer's settings and what was read from the user's file (tests only; not exported from the barrel). The file itself is not touched. */
 export function resetConfigs(): void {
   policy = undefined;
-  user.clear();
+  generation++;
+  invalidateUserFile();
 }

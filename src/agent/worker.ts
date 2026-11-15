@@ -4,6 +4,7 @@ import type { AgentConfig } from "../types/agent.ts";
 import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
+import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 import { resolveModelUnchecked } from "../providers/registry.ts";
 import { ConfigError } from "../types/errors.ts";
 
@@ -90,7 +91,7 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
   ) {
     modelStringOrSpec = rawModel as Record<string, unknown>;
   } else {
-    modelStringOrSpec = (rawModel as string | undefined) || getModel();
+    modelStringOrSpec = (rawModel as string | undefined) || chosenModel() || getModel();
   }
   return { modelStringOrSpec: modelStringOrSpec as string | Record<string, unknown> | undefined, rawModel };
 }
@@ -113,7 +114,7 @@ export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | R
   ) {
     dynModel = dynModelRaw as Record<string, unknown>;
   } else {
-    dynModel = (dynModelRaw as string | undefined) || (getSubModel() as string | undefined);
+    dynModel = (dynModelRaw as string | undefined) || chosenSubAgentModel() || (getSubModel() as string | undefined);
   }
   return dynModel;
 }
@@ -140,7 +141,7 @@ export function resolveSubAgentModel(config: {
   name?: string;
   model?: AgentConfig["model"];
 }): NonNullable<AgentConfig["model"]> {
-  const resolvedModel = config.model ?? getSubModel() ?? getModel();
+  const resolvedModel = config.model ?? chosenSubAgentModel() ?? getSubModel() ?? chosenModel() ?? getModel();
   if (!resolvedModel) {
     throw new ConfigError(
       `[Agent Accelerator] SubAgent '${config.name || "subagent"}' requires a model. ` +

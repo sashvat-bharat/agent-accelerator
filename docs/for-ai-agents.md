@@ -28,7 +28,7 @@
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
 | Limit provider calls running at once (many agents, workers, 429s) | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | [Safety](guides/safety-and-ops.md#concurrency-limit) |
 | Set limits and options in code, and choose what the end user may change | `setConfigs({ values, editable })`, `getConfigs()`, `setConfig(key, value)` | [Safety](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) |
-| Fix the list of models a program may use | `setModels(modelsJson)`, `listModels()` for a picker | [Agents](guides/agents-and-models.md#the-list-of-allowed-models) |
+| Fix the list of models a program may use, let the user pick | `setModels(modelsJson)`, `listModels()` for a picker, `setModel(id)`, `setSubAgentModel(id)` | [Agents](guides/agents-and-models.md#the-list-of-allowed-models) |
 | What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
 | Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, the model list (`setModels`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | Observe | `telemetryBus.onEvent` |

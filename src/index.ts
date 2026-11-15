@@ -71,7 +71,7 @@ export { setHome, resolveHome } from "./utils/home.ts";
 export { configure } from "./agent/defaults.ts";
 export type { AgentDefaults } from "./agent/defaults.ts";
 export { getConcurrencyStatus } from "./agent/governor.ts";
-export { setModels, listModels } from "./config/models.ts";
+export { setModels, listModels, setModel, setSubAgentModel } from "./config/models.ts";
 export type { ModelList, ModelOption } from "./config/models.ts";
 export { setConfigs, getConfigs, setConfig } from "./config/settings.ts";
 export type { SettingKey, SettingsJson } from "./config/settings.ts";

@@ -146,6 +146,19 @@ setConfig("usage_limit", { max_cost_usd: 1000 }); // throws SettingNotEditableEr
 - `getConfigs()` returns the editable settings with their current value, `null` meaning "not set, the default applies", frozen.
 - This is a guardrail inside your program, not a security wall: code in the same process can call `setConfigs` too.
 
+**The user's saved choices: `<home>/configs.json`.** `setConfig` saves in a small visible file in the home folder, which the user may also edit by hand:
+
+```json
+{ "version": 1, "model": "google/gemini-4-argon", "concurrency": { "max_requests": 2 } }
+```
+
+- It holds the chosen `model` and `sub_agent_model` (see `setModel` in [Agents and models](agents-and-models.md#the-list-of-allowed-models)) and the values of editable settings. The folder is created on the first write; reading creates nothing, and with no file the SDK runs on your code defaults.
+- It is read once per process (and again when `setHome()` changes the home), so a hand edit takes effect the next time the program starts. It is the process-wide home (`setHome()`, `AGENT_ACCEL_HOME` or `.agent-accel/`), not an Agent's own `home`.
+- Writes are durable (fsync, a `.bak` of the last good file, atomic rename) under a short lock that re-reads the file first, so processes sharing a home do not lose each other's changes and a crash leaves the old file or the new one. A file that cannot be written makes `setConfig` throw a `ConfigError` and changes nothing.
+- A damaged file is set aside as `configs.json.corrupt-<time>` and the last good version is restored from `.bak` when there is one (`config.file_restored`), otherwise the defaults apply (`config.file_invalid`). A file with another `version` is ignored and left in place.
+- A hand edit the program does not allow is ignored with a `config.file_ignored_key` warning (`data.key`, `data.reason`: `unknown`, `invalid` or `hidden`), and the developer's value wins. Unknown keys are kept when the file is rewritten.
+
+
 ### Network timeouts
 
 The only limits that are on by default are three network timeouts. They are not budgets: they exist so a silent connection fails instead of hanging forever. Change them in `limits` (agent level; workers and scheduled runs inherit them):
@@ -225,7 +238,7 @@ const off = telemetryBus.onEvent((e) => {
 
 Tool calls emit `tool.*` lifecycle events (`call_started`, `progress`, `call_failed`, ...). To keep a crash-proof trace, set `telemetry: { persist: true }`: every event (except reasoning text) is appended, one line each: an event of a persisted session (the `tool.*` events, `agent.resumed`, `agent.run_retry`) to `<home>/sessions/<id>/telemetry.ndjson` next to that session's journal and tool logs (a worker's events to its own folder), everything else to `<home>/telemetry/<date>.ndjson`. Nothing is ever written outside the home: a session saved to a `persist.dir` outside it logs to the daily file. A `tool.call_started` with no ending event was in flight when the process died; the last `tool.progress` shows how far it got. Nothing is written unless you opt in.
 
-The bus is in-process, delivers synchronously, isolates listener errors and prints nothing by default. Events: provider warnings (`provider_warning`), Google chain anomalies, stream anomalies, `cache_clamp`, catalog and session notices, `config.*` warnings, `agent.max_turns_truncated`, `turn.thinking`, and `concurrency.*` and `scheduled_action.*` (full list in [Reference](../reference.md)). `AgentResponse.raw` and the stream `start` event show the wire exchange according to `captureRaw`.
+The bus is in-process, delivers synchronously, isolates listener errors and prints nothing by default. Events: provider warnings (`provider_warning`), Google chain anomalies, stream anomalies, `cache_clamp`, catalog and session notices, `config.*` warnings, `agent.max_turns_truncated`, `turn.thinking`, and `concurrency.*`, `config.file_*` and `scheduled_action.*` (full list in [Reference](../reference.md)). `AgentResponse.raw` and the stream `start` event show the wire exchange according to `captureRaw`.
 
 ## Security
 

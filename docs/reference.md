@@ -124,6 +124,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed / resuming (or a prompt that was waiting) failed |
 | `worker.invalid` | A saved `worker.json` is damaged and that worker is skipped |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
+| `config.file_invalid`, `config.file_restored`, `config.file_ignored_key`, `config.saved_model_ignored` | `<home>/configs.json` was not valid or had another version (`data.reason`), was restored from its backup, had an entry that is unknown, invalid or hidden (`data.key`, `data.reason`), or names a saved model that left the program's list |
 | `concurrency.queued` | A provider call had to wait for a free slot (`provider`, `waiting`, `active`, `paused`); only with `configure({ concurrency })` |
 | `concurrency.paused` | A provider answered 429 with a `Retry-After`: no new calls to it for `ms` (`provider`, `ms`, `waiting`) |
 | `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle; payloads in [Scheduled action files](scheduled-action-files.md#events) |
@@ -166,7 +167,7 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
 | `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |
 | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | Code only (no env var): limit provider calls in flight, see [Safety](guides/safety-and-ops.md#concurrency-limit) |
-| `setConfigs(json)`, `getConfigs()`, `setConfig(key, value)` | Code only: the program's settings from the exact `configs.json` shape (`values` plus an `editable` list; hidden unless listed), see [Safety](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) |
+| `setConfigs(json)`, `getConfigs()`, `setConfig(key, value)`, `setModel(id)`, `setSubAgentModel(id)` | Code only: the program's settings from the exact `configs.json` shape (`values` plus an `editable` list; hidden unless listed). The user's changes and model choice are saved in `<home>/configs.json`. See [Safety](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) |
 | `setModels(json)`, `listModels()` | Code only: the allowed-models list from the exact `models.json` shape, see [Agents and models](guides/agents-and-models.md#the-list-of-allowed-models); a model outside it throws `ModelNotAllowedError` at every run start, in the constructor and in `importSession` |
 | `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS` | Default `usageLimit` for every agent you build (see `configure()` and the safety guide) |
 | `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |

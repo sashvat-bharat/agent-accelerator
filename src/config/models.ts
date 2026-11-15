@@ -11,6 +11,7 @@
  * into `provider/model`. The two defaults are full `provider/model` strings and must be in the list.
  */
 import { ConfigError, ModelNotAllowedError } from "../types/errors.ts";
+import { currentUserFile, saveUserFile, warnOnce } from "./user-file.ts";
 
 /** One allowed model: its provider, its id inside that provider, and the full `provider/id` string agents use. */
 export interface ModelOption {
@@ -163,7 +164,7 @@ export function listModels(): ModelList | undefined {
   return current;
 }
 
-/** Forgets the list (tests only; not exported from the barrel). */
+/** Forgets the list (tests only; not exported from the barrel). The user's file is not touched. */
 export function resetModels(): void {
   current = undefined;
   changed();
@@ -191,4 +192,54 @@ export function assertModelAllowed(provider: string, id: string): void {
     `${provider}/${id}`,
     current!.models.map((m) => m.model)
   );
+}
+
+type Choice = "model" | "sub_agent_model";
+
+// Checks a chosen model id against the list (when there is one) and saves it in the user's file; in: setModel and setSubAgentModel, out: the file.
+function saveChoice(field: Choice, id: string): void {
+  const full = typeof id === "string" ? id.trim() : "";
+  if (!full)
+    throw new ConfigError(
+      `[Agent Accelerator] ${field === "model" ? "setModel" : "setSubAgentModel"} expects a "provider/model" string.`
+    );
+  if (current && !current.models.some((m) => m.model === full))
+    throw new ModelNotAllowedError(
+      full,
+      current.models.map((m) => m.model)
+    );
+  saveUserFile((f) => void (f[field] = full));
+}
+
+/** Saves the user's choice of main model in `<home>/configs.json`; it must be on the program's list when there is one (else `ModelNotAllowedError`, nothing saved). Agents built without an explicit `model` use it. */
+export function setModel(id: string): void {
+  saveChoice("model", id);
+}
+
+/** Saves the user's choice of worker model (see {@link setModel}). */
+export function setSubAgentModel(id: string): void {
+  saveChoice("sub_agent_model", id);
+}
+
+// The model to use when an Agent names none: the user's saved choice (if the list still has it), else the program's default; in: the worker core's fallback chains, out: `provider/model` or undefined.
+function chosen(field: Choice): string | undefined {
+  const saved = currentUserFile()[field];
+  if (saved && (!current || current.models.some((m) => m.model === saved))) return saved;
+  if (saved)
+    warnOnce(
+      "config.saved_model_ignored",
+      `The saved ${field} "${saved}" is not on the program's model list any more and is ignored.`,
+      { field, model: saved }
+    );
+  return current?.default[field];
+}
+
+/** The main model when none is given: saved choice, else the program's default, else `undefined`. Internal. */
+export function chosenModel(): string | undefined {
+  return chosen("model");
+}
+
+/** The worker model when none is given (same rule). Internal. */
+export function chosenSubAgentModel(): string | undefined {
+  return chosen("sub_agent_model");
 }
