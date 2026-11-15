@@ -45,7 +45,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
       { apiKey: "test-key" }
     );
     expect(res.toolCalls?.length).toBe(1);
-    expect(res.toolCalls![0].thoughtSignature).toBe(SIG);
+    expect(res.toolCalls![0]!.thoughtSignature).toBe(SIG);
   });
 
   test("buildPayload replays signature on Turn 2 (prevents 400)", async () => {
@@ -122,7 +122,7 @@ describe("Gemini thought_signature via OpenAI-compat", () => {
     }
     const final = await s.result();
     expect(final.toolCalls?.length).toBe(1);
-    expect(final.toolCalls![0].thoughtSignature).toBe(SIG);
+    expect(final.toolCalls![0]!.thoughtSignature).toBe(SIG);
   });
 
   test("no signature → no extra_content (plain OpenAI unaffected)", async () => {

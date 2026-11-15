@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, BudgetExceededError, ConfigError, loadSessionDir } from "../src/index.ts";
 import { buildDynamicWorkerConfig } from "../src/agent/worker.ts";
+import { sseFrame } from "./helpers.ts";
 
 const roots: string[] = [];
 const tmp = (): string => {
@@ -15,7 +16,6 @@ afterEach(() => {
   while (roots.length) fs.rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
-const sse = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`;
 // A reply of `text` (or tool calls) that spends `tokens` (and reports `cost` when given), plain or streamed as the request asks.
 function reply(body: any, opts: { text?: string; calls?: Array<{ id: string; name: string; args: object }>; tokens?: number; cost?: number }): Response {
   const tokens = opts.tokens ?? 4;
@@ -28,7 +28,7 @@ function reply(body: any, opts: { text?: string; calls?: Array<{ id: string; nam
     const delta: Record<string, unknown> = opts.calls
       ? { tool_calls: opts.calls.map((c, index) => ({ index, id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })) }
       : { content: opts.text ?? "ok" };
-    return new Response(sse({ id: "r", choices: [{ delta }] }) + sse({ id: "r", choices: [{ delta: {}, finish_reason: finish }], usage }) + "data: [DONE]\n\n", {
+    return new Response(sseFrame({ id: "r", choices: [{ delta }] }) + sseFrame({ id: "r", choices: [{ delta: {}, finish_reason: finish }], usage }) + "data: [DONE]\n\n", {
       status: 200,
       headers: { "content-type": "text/event-stream" },
     });

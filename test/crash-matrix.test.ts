@@ -11,7 +11,7 @@ import { getScheduler, resetSchedulers } from "../src/scheduler/scheduler.ts";
 // same folder. Each case checks that no finished work is repeated, no waiting prompt is lost and the files repair.
 
 const roots: string[] = [];
-const children: Array<{ kill: (signal?: number | string) => void }> = [];
+const children: Array<{ kill: (signal?: NodeJS.Signals | number) => void }> = [];
 afterEach(() => {
   resetSchedulers();
   for (const c of children.splice(0)) c.kill("SIGKILL");

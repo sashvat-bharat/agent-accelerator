@@ -8,7 +8,7 @@ import { ConfigError } from "../src/types/errors.ts";
 import { listScheduledActions, resetSchedulers } from "../src/scheduler/scheduler.ts";
 
 const roots: string[] = [];
-const children: Array<{ kill: (signal?: number | string) => void }> = [];
+const children: Array<{ kill: (signal?: NodeJS.Signals | number) => void }> = [];
 const tmp = (): string => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "accel-lock-"));
   roots.push(d);
@@ -23,7 +23,7 @@ afterEach(() => {
 const durablePath = path.resolve(import.meta.dir, "../src/utils/durable.ts");
 
 // Starts a second process that locks `dir` and stays alive; resolves once it holds the lock.
-async function otherProcessHolding(dir: string): Promise<{ pid: number; kill: (signal?: number | string) => void; exited: Promise<number> }> {
+async function otherProcessHolding(dir: string): Promise<{ pid: number; kill: (signal?: NodeJS.Signals | number) => void; exited: Promise<number> }> {
   const code = `import { lockFolder } from ${JSON.stringify(durablePath)}; lockFolder(${JSON.stringify(dir)}); console.log("locked"); setInterval(() => {}, 1000);`;
   const child = Bun.spawn(["bun", "-e", code], { stdout: "pipe", stderr: "pipe" });
   children.push(child);

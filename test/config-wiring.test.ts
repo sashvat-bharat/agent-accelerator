@@ -338,7 +338,7 @@ describe("budgets, limits and worker inheritance are enforced", () => {
 
   it("the hooks placeholder warns instead of being silently ignored", () => {
     const codes: string[] = [];
-    const off = telemetryBus.onEvent((e) => e.code === "config.unsupported_option" && codes.push(e.data?.option));
+    const off = telemetryBus.onEvent((e) => e.code === "config.unsupported_option" && codes.push(String((e.data as { option?: string } | undefined)?.option)));
     try {
       new Agent({ model: GOOGLE_MODEL, apiKey: "k", hooks: {} });
       expect(codes).toEqual(["hooks"]);

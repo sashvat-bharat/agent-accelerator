@@ -17,9 +17,9 @@ import {
 } from "../src/index.ts";
 import { z } from "zod";
 // Minimalist core: legacy wire types removed; structural records used instead.
-type GoogleGenerateContentRequest = Record<string, unknown>;
-type OpenAIChatCompletionRequest = Record<string, unknown>;
-type OpenRouterChatRequest = Record<string, unknown>;
+type GoogleGenerateContentRequest = Record<string, any>;
+type OpenAIChatCompletionRequest = Record<string, any>;
+type OpenRouterChatRequest = Record<string, any>;
 
 describe("Single-File Provider Architecture & Provider-Specific Types", () => {
   it("should have all providers defined in single .ts files and registered", () => {
@@ -51,7 +51,7 @@ describe("Single-File Provider Architecture & Provider-Specific Types", () => {
       additionalProperties: false,
     };
 
-    const cleaned = stripSchemaForGoogle(jsonSchemaWithDefs);
+    const cleaned = stripSchemaForGoogle(jsonSchemaWithDefs) as Record<string, any>;
     expect(cleaned.$schema).toBeUndefined();
     expect(cleaned.additionalProperties).toBeUndefined();
     expect(cleaned.properties.query.type).toBe("string");

@@ -304,8 +304,8 @@ describe("OpenAI Provider & Responses API Compatibility", () => {
 
       expect(result.toolCalls).toBeDefined();
       expect(result.toolCalls!.length).toBe(1);
-      expect(result.toolCalls![0].name).toBe("calculator");
-      expect(result.toolCalls![0].arguments).toEqual({ expr: "2+2" });
+      expect(result.toolCalls![0]!.name).toBe("calculator");
+      expect(result.toolCalls![0]!.arguments).toEqual({ expr: "2+2" });
       expect(result.finishReason).toBe("tool_calls");
     } finally {
       globalThis.fetch = originalFetch;

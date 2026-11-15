@@ -7,7 +7,7 @@ import { Agent, tool, ConfigError, telemetryBus } from "../src/index.ts";
 import { loadSessionDir, sessionDirFor, JOURNAL_FILE } from "../src/session/store.ts";
 
 const roots: string[] = [];
-const children: Array<{ kill: (signal?: number | string) => void }> = [];
+const children: Array<{ kill: (signal?: NodeJS.Signals | number) => void }> = [];
 const tmp = (): string => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "accel-resume-"));
   roots.push(d);

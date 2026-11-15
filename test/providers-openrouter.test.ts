@@ -12,6 +12,7 @@ import {
 import { getProvider, resolveModel } from "../src/providers/registry.ts";
 import { isRetryableRun } from "../src/utils/retry.ts";
 import { clampToolCallId } from "../src/providers/shared.ts";
+import { captureWarnings } from "./helpers.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -43,15 +44,6 @@ function mockFetchOnce(body: unknown, init?: { status?: number }) {
     }
     return sseReply(body);
   };
-}
-
-function captureWarnings(): { messages: string[]; restore: () => void } {
-  const messages: string[] = [];
-  const orig = console.warn;
-  console.warn = (...args: unknown[]) => {
-    messages.push(args.map(String).join(" "));
-  };
-  return { messages, restore: () => { console.warn = orig; } };
 }
 
 const TEXT_RESPONSE = {

@@ -8,28 +8,11 @@ import {
 } from "../src/providers.ts";
 import { getProvider, resolveModel } from "../src/providers/registry.ts";
 import { parseStreamedToolArguments } from "../src/providers.ts";
+import { mockFetchOnce, captureWarnings } from "./helpers.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
-function mockFetchOnce(body: unknown, init?: { status?: number }) {
-  const text = typeof body === "string" ? body : JSON.stringify(body);
-  (globalThis as any).fetch = async (_url: unknown, _req: unknown) => {
-    return new Response(text, {
-      status: init?.status ?? 200,
-      statusText: init?.status === 400 ? "Bad Request" : "OK",
-      headers: { "Content-Type": "application/json" },
-    });
-  };
-}
 
-function captureWarnings(): { messages: string[]; restore: () => void } {
-  const messages: string[] = [];
-  const orig = console.warn;
-  console.warn = (...args: unknown[]) => {
-    messages.push(args.map(String).join(" "));
-  };
-  return { messages, restore: () => { console.warn = orig; } };
-}
 
 const TEXT_RESPONSE = {
   id: "resp-test123",
