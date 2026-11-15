@@ -33,7 +33,6 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `fileAccess`, `captureRaw`, `onFailure` | `{ roots }`, `"redacted"`/`true`/`false`, `"auto"`/`"rollback"`/`"keep"` | [Safety](guides/safety-and-ops.md) |
 | `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
 | `prompts` | `{ [PromptName]: string }` replaces single SDK prompts; unset entries keep `DEFAULT_PROMPTS`. Unknown name or empty text throws `ConfigError`. Workers inherit it | [Prompts](guides/prompts.md) |
-| `allowedModels` | `string[]` of `provider/model`, compared as written. Unset = any model. A model outside the list throws `ConfigError` when the Agent is built (also through `Agent.fromConfig`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text): a persisted session's events (`tool.*`, resume, retry) to `<home>/sessions/<id>/telemetry.ndjson`, everything else to `<home>/telemetry/<date>.ndjson`. Never outside the home. Off by default | [Safety](guides/safety-and-ops.md) |
 | `logger`, `hooks`, `contextManagement` | **Not implemented**; emit `config.unsupported_option`. Use `telemetryBus` | |
 
@@ -141,6 +140,7 @@ All extend `AgentAccelError` (`code`, `retryable`, `context`).
 | `BudgetExceededError` | `budget` or `limits.maxTotalTokens` / `deadlineMs` / `maxToolCallsPerRun` exceeded; partial usage attached |
 | `ToolError` | A tool failed in a way surfaced to the caller |
 | `ValidationError` | Structured output or scheduled-action input did not validate; input the model cannot take (an unsupported modality), before any network call; an empty prompt; a call made the wrong way (a streaming option on `steer`/`queue`/`interrupt(message)`, `resume()` while busy, a full queue or steer inbox); a bad session id, `registerModel` spec or media input |
+| `ModelNotAllowedError` | A model outside the program's `setModels` list (a `ConfigError`, never retried); `model` and `allowed` say what was asked and what is available |
 | `ThinkingLevelError` | Level not supported by the model (a `ConfigError`); `allowedLevels` lists valid ones |
 | `SubAgentModelError` | Dynamic workers or scheduling without a worker model |
 | `SessionLoadError` | A valid session file exceeds limits (never quarantined) |
@@ -165,7 +165,7 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
 | `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |
 | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | Code only (no env var): limit provider calls in flight, see [Safety](guides/safety-and-ops.md#concurrency-limit) |
-| `setModels(json)`, `listModels()` | Code only: the allowed-models list from the exact `models.json` shape, see [Agents and models](guides/agents-and-models.md#the-list-of-allowed-models) |
+| `setModels(json)`, `listModels()` | Code only: the allowed-models list from the exact `models.json` shape, see [Agents and models](guides/agents-and-models.md#the-list-of-allowed-models); a model outside it throws `ModelNotAllowedError` at every run start, in the constructor and in `importSession` |
 | `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS` | Default `usageLimit` for every agent you build (see `configure()` and the safety guide) |
 | `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |
 | `AGENT_CATALOG_REFRESH=off` | Disable automatic model-catalog refresh |

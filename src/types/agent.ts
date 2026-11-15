@@ -234,12 +234,6 @@ export interface AgentConfig {
    */
   usageLimit?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
   /**
-   * The only models this agent may use, as `provider/model` strings compared as written. Unset (default) = any model.
-   * Checked when the Agent is built (also for a config an agent edited through {@link Agent.fromConfig}); a model
-   * outside the list throws a `ConfigError`. Workers and `subagentModel` are not affected.
-   */
-  allowedModels?: string[];
-  /**
    * Replaces single prompts the SDK puts in front of the model (the reasoning directive, tool refusals, the worker
    * headers, the tool manuals ...). Every prompt you leave out keeps its default; see `DEFAULT_PROMPTS` for the names, the
    * shipped text and the `{{placeholders}}` the SDK fills in. Keeping the original text is recommended: it is what the SDK
@@ -254,7 +248,7 @@ export interface AgentConfig {
  * Plain JSON. Every other setting (limits, budget, cache, thinking, keys, ...) stays with the developer.
  */
 export interface EditableAgentConfig {
-  /** `provider/model`; must be in `allowedModels` when the developer set it. */
+  /** `provider/model`; must be on the program's list (`setModels`) when the developer set one. */
   model?: string;
   /** System instructions. */
   instructions?: string;

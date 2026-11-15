@@ -5,7 +5,8 @@
  * `catalog-shards.ts`). `GOOGLE_MODELS`, `OPENAI_MODELS`, `ANTHROPIC_MODELS` and `OPENROUTER_MODELS` are lazy views of it.
  */
 
-import { getShardModels, registerCatalogUpdateListener } from "./catalog-cache.ts";
+import { getShardModels as getRawShardModels, registerCatalogUpdateListener } from "./catalog-cache.ts";
+import { allowedIds, onModelsChange } from "../config/models.ts";
 import { CATALOG_PROVIDERS } from "./catalog-shards.ts";
 import type { ModelSpec, ProviderId, ModelLimit, ModelCost, ModelModalities } from "../types/model.ts";
 import type { ThinkingLevel } from "../types/core.ts";
@@ -68,6 +69,21 @@ function normalizeModelIdForLookup(modelId: string): string {
 // Bound lookupCache to 1000 entries LRU: evict oldest on overflow.
 // ---------------------------------------------------------------------------
 const lookupCache = new Map<string, ModelSpec | undefined>();
+const filteredShards = new Map<string, Record<string, any> | undefined>();
+
+// The models of one provider as the catalog shows them: the shard, narrowed to the program's allowed list when it set one (`setModels`). Read-time only: the cache files are never rewritten, because several processes may share a home; in: every lookup here, out: id -> entry.
+function getShardModels(provider: string): Record<string, any> | undefined {
+  const raw = getRawShardModels(provider) as Record<string, any> | undefined;
+  const allowed = raw ? allowedIds(provider) : undefined;
+  if (!raw || !allowed) return raw;
+  if (!filteredShards.has(provider)) {
+    filteredShards.set(
+      provider,
+      Object.fromEntries(Object.entries(raw).filter(([key, m]) => allowed.has(key) || allowed.has(String(m?.id))))
+    );
+  }
+  return filteredShards.get(provider);
+}
 const providerModelsCache = new Map<string, ModelSpec[]>();
 
 /** Bounded LRU set for lookupCache: keeps at most 1000 entries. */
@@ -602,11 +618,14 @@ export const ANTHROPIC_MODELS: ModelSpec[] = lazyModelList("anthropic");
 export const OPENROUTER_MODELS: ModelSpec[] = lazyModelList("openrouter");
 
 // Drops every derived cache whenever the catalog changes (the lazy `*_MODELS` lists rebuild on their next use)
-registerCatalogUpdateListener(() => {
+const dropDerivedCaches = (): void => {
   lookupCache.clear();
   providerModelsCache.clear();
+  filteredShards.clear();
   globalIndex = null;
-});
+};
+registerCatalogUpdateListener(dropDerivedCaches);
+onModelsChange(dropDerivedCaches); // a new or cleared allowed list changes what the catalog shows
 
 // Re-export cache management utilities
 export {

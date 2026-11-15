@@ -165,7 +165,7 @@ try {
 }
 ```
 
-All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError`, `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError` and `SubAgentModelError` (both `ConfigError`s). Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line `ProviderError`s: `err.code` is `"provider"` (`"incomplete_stream"` for a cut stream) and `err.retryable` is true for HTTP 408/425/429/5xx, network errors and a cut stream; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `providerCode` (the provider's own error code), `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
+All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError` (`ModelNotAllowedError` for a model off the `setModels` list), `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError` and `SubAgentModelError` (both `ConfigError`s). Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line `ProviderError`s: `err.code` is `"provider"` (`"incomplete_stream"` for a cut stream) and `err.retryable` is true for HTTP 408/425/429/5xx, network errors and a cut stream; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `providerCode` (the provider's own error code), `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
 
 ## Telemetry
 

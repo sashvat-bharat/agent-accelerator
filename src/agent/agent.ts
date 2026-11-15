@@ -24,7 +24,7 @@ import type { ContentPart } from "../types/message.ts";
 import { AgentResponse, type StreamEvent } from "../types/response.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
-import { resolveModel } from "../providers/registry.ts";
+import { resolveModel, resolveModelUnchecked } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry, savedSpend } from "./workers.ts";
@@ -56,7 +56,8 @@ import { NamedSessions } from "./named-sessions.ts";
 import { RunControl, type QueuedPrompt } from "./run-control.ts";
 import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
 import { mergeCap } from "./defaults.ts";
-import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
+import { applyEditable, toEditableConfig } from "./config-blocks.ts";
+import { assertModelAllowed } from "../config/models.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
   runAgentLoop,
@@ -120,6 +121,18 @@ const mergeDisposers = new WeakMap<AbortController, () => void>();
 
 /** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
 export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
+
+// Throws ModelNotAllowedError when `model` resolves to a model outside the program's list (`setModels`); a model that cannot be resolved at all is left to the run, which reports it; in: the Agent constructor and importSession, out: nothing or the error.
+function checkModelAllowed(model: unknown): void {
+  if (!model) return;
+  let resolved: ReturnType<typeof resolveModelUnchecked>;
+  try {
+    resolved = resolveModelUnchecked(model as string);
+  } catch {
+    return;
+  }
+  assertModelAllowed(resolved.provider.id, resolved.modelId);
+}
 
 /** Thrown when dynamic sub-agent spawning is enabled without an explicit model. */
 export class SubAgentModelError extends ConfigError {
@@ -337,11 +350,17 @@ export class Agent {
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
     this.modelStringOrSpec = modelStringOrSpec as string | any;
-    assertModelAllowed(config.allowedModels, modelKey(modelStringOrSpec));
+    if ((config as { allowedModels?: unknown }).allowedModels !== undefined) {
+      throw new ConfigError(
+        "[Agent Accelerator] AgentConfig.allowedModels was removed: set the program's list once with setModels({ default, providers }) (see the models guide)."
+      );
+    }
+    checkModelAllowed(modelStringOrSpec); // fail at construction, not at the first run
     const dynRaw = config.dynamicSubagents;
     // Unified worker-model chain: dynamicSubagents.model > subagentModel > SUB_AGENT_MODEL.
     const dynModel = resolveDynamicModelInput(dynRaw, config.subagentModel);
     this.subagentModel = dynModel as string | any | undefined;
+    if (dynRaw) checkModelAllowed(dynModel); // the developer's worker model must be on the list too
     const dynEnabled = dynRaw ? (dynRaw.enabled ?? true) : false;
     if (dynRaw) {
       const dynTools = normalizeToolMap(
@@ -1091,7 +1110,7 @@ export class Agent {
   /**
    * Builds an Agent from your full `base` config with an agent's edits applied. Only `model`, `instructions` and
    * `tools` of `editable` count (other keys are ignored with a `config.not_editable` warning); `tools` are names picked
-   * from `base.tools`, an unknown name throws; `base.allowedModels` is enforced. Keys and limits always come from `base`.
+   * from `base.tools`, an unknown name throws; the model must be on the program's list (`setModels`). Keys and limits always come from `base`.
    */
   static fromConfig(editable: EditableAgentConfig, base: AgentConfig): Agent {
     return new Agent(applyEditable(editable, base));
@@ -1526,6 +1545,8 @@ export class Agent {
       );
     }
     this.warnOnLocalMediaPaths(data.messages ?? []);
+    checkModelAllowed(data.model); // an imported session may not smuggle in a model outside the list
+    checkModelAllowed(data.subagentModel);
     const prevSid = this.sessionId;
     if (data.sessionId) (this as any).sessionId = data.sessionId;
     if (this.sessionId !== prevSid) {

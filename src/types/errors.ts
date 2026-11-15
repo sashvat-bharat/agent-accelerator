@@ -61,6 +61,21 @@ export class ConfigError extends AgentAccelError {
   }
 }
 
+/** A model outside the program's allowed list (`setModels`) was asked for. A `ConfigError`: never retried. */
+export class ModelNotAllowedError extends ConfigError {
+  readonly model: string;
+  readonly allowed: readonly string[];
+  constructor(model: string, allowed: readonly string[]) {
+    super(
+      `[Agent Accelerator] Model "${model}" is not available. Available: ${allowed.length > 0 ? allowed.join(", ") : "none"}.`,
+      { model, allowed: [...allowed] }
+    );
+    this.name = "ModelNotAllowedError";
+    this.model = model;
+    this.allowed = allowed;
+  }
+}
+
 export class ProviderError extends AgentAccelError {
   readonly status?: number;
   constructor(

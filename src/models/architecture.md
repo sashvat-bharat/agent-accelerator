@@ -16,3 +16,4 @@ The model catalog: context limits, prices, modalities and reasoning options come
 - Do not keep static copies of catalog data; use the lookups or the update listener.
 - A model outside the kept series (gemini-2, gpt-4, claude-4, other providers) is unknown on purpose. `meta.json` is the commit marker: shards are written first. A `models.dev.json` left by a release before 0.6.8 is never read and is removed by the next successful refresh.
 - Keep the rule table in `catalog-shards.ts` the only place that says which models are kept; adding a catalog provider means a `CATALOG_PROVIDERS` entry, a `KEEP` rule and a `PROVIDER_ALIASES` entry.
+- With `setModels` set, the catalog is filtered when it is read (`getShardModels` in `catalog.ts`, memoized and dropped on `onModelsChange`): the cache files are never rewritten, because several processes may share a home.

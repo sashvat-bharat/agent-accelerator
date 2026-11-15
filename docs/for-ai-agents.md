@@ -29,7 +29,7 @@
 | Limit provider calls running at once (many agents, workers, 429s) | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | [Safety](guides/safety-and-ops.md#concurrency-limit) |
 | Fix the list of models a program may use | `setModels(modelsJson)`, `listModels()` for a picker | [Agents](guides/agents-and-models.md#the-list-of-allowed-models) |
 | What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
-| Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, `allowedModels` | [Agents](guides/agents-and-models.md#self-improving-agents) |
+| Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, the model list (`setModels`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
 | Observe | `telemetryBus.onEvent` |
 | Ask permission before a tool acts | check inside `execute`, refuse with `ctx.stop(reason)` (run ends `stopped`) | [Tools and streaming](guides/tools-and-streaming.md) | [Safety](guides/safety-and-ops.md) |
 
@@ -95,6 +95,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | Symptom | Likely cause and fix |
 |---|---|
 | `ConfigError` before any request | No key or base URL for that prefix. Set `<PREFIX>_API_KEY` and `<PREFIX>_BASE_URL` |
+| `ModelNotAllowedError` | Model not in the program's `setModels` list; pick one from `err.allowed` |
 | `ThinkingLevelError` | Level unsupported by the model; use one from `err.allowedLevels` |
 | `SubAgentModelError` | Set `dynamicSubagents.model` or `SUB_AGENT_MODEL` |
 | `BudgetExceededError` | Raise `budget` or reduce work; `err.partial` has progress |

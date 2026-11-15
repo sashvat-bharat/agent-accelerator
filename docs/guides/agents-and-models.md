@@ -117,6 +117,14 @@ for (const m of listModels()!.models) console.log(m.model); // "google/gemini-4-
 - `listModels()` returns `{ default: { model, sub_agent_model }, models: [{ provider, id, model }] }`, deeply frozen, or `undefined` until `setModels` is called. Calling `setModels` again replaces the list.
 - This is a guardrail inside your program, not a security wall: code running in the same process can call `setModels` too.
 
+**Where the list is enforced.** Once `setModels` has been called, a model outside it is refused with a `ModelNotAllowedError` (a `ConfigError`: never retried) whose message names the model and lists the available ones, e.g. `Model "openai/gpt-6" is not available. Available: google/gemini-4-argon, ...`. It is checked at every place a model is picked:
+- every run start (`run`, `stream`, queued runs, resumed runs), before anything is sent or added to the conversation;
+- the `Agent` constructor, for the main model and the worker model (`dynamicSubagents.model` / `subagentModel`), so a bad setup fails at construction; this also covers `Agent.fromConfig` and `fork()`;
+- chat workers and scheduled runs (their model is the developer's worker model, checked the same way; a scheduled run that finds its model off the list is recorded as failed);
+- `importSession`, for the session's model and worker model, before anything is changed.
+
+The model catalog is filtered when it is read: `getModelsForProvider`, the `*_MODELS` lists and lookups show only listed models (a provider with no listed model shows none), and clearing the list brings everything back. The cache files are never changed, because several processes may share one home. A listed model the catalog does not know is still allowed; its price is unknown, never $0. Without `setModels` nothing is restricted.
+
 ## Thinking (reasoning)
 
 ```ts
@@ -186,12 +194,11 @@ The SDK gives you the building blocks for an agent that improves itself; the loo
 ```ts
 import { Agent, tool } from "agent-accelerator";
 
-// 1. Your full config. `tools` is the pool the agent may pick from; `allowedModels` is where it may go.
+// 1. Your full config. `tools` is the pool the agent may pick from; the program's model list (`setModels`, above) is where it may go.
 const base = {
   model: "openai/gpt-5.5",
   instructions: "You answer support questions.",
   tools: { search, readFile, writeFile }, // each tool in its own file, so an agent (or you) can edit it
-  allowedModels: ["openai/gpt-5.5", "openai/gpt-5.5-mini"],
   budget: { maxCostUsd: 2 },
   maxTurns: 20,
 };
@@ -205,8 +212,8 @@ const next = Agent.fromConfig({ ...agent.toConfig(), instructions: "Be brief. Ci
 ```
 
 - **`tools` are names**, picked from `base.tools`. A name that is not in the pool throws a `ConfigError` that lists the names that are, so a harness can hand the message straight back to the model. Leave `tools` out to keep all of them. The built-in delegation and scheduler tools come from `base` and never appear in `toConfig()`.
-- **`allowedModels`** is checked whenever an Agent is built, so it covers `new Agent(base)` and `Agent.fromConfig`. Entries are compared as written (`"provider/model"`). A model outside the list, or a bad list (empty, not strings), throws a `ConfigError`. Workers and `subagentModel` are not affected.
-- **Keys never travel.** `toConfig()` has no keys. If `base.model` is a model helper holding an `apiKey`/`baseUrl`, the new agent keeps them only for the **same provider**; a model on another provider gets no key from it (a top-level `base.apiKey` applies to every model, as always, so combine it with `allowedModels`).
+- **The model list** (`setModels`, see [The list of allowed models](#the-list-of-allowed-models)) is what limits an agent's model edit: a model outside it throws a `ModelNotAllowedError` when the Agent is built, so it covers `new Agent(base)` and `Agent.fromConfig`. The option `allowedModels` was removed in 0.7.0 (passing it throws a `ConfigError` that says so).
+- **Keys never travel.** `toConfig()` has no keys. If `base.model` is a model helper holding an `apiKey`/`baseUrl`, the new agent keeps them only for the **same provider**; a model on another provider gets no key from it (a top-level `base.apiKey` applies to every model, as always, so combine it with the model list).
 - **A new Agent, not a patch.** `fromConfig` returns a fresh Agent and never changes the old one. Give `base` the same `sessionId` and `persist` to continue the saved conversation with the new settings.
 - **Tool files.** To let an agent edit a tool's name, description or code, write each tool in its own file and give the agent access to it. That is a convention, not an SDK feature: loading the edited file back (with a fresh import) is the harness's job.
 

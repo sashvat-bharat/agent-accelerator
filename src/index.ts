@@ -224,6 +224,7 @@ export {
   ValidationError,
   SessionLoadError,
   SecurityPolicyError,
+  ModelNotAllowedError,
   isAbortError,
   formatErrorPlain,
 } from "./types/errors.ts";

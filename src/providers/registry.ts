@@ -7,6 +7,7 @@ import { getEnv } from "../utils/env.ts";
 import { GoogleInteractionsProvider } from "./google.ts";
 import { OpenRouterChatCompletionsProvider } from "./openrouter.ts";
 import { OpenAIResponsesProvider } from "./openai.ts";
+import { assertModelAllowed } from "../config/models.ts";
 
 const providerRegistry = new Map<ProviderId, Provider>();
 
@@ -141,6 +142,13 @@ export interface ResolvedModel {
  * @example `const { provider, modelId } = resolveModel("openai/gpt-4o");`
  */
 export function resolveModel(model: string | ModelSpec): ResolvedModel {
+  const resolved = resolveModelUnchecked(model);
+  assertModelAllowed(resolved.provider.id, resolved.modelId); // the program's list (`setModels`), when it set one
+  return resolved;
+}
+
+/** Same routing as {@link resolveModel} without the allowed-models check: for code that only needs to know WHERE a model goes (provider matching, early checks that report their own error). */
+export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel {
   if (!model || (typeof model === "string" && !model.trim())) {
     throw new ConfigError(
       "[Agent Accelerator] No model specified. Please specify 'model' in Agent configuration or set the MODEL environment variable."

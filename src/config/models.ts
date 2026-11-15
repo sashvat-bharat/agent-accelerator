@@ -10,7 +10,7 @@
  * Models sit under their provider WITHOUT the `provider/` prefix (OpenRouter ids keep their own slash); the SDK joins them
  * into `provider/model`. The two defaults are full `provider/model` strings and must be in the list.
  */
-import { ConfigError } from "../types/errors.ts";
+import { ConfigError, ModelNotAllowedError } from "../types/errors.ts";
 
 /** One allowed model: its provider, its id inside that provider, and the full `provider/id` string agents use. */
 export interface ModelOption {
@@ -71,7 +71,8 @@ export function parseModels(json: unknown): ModelList {
       );
     } else {
       for (const [rawName, entry] of Object.entries(providers)) {
-        const provider = rawName.trim().toLowerCase();
+        const lower = rawName.trim().toLowerCase();
+        const provider = lower === "gemini" ? "google" : lower; // the SDK routes `gemini/...` to `google`
         const where = `providers.${rawName}`;
         if (!/^[a-z0-9][a-z0-9_-]*$/.test(provider)) {
           problems.push(`${where}: not a provider name (letters, digits, "_" or "-").`);
@@ -133,6 +134,19 @@ export function parseModels(json: unknown): ModelList {
 }
 
 let current: ModelList | undefined;
+const listeners = new Set<() => void>();
+let ids: Map<string, Set<string>> | undefined;
+
+// Tells the caches that read the list (the catalog) that it changed; in: setModels and resetModels, out: their listeners.
+function changed(): void {
+  ids = undefined;
+  for (const fn of listeners) fn();
+}
+
+/** Runs `fn` whenever the list is set or cleared (the catalog drops its filtered views). Internal. */
+export function onModelsChange(fn: () => void): void {
+  listeners.add(fn);
+}
 
 /**
  * Sets the models this program allows, from the exact `models.json` shape (see the file header). Validates everything
@@ -141,6 +155,7 @@ let current: ModelList | undefined;
  */
 export function setModels(json: unknown): void {
   current = parseModels(json);
+  changed();
 }
 
 /** The allowed models (`default` plus every `provider/model`, frozen) for a picker, or `undefined` when `setModels` was never called. */
@@ -151,4 +166,29 @@ export function listModels(): ModelList | undefined {
 /** Forgets the list (tests only; not exported from the barrel). */
 export function resetModels(): void {
   current = undefined;
+  changed();
+}
+
+/** The ids allowed for one provider: `undefined` when no list is set (everything is allowed), an empty set when the list has no model of that provider. Internal: the catalog's read-time filter. */
+export function allowedIds(provider: string): ReadonlySet<string> | undefined {
+  if (!current) return undefined;
+  if (!ids) {
+    ids = new Map();
+    for (const m of current.models) (ids.get(m.provider) ?? ids.set(m.provider, new Set()).get(m.provider)!).add(m.id);
+  }
+  return ids.get(provider) ?? new Set();
+}
+
+/** True when `provider/id` may be used: always without a list, else only if it is listed. */
+export function isModelAllowed(provider: string, id: string): boolean {
+  return !current || allowedIds(provider)!.has(id);
+}
+
+/** Throws a {@link ModelNotAllowedError} (listing the available models) unless `provider/id` is allowed. Called by `resolveModel`, the Agent constructor and `importSession`. */
+export function assertModelAllowed(provider: string, id: string): void {
+  if (isModelAllowed(provider, id)) return;
+  throw new ModelNotAllowedError(
+    `${provider}/${id}`,
+    current!.models.map((m) => m.model)
+  );
 }

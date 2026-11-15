@@ -4,7 +4,7 @@ import type { AgentConfig } from "../types/agent.ts";
 import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
 import { getModel, getSubModel } from "../utils/env.ts";
-import { resolveModel } from "../providers/registry.ts";
+import { resolveModelUnchecked } from "../providers/registry.ts";
 import { ConfigError } from "../types/errors.ts";
 
 /** Minimal live-trace shape shared by fixed + dynamic workers (structural subset of `SubAgentTrace`). */
@@ -217,7 +217,7 @@ function providerOf(modelStr: string | unknown | undefined): string | undefined 
         : ((modelStr as { model?: unknown; id?: unknown })?.model ??
           (modelStr as { id?: unknown })?.id ??
           String(modelStr));
-    return resolveModel(m as string).provider.id;
+    return resolveModelUnchecked(m as string).provider.id;
   } catch {
     return undefined;
   }
