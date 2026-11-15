@@ -1,8 +1,10 @@
 /**
  * The concurrency governor: a FIFO limiter for provider calls. One global limit and one limit per provider; a call waits
  * in line for a slot and releases it exactly once when its response ends, fails, or its stream is cancelled. Off until a
- * limit is set. Waiting is abortable. Pure and dependency-free: the loops reach it through `withProviderSlot`.
+ * limit is set. Waiting is abortable. A rate-limit answer (429 with a Retry-After) pauses that provider's queue until the wait
+ * has passed. The loops reach it through `withProviderSlot`.
  */
+import { readRetryAfterMs } from "../utils/retry.ts";
 
 /** What the governor limits; every key is optional and unset means unlimited. */
 export interface GovernorLimits {
@@ -36,6 +38,24 @@ function abortError(signal: AbortSignal): Error {
   );
 }
 
+/** The clock the governor reads; tests pass a fake one. `later` schedules `fn` after `ms` and returns its canceller. */
+export interface GovernorClock {
+  now(): number;
+  later(fn: () => void, ms: number): () => void;
+}
+
+const realClock: GovernorClock = {
+  now: () => Date.now(),
+  later: (fn, ms) => {
+    const timer = setTimeout(fn, ms);
+    (timer as { unref?: () => void }).unref?.(); // a pause never keeps the process alive
+    return () => clearTimeout(timer);
+  },
+};
+
+/** Longest a provider is paused for one rate-limit answer (the same 60 s cap as the retry layer). */
+export const MAX_PAUSE_MS = 60_000;
+
 /** FIFO limiter: grants slots in arrival order, per provider and overall. */
 export class Governor {
   private readonly max: number;
@@ -43,8 +63,14 @@ export class Governor {
   private active = 0;
   private readonly activeBy = new Map<string, number>();
   private readonly queue: Waiter[] = [];
+  /** Provider id -> time (clock ms) until which no new call may start. */
+  private readonly pausedUntil = new Map<string, number>();
+  private readonly wake = new Map<string, () => void>();
 
-  constructor(limits: GovernorLimits = {}) {
+  constructor(
+    limits: GovernorLimits = {},
+    private readonly clock: GovernorClock = realClock
+  ) {
     this.max = limitOf(limits.maxRequests);
     for (const [provider, n] of Object.entries(limits.perProvider ?? {})) this.per.set(provider, limitOf(n));
   }
@@ -59,9 +85,44 @@ export class Governor {
     return { active: this.active, waiting: this.queue.length, byProvider: Object.fromEntries(this.activeBy) };
   }
 
+  /** Stops new calls to `provider` from starting for `ms` (never shortens an earlier pause); calls already running are not touched. In: a 429 with a Retry-After, out: the queue resumes by itself. */
+  pause(provider: string, ms: number): void {
+    if (!(Number.isFinite(ms) && ms > 0)) return;
+    const until = this.clock.now() + Math.min(ms, MAX_PAUSE_MS);
+    if (until <= (this.pausedUntil.get(provider) ?? 0)) return;
+    this.pausedUntil.set(provider, until);
+    this.wake.get(provider)?.();
+    this.wake.set(
+      provider,
+      this.clock.later(() => {
+        this.wake.delete(provider);
+        this.pump();
+      }, until - this.clock.now())
+    );
+  }
+
+  /** Cancels the pending wake-ups (the governor was replaced). */
+  dispose(): void {
+    for (const cancel of this.wake.values()) cancel();
+    this.wake.clear();
+  }
+
+  /** True while `provider` is paused by a rate-limit answer. */
+  isPaused(provider: string): boolean {
+    const until = this.pausedUntil.get(provider);
+    if (until === undefined) return false;
+    if (this.clock.now() < until) return true;
+    this.pausedUntil.delete(provider);
+    return false;
+  }
+
   // True when a call to `provider` may start now; in: acquire and pump, out: a boolean.
   private fits(provider: string): boolean {
-    return this.active < this.max && (this.activeBy.get(provider) ?? 0) < (this.per.get(provider) ?? Infinity);
+    return (
+      !this.isPaused(provider) &&
+      this.active < this.max &&
+      (this.activeBy.get(provider) ?? 0) < (this.per.get(provider) ?? Infinity)
+    );
   }
 
   // Takes the slot for `provider` and returns its release, which does something only the first time; in: acquire and pump, out: the release function.
@@ -112,11 +173,19 @@ export class Governor {
   }
 }
 
+// The wait a rate-limit error asks for (HTTP 429 with a Retry-After), else undefined; in: withProviderSlot, out: Governor.pause.
+function rateLimitWaitMs(err: unknown): number | undefined {
+  const e = err as { status?: unknown; statusCode?: unknown } | null;
+  if (!e || (e.status ?? e.statusCode) !== 429) return undefined;
+  return readRetryAfterMs(err);
+}
+
 let current = new Governor();
 
 /** Sets the limits for every provider call from now on (unset keys are unlimited); calls already running keep their slots. Internal until the public setting lands. */
-export function setGovernorLimits(limits: GovernorLimits = {}): void {
-  current = new Governor(limits);
+export function setGovernorLimits(limits: GovernorLimits = {}, clock?: GovernorClock): void {
+  current.dispose();
+  current = new Governor(limits, clock);
 }
 
 /** The governor in use now. */
@@ -139,6 +208,10 @@ export async function withProviderSlot<T>(
   const release = await governor.acquire(provider, signal);
   try {
     return await task();
+  } catch (err) {
+    const wait = rateLimitWaitMs(err);
+    if (wait !== undefined) governor.pause(provider, wait); // the provider said "too many requests, wait": nobody queued behind sends another now
+    throw err;
   } finally {
     release();
   }

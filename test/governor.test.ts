@@ -215,3 +215,101 @@ describe("governor in the loops", () => {
     await Promise.all(Array.from({ length: 8 }, run));
   });
 });
+
+// A clock the test moves by hand: timers fire when `advance` passes them.
+function fakeClock() {
+  let t = 1_000;
+  const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
+  return {
+    now: () => t,
+    later: (fn: () => void, ms: number) => {
+      const timer = { at: t + ms, fn, live: true };
+      timers.push(timer);
+      return () => void (timer.live = false);
+    },
+    advance(ms: number) {
+      t += ms;
+      for (const timer of timers.filter((x) => x.live && x.at <= t)) {
+        timer.live = false;
+        timer.fn();
+      }
+    },
+  };
+}
+
+const rateLimited = (retryAfterMs?: number) =>
+  Object.assign(new Error("429"), { status: 429, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) });
+
+describe("429 pause", () => {
+  test("a paused provider's queue resumes when the wait has passed", async () => {
+    const clock = fakeClock();
+    const g = new Governor({ maxRequests: 5 }, clock);
+    g.pause("a", 2_000);
+    expect(g.isPaused("a")).toBe(true);
+    let granted = false;
+    const waiting = g.acquire("a").then((r) => ((granted = true), r));
+    await tick();
+    expect(granted).toBe(false);
+    clock.advance(1_999);
+    await tick();
+    expect(granted).toBe(false);
+    clock.advance(1);
+    (await waiting)();
+    expect(g.isPaused("a")).toBe(false);
+  });
+
+  test("other providers keep running and a running call is not touched", async () => {
+    const clock = fakeClock();
+    const g = new Governor({ maxRequests: 5 }, clock);
+    const running = await g.acquire("a");
+    g.pause("a", 5_000);
+    (await g.acquire("b"))();
+    expect(g.status().active).toBe(1);
+    running();
+  });
+
+  test("a pause never gets shorter and is capped at 60 s", async () => {
+    const clock = fakeClock();
+    const g = new Governor({ maxRequests: 5 }, clock);
+    g.pause("a", 10_000);
+    g.pause("a", 1_000);
+    clock.advance(5_000);
+    expect(g.isPaused("a")).toBe(true);
+    g.pause("a", 10 * 60_000);
+    clock.advance(59_999);
+    expect(g.isPaused("a")).toBe(true);
+    clock.advance(1);
+    expect(g.isPaused("a")).toBe(false);
+  });
+
+  test("an abort while paused still rejects", async () => {
+    const clock = fakeClock();
+    const g = new Governor({ maxRequests: 5 }, clock);
+    g.pause("a", 5_000);
+    const ctl = new AbortController();
+    const q = g.acquire("a", ctl.signal);
+    ctl.abort();
+    await expect(q).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  test("withProviderSlot pauses on 429 with Retry-After, and not without it or on other errors", async () => {
+    const clock = fakeClock();
+    setGovernorLimits({ maxRequests: 5 }, clock);
+    const fail = (e: Error) =>
+      withProviderSlot("a", undefined, async () => {
+        throw e;
+      }).catch(() => {});
+    await fail(rateLimited()); // no Retry-After
+    await fail(Object.assign(new Error("500"), { status: 500, retryAfterMs: 3_000 }));
+    expect(getGovernor().isPaused("a")).toBe(false);
+    await fail(rateLimited(3_000));
+    expect(getGovernor().isPaused("a")).toBe(true);
+    let ran = false;
+    const next = withProviderSlot("a", undefined, async () => (ran = true));
+    await tick();
+    expect(ran).toBe(false);
+    clock.advance(3_000);
+    await next;
+    expect(ran).toBe(true);
+  });
+});
