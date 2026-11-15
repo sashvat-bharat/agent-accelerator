@@ -34,6 +34,7 @@ import { applyCaptureRaw, type CaptureRawMode } from "../utils/raw-capture.ts";
 import { previewPrompt } from "../utils/session.ts";
 import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
+import { withProviderSlot } from "./governor.ts";
 
 /** One mid-session steer request buffered while a run is active. */
 export interface SteerEntry {
@@ -959,17 +960,20 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
       // A long-running call (e.g. Google long decode) times each HTTP request itself: no whole-call race.
       const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
-      const genResult = await generateWithTimeout(
-        () =>
-          provider.generate(
-            modelId,
-            {
-              systemPrompt: context.systemPrompt,
-              messages: context.messages,
-            },
-            providerOptions
-          ),
-        longRunning ? Infinity : limits.requestTimeoutMs
+      // The slot wait comes first and is not timed: the request timeout starts once the slot is held.
+      const genResult = await withProviderSlot(provider.id, runOptions?.signal, () =>
+        generateWithTimeout(
+          () =>
+            provider.generate(
+              modelId,
+              {
+                systemPrompt: context.systemPrompt,
+                messages: context.messages,
+              },
+              providerOptions
+            ),
+          longRunning ? Infinity : limits.requestTimeoutMs
+        )
       );
 
       finalResult = genResult;
@@ -1178,7 +1182,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   };
   if (userSignal?.aborted) forwardUserAbort();
   else userSignal?.addEventListener("abort", forwardUserAbort, { once: true });
-  let currentInner: AssistantMessageEventStream | null = null;
+  let currentInner = null as AssistantMessageEventStream | null; // assigned inside the provider-slot closure, so no narrowing to null
   const removeOuterCancel = outerStream.onCancel(() => {
     try {
       linked.abort();
@@ -1281,80 +1285,84 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         );
 
         const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
-        const innerStream = provider.stream(
-          modelId,
-          {
-            systemPrompt: context.systemPrompt,
-            messages: context.messages,
-          },
-          providerOptions
-        );
-        currentInner = innerStream as AssistantMessageEventStream;
+        // The provider slot is held from the request until the stream ends, fails or is cancelled; first-byte and idle timers start after it is held.
+        const turnResponse = await withProviderSlot(provider.id, linked.signal, async () => {
+          const innerStream = provider.stream(
+            modelId,
+            {
+              systemPrompt: context.systemPrompt,
+              messages: context.messages,
+            },
+            providerOptions
+          );
+          currentInner = innerStream as AssistantMessageEventStream;
 
-        // First-byte + idle timeouts around SSE (tolerate reasoning).
-        // Implemented as races on the inner iterator so a hung provider
-        // surfaces as TimeoutError instead of hanging the run forever.
-        {
-          const it = (innerStream as AsyncIterable<StreamEvent>)[Symbol.asyncIterator]();
-          let first = true;
-          let doneIter = false;
-          while (!doneIter) {
-            // Long-running streams pause for minutes between chunks; the adapter guards stalls and reconnects.
-            const waitMs = longRunning
-              ? Infinity
-              : first
-                ? streamLimits.firstByteTimeoutMs
-                : streamLimits.streamIdleTimeoutMs;
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            const timeoutP =
-              Number.isFinite(waitMs) && waitMs !== Infinity && waitMs > 0
-                ? new Promise<never>((_, reject) => {
-                    timer = setTimeout(() => {
-                      reject(
-                        new TimeoutError(
-                          `[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`
-                        )
-                      );
-                    }, waitMs);
-                    try {
-                      (timer as unknown as { unref?: () => void }).unref?.();
-                    } catch {}
-                  })
-                : null;
-            try {
-              const nextP = it.next();
-              const res = timeoutP ? await Promise.race([nextP, timeoutP]) : await nextP;
-              if (timer) clearTimeout(timer);
-              if (res.done) {
-                doneIter = true;
-                break;
+          // First-byte + idle timeouts around SSE (tolerate reasoning).
+          // Implemented as races on the inner iterator so a hung provider
+          // surfaces as TimeoutError instead of hanging the run forever.
+          {
+            const it = (innerStream as AsyncIterable<StreamEvent>)[Symbol.asyncIterator]();
+            let first = true;
+            let doneIter = false;
+            while (!doneIter) {
+              // Long-running streams pause for minutes between chunks; the adapter guards stalls and reconnects.
+              const waitMs = longRunning
+                ? Infinity
+                : first
+                  ? streamLimits.firstByteTimeoutMs
+                  : streamLimits.streamIdleTimeoutMs;
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              const timeoutP =
+                Number.isFinite(waitMs) && waitMs !== Infinity && waitMs > 0
+                  ? new Promise<never>((_, reject) => {
+                      timer = setTimeout(() => {
+                        reject(
+                          new TimeoutError(
+                            `[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`
+                          )
+                        );
+                      }, waitMs);
+                      try {
+                        (timer as unknown as { unref?: () => void }).unref?.();
+                      } catch {}
+                    })
+                  : null;
+              try {
+                const nextP = it.next();
+                const res = timeoutP ? await Promise.race([nextP, timeoutP]) : await nextP;
+                if (timer) clearTimeout(timer);
+                if (res.done) {
+                  doneIter = true;
+                  break;
+                }
+                first = false;
+                throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
+                const event = res.value as StreamEvent;
+                if ((event as StreamEvent)?.type !== "done") {
+                  // The provider's `start` event carries the request audit record: apply the capture policy.
+                  outerStream.push(
+                    event.type === "start" && event.raw
+                      ? { ...event, raw: applyCaptureRaw(event.raw, config.captureRaw) }
+                      : event
+                  );
+                }
+              } catch (e) {
+                if (timer) clearTimeout(timer);
+                // Timeout: cancel the hung inner stream before surfacing.
+                if ((e as Error)?.name === "TimeoutError") {
+                  try {
+                    currentInner?.cancel();
+                  } catch {}
+                }
+                throw e;
               }
-              first = false;
-              throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
-              const event = res.value as StreamEvent;
-              if ((event as StreamEvent)?.type !== "done") {
-                // The provider's `start` event carries the request audit record: apply the capture policy.
-                outerStream.push(
-                  event.type === "start" && event.raw
-                    ? { ...event, raw: applyCaptureRaw(event.raw, config.captureRaw) }
-                    : event
-                );
-              }
-            } catch (e) {
-              if (timer) clearTimeout(timer);
-              // Timeout: cancel the hung inner stream before surfacing.
-              if ((e as Error)?.name === "TimeoutError") {
-                try {
-                  currentInner?.cancel();
-                } catch {}
-              }
-              throw e;
             }
           }
-        }
 
-        const turnResponse = await innerStream.result();
-        currentInner = null;
+          const result = await innerStream.result();
+          currentInner = null;
+          return result;
+        });
         throwIfCancelled({ usage: accumulatedUsage, turns, text: (turnResponse as { text?: string })?.text });
         lastResponse = turnResponse;
         // Canonical session routing: lets adapters detect provider switches.
