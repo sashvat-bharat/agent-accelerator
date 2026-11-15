@@ -3,17 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
-import {
-  Agent,
-  tool,
-  toolContent,
-  executeToolCalls,
-  telemetryBus,
-  clearInteractionChains,
-  clearSessionRouting,
-  clearEmittedWarnings,
-  loadSessionDir,
-} from "../src/index.ts";
+import { Agent, tool, toolContent, telemetryBus, clearInteractionChains, loadSessionDir } from "../src/index.ts";
+import { executeToolCalls } from "../src/tools/executor.ts";
+import { clearSessionRouting, clearEmittedWarnings } from "../src/providers.ts";
 
 afterEach(() => {
   clearInteractionChains();

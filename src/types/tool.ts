@@ -1,13 +1,5 @@
 import type { z } from "zod";
 
-/** Minimal logger surface accepted by tool contexts (additive). */
-export interface ToolLogger {
-  debug?: (...args: unknown[]) => void;
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-}
-
 /** Live-event emitter handed to tools that stream progress (additive). */
 export type ToolEmitFn = (event: { type: string; [k: string]: unknown }) => void;
 
@@ -28,13 +20,8 @@ export interface ToolExecutionContext {
     partialText?: string;
     partialThinking?: string;
   }) => void;
-  // Tool API v2 context additions (all optional, additive).
-  /** Stable id for this run (`newRunId`). Mirrors SubAgentRunIds.runId. */
-  runId?: string;
   /** Live-event emitter for tools that stream progress. */
   emit?: ToolEmitFn;
-  /** Structured logger for tool implementations (defaults to no-op). */
-  logger?: ToolLogger;
   /**
    * Writes one line to this call's log file (`tool-logs/<n>-<tool>.ndjson` in the session folder), flushed at once, so
    * after a crash it shows how far the call got: `ctx.log("uploaded 3 of 5 files", { done: 3 })`. Only written when the
@@ -51,11 +38,13 @@ export interface ToolExecutionContext {
   stop: (reason: string) => never;
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: `any` lets a record of tools with different input types be one `tools` value (`unknown` breaks it)
 export type ToolExecuteFn<TInput = any, TOutput = any> = (
   input: TInput,
   context: ToolExecutionContext
 ) => Promise<TOutput> | TOutput;
 
+// biome-ignore lint/suspicious/noExplicitAny: `any` lets a record of tools with different input types be one `tools` value (`unknown` breaks it)
 export interface ToolDefinition<TInput = any, TOutput = any> {
   /** Optional public name; record keys are used when omitted. */
   name?: string;
@@ -75,7 +64,7 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
   maxConcurrency?: number | string;
   /** Function executed after validation; its result is made JSON-safe for model context. */
   execute: ToolExecuteFn<TInput, TOutput>;
-  // Tool API v2 additions (all optional, additive; loop reads via `(toolDef as any).*`).
+  // Policies the executor enforces (all optional).
   /**
    * Canonical alias for `maxTries`. When both are set, `maxTries` wins.
    * Normalized by `normalizeMaxAttempts` (see tools/tool.ts).
@@ -87,11 +76,6 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
    * `maxAttempts` explicitly overrides the attempt count.
    */
   idempotent?: boolean;
-  /**
-   * Explicit retry policy. Preferred over bare `maxTries` for new code;
-   * `maxTries`/`maxAttempts` map to `{ maxRetries: n - 1 }`.
-   */
-  retry?: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number };
   /**
    * Whether an identical call may repeat across consecutive turns. Defaults to
    * `true` for idempotent tools, `false` otherwise. Honored by repeat guards.
@@ -110,14 +94,6 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
    * Kept short for Tool API v2 parity.
    */
   redact?: (err: unknown) => string;
-  /** Free-form tags for grouping/filtering tools (e.g. `["web", "readonly"]`). */
-  tags?: string[];
-  /**
-   * Optional output schema (Zod or JSON Schema) used to validate/coerce the
-   * tool's return value before it reaches model context. Stored as `unknown`
-   * so `zod` stays an optional peer for type-only consumers.
-   */
-  output?: unknown;
   /** Opaque brand marker narrowing bare object literals to `tool()` output. */
   readonly __brand?: "ToolDefinition";
 }

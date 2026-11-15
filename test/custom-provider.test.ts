@@ -5,18 +5,18 @@ import {
   ModelProvider,
   ensureCustomProvider,
   OpenAICompatibleChatProvider,
+  setConfigs,
 } from "../src/index.ts";
+
+// The base URL of a custom endpoint is a setting (`base_urls`), not an env var.
+const urls = (u: Record<string, string>) => setConfigs({ values: { catalog_refresh: "off", base_urls: u }, editable: [] });
 
 describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
     process.env = { ...originalEnv };
-    delete process.env.OPENAI_BASE_URL;
-    delete process.env.OPENAI_API_BASE;
-    delete process.env.GROQ_BASE_URL;
     delete process.env.GROQ_API_KEY;
-    delete process.env.CEREBRAS_BASE_URL;
     delete process.env.CEREBRAS_API_KEY;
   });
 
@@ -26,7 +26,7 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
 
   test("MODEL=groq/... routes to auto-created custom provider (env-only, zero code)", () => {
     process.env.GROQ_API_KEY = "gsk_test123";
-    process.env.GROQ_BASE_URL = "https://api.groq.com/openai/v1";
+    urls({ groq: "https://api.groq.com/openai/v1" });
 
     const resolved = resolveModel("groq/llama-3.3-70b-versatile");
     expect(resolved.provider.id).toBe("groq");
@@ -35,9 +35,8 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
   });
 
   test("different prefixes get isolated providers (multi-provider in one process)", () => {
-    process.env.GROQ_BASE_URL = "https://api.groq.com/openai/v1";
+    urls({ groq: "https://api.groq.com/openai/v1", cerebras: "https://api.cerebras.ai/v1" });
     process.env.GROQ_API_KEY = "gsk_a";
-    process.env.CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1";
     process.env.CEREBRAS_API_KEY = "csk_b";
 
     const groq = resolveModel("groq/llama-3.3-70b-versatile");
@@ -60,7 +59,7 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
     const asScope = resolveModel("z-ai/glm-5.2:free");
     expect(asScope.provider.id).toBe("openrouter");
 
-    process.env.Z_AI_BASE_URL = "https://api.z.ai/api/paas/v4";
+    urls({ "z-ai": "https://api.z.ai/api/paas/v4" });
     process.env.Z_AI_API_KEY = "zkey";
     const asCustom = resolveModel("z-ai/glm-5.2:free");
     expect(asCustom.provider.id).toBe("z-ai");
@@ -93,8 +92,8 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
     expect(resolved.provider.id).toBe("groq");
   });
 
-  test("custom provider hits {PREFIX}_BASE_URL (not OpenAI cloud)", async () => {
-    process.env.GROQ_BASE_URL = "https://api.groq.com/openai/v1";
+  test("custom provider hits its base_urls setting (not OpenAI cloud)", async () => {
+    urls({ groq: "https://api.groq.com/openai/v1" });
     process.env.GROQ_API_KEY = "gsk_secret";
 
     const provider = ensureCustomProvider("groq");
@@ -127,9 +126,7 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
   });
 
   test("custom prefix without a base URL fails fast and never sends its key to OpenAI", async () => {
-    delete process.env.GROQ_BASE_URL;
-    delete process.env.GROQ_BASEURL;
-    delete process.env.GROQ_API_BASE;
+    setConfigs({ values: { catalog_refresh: "off" }, editable: [] }); // no base URL anywhere
     process.env.GROQ_API_KEY = "gsk_secret";
     const provider = ensureCustomProvider("groq");
     const originalFetch = globalThis.fetch;
@@ -176,7 +173,7 @@ describe("Unified Multi-Provider Layer (no OpenRouter fee)", () => {
 
   test("Agent works end-to-end on custom provider with mocked fetch", async () => {
     const { Agent } = await import("../src/index.ts");
-    process.env.OLLAMA_BASE_URL = "http://localhost:11434/v1";
+    urls({ ollama: "http://localhost:11434/v1" });
     process.env.OLLAMA_API_KEY = "ollama";
 
     const originalFetch = globalThis.fetch;

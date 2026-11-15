@@ -42,10 +42,9 @@ import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey, getEnv } from "../utils/env.ts";
+import { openRouterSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { ConfigError, isAbortError } from "../types/errors.ts";
 import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
@@ -63,12 +62,15 @@ import {
   toolTurnFinishReason,
   combinedSignal,
   timeoutFor,
-  hasAuthHeader,
   clampToolCallId,
   openStreamResponse,
   retryOptionsFrom,
   headersToRecord,
   parseRetryAfterMs,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+  stripModelScope,
+  resultToOutput,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -161,31 +163,23 @@ const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
 
-// Endpoint from the option, OPENROUTER_BASE_URL, else openrouter.ai; in: each request, out: the base URL without a trailing slash.
+// The openrouter base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return (
-    options?.baseUrl ||
-    options?.env?.["OPENROUTER_BASE_URL"] ||
-    getEnv("OPENROUTER_BASE_URL") ||
-    DEFAULT_BASE_URL
-  ).replace(/\/+$/, "");
+  return resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options);
 }
 
-// Key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
+// The openrouter key of this request; in: each request, out: the shared resolver.
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
-  const key = getApiKey("openrouter", options?.apiKey, options?.env);
-  if (key) return key;
-  if (hasAuthHeader(options?.headers)) return "unused";
-  return undefined;
+  return resolveProviderApiKey("openrouter", options);
 }
 
 /**
  * Strips ONLY the `openrouter/` prefix. Scoped ids (`scope/model:variant`)
  * and bare ids pass through untouched — the router resolves them.
  */
+// The model id without its provider scope; in: each request, out: the bare id.
 function cleanModelId(model: string | ModelSpec): string {
-  const rawId = typeof model === "string" ? model : model.id;
-  return rawId.replace(/^openrouter\//i, "");
+  return stripModelScope(model, /^openrouter\//i);
 }
 
 // The HTTP status of an error chunk inside a stream (the HTTP status itself is 200): its numeric `code`, else the status of its retryable `error_type` (errors-and-debugging.md, "Typed Error Codes"); in: the chunk's error, out: streamInto, where it makes the error retryable.
@@ -202,68 +196,31 @@ function midStreamStatus(code: unknown, errorType: unknown): number | undefined 
   return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
 }
 
-// OpenRouter options that come from env vars, never from AgentConfig (provider routing, `parallel_tool_calls`, `reasoning.exclude`, `user`). A per-Agent `env` wins over the process env; nothing is sent when no variable is set; a bad value is a ConfigError before any network call. NOT supported on purpose (the owner does not want them for now): `reasoning.max_tokens` and `trace`; in: buildBody, out: the extra body fields.
-const ROUTING_LISTS = { OPENROUTER_ORDER: "order", OPENROUTER_ONLY: "only", OPENROUTER_IGNORE: "ignore" } as const;
-const ROUTING_FLAGS = {
-  OPENROUTER_ALLOW_FALLBACKS: "allow_fallbacks",
-  OPENROUTER_REQUIRE_PARAMETERS: "require_parameters",
-  OPENROUTER_ZDR: "zdr",
-} as const;
-function openRouterEnvOptions(options?: ProviderRequestOptions): {
+// The OpenRouter request options from the `openrouter` setting (provider routing, `parallel_tool_calls`, `reasoning.exclude`, `user`), already checked by the settings layer; nothing is sent for a key that is not set. NOT supported on purpose (the owner does not want them for now): `reasoning.max_tokens` and `trace`; in: buildBody, out: the extra body fields.
+const ROUTING_KEYS = [
+  "order",
+  "only",
+  "ignore",
+  "allow_fallbacks",
+  "require_parameters",
+  "zdr",
+  "data_collection",
+  "sort",
+] as const;
+function openRouterOptions(): {
   provider?: Record<string, unknown>;
   parallel_tool_calls?: boolean;
   reasoning_exclude?: boolean;
   user?: string;
 } {
-  const read = (name: string): string | undefined => {
-    const own = options?.env?.[name]?.trim();
-    return own ? own : getEnv(name);
-  };
-  const bad = (name: string, value: string, expected: string): never => {
-    throw new ConfigError(`[Agent Accelerator] Invalid ${name} ${JSON.stringify(value)}: expected ${expected}.`);
-  };
-  const flag = (name: string): boolean | undefined => {
-    const v = read(name);
-    if (v === undefined) return undefined;
-    const t = v.toLowerCase();
-    if (t === "true" || t === "1") return true;
-    if (t === "false" || t === "0") return false;
-    return bad(name, v, "true or false");
-  };
+  const s = openRouterSetting();
   const provider: Record<string, unknown> = {};
-  for (const [name, field] of Object.entries(ROUTING_LISTS)) {
-    const v = read(name);
-    if (v === undefined) continue;
-    const list = v
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-    if (list.length === 0) bad(name, v, "a comma-separated list of provider slugs");
-    provider[field] = list;
-  }
-  for (const [name, field] of Object.entries(ROUTING_FLAGS)) {
-    const v = flag(name);
-    if (v !== undefined) provider[field] = v;
-  }
-  const collection = read("OPENROUTER_DATA_COLLECTION");
-  if (collection !== undefined) {
-    if (collection !== "allow" && collection !== "deny") bad("OPENROUTER_DATA_COLLECTION", collection, "allow or deny");
-    provider["data_collection"] = collection;
-  }
-  const sort = read("OPENROUTER_SORT");
-  if (sort !== undefined) {
-    if (sort !== "price" && sort !== "throughput" && sort !== "latency")
-      bad("OPENROUTER_SORT", sort, "price, throughput or latency");
-    provider["sort"] = sort;
-  }
-  const parallel = flag("OPENROUTER_PARALLEL_TOOL_CALLS");
-  const exclude = flag("OPENROUTER_REASONING_EXCLUDE");
-  const user = read("OPENROUTER_USER");
+  for (const key of ROUTING_KEYS) if (s[key] !== undefined) provider[key] = s[key];
   return {
     ...(Object.keys(provider).length > 0 ? { provider } : {}),
-    ...(parallel !== undefined ? { parallel_tool_calls: parallel } : {}),
-    ...(exclude !== undefined ? { reasoning_exclude: exclude } : {}),
-    ...(user ? { user } : {}),
+    ...(typeof s["parallel_tool_calls"] === "boolean" ? { parallel_tool_calls: s["parallel_tool_calls"] } : {}),
+    ...(typeof s["reasoning_exclude"] === "boolean" ? { reasoning_exclude: s["reasoning_exclude"] } : {}),
+    ...(typeof s["user"] === "string" ? { user: s["user"] } : {}),
   };
 }
 
@@ -430,12 +387,6 @@ function storedReplay(m: { providerSteps?: { provider: string; steps: unknown[] 
     ...(details.length > 0 ? { reasoning_details: details } : {}),
     ...(annotations.length > 0 ? { annotations } : {}),
   };
-}
-
-// A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
-function resultToOutput(result: unknown): string {
-  if (typeof result === "string") return result;
-  return safeStringify(result);
 }
 
 /**
@@ -656,7 +607,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     let outputEmulated = false;
     let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
     try {
-      outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+      outputSpec = normalizeStructuredOutput(options?.output);
     } catch {
       // why: invalid output shapes fail fast at Agent construction/loop validation.
       outputSpec = undefined;
@@ -690,7 +641,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (orTools) body.tools = orTools;
     const toolChoice = mapToolChoiceToOpenRouterChat(options?.toolChoice);
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
-    const env = openRouterEnvOptions(options);
+    const env = openRouterOptions();
     if (effort || env.reasoning_exclude !== undefined)
       body.reasoning = {
         ...(effort ? { effort } : {}),
@@ -786,10 +737,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderGenerateResult> {
     // The whole call stays bounded by `timeoutMs`; the stream's own timer only covers the wait for its first byte.
-    const { signal, cleanup } = combinedSignal(
-      options?.signal,
-      timeoutFor(options as { timeoutMs?: number } | undefined)
-    );
+    const { signal, cleanup } = combinedSignal(options?.signal, timeoutFor(options));
     try {
       // Nobody reads the deltas here, so the stream keeps none (a burst of frames would overflow its buffer for nothing).
       const events = this.streamInto(new AssistantMessageEventStream({ buffer: false }), model, context, {
@@ -871,7 +819,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           body,
         };
 
-        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({

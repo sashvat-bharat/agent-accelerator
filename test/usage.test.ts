@@ -6,6 +6,7 @@ import { Agent, registerModel, clearCustomModels } from "../src/index.ts";
 import { createGenericModelSpec } from "../src/models/catalog.ts";
 import { loadSessionDir, priceUsage, sessionDirFor } from "../src/session/store.ts";
 import { addTurn, buildUsageReport, emptyUsage, mergeUsage, readUsage, usageLine } from "../src/session/usage.ts";
+import { sseFrame } from "./helpers.ts";
 
 const roots: string[] = [];
 const tmp = (): string => {
@@ -30,7 +31,6 @@ const usage = (extra: Record<string, unknown> = {}) => ({
   completion_tokens_details: { reasoning_tokens: 50 },
   ...extra,
 });
-const sseFrame = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`;
 const reply = (text: string, body: any, u = usage()): Response =>
   body.stream
     ? new Response(sseFrame({ id: "r", choices: [{ delta: { content: text } }] }) + sseFrame({ id: "r", choices: [{ delta: {}, finish_reason: "stop" }], usage: u }) + "data: [DONE]\n\n", { status: 200, headers: { "content-type": "text/event-stream" } })

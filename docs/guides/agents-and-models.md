@@ -10,7 +10,7 @@ import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
   name: "support",
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   instructions: "You are a friendly support agent. Be brief.",
   maxTurns: 10,
 });
@@ -32,12 +32,12 @@ console.log(res2.text);
 | `session(id?)`, `disposeSession(id)`, `clearSessions()` | In-memory named sessions: `run(prompt, { sessionId })` keeps a separate history per id. |
 | `exportSession()`, `importSession()` | Snapshot/restore history (see [Data and media](data-and-media.md)). |
 
-Useful config: `stateless: true` clears history around every run (one-shot judges); `headers`, `apiKey`, `baseUrl` per agent; `maxTurns` (`0`/omitted = unlimited); `agentFromEnv(config)` builds an agent from `MODEL`/`SUB_AGENT_MODEL`. Every key is in [Reference](../reference.md).
+Useful config: `stateless: true` clears history around every run (one-shot judges); `headers`, `apiKey`, `baseUrl` per agent; `maxTurns` (`0`/omitted = unlimited); `agentFromEnv(config)` builds an agent with the saved or default model (`setModels` / `setModel`) when you give none. Every key is in [Reference](../reference.md).
 
 **Recommendations**
 - ✅ Keep `instructions` and the tool set **stable** between calls; put anything that changes per turn in `additionalContext` or the user message.
 - ✅ Set a finite `maxTurns` in services (see [Safety and operations](safety-and-ops.md)).
-- ⚠️ `hooks`, `contextManagement` and `logger` config keys are **not implemented**; they only emit a warning. Use `telemetryBus` instead.
+- ⚠️ The `hooks` config key is **not implemented**; it only emits a warning. Use `telemetryBus` instead. (`logger` and `contextManagement` were removed in 0.7.0.)
 - 💡 An `Agent` runs one thing at a time. A second call while busy is steered or queued (see [Tools and streaming](tools-and-streaming.md)).
 
 ## Models and providers
@@ -48,7 +48,7 @@ Useful config: `stateless: true` clears history around every run (one-shot judge
 | `openai/<id>` | OpenAI Responses API | `OPENAI_API_KEY` |
 | `openrouter/<scope>/<id>` or `scope/id:variant` | OpenRouter Chat Completions | `OPENROUTER_API_KEY` |
 | `<anything-else>/<id>` | Generic OpenAI-compatible Chat Completions | `<PREFIX>_API_KEY` + `<PREFIX>_BASE_URL` |
-| bare `<id>` | Catalog lookup (google, openai, openrouter), else OpenRouter; with `OPENAI_BASE_URL` set it goes to OpenAI | |
+| bare `<id>` | Catalog lookup (google, openai, openrouter), else OpenRouter; with the `base_urls.openai` setting set it goes to OpenAI | |
 
 Rules worth knowing: a custom prefix **never** falls back to another vendor's key or default URL (a missing base URL throws before any network call); local endpoints (localhost, LAN, `*.local`) may omit the key; Gemini older than version 3 is rejected before the network.
 
@@ -88,12 +88,51 @@ Unsupported options are **warned on the telemetry bus and dropped**, never sent.
 - There are no `stop` or `seed` options (both removed in 0.6.0).
 - 💡 Switching providers mid-session is supported; the conversation history is provider-neutral.
 
+### The list of allowed models
+
+A program that ships to other people (a harness, a binary) often needs one fixed list of models. Write it as `models.json`, embed it in your code and hand it to `setModels`; the SDK never reads it from disk, so an end user cannot change it by editing a file in their home folder.
+
+```json
+{
+  "default": { "model": "google/gemini-4-argon", "sub_agent_model": "google/gemini-4-argon" },
+  "providers": {
+    "google": { "models": ["gemini-4-argon", "gemini-4-carbon"] },
+    "anthropic": { "models": ["claude-opus-5-5"] },
+    "openrouter": { "models": ["meta/muse-ember"] }
+  }
+}
+```
+
+```ts
+import { setModels, listModels } from "agent-accelerator";
+import models from "./models.json";
+
+setModels(models);                 // validates everything first
+for (const m of listModels()!.models) console.log(m.model); // "google/gemini-4-argon", ... for a picker
+```
+
+- Models sit under their provider **without** the `provider/` prefix; the SDK joins them into `provider/model`. OpenRouter ids keep their own slash (`"meta/muse-ember"` becomes `openrouter/meta/muse-ember`). Use real catalog ids (Anthropic ids use dashes: `claude-opus-5-5`).
+- `default.model` and `default.sub_agent_model` are full `provider/model` strings and must be in the list. The list means "any of these": it is not a fallback order, and the model never picks from it.
+- The shape is exact. A wrong shape, an unknown key, a provider with no models, an empty, duplicate or wildcard (`*`) entry, a `provider/`-prefixed entry or a default outside the list throws one `ConfigError` that lists every problem, and nothing changes.
+- `listModels()` returns `{ default: { model, sub_agent_model }, models: [{ provider, id, model }] }`, deeply frozen, or `undefined` until `setModels` is called. Calling `setModels` again replaces the list.
+- This is a guardrail inside your program, not a security wall: code running in the same process can call `setModels` too.
+
+**The user's choice.** `setModel("google/gemini-4-argon")` and `setSubAgentModel("google/gemini-4-argon")` save the user's pick in `<home>/configs.json` (see [Safety and operations](safety-and-ops.md#settings-in-code-and-who-may-change-them)). They are the only way the model is written: the id must be a full `provider/model` string that is on your list, otherwise a `ModelNotAllowedError` is thrown and nothing is saved (with no list set, any non-empty id is accepted). An Agent built without an explicit `model` uses the saved choice, else your list's `default.model`; a worker without an explicit model uses the saved `sub_agent_model`, else `default.sub_agent_model`. A model you name in the Agent config always wins. A saved model that is no longer on the list (you shipped a new list) is ignored with a `config.saved_model_ignored` warning and the default is used.
+
+**Where the list is enforced.** Once `setModels` has been called, a model outside it is refused with a `ModelNotAllowedError` (a `ConfigError`: never retried) whose message names the model and lists the available ones, e.g. `Model "openai/gpt-6" is not available. Available: google/gemini-4-argon, ...`. It is checked at every place a model is picked:
+- every run start (`run`, `stream`, queued runs, resumed runs), before anything is sent or added to the conversation;
+- the `Agent` constructor, for the main model and the worker model (`dynamicSubagents.model` / `subagentModel`), so a bad setup fails at construction; this also covers `Agent.fromConfig` and `fork()`;
+- chat workers and scheduled runs (their model is the developer's worker model, checked the same way; a scheduled run that finds its model off the list is recorded as failed);
+- `importSession`, for the session's model and worker model, before anything is changed.
+
+The model catalog is filtered when it is read: `getModelsForProvider`, the `*_MODELS` lists and lookups show only listed models (a provider with no listed model shows none), and clearing the list brings everything back. The cache files are never changed, because several processes may share one home. A listed model the catalog does not know is still allowed; its price is unknown, never $0. Without `setModels` nothing is restricted.
+
 ## Thinking (reasoning)
 
 ```ts
 import { Agent, ThinkingLevelError } from "agent-accelerator";
 
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite", thinking: "medium" });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite", thinking: "medium" });
 
 try {
   const res = await agent.run("Plan a 3-step database migration.", { thinking: "high" }); // per-run override
@@ -115,7 +154,7 @@ Levels: `none`, `dynamic` (server default), `minimal`, `low`, `medium`, `high`, 
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "openai/gpt-4o",
+  model: "openai/gpt-5.5",
   instructions: "Long, stable system prompt...",
   cache: "implicit", // or "5m" | "30m" | "1h" | "12h" where the provider supports it
   serviceTier: "flex", // cheaper, slower; or "priority"
@@ -136,7 +175,7 @@ import { Agent, ValidationError } from "agent-accelerator";
 import { z } from "zod";
 
 const Invoice = z.object({ vendor: z.string(), total: z.number(), currency: z.string() });
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite", output: Invoice });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite", output: Invoice });
 
 try {
   const res = await agent.run("Acme Ltd charged 120.50 EUR for hosting.");
@@ -157,12 +196,11 @@ The SDK gives you the building blocks for an agent that improves itself; the loo
 ```ts
 import { Agent, tool } from "agent-accelerator";
 
-// 1. Your full config. `tools` is the pool the agent may pick from; `allowedModels` is where it may go.
+// 1. Your full config. `tools` is the pool the agent may pick from; the program's model list (`setModels`, above) is where it may go.
 const base = {
   model: "openai/gpt-5.5",
   instructions: "You answer support questions.",
   tools: { search, readFile, writeFile }, // each tool in its own file, so an agent (or you) can edit it
-  allowedModels: ["openai/gpt-5.5", "openai/gpt-5.5-mini"],
   budget: { maxCostUsd: 2 },
   maxTurns: 20,
 };
@@ -176,8 +214,8 @@ const next = Agent.fromConfig({ ...agent.toConfig(), instructions: "Be brief. Ci
 ```
 
 - **`tools` are names**, picked from `base.tools`. A name that is not in the pool throws a `ConfigError` that lists the names that are, so a harness can hand the message straight back to the model. Leave `tools` out to keep all of them. The built-in delegation and scheduler tools come from `base` and never appear in `toConfig()`.
-- **`allowedModels`** is checked whenever an Agent is built, so it covers `new Agent(base)` and `Agent.fromConfig`. Entries are compared as written (`"provider/model"`). A model outside the list, or a bad list (empty, not strings), throws a `ConfigError`. Workers and `subagentModel` are not affected.
-- **Keys never travel.** `toConfig()` has no keys. If `base.model` is a model helper holding an `apiKey`/`baseUrl`, the new agent keeps them only for the **same provider**; a model on another provider gets no key from it (a top-level `base.apiKey` applies to every model, as always, so combine it with `allowedModels`).
+- **The model list** (`setModels`, see [The list of allowed models](#the-list-of-allowed-models)) is what limits an agent's model edit: a model outside it throws a `ModelNotAllowedError` when the Agent is built, so it covers `new Agent(base)` and `Agent.fromConfig`. The option `allowedModels` was removed in 0.7.0 (passing it throws a `ConfigError` that says so).
+- **Keys never travel.** `toConfig()` has no keys. If `base.model` is a model helper holding an `apiKey`/`baseUrl`, the new agent keeps them only for the **same provider**; a model on another provider gets no key from it (a top-level `base.apiKey` applies to every model, as always, so combine it with the model list).
 - **A new Agent, not a patch.** `fromConfig` returns a fresh Agent and never changes the old one. Give `base` the same `sessionId` and `persist` to continue the saved conversation with the new settings.
 - **Tool files.** To let an agent edit a tool's name, description or code, write each tool in its own file and give the agent access to it. That is a convention, not an SDK feature: loading the edited file back (with a fresh import) is the harness's job.
 

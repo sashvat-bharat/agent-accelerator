@@ -1,6 +1,6 @@
 import { Agent, tool } from "agent-accelerator";
 import { z } from "zod";
-import { fail } from "./_shared";
+import { fail, MODEL } from "./_shared";
 
 const get_status = tool({
   timeoutMs: 5_000,
@@ -17,7 +17,7 @@ const get_status = tool({
 const agent = new Agent({
   name: "Auth Agent",
   instructions: "Verify users via get_status. Be concise.",
-  model: process.env.MODEL,
+  model: MODEL,
   tools: { get_status },
   thinking: "medium",
   retry: { maxRetries: 2 },

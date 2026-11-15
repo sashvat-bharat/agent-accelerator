@@ -31,11 +31,9 @@ async function inSubprocess(cacheDir: string, body: string): Promise<any> {
   const script = path.join(cacheDir, "probe.ts");
   fs.writeFileSync(
     script,
-    `import { ensureModelCatalogFresh, getCatalogStatus } from ${JSON.stringify(SRC_INDEX)};\n${body}`
+    `import { ensureModelCatalogFresh, getCatalogStatus, setConfigs } from ${JSON.stringify(SRC_INDEX)};\nconst CACHE_DIR = ${JSON.stringify(cacheDir)};\nsetConfigs({ values: { catalog_cache_dir: CACHE_DIR } });\n${body}`
   );
-  const env: Record<string, string> = { ...(process.env as Record<string, string>), AGENT_CACHE_DIR: cacheDir };
-  delete env.AGENT_CATALOG_REFRESH;
-  const proc = Bun.spawn([process.execPath, script], { env, stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "pipe" });
   const out = await new Response(proc.stdout).text();
   const code = await proc.exited;
   if (code !== 0) throw new Error(`probe failed: ${await new Response(proc.stderr).text()}`);
@@ -115,14 +113,14 @@ console.log(JSON.stringify({ before: before.loaded, after: s.loaded, waited: Dat
     }
   });
 
-  it("AGENT_CATALOG_REFRESH=off never touches the network automatically", async () => {
+  it("the catalog_refresh setting off never touches the network automatically", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "accel-cat-"));
     try {
       writeCache(dir, 1, 1000);
       const res = await inSubprocess(
         dir,
         `
-process.env.AGENT_CATALOG_REFRESH = "off";
+setConfigs({ values: { catalog_cache_dir: CACHE_DIR, catalog_refresh: "off" } });
 let calls = 0;
 globalThis.fetch = async () => { calls++; throw new Error("must not be called"); };
 const s = await ensureModelCatalogFresh();

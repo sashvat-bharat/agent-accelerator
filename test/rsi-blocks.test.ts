@@ -1,6 +1,7 @@
-import { describe, it, expect } from "bun:test";
+import { afterEach, describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { Agent, tool, ConfigError, ModelProvider, telemetryBus } from "../src/index.ts";
+import { Agent, tool, ConfigError, ModelNotAllowedError, ModelProvider, telemetryBus, setModels } from "../src/index.ts";
+import { resetModels } from "../src/config/models.ts";
 
 // The RSI building blocks: an agent may edit only model, instructions and tools. Everything else is the developer's.
 const mk = (name: string) =>
@@ -135,40 +136,49 @@ describe("Agent.fromConfig(editable, base)", () => {
   });
 });
 
-describe("allowedModels", () => {
-  const allowed = ["groq/llama-3.3-70b-versatile", "groq/openai/gpt-oss-20b"];
+describe("the program's model list (setModels)", () => {
+  const list = (models: string[], def = "groq/llama-3.3-70b-versatile") => ({
+    default: { model: def, sub_agent_model: def },
+    providers: { groq: { models }, openai: { models: ["gpt-5.5"] } },
+  });
+  const allowed = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b"];
+  afterEach(() => resetModels());
 
   it("a model inside the list works, in the constructor and through fromConfig", () => {
-    expect(() => new Agent(base({ allowedModels: allowed }))).not.toThrow();
-    const agent = Agent.fromConfig({ model: "groq/openai/gpt-oss-20b" }, base({ allowedModels: allowed }));
+    setModels(list(allowed));
+    expect(() => new Agent(base())).not.toThrow();
+    const agent = Agent.fromConfig({ model: "groq/openai/gpt-oss-20b" }, base());
     expect(agent.modelStringOrSpec).toBe("groq/openai/gpt-oss-20b");
   });
 
-  it("a model outside the list is refused with the allowed ones named", () => {
-    expect(() => Agent.fromConfig({ model: "openai/gpt-5.5" }, base({ allowedModels: allowed }))).toThrow(
-      /"openai\/gpt-5\.5" is not in allowedModels\. Allowed: "groq\/llama-3\.3-70b-versatile", "groq\/openai\/gpt-oss-20b"/
-    );
-    expect(() => new Agent(base({ model: "openai/gpt-5.5", allowedModels: allowed }))).toThrow(ConfigError);
+  it("a model outside the list is refused with the available ones named", () => {
+    setModels(list(allowed));
+    const edit = () => Agent.fromConfig({ model: "openai/gpt-6" }, base());
+    expect(edit).toThrow(ModelNotAllowedError);
+    expect(edit).toThrow(/Model "openai\/gpt-6" is not available\. Available: groq\/llama-3\.3-70b-versatile, groq\/openai\/gpt-oss-20b, openai\/gpt-5\.5\./);
+    expect(() => new Agent(base({ model: "openai/gpt-6" }))).toThrow(ConfigError);
   });
 
   it("an edit without a model keeps the base model, which must be allowed too", () => {
-    expect(() => Agent.fromConfig({ instructions: "x" }, base({ model: "openai/gpt-5.5", allowedModels: allowed }))).toThrow(ConfigError);
+    setModels(list(allowed));
+    expect(() => Agent.fromConfig({ instructions: "x" }, base({ model: "openai/gpt-6" }))).toThrow(ModelNotAllowedError);
   });
 
-  it("entries are compared as written, and a model helper counts by its model string", () => {
-    expect(() => Agent.fromConfig({ model: "llama-3.3-70b-versatile" }, base({ allowedModels: allowed }))).toThrow(ConfigError);
-    expect(() => new Agent({ ...base({ allowedModels: ["openai/gpt-5.5"] }), model: ModelProvider.OpenAI("gpt-5.5") })).not.toThrow();
+  it("a model helper counts by the model it names", () => {
+    setModels(list(allowed));
+    expect(() => new Agent({ ...base(), model: ModelProvider.OpenAI("gpt-5.5") })).not.toThrow();
+    expect(() => new Agent({ ...base(), model: ModelProvider.OpenAI("gpt-6") })).toThrow(ModelNotAllowedError);
   });
 
-  it("an invalid list is a ConfigError, not a silent allow-all", () => {
-    for (const bad of [[], "groq/x", [1], [""]] as never[]) {
-      expect(() => new Agent(base({ allowedModels: bad }))).toThrow(/Invalid allowedModels/);
-    }
+  it("allowedModels was removed and says what to use instead", () => {
+    expect(() => new Agent(base({ allowedModels: ["groq/x"] }))).toThrow(/allowedModels was removed.*setModels/);
   });
 
   it("a fork keeps the rule", () => {
-    const agent = new Agent(base({ allowedModels: allowed }));
+    setModels(list(allowed));
+    const agent = new Agent(base());
     expect(() => agent.fork("child")).not.toThrow();
-    expect((agent as any).forkConfig.allowedModels).toEqual(allowed);
+    setModels(list(["other"], "groq/other"));
+    expect(() => agent.fork("child2")).toThrow(ModelNotAllowedError);
   });
 });

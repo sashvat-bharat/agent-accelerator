@@ -10,7 +10,6 @@ const rss = (): number => {
 };
 const row = (label: string, bytes: number, note = ""): void => console.log(`${label.padEnd(34)} ${mb(bytes)} MB  ${note}`);
 
-process.env.AGENT_CATALOG_REFRESH = "off";
 const streams = Number(process.argv[2] ?? 100);
 const floor = rss();
 row("bun with nothing loaded", floor);
@@ -19,6 +18,7 @@ await import("zod");
 row("+ zod", rss());
 
 const sdk = await import("../src/index.ts");
+sdk.setConfigs({ values: { catalog_refresh: "off" } });
 const afterImport = rss();
 row("+ agent-accelerator (import)", afterImport, `catalog models: ${sdk.getCatalogStatus().modelCount} (not read yet)`);
 
@@ -55,3 +55,15 @@ await Promise.all(
 clearInterval(sampler);
 row(`peak with ${streams} streams in flight`, peak, `${(performance.now() - t0).toFixed(0)} ms, +${((peak - afterImport) / 1048576).toFixed(1)} MB over import`);
 row("after they finished (gc)", rss());
+
+// The same streams again with the concurrency limit on: at most 10 in flight, the rest wait in line (cheap: a waiter is a small object).
+sdk.setConfigs({ values: { catalog_refresh: "off", concurrency: { max_requests: 10 } } });
+peak = 0;
+const sampler2 = setInterval(() => (peak = Math.max(peak, process.memoryUsage().rss)), 5);
+const t1 = performance.now();
+await Promise.all(
+  Array.from({ length: streams }, (_, i) => agent.fork(`bench-l-${i}`).stream("hi", { sessionId: `bench-l-${i}` }).result())
+);
+clearInterval(sampler2);
+row(`peak, ${streams} streams, limit 10`, peak, `${(performance.now() - t1).toFixed(0)} ms, ${JSON.stringify(sdk.getConcurrencyStatus())}`);
+sdk.setConfigs({ values: { catalog_refresh: "off" } });

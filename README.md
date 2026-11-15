@@ -8,7 +8,7 @@
 
 A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
 
-Agent Accelerator supports `google`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`.
+Agent Accelerator supports `google`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using the `{PREFIX}_API_KEY` key and the `base_urls.{prefix}` setting.
 
 
 ```ts
@@ -44,7 +44,7 @@ pnpm add agent-accelerator
 yarn add agent-accelerator
 ```
 
-Requires `bun` or `node 22+`.
+Built and tested on Bun (the package publishes TypeScript source, so run it with `bun`).
 
 The only dependency is `zod` (a peer dependency: install it next to the SDK and import `z` from `"zod"`). All provider transports are native REST (`fetch`, no SDK).
 
@@ -58,20 +58,23 @@ OPENROUTER_API_KEY=...
 OPENAI_API_KEY=...
 # or OPENAI_BASE_API_KEY=...
 
-MODEL="google/gemini-3.5-flash-lite"
-SUB_AGENT_MODEL="google/gemini-3.5-flash-lite"
-
-# Any OpenAI-compatible endpoint, no code change:
-# MODEL="groq/llama-3.3-70b-versatile"
+# Any OpenAI-compatible endpoint: only its key goes in the environment
 # GROQ_API_KEY="..."
-# GROQ_BASE_URL="https://api.groq.com/openai/v1"
-
-# Local, no key needed:
-# MODEL="ollama/qwen2.5-coder"
-# OLLAMA_BASE_URL="http://localhost:11434/v1"
 ```
 
-`MODEL` and `SUB_AGENT_MODEL` are fallbacks, used only when `model` or the dynamic worker model are omitted. Explicit configuration always takes precedence over environment variables.
+**The environment holds API keys and nothing else** (`GEMINI_API_KEY` / `GOOGLE_API_KEY`, `OPENAI_API_KEY` / `OPENAI_BASE_API_KEY`, `OPENROUTER_API_KEY`, `{PREFIX}_API_KEY`). Everything else is set in code (since 0.7.0 the settings env vars are gone):
+
+```ts
+import { Agent, setConfigs, setModels } from "agent-accelerator";
+
+setModels({ default: { model: "google/gemini-3.5-flash-lite", sub_agent_model: "google/gemini-3.5-flash-lite" },
+            providers: { google: { models: ["gemini-3.5-flash-lite"] } } });
+setConfigs({ values: { base_urls: { groq: "https://api.groq.com/openai/v1", ollama: "http://localhost:11434/v1" } } });
+
+const agent = new Agent({}); // no `model`: the saved choice, else the list's default
+```
+
+An `Agent` without a `model` uses the user's saved choice (`setModel`), else the list's `default.model`; a worker without one uses `default.sub_agent_model`. An explicit `model` always wins. The endpoint of an OpenAI-compatible provider is the `base_urls.<prefix>` setting (a local endpoint needs no key). See [Settings in code](docs/guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) and [the list of allowed models](docs/guides/agents-and-models.md#the-list-of-allowed-models).
 
 ---
 
@@ -116,11 +119,11 @@ An `Agent` holds:
 
 | Field             | Type                                                 | Meaning / Use Case                                                                                                                                         |
 | ----------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`           | `string \| ModelSpec \| ModelProviderInstance`       | Model identifier, such as `"google/gemini-3.5-flash-lite"`. Use `ModelProvider.*` or `ModelSpec` to pin a provider and credentials. Falls back to `MODEL`. |
+| `model`           | `string \| ModelSpec \| ModelProviderInstance`       | Model identifier, such as `"google/gemini-3.5-flash-lite"`. Use `ModelProvider.*` or `ModelSpec` to pin a provider and credentials. Without it, the saved choice or the list default (`setModel` / `setModels`). |
 | `instructions`    | `string`                                             | System prompt. Keep it stable; place per-turn additions in `additionalContext`.                                                                            |
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
-| `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
-| `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Falls back to `SUB_AGENT_MODEL`. |
+| `subagents`       | `(Agent \| { name, description, agent })[]`                            | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
+| `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Without it, the saved or default worker model (`setSubAgentModel` / `setModels`). |
 | `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned workers: `{ enabled, model?, maxSpawn?, maxDepth?, workerBudget?, scheduledActionBudget?, thinkingLevel?, tools?, workerTimeoutMs?, allowScheduledActions? }` (`workerTimeoutMs` is for scheduled actions only). See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
 | `cache`           | `CacheOption`                                        | `"implicit" \| "5m" \| "30m" \| "1h" \| "12h"`. Prompt-cache lifetime; unsupported values warn and fall back (see [Cache](#cache)).                                                                             |
@@ -137,7 +140,7 @@ An `Agent` holds:
 | `runRetries`      | `number`                                             | A run that FAILED for a transient reason (provider down or overloaded, timeouts, a cut stream, after `retry` gave up) is tried again from where it stopped, waiting 5 s, 15 s, 45 s, then 60 s. Default `3`, `0` = off. Finished tool calls are not repeated; the response reports the failed attempts' tool calls and usage. Never for aborts, 400/401/403/404, bad config, budgets or limits. `run()` and queued runs only, not `stream()`. |
 | `resume`          | `"automatic" \| "explicit"`                         | Crash recovery (needs `persist: { dir }` + the same `sessionId`): `automatic` (default) continues a cut-off run when the Agent is constructed, `explicit` waits for `agent.resume()`. Finished tool calls are never run again. `agent.interrupted()` lists cut-off runs. |
 | `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions, saved after every step (user/assistant/tool/sub-agent). `{ dir }` keeps `sessions/<sessionId>/session.json` (snapshot) plus an append-only `journal.ndjson` (one line per step, so a long chat costs the same per step as a short one), `{ file }` a single `.session.json`, `{}` uses `<home>/sessions`. Writes are durable (fsync, `.bak` of the last good file, atomic rename) and never fail a turn. |
-| `home`            | `string`                                             | Folder for everything the SDK writes to disk (`sessions/`, `scheduled/`, `telemetry/`). Defaults to `setHome(dir)`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory. An explicit `persist.dir` / `persist.file` still wins.        |
+| `home`            | `string`                                             | Folder for everything the SDK writes to disk (`sessions/`, `scheduled/`, `telemetry/`). Defaults to `setHome(dir)`, then `.agent-accel/` in the working directory (set in code only). An explicit `persist.dir` / `persist.file` still wins.        |
 
 When `dynamicSubagents.enabled` is set without a resolvable worker model, construction throws `SubAgentModelError`.
 
@@ -145,7 +148,7 @@ When `dynamicSubagents.enabled` is set without a resolvable worker model, constr
 
 ```ts
 await agent.run(prompt, opts?) // non-streaming, or streaming when opts.stream is true
-agent.ask(prompt, optsOrBool?) // deprecated (use run): string deltas when streaming, otherwise same as run
+agent.ask(prompt, optsOrBool?) // shorthand for run: string deltas when streaming, otherwise same as run
 agent.stream(prompt, opts?) // AssistantMessageEventStream
 agent.steer(prompt) / agent.queue(prompt) // while busy: join the active run / start after it
 agent.interrupt() // stop the active run now (provider request aborted, stream cancelled, tools get ctx.signal)
@@ -226,7 +229,7 @@ stream.off("text_delta", handler);
 
 ## SubAgent
 
-`SubAgent extends Agent` for fixed worker roles. It is a deprecated compat alias: prefer a plain `Agent` exposed via `subagents: [...]`, `agentToTool()` or `buildAgentTools()`.
+`SubAgent extends Agent` for fixed worker roles. It is a thin wrapper that gets no new features; a plain `Agent` exposed via `subagents: [...]`, `agentToTool()` or `buildAgentTools()` does the same.
 
 ```ts
 import { Agent, SubAgent } from "agent-accelerator";
@@ -246,7 +249,7 @@ const lead = new Agent({
 
 ### Differences from Agent
 
-* `model` resolves as `config.model ?? SUB_AGENT_MODEL ?? MODEL` and throws if empty.
+* `model` resolves as `config.model ?? the saved or default worker model ?? the saved or default main model` (see `setModels` / `setModel`) and throws if empty.
 * `.asTool(name?, desc?)` / `.toTool(name?, desc?)` converts the subagent into a `ToolDefinition` for manual registration.
 * `stateless: true` is supported for one-shot judges that must not retain history.
 
@@ -271,7 +274,7 @@ For LLM-spawned workers, configure `dynamicSubagents`:
 ```ts
 const agent = new Agent({
   name: "Main Agent",
-  model: process.env.MODEL,
+  model: "google/gemini-3.5-flash-lite",
   tools: { get_topic_brief },
   instructions: "You are the Main Agent",
   dynamicSubagents: {
@@ -304,7 +307,7 @@ console.log(res.subagents.map((s) => s.name));
 
 ### Persistent workers (`agent.workers`)
 
-Besides one-shot delegation, an agent can run **workers that keep their conversation**: start one, message it again and again, close it. A worker is a plain `Agent` with its own instructions and tools, on the developer's worker model (`dynamicSubagents.model` or `SUB_AGENT_MODEL`). With `persist: { dir }` on the parent it is saved under `<parent session folder>/workers/<id>/` (own journal, tool logs and `worker.json`), so it is rebuilt with its history after a restart.
+Besides one-shot delegation, an agent can run **workers that keep their conversation**: start one, message it again and again, close it. A worker is a plain `Agent` with its own instructions and tools, on the developer's worker model (`dynamicSubagents.model`, else the saved or default worker model). With `persist: { dir }` on the parent it is saved under `<parent session folder>/workers/<id>/` (own journal, tool logs and `worker.json`), so it is rebuilt with its history after a restart.
 
 ```ts
 const reply = await lead.workers.spawn({
@@ -386,7 +389,7 @@ telemetryBus.onEvent((e) => {
 | `skip(id)` | Ignore a missed run and wait for the next scheduled time. |
 | `delete(id, { force?, purge? })` | Delete for good. While it is cooking nothing changes unless `force: true`; `purge: true` also deletes past run files. |
 
-Every method works on **the agent's own home** (`home` option, else `setHome()`, `AGENT_ACCEL_HOME`, or `.agent-accel/`), so nothing needs a `{ home }` argument. `list`, `update`, `run`, `skip` and `delete` see every action in that home, like the model's `scheduled_actions` tool does.
+Every method works on **the agent's own home** (`home` option, else `setHome()`, or `.agent-accel/`), so nothing needs a `{ home }` argument. `list`, `update`, `run`, `skip` and `delete` see every action in that home, like the model's `scheduled_actions` tool does.
 
 **How it behaves**
 
@@ -447,7 +450,6 @@ const agent = new Agent({
 * `toStandardToolDeclarations(record | array)` — converts tools to `{ name, description, parameters }` for providers.
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
-* `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls validate Zod input, use bounded parallelism, enforce per-tool timeouts, retry transient failures, recover namespace/camel-case tool-name aliases, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
 
 The agent loop answers the 3rd consecutive identical call (same name and arguments) with a `repeat_blocked` error, so the model can reuse the prior result or change its arguments. Tools marked `repeatable: true`, or `idempotent: true` unless `repeatable` is set, are exempt.
 
@@ -600,8 +602,8 @@ Any other provider prefix is treated as an OpenAI-compatible custom provider.
 * `"google/<id>"` → Google AI Studio at `generativelanguage.googleapis.com`.
 * `"openrouter/<scope>/<model>"` or `"scope/model:variant"` → OpenRouter.
 * `"openai/<id>"` → OpenAI.
-* `"groq/<id>"`, `"ollama/<id>"`, etc. → custom providers using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`. The API key is optional for local endpoints.
-* A bare `"some-model"` uses `OPENAI_BASE_URL` when configured. Otherwise, catalog lookup is attempted, followed by an `openrouter` fallback.
+* `"groq/<id>"`, `"ollama/<id>"`, etc. → custom providers using `{PREFIX}_API_KEY` and the `base_urls.{prefix}` setting. The API key is optional for local endpoints.
+* A bare `"some-model"` uses OpenAI when the `base_urls.openai` setting is set. Otherwise, catalog lookup is attempted, followed by an `openrouter` fallback.
 
 Model resolution never silently selects a default model: an empty model throws.
 
@@ -660,7 +662,7 @@ new Agent({
     "groq/llama-3.3-70b-versatile",
     process.env.GROQ_API_KEY,
     {
-      baseUrl: process.env.GROQ_BASE_URL,
+      baseUrl: "https://api.groq.com/openai/v1", // or set `base_urls.groq` once in the settings
     },
   ),
 });
@@ -739,19 +741,21 @@ It also:
 * reports `cached_tokens` / `cache_write_tokens` / reasoning tokens, preferring provider-reported `cost` when present (a reported `0`, a free model or a cache hit, stays a known `$0`);
 * accepts `anthropic/...` and `~anthropic/...` model names for the `5m` / `1h` cache setting;
 * sends a turn's `reasoning_details` blocks and parsed-PDF `file` annotations back on the next turns, exactly as OpenRouter returned them;
-* reads provider routing and a few request fields from env vars (see below), never from `AgentConfig`.
+* reads provider routing and a few request fields from the `openrouter` setting (see below), never from `AgentConfig`.
 
-**Env vars** (an Agent's own `env: { ... }` wins over `process.env`; nothing is sent for a variable that is not set; a bad value throws a `ConfigError` before any request):
+**The `openrouter` setting** (`setConfigs({ values: { openrouter: { ... } } })`; nothing is sent for a key that is not set; a bad value throws a `ConfigError` when the setting is set, before any request):
 
-| Variable | Sent as |
+| Key | Sent as |
 |---|---|
-| `OPENROUTER_ORDER`, `OPENROUTER_ONLY`, `OPENROUTER_IGNORE` | `provider.order` / `only` / `ignore` (comma-separated provider slugs) |
-| `OPENROUTER_ALLOW_FALLBACKS`, `OPENROUTER_REQUIRE_PARAMETERS`, `OPENROUTER_ZDR` | `provider.allow_fallbacks` / `require_parameters` / `zdr` (`true`/`false`/`1`/`0`) |
-| `OPENROUTER_DATA_COLLECTION` | `provider.data_collection` (`allow` or `deny`) |
-| `OPENROUTER_SORT` | `provider.sort` (`price`, `throughput` or `latency`) |
-| `OPENROUTER_PARALLEL_TOOL_CALLS` | `parallel_tool_calls` (only when the request has tools) |
-| `OPENROUTER_REASONING_EXCLUDE` | `reasoning.exclude` (the model reasons but the text is not returned) |
-| `OPENROUTER_USER` | `user` (a stable end-user id) |
+| `order`, `only`, `ignore` | `provider.order` / `only` / `ignore` (lists of provider slugs) |
+| `allow_fallbacks`, `require_parameters`, `zdr` | `provider.allow_fallbacks` / `require_parameters` / `zdr` (`true` / `false`) |
+| `data_collection` | `provider.data_collection` (`"allow"` or `"deny"`) |
+| `sort` | `provider.sort` (`"price"`, `"throughput"` or `"latency"`) |
+| `parallel_tool_calls` | `parallel_tool_calls` (only when the request has tools) |
+| `reasoning_exclude` | `reasoning.exclude` (the model reasons but the text is not returned) |
+| `user` | `user` (a stable end-user id) |
+
+The endpoint is the `base_urls.openrouter` setting (default `https://openrouter.ai/api/v1`).
 
 `serviceTier` values other than `flex` / `priority` are omitted (standard routing).
 
@@ -1180,8 +1184,12 @@ Only the fields the SDK reads are saved (limits, prices, modalities, reasoning o
 
 - **Automated 12-hour validation**: `.run()`, `.ask()` and `.stream()` check `<home>/catalog/meta.json`. Within 12 hours it reads from disk with no network delay. After that the expired catalog is served immediately and refreshed from `https://models.dev/api.json` in the background (8 s timeout). Only a cold start, with nothing loaded yet, waits for the download. A failed refresh pauses automatic refreshes for 10 minutes.
 - **Git & Package Safety**: The cache lives in the single Agent Accelerator home (`<home>/catalog/`, `.agent-accel/` by default and gitignored), never inside the package or scattered in the project.
-- **Spending-cap defaults**: `configure({ usageLimit, scheduledActionBudget })` sets the two caps for every agent you build (one call at startup, like `setHome()`; each call replaces the last, `configure({})` clears it). The env vars `AGENT_ACCEL_USAGE_LIMIT_USD` / `_TOKENS` and `AGENT_ACCEL_SCHEDULED_BUDGET_USD` / `_TOKENS` do the same. Precedence, field by field: the Agent's own config, then `configure()`, then env, then no cap. Workers and scheduled runs built by the SDK never take them.
-- **Environment**: `setHome(dir)` / `AGENT_ACCEL_HOME` move the whole home; `AGENT_CACHE_DIR` moves only the cache (for read-only or serverless filesystems). `AGENT_CATALOG_REFRESH=off` disables automatic refreshes; `bun run update-models` and `refreshModelCatalog()` still work.
+- **Spending caps**: the `usage_limit` and `scheduled_action_budget` settings (`{ max_cost_usd?, max_total_tokens? }`) cap every agent you build; an Agent's own `usageLimit` / `dynamicSubagents.scheduledActionBudget` wins field by field. Workers and scheduled runs built by the SDK never take them. (`configure()` and the `AGENT_ACCEL_*` env vars were removed in 0.7.0.)
+- **Settings in code**: `setConfigs({ values, editable })` takes the developer's settings (`usage_limit`, `scheduled_action_budget`, `concurrency`, `catalog_refresh`, `catalog_cache_dir`, `models_dev_sha256`, `base_urls`, `openrouter`, `compat`) in the exact `configs.json` shape and lists the keys the end user may change; every other setting is hidden. `getConfigs()` shows the editable ones, `setConfig(key, value)` changes one (a hidden key throws `SettingNotEditableError`). One `ConfigError` lists every problem; the SDK never reads the developer's file from disk. See [Safety and operations](docs/guides/safety-and-ops.md#settings-in-code-and-who-may-change-them).
+- **Saved choices**: `setConfig` and `setModel(id)` / `setSubAgentModel(id)` (the only model writes; the id must be on the `setModels` list) save the user's changes in `<home>/configs.json`: a small visible file with a `version`, written durably (fsync, `.bak`, atomic rename) and read at the next start. A hand edit of an unknown, invalid or hidden entry is ignored with a warning and the developer's value wins. An Agent built without a `model` uses the saved choice, else the list's default. See [Safety and operations](docs/guides/safety-and-ops.md#settings-in-code-and-who-may-change-them).
+- **Allowed models**: `setModels(json)` takes the developer's list in the exact `models.json` shape (`default.model`, `default.sub_agent_model`, and `providers.<name>.models` without the `provider/` prefix) from code, validates it (one `ConfigError` lists every problem) and `listModels()` returns it frozen for a picker. A model outside it is refused with `ModelNotAllowedError` at every run start, in the constructor and in `importSession`, and the catalog shows only listed models. This replaces the removed `allowedModels` option. The SDK never reads the list from disk. See [Agents and models](docs/guides/agents-and-models.md#the-list-of-allowed-models).
+- **Concurrency limit**: the `concurrency` setting (`{ max_requests, per_provider: { google: 4 } }`) limits how many provider calls run at once across every agent, worker and scheduled run; extra calls wait in line (their wait is not counted in the request timeouts), and a 429 with a `Retry-After` pauses that provider. Off by default. `getConcurrencyStatus()` shows `{ limited, active, waiting, byProvider, paused }`; events `concurrency.queued` and `concurrency.paused` go to `telemetryBus`. See [Safety and operations](docs/guides/safety-and-ops.md#concurrency-limit).
+- **Environment**: only API keys. `setHome(dir)` (or an Agent's `home`) moves the whole home; the `catalog_cache_dir` setting moves only the cache (for read-only or serverless filesystems); the `catalog_refresh: "off"` setting disables automatic refreshes; `bun run update-models` and `refreshModelCatalog()` still work.
 
 ### Developer Catalog Controls
 
@@ -1390,8 +1398,6 @@ never in the gitignored snapshot.
 * `createSessionId(prefix?)` — creates a random UUID session ID (`${prefix}-<uuid>` when a prefix is given), clamped to 64 characters for affinity.
 * `createTrackingId()` — system-generated 32-char TrackingID for one sub-agent worker (`NAME-{TrackingID}`).
 * `createChildSessionId(parentId, tag)` / `createFixedChildSessionId(parentId, name)` / `isSessionDescendant(child, parent)` — provider-safe (≤64 chars) child session IDs with parent-hash lineage.
-* `getEnv(key, fallback?)` — resolves an environment variable.
-* `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
 * Two retry layers: `retry` repeats one failed provider CALL (seconds); `runRetries` repeats a whole failed RUN from where it stopped (minutes, `agent.run_retry` on the bus) while the agent stays busy, so queued prompts wait.
 * `withRetries(fn, { maxRetries?, maxRetryDelayMs?, signal?, label? })` / `isTransientError(err)` — bounded retries for transient provider failures (defaults: 2 retries, 5s cap, aborts never retried).
@@ -1481,7 +1487,7 @@ const saved = loadSessionFile(".session.json");
 const telemetry = SessionTelemetry.fromSaved(saved);
 
 const agent = new Agent({
-  model: saved?.model ?? process.env.MODEL,
+  model: saved?.model, // else the saved choice or the default of `setModels`
   sessionId: saved?.sessionId,
 });
 
@@ -1526,7 +1532,7 @@ src/
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
 └── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, retry, errors
-examples/        # live demos 01-14 (see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
+examples/        # live demos 01-15 (no 10; see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
 test/            # unit + mocked-provider tests mirroring src/
 ```
 

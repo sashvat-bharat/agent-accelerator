@@ -17,7 +17,7 @@
  *   4. Every tool call left its own log file (`ctx.log` lines included).
  *
  * Run:  bun run examples/15-durable-agent.ts
- * Needs: MODEL + provider key (see .env.example). Costs a few live model calls and
+ * Needs: a provider key (see .env.example); the model comes from examples/models.json. Costs a few live model calls and
  * waits about 5 s for the run retry. Files go to ./.agent-accel/demo-durable/
  * (gitignored; wiped at the start): sessions/<id>/{session.json, journal.ndjson,
  * tool-logs/*} and ledger.txt, the side effects the tools really did.
@@ -31,7 +31,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, tool, telemetryBus, resolveHome, loadSessionDir, sessionDirFor } from "agent-accelerator";
 import { z } from "zod";
-import { fail } from "./_shared";
+import { fail, MODEL } from "./_shared";
 
 const HOME = path.join(resolveHome(), "demo-durable");
 const SESSIONS = path.join(HOME, "sessions");
@@ -98,7 +98,7 @@ const makeAgent = (flaky = false) =>
   new Agent({
     name: "Ops Assistant",
     instructions: "You run operations tasks with your tools. Call independent tools together. Be concise.",
-    model: process.env.MODEL,
+    model: MODEL,
     tools: { reserve_stock, send_report, pay_invoice },
     home: HOME,
     persist: {}, // every step goes to <home>/sessions/<sessionId>/

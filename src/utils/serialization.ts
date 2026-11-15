@@ -27,8 +27,8 @@ export function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknow
         message: value.message,
         ...(value.stack ? { stack: value.stack } : {}),
       };
-      for (const key of Object.keys(value as any)) {
-        error[key] = toJsonSafe((value as any)[key], seen);
+      for (const key of Object.keys(value)) {
+        error[key] = toJsonSafe((value as unknown as Record<string, unknown>)[key], seen);
       }
       return error;
     }
@@ -65,8 +65,8 @@ export function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknow
     }
 
     const output: Record<string, unknown> = {};
-    for (const key of Object.keys(value as any)) {
-      output[key] = toJsonSafe((value as any)[key], seen);
+    for (const key of Object.keys(value as object)) {
+      output[key] = toJsonSafe((value as Record<string, unknown>)[key], seen);
     }
     return output;
   } finally {

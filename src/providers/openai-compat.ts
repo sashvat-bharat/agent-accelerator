@@ -53,10 +53,10 @@ import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage, ThinkingConfig } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey, getEnv } from "../utils/env.ts";
+import { getApiKey } from "../utils/env.ts";
+import { baseUrlSetting, compatSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
@@ -83,6 +83,7 @@ import {
   retryOptionsFrom,
   headersToRecord,
   parseRetryAfterMs,
+  resultToOutput,
 } from "./shared.ts";
 import { getModelFromCatalog, createGenericModelSpec, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
@@ -202,27 +203,18 @@ function envPrefixOf(prefix: string): string {
   return prefix.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 
-// Endpoint from the option, the provider's configuration or {PREFIX}_BASE_URL; throws ConfigError when none (never another vendor's URL); in: each request, out: the base URL.
+// Endpoint from the option, the provider's configuration or the `base_urls.<prefix>` setting; throws ConfigError when none (never another vendor's URL); in: each request, out: the base URL.
 function resolveBaseUrl(
   prefix: string,
   configuredBaseUrl: string | undefined,
   options?: ProviderRequestOptions
 ): string {
-  const envPrefix = envPrefixOf(prefix);
-  const resolved =
-    options?.baseUrl ||
-    configuredBaseUrl ||
-    options?.env?.[`${envPrefix}_BASE_URL`] ||
-    options?.env?.[`${envPrefix}_BASEURL`] ||
-    options?.env?.[`${envPrefix}_API_BASE`] ||
-    getEnv(`${envPrefix}_BASE_URL`) ||
-    getEnv(`${envPrefix}_BASEURL`) ||
-    getEnv(`${envPrefix}_API_BASE`);
+  const resolved = options?.baseUrl || configuredBaseUrl || baseUrlSetting(prefix);
   // Never fall back to another vendor's cloud: a custom prefix's API key
   // must only ever travel to the endpoint the developer named.
   if (!resolved) {
     throw new ConfigError(
-      `[Agent Accelerator] Missing base URL for "${prefix}". Set ${envPrefix}_BASE_URL (or pass baseUrl); custom endpoints never default to api.openai.com.`
+      `[Agent Accelerator] Missing base URL for "${prefix}". Set base_urls.${prefix} in the settings (or pass baseUrl); custom endpoints never default to api.openai.com.`
     );
   }
   return resolved.replace(/\/+$/, "");
@@ -387,12 +379,6 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
     // video/file never reach here: assertNoVideoOrFileParts runs first.
   }
   return blocks;
-}
-
-// A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
-function resultToOutput(result: unknown): string {
-  if (typeof result === "string") return result;
-  return safeStringify(result);
 }
 
 /**
@@ -632,7 +618,7 @@ function parseResponse(
 export interface CustomProviderOptions {
   /** Human label, defaults to `${prefix} (OpenAI-compatible)` */
   name?: string;
-  /** Static baseUrl — overrides env. Env `{PREFIX}_BASE_URL` still wins at runtime if set. */
+  /** Static baseUrl for this provider. The `base_urls.<prefix>` setting is used when this is not set. */
   baseUrl?: string;
   /** Static apiKey — overrides env. Explicit per-call `apiKey` still wins. */
   apiKey?: string;
@@ -741,7 +727,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     let outputEmulated = false;
     let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
     try {
-      outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+      outputSpec = normalizeStructuredOutput(options?.output);
     } catch {
       outputSpec = undefined;
     }
@@ -798,13 +784,10 @@ export class OpenAICompatibleChatProvider implements Provider {
     }
     // Request usage on streams where supported so terminal accounting
     // arrives on the final chunk. Strict servers that reject unknown fields
-    // opt out via `COMPAT_NO_STREAM_OPTIONS=1`; an explicit per-call
-    // `(options as any).streamOptions === false` also skips it.
+    // opt out via the `compat.no_stream_options` setting; an explicit per-call
+    // `streamOptions: false` in the request options also skips it.
     if (stream) {
-      const noStreamOptions =
-        (options as { streamOptions?: unknown } | undefined)?.streamOptions === false ||
-        getEnv("COMPAT_NO_STREAM_OPTIONS") === "1" ||
-        options?.env?.["COMPAT_NO_STREAM_OPTIONS"] === "1";
+      const noStreamOptions = options?.streamOptions === false || compatSetting().no_stream_options === true;
       if (!noStreamOptions) {
         (body as unknown as Record<string, unknown>)["stream_options"] = { include_usage: true };
       }
@@ -822,14 +805,11 @@ export class OpenAICompatibleChatProvider implements Provider {
   ): RequestInit {
     const headers: Record<string, string> = buildSessionHeaders(this.prefix, options?.headers, sessionId);
     // Strict-endpoint opt-out (pi sendSessionAffinityHeaders pattern):
-    // `COMPAT_NO_SESSION_HEADERS=1` or per-call `sendSessionHeaders:false`
+    // the `compat.no_session_headers` setting or per-call `sendSessionHeaders:false`
     // drops affinity headers that trigger CORS preflights / strict 400s.
     // Body `session_id` is already omitted on compat (headers-only affinity).
     try {
-      const noAffinity =
-        (options as { sendSessionHeaders?: unknown } | undefined)?.sendSessionHeaders === false ||
-        getEnv("COMPAT_NO_SESSION_HEADERS") === "1" ||
-        options?.env?.["COMPAT_NO_SESSION_HEADERS"] === "1";
+      const noAffinity = options?.sendSessionHeaders === false || compatSetting().no_session_headers === true;
       if (noAffinity) {
         for (const k of Object.keys(headers)) {
           const lower = k.toLowerCase();
@@ -853,10 +833,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(
-      signal,
-      timeoutFor(options as { timeoutMs?: number } | undefined)
-    );
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
       const text = await res.text();
@@ -1005,7 +982,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           body,
         };
 
-        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({

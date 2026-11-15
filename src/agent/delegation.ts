@@ -21,14 +21,7 @@ import type { UsageLimit } from "./usage-limit.ts";
 export function createChildSessionId(parentId: string, tag: string): string {
   let rand: string;
   try {
-    if (typeof globalThis !== "undefined" && (globalThis as any).crypto?.randomUUID) {
-      rand = (globalThis as any).crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-    } else {
-      // Node fallback - dynamic require avoids bundling issues
-      const nodeCrypto: any = (globalThis as any).process?.getBuiltinModule?.("node:crypto") ?? null;
-      if (nodeCrypto?.randomUUID) rand = nodeCrypto.randomUUID().replace(/-/g, "").slice(0, 8);
-      else rand = Math.random().toString(36).slice(2, 10);
-    }
+    rand = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   } catch {
     rand = Math.random().toString(36).slice(2, 10);
   }
@@ -369,8 +362,7 @@ export function openWorkerTrace(a: {
   insertTrace(trace, displayId);
   if (a.parent) {
     try {
-      const registry = ((a.parent as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
-      registry[trackingId] = trace;
+      a.parent.subagentTraces[trackingId] = trace;
     } catch {}
   }
   const live = createLiveWorker(trace, trackingId, displayId, {
@@ -635,12 +627,10 @@ export interface AgentAsToolTarget {
 export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: UsageLimit }): ToolDefinition {
   const agentInstance = "agent" in input ? input.agent : input;
   const rawName =
-    ("name" in input && (input as any).name) ||
-    agentInstance.name ||
-    `sub-agent-${Math.random().toString(36).slice(2, 7)}`;
+    ("name" in input && input.name) || agentInstance.name || `sub-agent-${Math.random().toString(36).slice(2, 7)}`;
   const name = sanitizeToolName(rawName);
   const description =
-    ("description" in input && (input as any).description) ||
+    ("description" in input && input.description) ||
     agentInstance.description ||
     `Calls the sub-agent '${name}' to perform tasks.`;
 
@@ -685,7 +675,7 @@ export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: Us
           signal: ctx?.signal,
           sessionId: subSessionId,
           onTurn: live.onWorkerTurn,
-        } as any);
+        });
         const detachWorkerListeners = live.attachToStream(
           workerStream as unknown as Parameters<typeof live.attachToStream>[0]
         );
@@ -715,8 +705,8 @@ export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: Us
             steps: live.steps(),
           }),
         ]);
-      } catch (err: any) {
-        const msg = err?.message || String(err);
+      } catch (err) {
+        const msg = (err as { message?: string } | undefined)?.message || String(err);
         live.fail(msg);
         return makeSubagentResult(`Error in ${name}: ${msg}`, [
           workerMetadata({ ...lineage, durationMs: Math.max(0, nowMs() - startTime), error: msg, steps: live.steps() }),

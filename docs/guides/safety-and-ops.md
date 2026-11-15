@@ -9,7 +9,7 @@
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   maxTurns: 12, // 0 or omitted = unlimited
   limits: {
     deadlineMs: 120_000, // whole run
@@ -78,11 +78,86 @@ Sources: [OpenAI, Background mode](https://developers.openai.com/api/docs/guides
 
 **`usageLimit` is the spending cap of a chat.** It adds up every model call of the agent and of all its workers (the `subagents` tool, `agent.workers` at any depth, fixed `subagents`) and never resets, so it is the cap to use for "this conversation may cost at most $5". When the total reaches `maxCostUsd` or `maxTotalTokens`, the next model call anywhere in the chat throws a `BudgetExceededError` ("Usage limit reached"); a worker that is asked to run after that answers with the same message and never reaches the provider. A persisted chat starts from what its saved sessions already spent: continue it the usual way (`importSession(loadSessionDir(...).session)`) and the count carries on. Models with unknown pricing add tokens but $0 to the cost, like `budget`. Scheduled actions are not part of the chat and never count.
 
-**Defaults for every agent.** `configure({ usageLimit: { maxCostUsd: 5 }, scheduledActionBudget: { maxCostUsd: 0.5 } })` (call it once at startup, like `setHome()`) sets the two caps for every agent you build afterwards, and so do the env vars `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS`, `AGENT_ACCEL_SCHEDULED_BUDGET_USD` and `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` (a number above 0; anything else throws a `ConfigError` naming the variable). Precedence, field by field: the Agent's own config, then `configure()`, then the env var, then no cap. Each `configure()` call replaces the previous one (`configure({})` clears it). Workers and scheduled runs the SDK builds itself never take these defaults: a chat worker joins its parent's cap and a scheduled run has `scheduledActionBudget`.
+**Defaults for every agent.** The settings `usage_limit` and `scheduled_action_budget` (`{ max_cost_usd?, max_total_tokens? }`, see [Settings in code](#settings-in-code-and-who-may-change-them)) cap every agent you build, e.g. `setConfigs({ values: { usage_limit: { max_cost_usd: 5 }, scheduled_action_budget: { max_cost_usd: 0.5 } } })` once at startup. Precedence, field by field: the Agent's own config, then the setting (the user's value when the program lets them change it, else yours), then no cap. Workers and scheduled runs the SDK builds itself never take these settings: a chat worker joins its parent's cap and a scheduled run has `scheduledActionBudget`. (`configure()` and the `AGENT_ACCEL_*` env vars of earlier releases were removed in 0.7.0.)
 
 A scheduled-action run is capped by `scheduledActionBudget` only. Scheduled actions are detached from the chat, so a run never borrows the agent's own `budget`, the chat workers' `workerBudget` or the chat's `usageLimit`; with no `scheduledActionBudget` a scheduled run has no cap.
 
 Unlimited also means unbounded cost and memory when a model keeps starting workers. For unattended runs set `usageLimit`, `workerBudget`, `scheduledActionBudget`, `maxSpawn` and/or `maxDepth`. The only other default cap is the waiting-prompt buffer: `midSession.maxQueued` / `maxSteers` (20 each), which protects memory and can be raised.
+
+### Concurrency limit
+
+Many agents, workers and scheduled runs can ask a provider for answers at the same moment, and providers answer a flood with 429. Set how many provider calls may run at once, in the `concurrency` setting, once at startup:
+
+```ts
+import { setConfigs, getConcurrencyStatus } from "agent-accelerator";
+
+setConfigs({ values: { concurrency: { max_requests: 8, per_provider: { google: 4 } } } });
+console.log(getConcurrencyStatus()); // { limited, active, waiting, byProvider, paused }
+```
+
+- Off until you set it (no limit). `max_requests` is the limit across every provider, `per_provider` one limit per provider id (`google`, `openai`, `openrouter`, or a custom prefix). Whole numbers, 1 or more; a wrong value throws a `ConfigError` when the setting is set.
+- It covers every model call of every agent in the process, workers and scheduled runs included. A call over the limit waits in line, in the order it arrived. A call that waits only for its own provider's limit never holds back calls to other providers.
+- A slot is held from the request until the answer ends, the call fails or the stream is cancelled. Time spent waiting does not count toward `requestTimeoutMs`, `firstByteTimeoutMs` or `streamIdleTimeoutMs`, which start once the call really begins. Aborting a run (signal, `interrupt()`) also ends its wait.
+- A call that fails with HTTP 429 and a `Retry-After` pauses that provider: no new call to it starts until the wait has passed (never more than 60 s). Calls already running are not touched and other providers keep going.
+- A new `setConfigs` replaces the previous one, so leaving `concurrency` out removes the limit; if the program lets the user change it, `setConfig("concurrency", ...)` takes effect at once. It is one setting for the whole process, not per agent.
+- Events on `telemetryBus`: `concurrency.queued` (a call had to wait: `provider`, `waiting`, `active`, `paused`) and `concurrency.paused` (`provider`, `ms`, `waiting`).
+
+### Settings in code and who may change them
+
+A program that ships to other people (a harness, a binary) sets its limits and options in code, and decides which of them the end user may change. Write them as `configs.json`, embed it in your code and hand it to `setConfigs`; the SDK never reads the developer's file from disk.
+
+```json
+{
+  "values": {
+    "usage_limit": { "max_cost_usd": 5 },
+    "concurrency": { "max_requests": 8, "per_provider": { "google": 4 } },
+    "catalog_refresh": "on",
+    "openrouter": { "sort": "price" }
+  },
+  "editable": ["concurrency", "catalog_refresh"]
+}
+```
+
+```ts
+import { setConfigs, getConfigs, setConfig } from "agent-accelerator";
+import configs from "./configs.json";
+
+setConfigs(configs);                              // validates everything first
+getConfigs();                                     // { concurrency: {...}, catalog_refresh: "on" }: only the editable ones
+setConfig("concurrency", { max_requests: 2 });    // ok: editable
+setConfig("usage_limit", { max_cost_usd: 1000 }); // throws SettingNotEditableError: hidden
+```
+
+- **Access has two levels.** A setting is `hidden` unless its key is in `editable`: a hidden setting only ever has the developer's value and never appears in `getConfigs()`. An editable one has the user's value when they set one, else the developer's, else the built-in default (unlimited, off). Nothing is editable until you list it. With no `setConfigs` call at all there is no developer policy, so every setting is editable.
+- **The settings** (all optional, snake_case, whole objects are replaced, never merged):
+
+| Key | Value |
+|---|---|
+| `usage_limit`, `scheduled_action_budget` | `{ max_cost_usd?, max_total_tokens? }` (numbers above 0, at least one), the same caps as the Agent options `usageLimit` and `dynamicSubagents.scheduledActionBudget` |
+| `concurrency` | `{ max_requests?, per_provider?: { google: 4 } }` (whole numbers >= 1), the limit described in [Concurrency limit](#concurrency-limit) |
+| `catalog_refresh` | `"on"` or `"off"` (automatic model-catalog refresh) |
+| `catalog_cache_dir`, `models_dev_sha256` | the catalog cache folder, and a 64-hex checksum pin for the download |
+| `base_urls` | `{ openai: "https://host/v1", ollama: "http://localhost:11434/v1" }`, an http(s) endpoint per provider or custom prefix |
+| `openrouter` | `{ order?, only?, ignore?, allow_fallbacks?, require_parameters?, zdr?, data_collection?, sort?, parallel_tool_calls?, reasoning_exclude?, user? }`, the OpenRouter request options |
+| `compat` | `{ no_stream_options?, no_session_headers? }`, opt-outs for strict OpenAI-compatible endpoints |
+
+- **One error lists every problem.** A wrong shape, an unknown key or setting, a bad value or a key listed twice in `editable` throws one `ConfigError`, and a failed `setConfigs` changes nothing. `setConfigs` again replaces the developer's settings.
+- **`setConfig(key, value)`** changes one editable setting. `null` removes the user's value, so the developer's value (or the default) applies again. An unknown key or a bad value is a `ConfigError`; a hidden key is a `SettingNotEditableError` (a `ConfigError`, never retried). A user value is ignored as soon as its setting becomes hidden.
+- `getConfigs()` returns the editable settings with their current value, `null` meaning "not set, the default applies", frozen.
+- This is a guardrail inside your program, not a security wall: code in the same process can call `setConfigs` too.
+
+**The user's saved choices: `<home>/configs.json`.** `setConfig` saves in a small visible file in the home folder, which the user may also edit by hand:
+
+```json
+{ "version": 1, "model": "google/gemini-4-argon", "concurrency": { "max_requests": 2 } }
+```
+
+- It holds the chosen `model` and `sub_agent_model` (see `setModel` in [Agents and models](agents-and-models.md#the-list-of-allowed-models)) and the values of editable settings. The folder is created on the first write; reading creates nothing, and with no file the SDK runs on your code defaults.
+- It is read once per process (and again when `setHome()` changes the home), so a hand edit takes effect the next time the program starts. It is the process-wide home (`setHome()`, `AGENT_ACCEL_HOME` or `.agent-accel/`), not an Agent's own `home`.
+- Writes are durable (fsync, a `.bak` of the last good file, atomic rename) under a short lock that re-reads the file first, so processes sharing a home do not lose each other's changes and a crash leaves the old file or the new one. A file that cannot be written makes `setConfig` throw a `ConfigError` and changes nothing.
+- A damaged file is set aside as `configs.json.corrupt-<time>` and the last good version is restored from `.bak` when there is one (`config.file_restored`), otherwise the defaults apply (`config.file_invalid`). A file with another `version` is ignored and left in place.
+- A hand edit the program does not allow is ignored with a `config.file_ignored_key` warning (`data.key`, `data.reason`: `unknown`, `invalid` or `hidden`), and the developer's value wins. Unknown keys are kept when the file is rewritten.
+
 
 ### Network timeouts
 
@@ -96,7 +171,7 @@ The only limits that are on by default are three network timeouts. They are not 
 
 ```ts
 const agent = new Agent({
-  model: "openai/gpt-5",
+  model: "openai/gpt-5.5",
   limits: {
     requestTimeoutMs: 600_000, // a slow reasoning model answering without streaming: give it 10 minutes
     firstByteTimeoutMs: 0, // 0 (or Infinity) turns this timeout off
@@ -134,7 +209,7 @@ for (const w of workers) console.log(w.id, w.status, w.turns, w.tokens.thinking,
 ```ts
 import { Agent, BudgetExceededError, ProviderError, TimeoutError, formatErrorPlain, isAbortError } from "agent-accelerator";
 
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite", budget: { maxCostUsd: 0.01 } });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite", budget: { maxCostUsd: 0.01 } });
 
 try {
   await agent.run("Write a long essay.", { signal: AbortSignal.timeout(30_000) });
@@ -147,7 +222,7 @@ try {
 }
 ```
 
-All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError`, `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError` and `SubAgentModelError` (both `ConfigError`s). Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line `ProviderError`s: `err.code` is `"provider"` (`"incomplete_stream"` for a cut stream) and `err.retryable` is true for HTTP 408/425/429/5xx, network errors and a cut stream; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `providerCode` (the provider's own error code), `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
+All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError` (`ModelNotAllowedError` for a model off the `setModels` list, `SettingNotEditableError` for a hidden setting), `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError` and `SubAgentModelError` (both `ConfigError`s). Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line `ProviderError`s: `err.code` is `"provider"` (`"incomplete_stream"` for a cut stream) and `err.retryable` is true for HTTP 408/425/429/5xx, network errors and a cut stream; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `providerCode` (the provider's own error code), `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
 
 ## Telemetry
 
@@ -163,7 +238,7 @@ const off = telemetryBus.onEvent((e) => {
 
 Tool calls emit `tool.*` lifecycle events (`call_started`, `progress`, `call_failed`, ...). To keep a crash-proof trace, set `telemetry: { persist: true }`: every event (except reasoning text) is appended, one line each: an event of a persisted session (the `tool.*` events, `agent.resumed`, `agent.run_retry`) to `<home>/sessions/<id>/telemetry.ndjson` next to that session's journal and tool logs (a worker's events to its own folder), everything else to `<home>/telemetry/<date>.ndjson`. Nothing is ever written outside the home: a session saved to a `persist.dir` outside it logs to the daily file. A `tool.call_started` with no ending event was in flight when the process died; the last `tool.progress` shows how far it got. Nothing is written unless you opt in.
 
-The bus is in-process, delivers synchronously, isolates listener errors and prints nothing by default. Events: provider warnings (`provider_warning`), Google chain anomalies, stream anomalies, `cache_clamp`, catalog and session notices, `config.*` warnings, `agent.max_turns_truncated`, `turn.thinking`, and `scheduled_action.*` (full list in [Reference](../reference.md)). `AgentResponse.raw` and the stream `start` event show the wire exchange according to `captureRaw`.
+The bus is in-process, delivers synchronously, isolates listener errors and prints nothing by default. Events: provider warnings (`provider_warning`), Google chain anomalies, stream anomalies, `cache_clamp`, catalog and session notices, `config.*` warnings, `agent.max_turns_truncated`, `turn.thinking`, and `concurrency.*`, `config.file_*` and `scheduled_action.*` (full list in [Reference](../reference.md)). `AgentResponse.raw` and the stream `start` event show the wire exchange according to `captureRaw`.
 
 ## Security
 
@@ -184,8 +259,8 @@ The bus is in-process, delivers synchronously, isolates listener errors and prin
 Be aware (pre-1.0):
 - **One process per session folder.** A session you persist is locked (`<session folder>/.lock`): a second process opening the same session fails fast with a `ConfigError` instead of silently losing updates, while other sessions of the same home stay free; a lock left by a killed process is taken over, and local disks only. Scheduled actions can be shared by several processes (one folder and a short lock per action). Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `task.json`, `delivery.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
 - Scheduled actions: creating Agent held weakly; `run_now` never retries; no spending guardrail except `dynamicSubagents.scheduledActionBudget`; no timezone/DST logic; run only while the process lives.
-- Not implemented: `hooks`, `contextManagement`, `logger` config keys; `thinking.budgetTokens` forwarding.
-- Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.
+- Not implemented: the `hooks` config key (it only warns); `thinking.budgetTokens` forwarding.
+- Stateless adapters resend the full history every turn; `persist.file` rewrites the whole snapshot each step, `persist.dir` appends to a journal.
 - An idle process that imported the SDK uses about 40 MB (Bun itself 17 MB, `zod` 10 MB, the SDK 12 MB; the model catalog is read lazily and is tiny). 100 parallel streaming runs add about 20 MB at their peak (`bun run bench` measures both). The SDK is not yet tuned further for tiny-memory hosts.
 - The SSRF guard resolves DNS before `fetch` (a DNS-rebinding window remains). Local disk only; no network drives.
 - A major robustness and scale refactor (multi-process safety, durability, memory diet) is planned.
@@ -194,7 +269,7 @@ Be aware (pre-1.0):
 
 - Set `maxTurns`, `limits.deadlineMs` and `budget` for anything that runs unattended; pass `signal` per call.
 - Branch on error classes, not message text; `err.partial` holds progress; `err.retryable` tells you whether to retry.
-- Do not rely on `hooks` or `logger`; subscribe to `telemetryBus` instead. To require approval for a tool, ask inside `execute` and refuse with `ctx.stop(reason)`.
+- Do not rely on `hooks`; subscribe to `telemetryBus` instead. To require approval for a tool, ask inside `execute` and refuse with `ctx.stop(reason)`.
 - Keep `captureRaw` at `"redacted"` unless debugging locally.
 - Default to `fileAccess: { roots: [...] }` whenever file paths or sessions come from outside your program.
 - See also: [Tools and streaming](tools-and-streaming.md), [Multi-agent and scheduling](multi-agent.md), [Reference](../reference.md).

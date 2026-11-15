@@ -1,8 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import {
-  buildSessionHeaders,
-  createSessionId,
-} from "../src/index.ts";
+import { buildSessionHeaders } from "../src/index.ts";
 import { setAttribution, getAttribution } from "../src/utils/headers.ts";
 
 describe("Caching & Session Affinity", () => {

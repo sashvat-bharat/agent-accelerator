@@ -1,10 +1,10 @@
 import { Agent } from "agent-accelerator";
-import { fail } from "./_shared";
+import { fail, MODEL } from "./_shared";
 
 const agent = new Agent({
   name: "Reader",
   instructions: "Summarize documents concisely.",
-  model: process.env.MODEL,
+  model: MODEL,
   fileAccess: { roots: ["./examples/files"] },
   captureRaw: "redacted",
 });

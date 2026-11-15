@@ -18,9 +18,9 @@ describe("End-to-End Agent Execution", () => {
     let callCount = 0;
 
     googleProvider.generate = async (
-      model: any,
-      context: ProviderContext,
-      options?: ProviderRequestOptions
+      _model: any,
+      _context: ProviderContext,
+      _options?: ProviderRequestOptions
     ): Promise<ProviderGenerateResult> => {
       callCount++;
       if (callCount === 1) {
@@ -55,9 +55,9 @@ describe("End-to-End Agent Execution", () => {
     };
 
     googleProvider.stream = (
-      model: any,
-      context: ProviderContext,
-      options?: ProviderRequestOptions
+      _model: any,
+      _context: ProviderContext,
+      _options?: ProviderRequestOptions
     ): AssistantMessageEventStream => {
       const stream = new AssistantMessageEventStream();
       callCount++;

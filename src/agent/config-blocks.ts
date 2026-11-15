@@ -9,28 +9,13 @@ import { normalizeToolMap } from "./worker.ts";
 
 const EDITABLE_FIELDS = ["model", "instructions", "tools"] as const;
 
-// The model as a plain `provider/id` string (a string stays as written, a ModelSpec becomes `provider/id`); in: Agent.modelStringOrSpec or a base `model`, out: toConfig, the allowedModels check, applyEditable.
+// The model as a plain `provider/id` string (a string stays as written, a ModelSpec becomes `provider/id`); in: Agent.modelStringOrSpec or a base `model`, out: toConfig, applyEditable.
 export function modelKey(model: unknown): string | undefined {
   if (typeof model === "string") return model.trim() || undefined;
   const m = model as { model?: unknown; id?: unknown; provider?: unknown } | null | undefined;
   if (m && typeof m.model === "string") return m.model.trim() || undefined;
   if (m && typeof m.id === "string" && typeof m.provider === "string") return `${m.provider}/${m.id}`;
   return undefined;
-}
-
-// Throws when `allowedModels` is set and the model is not in it (entries are compared as written, e.g. "google/gemini-3.5-flash"); in: AgentConfig.allowedModels + the model, out: the Agent constructor and applyEditable.
-export function assertModelAllowed(allowed: unknown, model: string | undefined): void {
-  if (allowed === undefined) return;
-  if (!Array.isArray(allowed) || allowed.length === 0 || allowed.some((m) => typeof m !== "string" || !m.trim())) {
-    throw new ConfigError(
-      `[Agent Accelerator] Invalid allowedModels ${JSON.stringify(allowed)}: expected a non-empty list of "provider/model" strings, or omit it to allow any model.`
-    );
-  }
-  if (!model || !allowed.includes(model)) {
-    throw new ConfigError(
-      `[Agent Accelerator] Model ${JSON.stringify(model ?? null)} is not in allowedModels. Allowed: ${allowed.map((m) => JSON.stringify(m)).join(", ")}.`
-    );
-  }
 }
 
 // The editable part of an agent as plain JSON; in: the Agent's model, instructions and the developer's tool list (not the built-in delegation/scheduler tools), out: Agent.toConfig.
@@ -103,5 +88,5 @@ export function applyEditable(editable: EditableAgentConfig, base: AgentConfig):
     for (const n of e.tools as string[]) picked[n] = pool[n]!;
     out.tools = picked;
   }
-  return out; // allowedModels is enforced by the Agent constructor
+  return out; // the model list (`setModels`) is enforced by the Agent constructor
 }

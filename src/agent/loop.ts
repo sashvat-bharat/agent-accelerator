@@ -1,7 +1,13 @@
-import type { Provider, ProviderRequestOptions, ModelSpec, ProviderRawData } from "../types/model.ts";
+import type {
+  Provider,
+  ProviderRequestOptions,
+  ProviderGenerateResult,
+  ModelSpec,
+  ProviderRawData,
+} from "../types/model.ts";
 import type { ToolDefinition, ToolCallRecord, ToolResultRecord, StandardToolDeclaration } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
-import type { AgentRunOptions } from "../types/agent.ts";
+import type { AgentRunLimits, AgentRunOptions } from "../types/agent.ts";
 import type { ContentPart } from "../types/message.ts";
 import {
   AgentResponse,
@@ -34,6 +40,7 @@ import { applyCaptureRaw, type CaptureRawMode } from "../utils/raw-capture.ts";
 import { previewPrompt } from "../utils/session.ts";
 import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
+import { withProviderSlot } from "./governor.ts";
 
 /** One mid-session steer request buffered while a run is active. */
 export interface SteerEntry {
@@ -68,6 +75,8 @@ export interface AgentLoopConfig {
    * - `"keep"`: never restore it.
    */
   onFailure?: "auto" | "rollback" | "keep";
+  /** Run and network limits (see `AgentConfig.limits`); unset keys take their defaults. */
+  limits?: AgentRunLimits;
   /** Wire-exchange capture policy for `AgentResponse.raw` (default `"redacted"`: no bodies). */
   captureRaw?: CaptureRawMode;
   /**
@@ -346,12 +355,12 @@ export interface LoopLimits {
   streamIdleTimeoutMs: number;
 }
 
-/** Resolves `(config as any).limits` with defaults (timeouts tolerate reasoning). */
+/** Resolves the run limits with defaults (timeouts tolerate reasoning). */
 function resolveLoopLimits(
   config: AgentLoopConfig,
   fallbackMaxTurns: number
 ): LoopLimits & { maxTurns: number; deadlineMs: number; maxToolCallsPerRun: number; maxTotalTokens: number } {
-  const raw = ((config as unknown as { limits?: Record<string, unknown> }).limits ?? {}) as Record<string, unknown>;
+  const raw: Record<string, unknown> = { ...(config.limits ?? {}) };
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   let maxTurns = fallbackMaxTurns;
   const limMax = num(raw.maxTurns);
@@ -615,7 +624,7 @@ function buildTurnOptions(
   // Per-request timeout pass-through (providers honor timeoutMs).
   try {
     if (Number.isFinite(requestTimeoutMs) && requestTimeoutMs !== Infinity) {
-      (providerOptions as unknown as { timeoutMs?: number }).timeoutMs = requestTimeoutMs;
+      providerOptions.timeoutMs = requestTimeoutMs;
     }
   } catch {}
   return providerOptions;
@@ -624,13 +633,12 @@ function buildTurnOptions(
 // Moves an empty-text turn's reasoning into its answer, only when the caller opted in; in: a finished model turn, out: that turn's text and thinking.
 function promoteThinkingIfAllowed(
   turn: { text: string; thinking?: string; toolCalls?: unknown[] },
-  config: AgentLoopConfig,
   runOptions: AgentRunOptions | undefined
 ): void {
   if ((turn.text && turn.text.trim() !== "") || (turn.toolCalls && turn.toolCalls.length > 0) || !turn.thinking) return;
   // Thinking is exposed via events/traces and onTurn. Promoting it to answer text is gated (default OFF): without the
   // opt-in the run returns the provider's empty text and finishReason.
-  if (!shouldPromoteThinkingToAnswer(config, runOptions)) return;
+  if (!shouldPromoteThinkingToAnswer(runOptions)) return;
   const mutable = turn as { text: string; thinking?: string };
   if (turn.thinking.includes("</think>")) {
     const parts = turn.thinking.split(/<\/(?:think|thought)>/i);
@@ -912,7 +920,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
   const allToolCalls: ToolCallRecord[] = [];
   const allToolResults: ToolResultRecord[] = [];
   const allSubagents: SubAgentExecutionMetadata[] = [];
-  let finalResult: any = null;
+  let finalResult: ProviderGenerateResult | null = null;
   let turns = 0;
   let toolsExecuted = false;
   let stoppedByTool = false;
@@ -959,17 +967,20 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
 
       // A long-running call (e.g. Google long decode) times each HTTP request itself: no whole-call race.
       const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
-      const genResult = await generateWithTimeout(
-        () =>
-          provider.generate(
-            modelId,
-            {
-              systemPrompt: context.systemPrompt,
-              messages: context.messages,
-            },
-            providerOptions
-          ),
-        longRunning ? Infinity : limits.requestTimeoutMs
+      // The slot wait comes first and is not timed: the request timeout starts once the slot is held.
+      const genResult = await withProviderSlot(provider.id, runOptions?.signal, () =>
+        generateWithTimeout(
+          () =>
+            provider.generate(
+              modelId,
+              {
+                systemPrompt: context.systemPrompt,
+                messages: context.messages,
+              },
+              providerOptions
+            ),
+          longRunning ? Infinity : limits.requestTimeoutMs
+        )
       );
 
       finalResult = genResult;
@@ -977,7 +988,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       // Canonical session routing: lets adapters detect provider switches.
       noteProviderTurn(runOptions?.sessionId || options?.sessionId, provider.id);
 
-      promoteThinkingIfAllowed(genResult, config, runOptions);
+      promoteThinkingIfAllowed(genResult, runOptions);
 
       recordModelTurn(config, accumulatedUsage, genResult.usage, spec, limits.maxTotalTokens);
 
@@ -1082,13 +1093,13 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     // maxTurns exhausted while the model still requested tools: the tool
     // results above were never sent back, so the run is truncated — surface
     // it via finishReason + warning instead of silently returning.
-    const truncatedByMaxTurns =
-      !stoppedByTool && turns >= maxTurns && !!finalResult?.toolCalls && finalResult.toolCalls.length > 0;
+    const pendingCalls = finalResult?.toolCalls ?? [];
+    const truncatedByMaxTurns = !stoppedByTool && turns >= maxTurns && pendingCalls.length > 0;
     if (truncatedByMaxTurns) {
       warnMaxTurnsHit(
         agentName,
         maxTurns,
-        finalResult.toolCalls.map((c: ToolCallRecord) => c.name)
+        pendingCalls.map((c) => c.name)
       );
     }
 
@@ -1124,7 +1135,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
     });
   } catch (err) {
     // Run-level onFailure rollback (default restores pre-run
-    // checkpoint; opt out with (config as any).onFailure === "keep").
+    // checkpoint; opt out with onFailure: "keep").
     // Aborts are excluded so partial history survives interruption.
     const isAbort = (err as { name?: string } | null)?.name === "AbortError" || !!runOptions?.signal?.aborted;
     if (shouldRollbackOnFailure(config.onFailure, isAbort, toolsExecuted)) {
@@ -1169,7 +1180,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   const userSignal = config.runOptions?.signal;
   const forwardUserAbort = () => {
     try {
-      linked.abort((userSignal as any)?.reason);
+      linked.abort(userSignal?.reason);
     } catch {
       try {
         linked.abort();
@@ -1178,7 +1189,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   };
   if (userSignal?.aborted) forwardUserAbort();
   else userSignal?.addEventListener("abort", forwardUserAbort, { once: true });
-  let currentInner: AssistantMessageEventStream | null = null;
+  let currentInner = null as AssistantMessageEventStream | null; // assigned inside the provider-slot closure, so no narrowing to null
   const removeOuterCancel = outerStream.onCancel(() => {
     try {
       linked.abort();
@@ -1281,86 +1292,90 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         );
 
         const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
-        const innerStream = provider.stream(
-          modelId,
-          {
-            systemPrompt: context.systemPrompt,
-            messages: context.messages,
-          },
-          providerOptions
-        );
-        currentInner = innerStream as AssistantMessageEventStream;
+        // The provider slot is held from the request until the stream ends, fails or is cancelled; first-byte and idle timers start after it is held.
+        const turnResponse = await withProviderSlot(provider.id, linked.signal, async () => {
+          const innerStream = provider.stream(
+            modelId,
+            {
+              systemPrompt: context.systemPrompt,
+              messages: context.messages,
+            },
+            providerOptions
+          );
+          currentInner = innerStream as AssistantMessageEventStream;
 
-        // First-byte + idle timeouts around SSE (tolerate reasoning).
-        // Implemented as races on the inner iterator so a hung provider
-        // surfaces as TimeoutError instead of hanging the run forever.
-        {
-          const it = (innerStream as AsyncIterable<StreamEvent>)[Symbol.asyncIterator]();
-          let first = true;
-          let doneIter = false;
-          while (!doneIter) {
-            // Long-running streams pause for minutes between chunks; the adapter guards stalls and reconnects.
-            const waitMs = longRunning
-              ? Infinity
-              : first
-                ? streamLimits.firstByteTimeoutMs
-                : streamLimits.streamIdleTimeoutMs;
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            const timeoutP =
-              Number.isFinite(waitMs) && waitMs !== Infinity && waitMs > 0
-                ? new Promise<never>((_, reject) => {
-                    timer = setTimeout(() => {
-                      reject(
-                        new TimeoutError(
-                          `[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`
-                        )
-                      );
-                    }, waitMs);
-                    try {
-                      (timer as unknown as { unref?: () => void }).unref?.();
-                    } catch {}
-                  })
-                : null;
-            try {
-              const nextP = it.next();
-              const res = timeoutP ? await Promise.race([nextP, timeoutP]) : await nextP;
-              if (timer) clearTimeout(timer);
-              if (res.done) {
-                doneIter = true;
-                break;
+          // First-byte + idle timeouts around SSE (tolerate reasoning).
+          // Implemented as races on the inner iterator so a hung provider
+          // surfaces as TimeoutError instead of hanging the run forever.
+          {
+            const it = (innerStream as AsyncIterable<StreamEvent>)[Symbol.asyncIterator]();
+            let first = true;
+            let doneIter = false;
+            while (!doneIter) {
+              // Long-running streams pause for minutes between chunks; the adapter guards stalls and reconnects.
+              const waitMs = longRunning
+                ? Infinity
+                : first
+                  ? streamLimits.firstByteTimeoutMs
+                  : streamLimits.streamIdleTimeoutMs;
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              const timeoutP =
+                Number.isFinite(waitMs) && waitMs !== Infinity && waitMs > 0
+                  ? new Promise<never>((_, reject) => {
+                      timer = setTimeout(() => {
+                        reject(
+                          new TimeoutError(
+                            `[Agent Accelerator] Stream ${first ? "first-byte" : "idle"} timed out after ${waitMs}ms.`
+                          )
+                        );
+                      }, waitMs);
+                      try {
+                        (timer as unknown as { unref?: () => void }).unref?.();
+                      } catch {}
+                    })
+                  : null;
+              try {
+                const nextP = it.next();
+                const res = timeoutP ? await Promise.race([nextP, timeoutP]) : await nextP;
+                if (timer) clearTimeout(timer);
+                if (res.done) {
+                  doneIter = true;
+                  break;
+                }
+                first = false;
+                throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
+                const event = res.value as StreamEvent;
+                if ((event as StreamEvent)?.type !== "done") {
+                  // The provider's `start` event carries the request audit record: apply the capture policy.
+                  outerStream.push(
+                    event.type === "start" && event.raw
+                      ? { ...event, raw: applyCaptureRaw(event.raw, config.captureRaw) }
+                      : event
+                  );
+                }
+              } catch (e) {
+                if (timer) clearTimeout(timer);
+                // Timeout: cancel the hung inner stream before surfacing.
+                if ((e as Error)?.name === "TimeoutError") {
+                  try {
+                    currentInner?.cancel();
+                  } catch {}
+                }
+                throw e;
               }
-              first = false;
-              throwIfCancelled({ usage: accumulatedUsage, turns, text: lastResponse?.text });
-              const event = res.value as StreamEvent;
-              if ((event as StreamEvent)?.type !== "done") {
-                // The provider's `start` event carries the request audit record: apply the capture policy.
-                outerStream.push(
-                  event.type === "start" && event.raw
-                    ? { ...event, raw: applyCaptureRaw(event.raw, config.captureRaw) }
-                    : event
-                );
-              }
-            } catch (e) {
-              if (timer) clearTimeout(timer);
-              // Timeout: cancel the hung inner stream before surfacing.
-              if ((e as Error)?.name === "TimeoutError") {
-                try {
-                  currentInner?.cancel();
-                } catch {}
-              }
-              throw e;
             }
           }
-        }
 
-        const turnResponse = await innerStream.result();
-        currentInner = null;
+          const result = await innerStream.result();
+          currentInner = null;
+          return result;
+        });
         throwIfCancelled({ usage: accumulatedUsage, turns, text: (turnResponse as { text?: string })?.text });
         lastResponse = turnResponse;
         // Canonical session routing: lets adapters detect provider switches.
         noteProviderTurn(runOptions?.sessionId || options?.sessionId, provider.id);
 
-        promoteThinkingIfAllowed(turnResponse, config, runOptions);
+        promoteThinkingIfAllowed(turnResponse, runOptions);
 
         recordModelTurn(config, accumulatedUsage, turnResponse.usage, spec2, streamLimits.maxTotalTokens);
 
@@ -1561,9 +1576,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       });
 
       outerStream.end(finalAgentResponse);
-    } catch (err: any) {
+    } catch (err) {
       const raw = err instanceof Error ? err : new Error(String(err));
-      const isAbort = linked.signal.aborted || outerStream.isCancelled() || (raw as any)?.name === "AbortError";
+      const isAbort = linked.signal.aborted || outerStream.isCancelled() || raw.name === "AbortError";
       // Streaming onFailure rollback (same policy as runAgentLoop;
       // aborts excluded so partial history survives).
       try {
@@ -1633,29 +1648,11 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 /**
  * Whether an empty-text turn may promote `thinking` to answer `text`.
  * Default false: the run returns the provider's empty text with its
- * finishReason instead of fabricating an answer from reasoning. Opt in via
- * `(runOptions as any).thinkingAsAnswerFallback === true` or
- * `(config as any).thinkingAsAnswerFallback === true`.
+ * finishReason instead of fabricating an answer from reasoning. Opt in with
+ * the run option `thinkingAsAnswerFallback: true`.
  */
-export function shouldPromoteThinkingToAnswer(config?: unknown, runOptions?: unknown): boolean {
-  try {
-    if ((runOptions as { thinkingAsAnswerFallback?: unknown } | null | undefined)?.thinkingAsAnswerFallback === true) {
-      return true;
-    }
-    const c = config as
-      | {
-          thinkingAsAnswerFallback?: unknown;
-          runOptions?: { thinkingAsAnswerFallback?: unknown };
-        }
-      | null
-      | undefined;
-    if (c?.thinkingAsAnswerFallback === true) return true;
-    if (c?.runOptions?.thinkingAsAnswerFallback === true) return true;
-    return false;
-  } catch {
-    // why: policy lookup is best-effort — default to NOT promoting thinking.
-    return false;
-  }
+export function shouldPromoteThinkingToAnswer(runOptions?: AgentRunOptions): boolean {
+  return runOptions?.thinkingAsAnswerFallback === true;
 }
 
 /**

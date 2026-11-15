@@ -21,8 +21,8 @@ import {
   type ServiceTier,
 } from "../types/core.ts";
 import type { ContentPart } from "../types/message.ts";
-import { AgentResponse, type StreamEvent } from "../types/response.ts";
-import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { AgentResponse, type StreamEvent, type SubAgentExecutionMetadata } from "../types/response.ts";
+import { AssistantMessageEventStream, type StreamEventListener } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
@@ -53,10 +53,13 @@ import {
 export { normalizeThinking, resolveEffectiveThinking };
 export type { AgentRunLimits };
 import { NamedSessions } from "./named-sessions.ts";
-import { RunControl, type QueuedPrompt } from "./run-control.ts";
+import { checkModelAllowed, importSessionInto } from "./agent-session.ts";
+import { doPersist, persistNow } from "./agent-persist.ts";
+import { listTrackedSubAgents, mergeSubagentTraces, trackSubAgent } from "./agent-tracking.ts";
+import { RunControl, isPiped, type QueuedPrompt } from "./run-control.ts";
 import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
 import { mergeCap } from "./defaults.ts";
-import { applyEditable, assertModelAllowed, modelKey, toEditableConfig } from "./config-blocks.ts";
+import { applyEditable, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
   runAgentLoop,
@@ -68,14 +71,7 @@ import {
 } from "./loop.ts";
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
 import { createSessionId, nowMs, newRunId, previewPrompt } from "../utils/session.ts";
-import {
-  chargeBudgetUsage,
-  checkBudget,
-  getSubAgentTraceForSessions,
-  subscribeToSubAgentForSessions,
-  listSubAgentTraceIdsForSessions,
-  type SubAgentTrace,
-} from "./delegation.ts";
+import { chargeBudgetUsage, checkBudget, subscribeToSubAgentForSessions, type SubAgentTrace } from "./delegation.ts";
 import {
   addTurn,
   buildUsageReport,
@@ -88,10 +84,8 @@ import {
   type UsageTotals,
 } from "../session/usage.ts";
 import {
-  saveSessionFile,
   sessionDirFor,
   loadSessionDir,
-  findInvalidMessage,
   priceUsage,
   telemetryBus,
   type SessionRunMark,
@@ -101,15 +95,15 @@ import {
 } from "../session/store.ts";
 import { SessionJournal } from "../session/journal.ts";
 import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
-import { isLocalPathInput } from "../utils/safe-io.ts";
 import { clearSessionRouting, normalizeStructuredOutput } from "../providers.ts";
-import type { StructuredOutputSpec } from "../types/model.ts";
+import type { ModelSpec, StructuredOutputSpec } from "../types/model.ts";
+import type { ModelProviderInstance } from "../providers/registry.ts";
 import { clearInteractionChains } from "../providers/google.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
 import { buildSessionData, type PersistedAgentSession, type SessionTotals } from "../session/store.ts";
 import { SessionTelemetry } from "../session/store.ts";
 
-import { ConfigError, SessionLoadError, ValidationError, isAbortError } from "../types/errors.ts";
+import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (fallback when
@@ -137,7 +131,7 @@ export class SubAgentModelError extends ConfigError {
       `[Agent Accelerator] Missing Configuration: a sub-agent model is required when dynamic sub-agents are enabled. ` +
       `Main Agent Model: ${parentName}. ` +
       `Dynamic sub-agent delegation was enabled (dynamicSubagents.enabled), but no model was assigned for sub-agents. ` +
-      `Fix: pass dynamicSubagents.model in Agent config or set SUB_AGENT_MODEL.`;
+      `Fix: pass dynamicSubagents.model in Agent config, or set a default worker model with setModels() or setSubAgentModel().`;
 
     super(formatted, { parentModel: parentName });
     this.name = "SubAgentModelError";
@@ -173,13 +167,13 @@ export class Agent {
   /** The SDK prompts in use: the shipped defaults with `AgentConfig.prompts` applied. */
   readonly prompts: Prompts;
   /** Original model string or catalog spec used for resolution. */
-  readonly modelStringOrSpec: string | any;
+  readonly modelStringOrSpec: string | ModelSpec;
   /** Configured dynamic sub-agent model, if enabled. */
-  readonly subagentModel?: string | any;
+  readonly subagentModel?: string | ModelSpec;
   /** Normalized dynamic sub-agent spawning policy. */
   readonly dynamicSubagents?: {
     enabled: boolean;
-    model?: string | any;
+    model?: string | ModelSpec;
     /** Open workers at once; `Infinity` (the default) = no limit. */
     maxSpawn: number;
     thinkingLevel?: ThinkingLevel;
@@ -249,13 +243,13 @@ export class Agent {
   /** Whether history is cleared around each run. */
   readonly stateless: boolean;
   /** Durable persistence target: session file rewritten after every step. */
-  readonly persistConfig?: { dir?: string; file?: string };
+  readonly persistConfig?: AgentConfig["persist"];
   /** Mid-session queue policy for new queries arriving while a run is active. */
   readonly midSessionConfig: Required<Pick<MidSessionConfig, "mode">> & MidSessionConfig & { maxSteers?: number };
   /** Max buffered steer entries per run (default 20). */
   readonly maxSteers: number;
   /**
-   * Normalized run limits. Read from `(config as any).limits`;
+   * Normalized run limits. From `AgentConfig.limits`;
    * sub-agents inherit these unless overridden. `maxTurns`/`deadlineMs`/
    * `maxToolCallsPerRun` default to unlimited; timeouts default to
    * request 300s / first-byte 120s / idle 300s (tolerate reasoning).
@@ -270,12 +264,16 @@ export class Agent {
     () => new AgentContext(this.getFullInstructions())
   );
   /** Coalesced persistence single-flight flag. */
-  private persistScheduled = false;
+  persistScheduled = false;
   /** Step journal of the persisted session folder (dir mode only). */
-  private journal?: SessionJournal;
+  journal?: SessionJournal;
   /** Log files of tool calls in the persisted session folder (dir mode only). */
   private toolLogs?: ToolLogs;
   private toolLogsDir?: string;
+  /** Live traces of the workers this agent started, by tracking id (saved with the session). @internal */
+  subagentTraces: Record<string, SubAgentTrace> = {};
+  /** The session this agent was started from, for a worker (set by the registry or `fork`). @internal */
+  parentSessionId?: string;
   /** Where each run of the default session began (saved with the session). @internal */
   readonly runMarks: SessionRunMark[] = [];
   /** Tool calls finished in the current run; saved the moment each finishes so a crash never repeats them. @internal */
@@ -322,7 +320,7 @@ export class Agent {
     // DX1: only instructions (no systemPrompt alias)
     this.instructions = config.instructions || "";
     this.prompts = resolvePrompts(config.prompts);
-    // Workers and scheduled runs the SDK builds never take developer defaults (`configure()`, env vars).
+    // Workers and scheduled runs the SDK builds never take developer defaults (the spending-cap settings).
     const takesDefaults = !isWorkerConfig(config);
     if (config.usageLimit !== undefined) {
       const problem = checkUsageLimitConfig(config.usageLimit);
@@ -336,12 +334,18 @@ export class Agent {
     // Unified model resolution (shared with SubAgent/workers): supports
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
-    this.modelStringOrSpec = modelStringOrSpec as string | any;
-    assertModelAllowed(config.allowedModels, modelKey(modelStringOrSpec));
+    this.modelStringOrSpec = modelStringOrSpec as string | ModelSpec;
+    if ((config as { allowedModels?: unknown }).allowedModels !== undefined) {
+      throw new ConfigError(
+        "[Agent Accelerator] AgentConfig.allowedModels was removed: set the program's list once with setModels({ default, providers }) (see the models guide)."
+      );
+    }
+    checkModelAllowed(modelStringOrSpec); // fail at construction, not at the first run
     const dynRaw = config.dynamicSubagents;
-    // Unified worker-model chain: dynamicSubagents.model > subagentModel > SUB_AGENT_MODEL.
+    // Unified worker-model chain: dynamicSubagents.model > subagentModel > saved or default worker model.
     const dynModel = resolveDynamicModelInput(dynRaw, config.subagentModel);
-    this.subagentModel = dynModel as string | any | undefined;
+    this.subagentModel = dynModel;
+    if (dynRaw) checkModelAllowed(dynModel); // the developer's worker model must be on the list too
     const dynEnabled = dynRaw ? (dynRaw.enabled ?? true) : false;
     if (dynRaw) {
       const dynTools = normalizeToolMap(
@@ -402,9 +406,9 @@ export class Agent {
       const workerTimeoutMs = !rawTimeout ? Infinity : Math.max(1, Math.floor(rawTimeout));
       this.dynamicSubagents = {
         enabled: dynEnabled,
-        model: dynModel as string | any | undefined,
+        model: dynModel,
         maxSpawn,
-        thinkingLevel: (dynRaw as any)?.thinkingLevel,
+        thinkingLevel: dynRaw.thinkingLevel,
         tools: dynTools,
         workerTimeoutMs,
         allowScheduledActions: dynRaw.allowScheduledActions === true,
@@ -415,8 +419,11 @@ export class Agent {
           : {}),
       };
     }
-    this.apiKey = (rawModel as any)?.apiKey || config.apiKey;
-    this.baseUrl = (rawModel as any)?.baseUrl || config.baseUrl;
+    const modelHelper = (
+      typeof rawModel === "object" && rawModel !== null && "model" in rawModel ? rawModel : undefined
+    ) as ModelProviderInstance | undefined; // a `ModelProvider.*` result carries its own key, endpoint and level
+    this.apiKey = modelHelper?.apiKey || config.apiKey;
+    this.baseUrl = modelHelper?.baseUrl || config.baseUrl;
     this.customHeaders = config.headers;
     this.maxTurns =
       config.maxTurns === undefined || config.maxTurns === 0 || config.maxTurns === Infinity
@@ -425,7 +432,6 @@ export class Agent {
           ? Math.max(1, Math.floor(config.maxTurns as number))
           : Infinity;
     this.sessionId = config.sessionId || createSessionId();
-    (this as any).subagentTraces = {};
     this.home = resolveHome(config.home);
     // `persist: {}` (neither dir nor file) means the default sessions folder under home.
     this.persistConfig =
@@ -434,8 +440,8 @@ export class Agent {
         : config.persist;
     // `whenBusy` (canonical) wins over legacy `mode`; anything else is "auto".
     const normalizedMode = resolveWhenBusy(config.midSession);
-    const rawMaxQueued = (config.midSession as any)?.maxQueued;
-    const rawMaxSteers = (config.midSession as any)?.maxSteers;
+    const rawMaxQueued = config.midSession?.maxQueued;
+    const rawMaxSteers = config.midSession?.maxSteers;
     this.midSessionConfig = {
       mode: normalizedMode,
       ...(Number.isFinite(rawMaxQueued) && (rawMaxQueued as number) >= 0
@@ -462,7 +468,7 @@ export class Agent {
     this.runLimits = resolveAgentLimits(config as unknown as { limits?: Record<string, unknown> });
 
     // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
-    const mpThinking = (rawModel as any)?.thinkingLevel;
+    const mpThinking = modelHelper?.thinkingLevel;
     this.thinkingConfig = normalizeThinking(config, mpThinking);
 
     // Structured outputs: validate early so invalid schemas fail fast at construction.
@@ -495,15 +501,13 @@ export class Agent {
     this.forkConfig = { ...config };
     this.captureRaw = config.captureRaw;
     this.budget = config.budget ? { ...config.budget } : undefined;
-    for (const key of ["hooks", "contextManagement", "logger"] as const) {
-      if (config[key] !== undefined) {
-        // Declared for forward compatibility only: say so instead of silently ignoring.
-        telemetryBus.emitWarning(
-          "config.unsupported_option",
-          `[Agent Accelerator] AgentConfig.${key} is accepted for forward compatibility but is not implemented yet; it has no effect. Attach to telemetryBus.onEvent for observability.`,
-          { option: key }
-        );
-      }
+    if (config.hooks !== undefined) {
+      // Declared for forward compatibility only: say so instead of silently ignoring.
+      telemetryBus.emitWarning(
+        "config.unsupported_option",
+        "[Agent Accelerator] AgentConfig.hooks is accepted for forward compatibility but is not implemented yet; it has no effect. Attach to telemetryBus.onEvent for observability.",
+        { option: "hooks" }
+      );
     }
     if (config.telemetry?.persist) persistTelemetry(this.home);
     this.googleTier = config.googleTier === "paid" || config.googleTier === "free" ? config.googleTier : undefined;
@@ -536,7 +540,7 @@ export class Agent {
     const dyn = this.dynamicSubagents;
     if ((dyn?.enabled === true || dyn?.allowScheduledActions) && !this.subagentModel) {
       throw new SubAgentModelError(
-        typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : (this.modelStringOrSpec as any)?.id
+        typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : this.modelStringOrSpec?.id
       );
     }
     if (dyn?.enabled === true) {
@@ -573,7 +577,7 @@ export class Agent {
   }
 
   // Takes the one-process lock of the folder this Agent persists to: its own session folder, or the folder of a single `persist.file`; throws ConfigError when another live process holds it; in: the constructor and importSession (a new session id is a new folder), out: a `.lock` file there.
-  private lockSessionFolder(): void {
+  lockSessionFolder(): void {
     const cfg = this.persistConfig;
     if (!cfg || this.stateless) return;
     if (cfg.dir) {
@@ -590,7 +594,7 @@ export class Agent {
   }
 
   // Tells the telemetry sink where this Agent's session folder is (only for a session persisted to a folder), so its events are written next to its journal; in: the constructor and importSession, out: the telemetry routing map.
-  private registerTelemetryFolder(): void {
+  registerTelemetryFolder(): void {
     const root = this.persistConfig?.dir;
     if (!root || this.stateless) return;
     try {
@@ -632,7 +636,7 @@ export class Agent {
   }
 
   // Puts saved spending totals back after a restart or import (zeros when the file has none); in: a loaded session's `usage`, out: this.usageTotals.
-  private restoreUsage(saved: unknown): void {
+  restoreUsage(saved: unknown): void {
     Object.assign(this.usageTotals, readUsage(saved));
     if (this.ownsChat) this.chat!.restart(); // a restored session changes the starting point of the chat total
   }
@@ -778,7 +782,7 @@ export class Agent {
   }
 
   // Builds the system prompt: the developer's instructions plus, when thinking is on, the fixed Reasoning Directive; in: this.instructions + thinkingConfig, out: every AgentContext.systemPrompt.
-  private getFullInstructions(): string | undefined {
+  getFullInstructions(): string | undefined {
     const base = this.instructions || "";
     let out = base;
     const isThinkingEnabled =
@@ -959,22 +963,48 @@ export class Agent {
       );
     }
     if (!this.rc.current) return this.run(prompt, options) as Promise<AgentResponse>;
+    return this.enqueueFollowUp(prompt, options);
+  }
+
+  // Throws when `midSession.mode` forbids the requested enqueue kind; in: run() and stream() while busy, out: nothing or a ConfigError.
+  private assertEnqueueAllowed(requested: AgentRunOptions["enqueue"]): void {
+    const enforced = this.midSessionConfig.mode;
+    if (
+      requested &&
+      requested !== "interrupt" &&
+      (enforced === "steer" || enforced === "queue") &&
+      requested !== enforced
+    ) {
+      throw new ConfigError(
+        `[Agent Accelerator] enqueue "${requested}" is disabled by midSession.mode "${enforced}". Use ${enforced}() or set mode to "auto"/"${requested}".`
+      );
+    }
+  }
+
+  // Throws when the follow-up queue is at `midSession.maxQueued`; in: every queueing path except interrupt, out: nothing or a ValidationError.
+  private assertQueueRoom(): void {
     const max = this.midSessionConfig.maxQueued ?? 20;
     if (this.rc.queue.length >= max) {
       throw new ValidationError(
         `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
       );
     }
+  }
+
+  // Tells the active stream (if any) that a follow-up was queued; in: queue paths, out: a `queued` event with the new length.
+  private announceQueued(prompt: string | ContentPart[], queueLength: number): void {
+    try {
+      this.rc.current?.outerStream?.push({ type: "queued", queuedPrompt: previewPrompt(prompt), queueLength });
+    } catch {}
+  }
+
+  // Adds a non-streaming follow-up to the waiting queue after the room check, saves it and announces it; in: queue() and run() while busy, out: the promise of that later run.
+  private enqueueFollowUp(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse> {
+    this.assertQueueRoom();
     return new Promise<AgentResponse>((resolve, reject) => {
       this.rc.queue.push({ prompt, options, isStream: false, resolve, reject });
       this.persistNow();
-      try {
-        this.rc.current?.outerStream?.push({
-          type: "queued",
-          queuedPrompt: previewPrompt(prompt),
-          queueLength: this.rc.queue.length,
-        } as any);
-      } catch {}
+      this.announceQueued(prompt, this.rc.queue.length);
     });
   }
 
@@ -997,7 +1027,7 @@ export class Agent {
     if (!userSignal) return runController.signal;
     if (userSignal.aborted) {
       try {
-        runController.abort((userSignal as any).reason);
+        runController.abort(userSignal.reason);
       } catch {
         try {
           runController.abort();
@@ -1015,7 +1045,7 @@ export class Agent {
     // Fallback: manual forward without expando (disposer in WeakMap).
     const forward = () => {
       try {
-        runController.abort((userSignal as any).reason);
+        runController.abort(userSignal.reason);
       } catch {
         try {
           runController.abort();
@@ -1091,7 +1121,7 @@ export class Agent {
   /**
    * Builds an Agent from your full `base` config with an agent's edits applied. Only `model`, `instructions` and
    * `tools` of `editable` count (other keys are ignored with a `config.not_editable` warning); `tools` are names picked
-   * from `base.tools`, an unknown name throws; `base.allowedModels` is enforced. Keys and limits always come from `base`.
+   * from `base.tools`, an unknown name throws; the model must be on the program's list (`setModels`). Keys and limits always come from `base`.
    */
   static fromConfig(editable: EditableAgentConfig, base: AgentConfig): Agent {
     return new Agent(applyEditable(editable, base));
@@ -1239,7 +1269,7 @@ export class Agent {
         }
       }
       if (failedAttempts.length > 0) res = withFailedAttempts(res, failedAttempts);
-      this.mergeSubagentTraces(res.subagents as any);
+      this.mergeSubagentTraces(res.subagents);
       this.persistNow();
       if (this.stateless) {
         targetContext.messages = [];
@@ -1314,7 +1344,7 @@ export class Agent {
       (res) => {
         this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done");
         try {
-          this.mergeSubagentTraces(res.subagents as any);
+          this.mergeSubagentTraces(res.subagents);
           this.persistNow();
         } catch {}
         try {
@@ -1345,41 +1375,17 @@ export class Agent {
    * @example `const trace = agent.track("RAM-RESEARCH-AGENT-9f2c…");`
    */
   track(trackingId: string): SubAgentTrace | undefined {
-    if (!trackingId) return undefined;
-    try {
-      const own = (this as any).subagentTraces as Record<string, SubAgentTrace> | undefined;
-      const hit = own?.[trackingId];
-      if (hit) return { ...hit, steps: hit.steps.map((s) => ({ ...s })) };
-    } catch {}
-    // Process-wide store, filtered to sessions THIS agent owns: another
-    // agent's workers (e.g. a different tenant) are never reachable.
-    return getSubAgentTraceForSessions(trackingId, this.ownedSessionIds());
+    return trackSubAgent(this, trackingId);
   }
 
-  /** Session ids whose spawned workers this agent may inspect (default + named sessions). */
-  private ownedSessionIds(): ReadonlySet<string> {
+  /** Session ids whose spawned workers this agent may inspect (default + named sessions); read by `agent-tracking.ts`. */
+  ownedSessionIds(): ReadonlySet<string> {
     return new Set<string>([this.sessionId, ...this.named.ids()]);
   }
 
   /** Lists TrackingIDs of worker traces visible to this agent (deduped). */
   listTrackedSubAgents(): string[] {
-    const rawOf = (id: string): string => {
-      const tail = id.split("-").pop() ?? "";
-      return /^[0-9a-f]{32}$/.test(tail) ? tail : id;
-    };
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const id of [
-      ...Object.keys((this as any).subagentTraces ?? {}),
-      ...listSubAgentTraceIdsForSessions(this.ownedSessionIds()),
-    ]) {
-      const raw = rawOf(id);
-      if (!seen.has(raw)) {
-        seen.add(raw);
-        out.push(raw);
-      }
-    }
-    return out;
+    return listTrackedSubAgents(this);
   }
 
   /**
@@ -1398,22 +1404,11 @@ export class Agent {
    * manually. Never throws (failures route to `onPersistError`).
    *
    * Stateless agents skip persistence unless
-   * `(persist as any).allowStateless` is set. Calls in the same tick are
+   * `persist.allowStateless` is set. Calls in the same tick are
    * coalesced via a `queueMicrotask` single flight.
    */
   persistNow(): void {
-    const cfg = this.persistConfig;
-    if (!cfg || (!cfg.dir && !cfg.file)) return;
-    // No stateless persist by default.
-    try {
-      if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
-    } catch {}
-    if (this.persistScheduled) return;
-    this.persistScheduled = true;
-    queueMicrotask(() => {
-      this.persistScheduled = false;
-      this.doPersist();
-    });
+    persistNow(this);
   }
 
   // Opens the log file of one tool call when this Agent persists its default session to a folder, else nothing; in: the executor, once per call, out: a writer for `tool-logs/<n>-<tool>.ndjson`.
@@ -1428,75 +1423,14 @@ export class Agent {
     return this.toolLogs!.open(call);
   }
 
-  /** The step journal of this session's folder (recreated when `sessionId` changes). */
-  private journalFor(root: string): SessionJournal {
-    const dir = sessionDirFor(root, this.sessionId);
-    if (this.journal?.dir !== dir) this.journal = new SessionJournal(dir);
-    return this.journal;
-  }
-
   /** Synchronous persistence write behind the coalesced `persistNow()` gate. */
   private doPersist(): void {
-    const cfg = this.persistConfig;
-    if (!cfg || (!cfg.dir && !cfg.file)) return;
-    try {
-      if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
-    } catch {}
-    try {
-      if (cfg.dir) this.journalFor(cfg.dir).sync(this as any);
-      else if (cfg.file) saveSessionFile(cfg.file, this as any, null);
-    } catch (err) {
-      // Surface via hook instead of swallowing silently.
-      try {
-        (cfg as unknown as { onPersistError?: (e: unknown) => void }).onPersistError?.(err);
-      } catch {}
-    }
+    doPersist(this);
   }
 
   /** Merges completed worker metadata (incl. steps) into this agent's trace registry. */
-  private mergeSubagentTraces(
-    subagents: Array<{
-      trackingId?: string;
-      name: string;
-      sessionId?: string;
-      parentSessionId?: string;
-      task: string;
-      steps?: SubAgentTrace["steps"];
-      [k: string]: unknown;
-    }>
-  ): void {
-    if (!subagents || subagents.length === 0) return;
-    const rawOf = (id?: string): string | undefined => {
-      if (!id) return undefined;
-      const tail = id.split("-").pop() ?? "";
-      return /^[0-9a-f]{32}$/.test(tail) ? tail : id;
-    };
-    try {
-      const registry = ((this as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
-      for (const s of subagents) {
-        const raw = rawOf(s.trackingId);
-        const key = raw || s.name;
-        const existing = registry[key] ?? (raw ? registry[s.trackingId ?? ""] : undefined);
-        if (existing) {
-          existing.status = "done";
-          if (s.steps && s.steps.length > 0 && existing.steps.length === 0) {
-            existing.steps = s.steps.map((x) => ({ ...x }));
-          }
-          if (raw && !registry[raw]) registry[raw] = existing;
-        } else if (raw) {
-          registry[raw] = {
-            trackingId: raw,
-            name: s.name,
-            sessionId: s.sessionId || "",
-            parentSessionId: s.parentSessionId || this.sessionId,
-            status: "done",
-            task: s.task,
-            turns: 0,
-            steps: (s.steps ?? []).map((x) => ({ ...x })),
-          };
-        }
-      }
-    } catch {}
+  private mergeSubagentTraces(subagents: SubAgentExecutionMetadata[]): void {
+    mergeSubagentTraces(this, subagents);
   }
 
   /**
@@ -1506,7 +1440,7 @@ export class Agent {
    * @example `saveSessionFile(".session.json", agent, telemetry)`
    */
   exportSession(telemetry?: SessionTelemetry | SessionTotals | null): PersistedAgentSession {
-    return buildSessionData(this as any, telemetry);
+    return buildSessionData(this, telemetry);
   }
 
   /**
@@ -1518,113 +1452,7 @@ export class Agent {
    * @example `const saved = loadSessionFile(".session.json"); if (saved) agent.importSession(saved);`
    */
   importSession(data?: PersistedAgentSession | null): void {
-    if (!data) return;
-    const badIndex = findInvalidMessage(data.messages ?? []);
-    if (badIndex !== -1) {
-      throw new SessionLoadError(
-        `[Agent Accelerator] Cannot import session: messages[${badIndex}] is not a valid message (expected role system|user|assistant|tool and string or part-array content).`
-      );
-    }
-    this.warnOnLocalMediaPaths(data.messages ?? []);
-    const prevSid = this.sessionId;
-    if (data.sessionId) (this as any).sessionId = data.sessionId;
-    if (this.sessionId !== prevSid) {
-      try {
-        this.lockSessionFolder();
-      } catch (err) {
-        (this as any).sessionId = prevSid; // the session belongs to another process: keep ours untouched
-        throw err;
-      }
-      unregisterSessionFolder(prevSid);
-      this.registerTelemetryFolder();
-    }
-    if ((data as any).parentSessionId) (this as any).parentSessionId = (data as any).parentSessionId;
-    if ((data as any).subagents && typeof (data as any).subagents === "object") {
-      try {
-        (this as any).subagentTraces = JSON.parse(JSON.stringify((data as any).subagents));
-      } catch {
-        (this as any).subagentTraces = { ...((data as any).subagents as object) };
-      }
-    }
-    if (data.model) (this as any).modelStringOrSpec = data.model;
-    if (data.thinkingLevel) {
-      const lvl = String(data.thinkingLevel);
-      (this as any).thinkingConfig =
-        lvl === "none"
-          ? { enabled: false, level: "none", budgetTokens: 0 }
-          : lvl === "dynamic"
-            ? { enabled: true, level: "dynamic", budgetTokens: -1 }
-            : { enabled: true, level: lvl };
-    }
-    if (typeof data.instructions === "string") this.instructions = data.instructions;
-    if (data.cache) (this as { cache?: CacheOption }).cache = data.cache;
-    if (data.subagentModel) {
-      (this as any).subagentModel = data.subagentModel;
-      const dyn = (this as any).dynamicSubagents;
-      if (dyn) dyn.model = data.subagentModel;
-    }
-    try {
-      const g: any = globalThis as any;
-      this.context.messages = Array.isArray(data.messages)
-        ? typeof g.structuredClone === "function"
-          ? g.structuredClone(data.messages)
-          : JSON.parse(JSON.stringify(data.messages))
-        : [];
-    } catch {
-      this.context.messages = Array.isArray(data.messages) ? [...data.messages] : [];
-    }
-    this.context.thoughtSignatures = [];
-    this.runMarks.splice(
-      0,
-      this.runMarks.length,
-      ...(data.runs ?? []).filter((r) => r.i < this.context.messages.length)
-    );
-    this.restoreUsage(data.usage);
-    if (data.systemPrompt) {
-      this.context.systemPrompt = data.systemPrompt;
-    } else {
-      this.context.systemPrompt = this.getFullInstructions();
-    }
-    // Importing a snapshot invalidates prior provider chaining/routing
-    // for both the previous and the restored session.
-    try {
-      clearInteractionChains(prevSid);
-    } catch {}
-    try {
-      clearSessionRouting(prevSid);
-    } catch {}
-    try {
-      clearInteractionChains(this.sessionId);
-    } catch {}
-    try {
-      clearSessionRouting(this.sessionId);
-    } catch {}
-  }
-
-  /**
-   * A loaded session may reference local files (`image: "/home/me/x.png"`)
-   * that the next turn would read and upload. Without a `fileAccess.roots`
-   * policy that is silent, so surface it once on the telemetry bus.
-   */
-  private warnOnLocalMediaPaths(messages: ReadonlyArray<{ content?: unknown }>): void {
-    if (this.fileAccess?.roots) return; // enforced every turn by the loop
-    const paths: string[] = [];
-    for (const m of messages) {
-      if (!Array.isArray(m.content)) continue;
-      for (const part of m.content as Array<Record<string, unknown>>) {
-        const key = ["image", "audio", "video", "file"].find((k) => k === part?.type);
-        const value = key ? part[key] : undefined;
-        if (isLocalPathInput(value) && !value.startsWith("media/")) paths.push(value);
-      }
-    }
-    if (paths.length === 0) return;
-    try {
-      telemetryBus.emitWarning(
-        "session.local_media_paths",
-        `[Agent Accelerator] Imported session references ${paths.length} local file path(s) that will be read and sent to the provider on the next turn. Set fileAccess.roots to restrict them.`,
-        { count: paths.length, examples: paths.slice(0, 3) }
-      );
-    } catch {}
+    importSessionInto(this, data);
   }
 
   // Adds the user prompt to the target context (fresh context when stateless, stable system prompt, additionalContext as a user prefix) and marks the run start for the default session; in: a run start, out: the new SessionRunMark.
@@ -1705,21 +1533,19 @@ export class Agent {
     const isStream = options?.stream === true;
     if (isStream) {
       const hasCallbacks = !!(options?.onDelta || options?.onThinkingDelta || options?.onEvent);
-      const s = this.stream(prompt, options) as any;
+      const s = this.stream(prompt, options);
       if (hasCallbacks) {
         // Make `await agent.run(..., {stream:true, onDelta})` resolve to final response
         // while still streaming via callbacks. The returned value stays iterable/on-able.
-        const resultPromise = s.result();
-        const hybrid: any = resultPromise;
-        hybrid[Symbol.asyncIterator] = s[Symbol.asyncIterator].bind(s);
-        hybrid.on = s.on.bind(s);
-        hybrid.off = s.off.bind(s);
-        hybrid.result = s.result.bind(s);
-        hybrid.cancel = s.cancel.bind(s);
-        hybrid.onCancel = s.onCancel.bind(s);
-        hybrid.isCancelled = s.isCancelled.bind(s);
-        // also expose push/end/fail for compat, though not needed by caller
-        return hybrid;
+        return Object.assign(s.result(), {
+          [Symbol.asyncIterator]: s[Symbol.asyncIterator].bind(s),
+          on: s.on.bind(s),
+          off: s.off.bind(s),
+          result: s.result.bind(s),
+          cancel: s.cancel.bind(s),
+          onCancel: s.onCancel.bind(s),
+          isCancelled: s.isCancelled.bind(s),
+        });
       }
       return s;
     }
@@ -1731,42 +1557,19 @@ export class Agent {
           this.rc.queueUrgent({ prompt, options, isStream: false, resolve, reject })
         );
       }
-      const enforced = this.midSessionConfig.mode;
-      const requested = options?.enqueue;
-      if (requested && (enforced === "steer" || enforced === "queue") && requested !== enforced) {
-        throw new ConfigError(
-          `[Agent Accelerator] enqueue "${requested}" is disabled by midSession.mode "${enforced}". Use ${enforced}() or set mode to "auto"/"${requested}".`
-        );
-      }
-      const mode = this.rc.resolveEnqueueMode(requested);
+      this.assertEnqueueAllowed(options?.enqueue);
+      const mode = this.rc.resolveEnqueueMode(options?.enqueue);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
         return this.rc.steerInto(this.rc.current, prompt, options);
-      } else {
-        if (this.midSessionConfig.mode === "steer") {
-          throw new ConfigError(
-            '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
-          );
-        }
-        this.assertPromptValid(prompt);
-        const max = this.midSessionConfig.maxQueued ?? 20;
-        if (this.rc.queue.length >= max) {
-          throw new ValidationError(
-            `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
-          );
-        }
-        return new Promise<AgentResponse>((resolve, reject) => {
-          this.rc.queue.push({ prompt, options, isStream: false, resolve, reject });
-          this.persistNow();
-          try {
-            this.rc.current?.outerStream?.push({
-              type: "queued",
-              queuedPrompt: previewPrompt(prompt),
-              queueLength: this.rc.queue.length,
-            } as any);
-          } catch {}
-        });
       }
+      if (this.midSessionConfig.mode === "steer") {
+        throw new ConfigError(
+          '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
+        );
+      }
+      this.assertPromptValid(prompt);
+      return this.enqueueFollowUp(prompt, options);
     }
 
     return this.startNonStreamingRun(prompt, options);
@@ -1788,12 +1591,11 @@ export class Agent {
       const stream = this.stream(prompt, runOpts);
       // If callbacks are used, proxy them through string stream as well
       if (runOpts.onDelta || runOpts.onThinkingDelta || runOpts.onEvent) {
-        if (runOpts.onEvent) stream.on("*", runOpts.onEvent as any);
-        if (runOpts.onDelta) stream.on("text_delta", (e: any) => runOpts.onDelta!(e.delta!, e));
-        if (runOpts.onThinkingDelta)
-          stream.on("thinking_delta", (e: any) => runOpts.onThinkingDelta!(e.thinkingDelta!, e));
+        if (runOpts.onEvent) stream.on("*", runOpts.onEvent);
+        if (runOpts.onDelta) stream.on("text_delta", (e) => runOpts.onDelta!(e.delta!, e));
+        if (runOpts.onThinkingDelta) stream.on("thinking_delta", (e) => runOpts.onThinkingDelta!(e.thinkingDelta!, e));
       }
-      const stringStream: any = {
+      const stringStream = {
         [Symbol.asyncIterator]: async function* () {
           try {
             for await (const chunk of stream) {
@@ -1808,19 +1610,20 @@ export class Agent {
           }
         },
         result: () => stream.result(),
-        on: (evt: string, fn: any) => stream.on(evt, fn),
+        on: (evt: string, fn: StreamEventListener) => stream.on(evt, fn),
         cancel: () => stream.cancel(),
-        onCancel: (fn: any) => stream.onCancel(fn),
+        onCancel: (fn: () => void) => stream.onCancel(fn),
         isCancelled: () => stream.isCancelled(),
       };
       // Make await work (resolves to AgentResponse)
       const resultPromise = stream.result();
-      (stringStream as any).then = (res: any, rej: any) => resultPromise.then(res, rej);
-      (stringStream as any).catch = (rej: any) => resultPromise.catch(rej);
-      return stringStream;
+      return Object.assign(stringStream, {
+        then: resultPromise.then.bind(resultPromise),
+        catch: resultPromise.catch.bind(resultPromise),
+      }) as unknown as Promise<AgentResponse> & AsyncIterable<string | StreamEvent>;
     }
 
-    return this.run(prompt, runOpts) as any;
+    return this.run(prompt, runOpts) as unknown as Promise<AgentResponse> & AsyncIterable<string | StreamEvent>;
   }
 
   /**
@@ -1837,18 +1640,9 @@ export class Agent {
     this.assertPromptValid(prompt);
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
     if (this.rc.current) {
-      const enforcedStream = this.midSessionConfig.mode;
       const urgent = options?.enqueue === "interrupt"; // stops the active run and goes first, in every mode and whatever the queue holds
       const requestedStream = options?.enqueue === "interrupt" ? undefined : options?.enqueue;
-      if (
-        requestedStream &&
-        (enforcedStream === "steer" || enforcedStream === "queue") &&
-        requestedStream !== enforcedStream
-      ) {
-        throw new ConfigError(
-          `[Agent Accelerator] enqueue "${requestedStream}" is disabled by midSession.mode "${enforcedStream}". Use ${enforcedStream}() or set mode to "auto"/"${requestedStream}".`
-        );
-      }
+      this.assertEnqueueAllowed(requestedStream);
       const mode = urgent ? "queue" : this.rc.resolveEnqueueMode(requestedStream);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
@@ -1875,7 +1669,7 @@ export class Agent {
                   usage: res.usage,
                   finishReason: res.finishReason,
                   responseId: res.responseId,
-                } as any);
+                });
               } catch {}
               try {
                 stub.end(res);
@@ -1900,32 +1694,12 @@ export class Agent {
         );
       }
       this.assertPromptValid(prompt);
-      const max = this.midSessionConfig.maxQueued ?? 20;
-      if (!urgent && this.rc.queue.length >= max) {
-        throw new ValidationError(
-          `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
-        );
-      }
+      if (!urgent) this.assertQueueRoom();
       const deferred = new AssistantMessageEventStream();
       this.wireStreamCallbacks(deferred, options);
       // Notify the active stream (if any) that a follow-up was queued.
-      if (!urgent) {
-        try {
-          this.rc.current.outerStream?.push({
-            type: "queued",
-            queuedPrompt: previewPrompt(prompt),
-            queueLength: this.rc.queue.length + 1,
-          } as any);
-        } catch {}
-      }
-      const queuedEntry: {
-        prompt: string | ContentPart[];
-        options?: AgentRunOptions;
-        isStream: boolean;
-        deferredStream?: AssistantMessageEventStream;
-        resolve: (res: AgentResponse) => void;
-        reject: (err: unknown) => void;
-      } = {
+      if (!urgent) this.announceQueued(prompt, this.rc.queue.length + 1);
+      const queuedEntry: QueuedPrompt = {
         prompt,
         options,
         isStream: true,
@@ -1945,7 +1719,7 @@ export class Agent {
       // Forward cancellation before start: drop from queue and fail.
       deferred.onCancel(() => {
         try {
-          const idx = this.rc.queue.indexOf(queuedEntry as any);
+          const idx = this.rc.queue.indexOf(queuedEntry);
           if (idx >= 0) {
             this.rc.queue.splice(idx, 1);
             queuedEntry.reject(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
@@ -1956,9 +1730,9 @@ export class Agent {
         } catch {}
       });
       if (urgent) {
-        this.rc.queueUrgent(queuedEntry as QueuedPrompt);
+        this.rc.queueUrgent(queuedEntry);
       } else {
-        this.rc.queue.push(queuedEntry as any);
+        this.rc.queue.push(queuedEntry);
         this.persistNow();
       }
       // Attach deferred completion to queued promise without exposing it.
@@ -1968,21 +1742,21 @@ export class Agent {
           // If pump already piped via real stream, deferred is already ended.
           // Otherwise (edge), end it here.
           try {
-            if ((deferred as any).__piped !== true) {
+            if (!isPiped(deferred)) {
               deferred.push({
                 type: "done",
                 delta: "",
                 usage: res.usage,
                 finishReason: res.finishReason,
                 responseId: res.responseId,
-              } as any);
+              });
               deferred.end(res);
             }
           } catch {}
         },
         (err) => {
           try {
-            if ((deferred as any).__piped !== true) {
+            if (!isPiped(deferred)) {
               deferred.fail(err instanceof Error ? err : new Error(String(err)));
             }
           } catch {}
@@ -1998,9 +1772,9 @@ export class Agent {
 
   // Attaches the caller's onEvent/onDelta/onThinkingDelta callbacks to a stream; in: stream()/pumpQueue, out: listeners on the stream.
   private wireStreamCallbacks(s: AssistantMessageEventStream, options?: AgentRunOptions): void {
-    if (options?.onEvent) s.on("*", options.onEvent as any);
-    if (options?.onDelta) s.on("text_delta", (e: any) => options.onDelta!(e.delta!, e));
-    if (options?.onThinkingDelta) s.on("thinking_delta", (e: any) => options.onThinkingDelta!(e.thinkingDelta!, e));
+    if (options?.onEvent) s.on("*", options.onEvent);
+    if (options?.onDelta) s.on("text_delta", (e) => options.onDelta!(e.delta!, e));
+    if (options?.onThinkingDelta) s.on("thinking_delta", (e) => options.onThinkingDelta!(e.thinkingDelta!, e));
   }
 }
 

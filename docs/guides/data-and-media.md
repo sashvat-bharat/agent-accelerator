@@ -9,7 +9,7 @@
 import { Agent, findLatestSessionDir, loadSessionDir } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   persist: { dir: "sessions" }, // saves sessions/<sessionId>/ (session.json + journal.ndjson + media/) after every step
 });
 
@@ -30,7 +30,7 @@ console.log(res.text);
 | `telemetry/` | daily event log of the events that belong to no persisted session, only with `telemetry: { persist: true }` |
 | `catalog/` | the model catalog cache |
 
-Move it with `setHome(dir)` (call once, before creating Agents), the `AGENT_ACCEL_HOME` env var, or a per-Agent `home`. Explicit paths you pass (`persist: { dir }`, `saveSessionFile`) are used as given.
+Move it with `setHome(dir)` (call once, before creating Agents) or a per-Agent `home` (code only: there is no env var). Explicit paths you pass (`persist: { dir }`, `saveSessionFile`) are used as given.
 
 **Tool logs.** Each tool call also writes `tool-logs/<n>-<tool>.ndjson` next to the session (see [Tools and streaming](tools-and-streaming.md)); the session itself keeps only a `logFile` reference on the tool result.
 
@@ -55,7 +55,7 @@ const agent = new Agent({ model, persist: { dir: "sessions" }, sessionId: "suppo
 |---|---|
 | `{ dir }` | `<dir>/<sessionId>/session.json` (snapshot; includes the agent's own spending as `usage`, see `agent.usageReport()`) + `journal.ndjson` (one appended line per step, folded into the snapshot after 500 lines / 4 MB or when history changes another way) + `media/` files (written once, named by content hash) |
 | `{ file }` | one JSON file, rewritten each step (binary media inlined as data URLs; no journal) |
-| `{}` | `<home>/sessions` (`home` defaults to `setHome(dir)`, then `AGENT_ACCEL_HOME`, then `.agent-accel/` in the working directory) |
+| `{}` | `<home>/sessions` (`home` defaults to `setHome(dir)`, then `.agent-accel/` in the working directory) |
 
 Saves are durable (temp file, fsync of file and folder, the last good version kept as `session.json.bak`, atomic rename), so a crash or power cut never leaves a torn file; a damaged `session.json` loads from its `.bak`. Saves are coalesced and never fail a turn (`onPersistError` hook available). Also exported: `saveSessionFile`, `loadSessionFile`, `saveSessionDir`, `sessionDirFor`, `buildSessionData`, `serializeSession`, `deserializeSession`, `inspectSessionPayload`, `writeFileAtomic`, `extractMediaToDir`, `resolveMediaPaths`. Loading validates message shape; a **corrupt** file is renamed `*.corrupt-<ts>`, a valid file over the limits (50k messages / 100 MB) throws `SessionLoadError` and is never touched. Old pretty-printed and JSONL files still load. Sub-agent traces are saved too, and Google turns keep their raw output steps so a resumed session replays them exactly (thought signatures and cache prefix intact). Importing a session that points at local files warns (`session.local_media_paths`) unless `fileAccess.roots` is set.
 
@@ -71,7 +71,7 @@ Saves are durable (temp file, fsync of file and folder, the last good version ke
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   fileAccess: { roots: [process.cwd()] }, // local paths must stay inside these folders
 });
 
@@ -96,7 +96,7 @@ Part types: `text`, `image`, `audio`, `video`, `file`. MIME types are inferred f
 ```ts
 import { Agent, SessionTelemetry } from "agent-accelerator";
 
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite" });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite" });
 const telemetry = new SessionTelemetry();
 
 const res = await agent.run("Summarize the plot of Hamlet.");
@@ -109,7 +109,7 @@ console.log(telemetry.totals); // { input, output, cacheRead, cacheWrite, reason
 
 ## Model catalog
 
-The SDK reads limits, prices, modalities and reasoning options from a small cached extract of models.dev: one file per provider in `<home>/catalog/` (or `AGENT_CACHE_DIR`), read on first use, plus `meta.json`. The full models.dev payload is never saved.
+The SDK reads limits, prices, modalities and reasoning options from a small cached extract of models.dev: one file per provider in `<home>/catalog/` (or the `catalog_cache_dir` setting), read on first use, plus `meta.json`. The full models.dev payload is never saved.
 
 | Provider | Kept in `<home>/catalog/<provider>/models.json` |
 | --- | --- |
@@ -140,9 +140,9 @@ registerModel({
 });
 ```
 
-Behavior: the default TTL is 12 h; an expired catalog is used **immediately** and refreshed in the background (8 s timeout, 10 minute backoff after a failure); a cold start waits for the download; invalid payloads never overwrite a good cache. Set `AGENT_CATALOG_REFRESH=off` for air-gapped hosts and tests. Other helpers: `refreshModelCatalog`, `ensureModelCatalogFresh`, `getCatalogStatus`, `setCatalogTTL`, `getModelsForProvider`, `getCacheDir`, `getCacheFilePath`, `getModelThinkingInfo`, `validateModelThinking`, `modelSupportsStructuredOutput`, `getModelSource`, `clearCustomModels`. Custom prefixes never borrow another provider's price or abilities. Never hand-edit the cache file.
+Behavior: the default TTL is 12 h; an expired catalog is used **immediately** and refreshed in the background (8 s timeout, 10 minute backoff after a failure); a cold start waits for the download; invalid payloads never overwrite a good cache. Set the `catalog_refresh: "off"` setting for air-gapped hosts and tests (`setConfigs({ values: { catalog_refresh: "off" } })`); `models_dev_sha256` pins the downloaded file by checksum. Other helpers: `refreshModelCatalog`, `ensureModelCatalogFresh`, `getCatalogStatus`, `setCatalogTTL`, `getModelsForProvider`, `getCacheDir`, `getCacheFilePath`, `getModelThinkingInfo`, `validateModelThinking`, `modelSupportsStructuredOutput`, `getModelSource`, `clearCustomModels`. Custom prefixes never borrow another provider's price or abilities. Never hand-edit the cache file.
 
-**Recommendations:** ✅ `registerModel` for private models; ✅ read-only deployments: set `AGENT_CACHE_DIR` to a writable path. The catalog costs almost no memory at start (only `meta.json` is read); a provider's file, a few MB at most, is read on its first lookup.
+**Recommendations:** ✅ `registerModel` for private models; ✅ read-only deployments: set the `catalog_cache_dir` setting to a writable path. The catalog costs almost no memory at start (only `meta.json` is read); a provider's file, a few MB at most, is read on its first lookup.
 
 ## For AI agents
 

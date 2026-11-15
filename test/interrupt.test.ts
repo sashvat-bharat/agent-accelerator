@@ -303,7 +303,7 @@ describe("aborting a stream leaves nothing unhandled", () => {
   for (const [label, model, extra] of [
     ["OpenRouter", "openrouter/x/y", {}],
     ["OpenAI", "openai/gpt-5-nano", {}],
-    ["a custom endpoint", "groq/some-model", { env: { GROQ_BASE_URL: "http://localhost:1/v1" } }],
+    ["a custom endpoint", "groq/some-model", { baseUrl: "http://localhost:1/v1" }],
     ["Google", "google/gemini-3-test", {}],
   ] as const) {
     it(`${label}: stream()${label === "OpenRouter" ? " and run()" : ""} aborted by a signal`, async () => {

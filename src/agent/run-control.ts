@@ -40,6 +40,14 @@ export interface RunHost {
   readonly maxSteers: number;
 }
 
+// Deferred streams whose events the real run already pipes into them (so their own completion handler must stay out); in: pumpQueue marks, Agent.stream reads.
+const pipedStreams = new WeakSet<AssistantMessageEventStream>();
+
+/** True once a queued stream's real run started and pipes its events into it. */
+export function isPiped(stream: AssistantMessageEventStream): boolean {
+  return pipedStreams.has(stream);
+}
+
 /** The active run and the waiting queue of one Agent. */
 export class RunControl {
   /** The run in flight, or null when idle. */
@@ -143,15 +151,13 @@ export class RunControl {
       const deferred = next.deferredStream;
       try {
         const real = this.host.startStreamingRun(next.prompt, next.options);
-        try {
-          (deferred as any).__piped = true;
-        } catch {}
+        pipedStreams.add(deferred);
         const forward = (e: StreamEvent) => {
           try {
             deferred.push(e);
           } catch {}
         };
-        real.on("*", forward as any);
+        real.on("*", forward);
         try {
           deferred.onCancel(() => {
             try {

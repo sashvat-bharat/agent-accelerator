@@ -21,7 +21,8 @@ export function retainThoughtSignature(existing?: string, incoming?: string): st
 }
 
 /** Extracts a Google thought signature from OpenAI-compatible metadata. */
-export function extractGoogleThoughtSignature(obj: any): string | undefined {
-  const sig = obj?.extra_content?.google?.thought_signature;
+export function extractGoogleThoughtSignature(obj: unknown): string | undefined {
+  const sig = (obj as { extra_content?: { google?: { thought_signature?: unknown } } } | null | undefined)
+    ?.extra_content?.google?.thought_signature;
   return typeof sig === "string" && sig.length > 0 ? sig : undefined;
 }

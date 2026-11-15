@@ -20,7 +20,8 @@ function writeChildScript(dir: string): string {
   fs.writeFileSync(
     file,
     `import * as fs from "node:fs";
-import { Agent, telemetryBus } from ${JSON.stringify(path.resolve("src/index.ts"))};
+import { Agent, telemetryBus, setConfigs } from ${JSON.stringify(path.resolve("src/index.ts"))};
+setConfigs({ values: { catalog_refresh: "off" } });
 import { getScheduler } from ${JSON.stringify(path.resolve("src/scheduler/scheduler.ts"))};
 const [home, dir] = process.argv.slice(2) as [string, string];
 const events: Array<{ code: string; data: unknown }> = [];

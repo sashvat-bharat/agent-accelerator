@@ -23,4 +23,5 @@ Small shared helpers. Each file has one job.
 - Never write state with a bare `writeFileSync`; use `writeFileDurable`.
 - `media.ts` and `safe-io.ts` import `node:*` lazily so browser bundles keep working.
 - Redaction is central (`cache.ts`); adapters must not keep their own deny-lists.
-- `AGENT_ACCEL_HOME` is read at import time; `setHome()` after import relies on the catalog reload hook.
+- The home is set in code only (`setHome()` or an Agent's `home`; there is no env var). `setHome()` after import relies on the catalog reload hook.
+- The environment is read for API keys only (`env.ts`); every other option is a setting (`config/settings.ts`).

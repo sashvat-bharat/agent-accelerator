@@ -62,9 +62,6 @@ export function emitProviderWarning(options: {
     fallback: options.fallback,
   });
   try {
-    (globalThis as any).__agentAccelWarnSink?.(msg, options);
-  } catch {}
-  try {
     console.warn(msg);
   } catch {}
 }

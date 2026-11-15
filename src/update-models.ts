@@ -56,7 +56,7 @@ try {
   if (result.expiresAt) {
     console.log(`  \x1b[90mNext refresh after: ${new Date(result.expiresAt).toLocaleString()}\x1b[0m`);
   }
-} catch (error: any) {
-  console.error(`\x1b[31m✖ Failed to refresh model catalog:\x1b[0m`, error.message || error);
+} catch (error) {
+  console.error(`\x1b[31m✖ Failed to refresh model catalog:\x1b[0m`, (error as Error | undefined)?.message || error);
   process.exit(1);
 }

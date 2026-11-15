@@ -45,15 +45,6 @@ function valueLooksSensitive(value: unknown): boolean {
 }
 
 /**
- * Redacts a single value: sensitive strings become "[REDACTED]".
- */
-export function redactValue(value: unknown): unknown {
-  if (typeof value !== "string") return value;
-  if (valueLooksSensitive(value)) return "[REDACTED]";
-  return value;
-}
-
-/**
  * Redacts sensitive header values. Returns a shallow copy; input untouched.
  * Deny-list (name contains): *key*, *token*, *secret*, cookie, authorization.
  * Value patterns (redacted regardless of name): sk-, AIza, gsk-, xox-.
@@ -66,21 +57,4 @@ export function redactHeadersCentral(headers: Record<string, unknown> | undefine
     else out[k] = v;
   }
   return out;
-}
-
-/**
- * Redacts secret-looking substrings inside free text.
- * Replaces `sk-...`, `AIza...`, `gsk-...`, `xox-...` tokens with "[REDACTED]".
- */
-export function redactText(text: string): string {
-  if (typeof text !== "string" || !text) return text;
-  // Note: longer prefixes (gsk-/gsk_) first so the generic sk- pattern
-  // does not partially match inside them (e.g. "gsk-abc" -> one token).
-  return text
-    .replace(/gsk_[A-Za-z0-9]{8,}/g, "[REDACTED]")
-    .replace(/gsk-[A-Za-z0-9-_]{8,}/g, "[REDACTED]")
-    .replace(/xox-[A-Za-z0-9-]{8,}/g, "[REDACTED]")
-    .replace(/AIza[A-Za-z0-9-_]{10,}/g, "[REDACTED]")
-    .replace(/sk-[A-Za-z0-9-_]{8,}/g, "[REDACTED]")
-    .replace(/Bearer\s+[A-Za-z0-9\-._~+/=]{20,}/gi, "Bearer [REDACTED]");
 }

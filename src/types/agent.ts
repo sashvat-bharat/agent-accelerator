@@ -12,7 +12,7 @@ import type { PromptOverrides } from "../prompts/prompts.ts";
 // Canonical homes (one place per setting):
 // - Worker model: `dynamicSubagents.model` only. Top-level `subagentModel`
 //   is a deprecated alias (still honored: dynamicSubagents.model ??
-//   subagentModel ?? SUB_AGENT_MODEL ?? parent model).
+//   subagentModel ?? saved or default worker model).
 // - Session identity: agent-level `sessionId` only (per-run `sessionId`
 //   selects a named session entry).
 // - Model identity: `ModelRef` = string (`provider/model`) | catalog
@@ -33,14 +33,6 @@ export interface RetryPolicyConfig {
   baseDelayMs?: number;
   maxDelayMs?: number;
   budgetMs?: number;
-}
-
-/** Minimal logger surface for Agent/loop telemetry. */
-export interface AgentLogger {
-  debug?: (...args: unknown[]) => void;
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
 }
 
 /** Canonical tool-selection control. String form is the portable subset. */
@@ -128,7 +120,14 @@ export interface AgentConfig {
    * pretty `.session.json` file. `persist: {}` (neither) uses `<home>/sessions`.
    * Writes are atomic and never fail a turn.
    */
-  persist?: { dir?: string; file?: string };
+  persist?: {
+    dir?: string;
+    file?: string;
+    /** Called with the error when saving fails (a save never fails a turn). Default: ignore. */
+    onPersistError?: (error: unknown) => void;
+    /** `true` also saves a `stateless` agent (it is skipped by default, since its history is cleared around every run). */
+    allowStateless?: boolean;
+  };
   /**
    * How many times a run that FAILED for a transient reason (provider down or overloaded, timeouts, a cut stream, after
    * the provider layer's own `retry` gave up) is tried again from where it stopped, with a growing wait (5 s, 15 s, 45 s,
@@ -146,7 +145,7 @@ export interface AgentConfig {
   resume?: "automatic" | "explicit";
   /**
    * Folder for everything Agent Accelerator writes to disk (`sessions/`,
-   * `scheduled/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
+   * `scheduled/`, `telemetry/`). Defaults to `setHome()`, then `.agent-accel/` in the working directory (set in code only).
    * An explicit `persist.dir` / `persist.file` still wins for sessions.
    */
   home?: string;
@@ -180,12 +179,8 @@ export interface AgentConfig {
   fetch?: typeof fetch;
   /** Provider/env overrides forwarded to key resolution. */
   env?: Record<string, string>;
-  /** @deprecated Not implemented yet; subscribe with `telemetryBus.onEvent` instead. Passing it emits a `config.unsupported_option` warning. */
-  logger?: AgentLogger;
-  /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
+  /** Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   hooks?: unknown;
-  /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
-  contextManagement?: unknown;
   /**
    * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning text). An event
    * that belongs to a persisted session (`data.sessionId`: tool events, resume and retry events) goes to
@@ -234,12 +229,6 @@ export interface AgentConfig {
    */
   usageLimit?: Pick<Budget, "maxCostUsd" | "maxTotalTokens">;
   /**
-   * The only models this agent may use, as `provider/model` strings compared as written. Unset (default) = any model.
-   * Checked when the Agent is built (also for a config an agent edited through {@link Agent.fromConfig}); a model
-   * outside the list throws a `ConfigError`. Workers and `subagentModel` are not affected.
-   */
-  allowedModels?: string[];
-  /**
    * Replaces single prompts the SDK puts in front of the model (the reasoning directive, tool refusals, the worker
    * headers, the tool manuals ...). Every prompt you leave out keeps its default; see `DEFAULT_PROMPTS` for the names, the
    * shipped text and the `{{placeholders}}` the SDK fills in. Keeping the original text is recommended: it is what the SDK
@@ -254,7 +243,7 @@ export interface AgentConfig {
  * Plain JSON. Every other setting (limits, budget, cache, thinking, keys, ...) stays with the developer.
  */
 export interface EditableAgentConfig {
-  /** `provider/model`; must be in `allowedModels` when the developer set it. */
+  /** `provider/model`; must be on the program's list (`setModels`) when the developer set one. */
   model?: string;
   /** System instructions. */
   instructions?: string;
@@ -308,6 +297,8 @@ export interface MidSessionConfig {
   whenBusy?: MidSessionMode;
   /** Max queued (follow-up) requests buffered while busy. Extra `queue()` calls throw. Defaults to 20. */
   maxQueued?: number;
+  /** Max steer prompts buffered for the active run. Extra `steer()` calls throw. Defaults to 20. */
+  maxSteers?: number;
 }
 
 /** Developer-configured policy for LLM-spawned dynamic sub-agents. */
@@ -320,7 +311,7 @@ export interface DynamicSubagentsConfig {
    * default: without it no tool, clock or timer exists. Needs a worker model.
    */
   allowScheduledActions?: boolean;
-  /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then `SUB_AGENT_MODEL` env, then the parent model. */
+  /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then the saved choice or default worker model (`setSubAgentModel` / `setModels`). */
   model?: string | ModelSpec | ModelProviderInstance;
   /** Max workers that may be open at once on this agent (the model must close one before spawning another). Default: no limit; set a whole number >= 1 to cap it. */
   maxSpawn?: number;
@@ -400,14 +391,14 @@ export interface AgentRunOptions {
   toolChoice?: ToolChoiceOption;
   /** Per-run output-token cap. */
   maxOutputTokens?: number;
+  /** `true` lets a turn that produced reasoning but no answer text return the reasoning as its answer (default: the empty text is returned as is). */
+  thinkingAsAnswerFallback?: boolean;
   /** Per-run retry override. */
   retry?: RetryPolicyConfig;
   /** Per-run fetch override. */
   fetch?: typeof fetch;
   /** Per-run env overrides. */
   env?: Record<string, string>;
-  /** Per-run logger. */
-  logger?: AgentLogger;
 }
 
 /** Turn summary emitted to `AgentRunOptions.onTurn` after each loop turn. */

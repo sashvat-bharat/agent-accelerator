@@ -1,5 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import { tool, toStandardToolDeclarations, zodToJsonSchema, executeToolCalls } from "../src/index.ts";
+import type { ToolDefinition } from "../src/index.ts";
+import { tool, toStandardToolDeclarations } from "../src/index.ts";
+import { executeToolCalls } from "../src/tools/executor.ts";
 import { z } from "zod";
 
 describe("Tools & Parallel Execution", () => {
@@ -227,7 +229,8 @@ describe("Tools & Parallel Execution", () => {
 
 describe("truncated-argument marker vs. a real `raw` parameter", () => {
   it("executes a tool whose only parameter is named `raw`, and still refuses truncated streams", async () => {
-    const { executeToolCalls, tool, parseStreamedToolArguments } = await import("../src/index.ts");
+    const { tool } = await import("../src/index.ts");
+    const { parseStreamedToolArguments } = await import("../src/providers.ts");
     const { isTruncatedToolCall } = await import("../src/tools/executor.ts");
     let ran: unknown;
     const run_shell = tool({
@@ -303,7 +306,7 @@ describe("tool-name collisions fail at construction", () => {
 });
 
 describe("tool failure trace and partial progress", () => {
-  const collect = async (defn: ReturnType<typeof tool>, args: Record<string, unknown> = {}) => {
+  const collect = async (defn: ToolDefinition, args: Record<string, unknown> = {}) => {
     const { telemetryBus } = await import("../src/index.ts");
     const events: Array<{ code: string; data: any }> = [];
     const off = telemetryBus.onEvent((e) => { if (e.code.startsWith("tool.")) events.push({ code: e.code, data: e.data }); });

@@ -11,7 +11,7 @@ import { getScheduler, resetSchedulers } from "../src/scheduler/scheduler.ts";
 // same folder. Each case checks that no finished work is repeated, no waiting prompt is lost and the files repair.
 
 const roots: string[] = [];
-const children: Array<{ kill: (signal?: number | string) => void }> = [];
+const children: Array<{ kill: (signal?: NodeJS.Signals | number) => void }> = [];
 afterEach(() => {
   resetSchedulers();
   for (const c of children.splice(0)) c.kill("SIGKILL");
@@ -34,7 +34,7 @@ function tmp(): string {
 
 // Runs `body` in a child process (the prelude supplies the SDK and a hanging/scripted fetch), waits until it prints "ready", then kills it with SIGKILL; in: the child's code + env, out: everything it printed before the kill.
 async function crashChild(body: string, env: Record<string, string>): Promise<string> {
-  const code = `import { Agent, tool } from ${JSON.stringify(srcIndex)};\nimport { z } from "zod";\nimport * as fs from "node:fs";\n${body}`;
+  const code = `import { Agent, tool, setConfigs } from ${JSON.stringify(srcIndex)};\nimport { z } from "zod";\nimport * as fs from "node:fs";\nsetConfigs({ values: { catalog_refresh: "off" } });\n${body}`;
   const child = Bun.spawn(["bun", "-e", code], { cwd: repo, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
   children.push(child);
   const reader = child.stdout.getReader();

@@ -6,7 +6,7 @@
  * `agent.importSession` / `agent.exportSession`.
  * Everything lives under the Agent Accelerator home (`.agent-accel/`):
  * `sessions/<sessionId>/{session.json, media/*}` and, with `telemetry.persist`,
- * `telemetry/<date>.ndjson` (tool calls, warnings). Move it with `setHome(dir)` or AGENT_ACCEL_HOME.
+ * `telemetry/<date>.ndjson` (tool calls, warnings). Move it with `setHome(dir)`.
  *
  * Run: bun run examples/05-chat.ts
  */
@@ -31,6 +31,7 @@ import {
   formatSessionCost,
   formatSessionBanner,
 } from "agent-accelerator";
+import { MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 // ---------------------------------------------------------------------------
 // 1. Storage: <home>/sessions/<sessionId>/{session.json, media/*}
@@ -71,7 +72,7 @@ function loadPrompt(): string {
 // 2. Agent setup (strictly hardcoded to "high" thinking)
 // ---------------------------------------------------------------------------
 const THINKING_LEVEL = "high" as const;
-const initialModel = saved?.model ?? process.env.MODEL ?? "google/gemini-3.5-flash-lite";
+const initialModel = saved?.model ?? MODEL;
 
 const agent = new Agent({
   name: "Chat Agent",
@@ -80,7 +81,7 @@ const agent = new Agent({
   model: initialModel,
   dynamicSubagents: {
     enabled: true,
-    model: saved?.subagentModel ?? process.env.SUB_AGENT_MODEL,
+    model: saved?.subagentModel ?? SUB_AGENT_MODEL,
     maxSpawn: 4,
   },
   thinking: THINKING_LEVEL,
@@ -96,13 +97,11 @@ if (saved) {
 }
 
 // Force "high" across all internal properties after session import
-(agent as any).thinking = THINKING_LEVEL;
-(agent as any).thinkingLevel = THINKING_LEVEL;
-(agent as any).thinkingConfig = {
-  enabled: true,
-  level: THINKING_LEVEL,
-  budgetTokens: undefined,
-};
+Object.assign(agent, {
+  thinking: THINKING_LEVEL,
+  thinkingLevel: THINKING_LEVEL,
+  thinkingConfig: { enabled: true, level: THINKING_LEVEL, budgetTokens: undefined },
+});
 
 // ---------------------------------------------------------------------------
 // 3. Interactive CLI loop
@@ -157,11 +156,11 @@ while (true) {
     try {
       const resolved = resolveModel(nextModel);
       validateModelThinking(resolved.provider.id, resolved.modelId, THINKING_LEVEL);
-    } catch (e: any) {
-      console.log(`\x1b[33m⚠ Thinking level notice:\x1b[0m \x1b[90m${e.message}\x1b[0m`);
+    } catch (e) {
+      console.log(`\x1b[33m⚠ Thinking level notice:\x1b[0m \x1b[90m${(e as Error).message}\x1b[0m`);
     }
 
-    (agent as any).modelStringOrSpec = nextModel;
+    Object.assign(agent, { modelStringOrSpec: nextModel });
     persistSession();
     console.log(`\x1b[32m✔ Switched model to: "${nextModel}"\x1b[0m`);
     continue;
@@ -202,15 +201,13 @@ while (true) {
     if (res.subagents?.length) {
       console.log(
         `\x1b[90m  ↳ subagents: ${res.subagents
-          .map(
-            (s: any) => `${s.name}:${s.isError ? "ERR" : "ok"} (${formatSessionCost(s.usage?.cost?.totalCost ?? 0)})`
-          )
+          .map((s) => `${s.name}:${s.isError ? "ERR" : "ok"} (${formatSessionCost(s.usage?.cost?.totalCost ?? 0)})`)
           .join(", ")}\x1b[0m`
       );
     }
     console.log("");
-  } catch (e: any) {
-    console.log(`\n\x1b[31m✖ ${e.message}\x1b[0m\n`);
+  } catch (e) {
+    console.log(`\n\x1b[31m✖ ${(e as Error).message}\x1b[0m\n`);
   }
 }
 

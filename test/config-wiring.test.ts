@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { Agent, tool, telemetryBus, clearInteractionChains, clearSessionRouting, clearEmittedWarnings, TimeoutError } from "../src/index.ts";
+import { Agent, tool, telemetryBus, clearInteractionChains, TimeoutError } from "../src/index.ts";
+import { clearSessionRouting } from "../src/providers.ts";
 import { z } from "zod";
 
 const ORIGINAL_WARN = console.warn;
@@ -335,12 +336,12 @@ describe("budgets, limits and worker inheritance are enforced", () => {
     expect(inherited.limits).toMatchObject({ maxToolCallsPerRun: 3, maxTotalTokens: 1000 });
   });
 
-  it("placeholder options warn instead of being silently ignored", () => {
+  it("the hooks placeholder warns instead of being silently ignored", () => {
     const codes: string[] = [];
-    const off = telemetryBus.onEvent((e) => e.code === "config.unsupported_option" && codes.push(e.data?.option));
+    const off = telemetryBus.onEvent((e) => e.code === "config.unsupported_option" && codes.push(String((e.data as { option?: string } | undefined)?.option)));
     try {
-      new Agent({ model: GOOGLE_MODEL, apiKey: "k", hooks: {}, logger: {} });
-      expect(codes.sort()).toEqual(["hooks", "logger"]);
+      new Agent({ model: GOOGLE_MODEL, apiKey: "k", hooks: {} });
+      expect(codes).toEqual(["hooks"]);
     } finally {
       off();
     }

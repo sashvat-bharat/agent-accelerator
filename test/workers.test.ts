@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Agent, tool, ValidationError, ConfigError } from "../src/index.ts";
 import { sessionDirFor } from "../src/session/store.ts";
 import { buildDynamicWorkerConfig } from "../src/agent/worker.ts";
+import { sseFrame } from "./helpers.ts";
 
 const roots: string[] = [];
 const tmp = (): string => {
@@ -19,7 +20,6 @@ afterEach(() => {
 const settle = (ms = 30) => new Promise((r) => setTimeout(r, ms));
 
 const usage = { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 };
-const sseFrame = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`;
 // The same text as a streamed or a plain reply, whichever the request asks for.
 const reply = (text: string, body: any): Response =>
   body.stream

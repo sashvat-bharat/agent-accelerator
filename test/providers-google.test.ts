@@ -13,28 +13,11 @@ import {
   clearEmittedWarnings,
 } from "../src/providers.ts";
 import { getProvider, resolveModel } from "../src/providers/registry.ts";
+import { mockFetchOnce, captureWarnings } from "./helpers.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
-function mockFetchOnce(body: unknown, init?: { status?: number; headers?: Record<string, string> }) {
-  const text = typeof body === "string" ? body : JSON.stringify(body);
-  (globalThis as any).fetch = async (_url: unknown, _req: unknown) => {
-    return new Response(text, {
-      status: init?.status ?? 200,
-      statusText: init?.status === 400 ? "Bad Request" : "OK",
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-    });
-  };
-}
 
-function captureWarnings(): { messages: string[]; restore: () => void } {
-  const messages: string[] = [];
-  const orig = console.warn;
-  console.warn = (...args: unknown[]) => {
-    messages.push(args.map(String).join(" "));
-  };
-  return { messages, restore: () => { console.warn = orig; } };
-}
 
 const TEXT_INTERACTION = {
   id: "v1_test123",
@@ -965,8 +948,8 @@ describe("GoogleInteractionsProvider generation floor & failure handling (mocked
           {
             role: "assistant",
             content: [
-              { type: "thinking", thinking: "foreign reasoning", thoughtSignature: "sig-foreign", thoughtSignatureProvider: "openai" },
-              { type: "thinking", thinking: "own reasoning", thoughtSignature: "sig-own", thoughtSignatureProvider: "google" },
+              { type: "thinking", thinking: "foreign reasoning", thoughtSignature: "sig-foreign", thoughtSignatureProvider: "openai" } as never,
+              { type: "thinking", thinking: "own reasoning", thoughtSignature: "sig-own", thoughtSignatureProvider: "google" } as never,
             ],
           },
           { role: "user", content: "Again" },

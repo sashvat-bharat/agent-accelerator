@@ -3,19 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import type { ScheduledActionRecord } from "../src/types/scheduler.ts";
 import * as path from "node:path";
-import {
-  Agent,
-  SubAgentModelError,
-  ConfigError,
-  ValidationError,
-  tool,
-  telemetryBus,
-  executeToolCalls,
-  getDatetimeTool,
-  type AgentConfig,
-  type ScheduledActionInput,
-  type TelemetryEvent,
-} from "../src/index.ts";
+import { Agent, SubAgentModelError, ConfigError, ValidationError, tool, telemetryBus, getDatetimeTool, type AgentConfig, type ScheduledActionInput, type TelemetryEvent } from "../src/index.ts";
+import { executeToolCalls } from "../src/tools/executor.ts";
 import { z } from "zod";
 import {
   getScheduler,
@@ -58,6 +47,7 @@ import {
   runFileName,
   toLocalIso,
 } from "../src/scheduler/time.ts";
+import { chatReply, mockFetch } from "./helpers.ts";
 
 // Monday 26 October 2026, local clock.
 const at = (h: number, m = 0, s = 0): Date => new Date(2026, 9, 26, h, m, s);
@@ -154,26 +144,8 @@ afterEach(() => {
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 
-const chatReply = (text = "Brief done.") =>
-  new Response(
-    JSON.stringify({
-      id: "c",
-      choices: [{ message: { role: "assistant", content: text }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-    }),
-    { status: 200 }
-  );
 const badReply = () => new Response(JSON.stringify({ error: { message: "nope" } }), { status: 400 });
 
-function mockFetch(handler: (n: number, body: any) => Response | Promise<Response>) {
-  const calls: any[] = [];
-  const fn = (async (_url: string, init: any) => {
-    const body = JSON.parse(init.body);
-    calls.push(body);
-    return handler(calls.length, body);
-  }) as unknown as typeof fetch;
-  return { fn, calls };
-}
 
 const until = async (cond: () => boolean): Promise<void> => {
   for (let i = 0; i < 200 && !cond(); i++) await Bun.sleep(5);
@@ -280,15 +252,9 @@ describe("scheduled actions config", () => {
   });
 
   it("throws SubAgentModelError when enabled without a worker model", () => {
-    const prev = process.env.SUB_AGENT_MODEL;
-    delete process.env.SUB_AGENT_MODEL;
-    try {
-      expect(
-        () => new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1", dynamicSubagents: { enabled: false, allowScheduledActions: true } })
-      ).toThrow(SubAgentModelError);
-    } finally {
-      if (prev) process.env.SUB_AGENT_MODEL = prev;
-    }
+    expect(
+      () => new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1", dynamicSubagents: { enabled: false, allowScheduledActions: true } })
+    ).toThrow(SubAgentModelError);
   });
 
   it("adds scheduled_actions + get_datetime when on, and keeps a user-defined get_datetime", () => {
@@ -1425,7 +1391,7 @@ describe("scheduled_actions and get_datetime tools", () => {
     const r = await call(agent, { command: "create", instructions: "i", task: "t", tools: ["nope"], scheduled_action: { name: "N", id: "n-job", timeToDeliver: "00:07:00", meridiem: "PM", startCookingInAdvance: "00:00:10" } });
     expect(String(r.result)).toMatch(/unknown worker tool.*"nope".*recent_news/);
     const scheduledActions = createScheduledActionsTool(agent);
-    await expect(scheduledActions.execute({ command: "frobnicate" }, { toolCallId: "t" })).rejects.toThrow(/Unknown command "frobnicate"/);
+    await expect(scheduledActions.execute({ command: "frobnicate" }, { toolCallId: "t" } as never)).rejects.toThrow(/Unknown command "frobnicate"/);
   });
 
   it("get/update/delete/run_now/skip need an id; get returns the latest result text", async () => {
@@ -1451,7 +1417,7 @@ describe("scheduled_actions and get_datetime tools", () => {
   });
 
   it("get_datetime returns the local date and time with no timezone", async () => {
-    const out = (await getDatetimeTool.execute({}, { toolCallId: "t" })) as string;
+    const out = (await getDatetimeTool.execute({}, { toolCallId: "t" } as never)) as string;
     expect(out).toMatch(/^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday), \d{1,2} [A-Z][a-z]+, \d{2}:\d{2}:\d{2} (AM|PM), \d{4}$/);
     expect(out).not.toMatch(/UTC|GMT|[+-]\d{2}:?\d{2}/);
   });

@@ -42,7 +42,6 @@ import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey, getEnv } from "../utils/env.ts";
 import { normalizeMediaInput, inferMimeType } from "../utils/media.ts";
 import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 import { safeStringify } from "../utils/serialization.ts";
@@ -59,13 +58,15 @@ import {
   isNotFoundChainError,
   combinedSignal,
   timeoutFor,
-  hasAuthHeader,
   openStreamResponse,
   retryOptionsFrom,
   headersToRecord,
   parseRetryAfterMs,
   linkStreamAbort,
   withAbortTimer,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+  stripModelScope,
 } from "./shared.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
@@ -420,28 +421,19 @@ export function clearInteractionChains(sessionId?: string): void {
 // Request building (canonical -> Interactions)
 // ---------------------------------------------------------------------------
 
-// Endpoint from the option, GOOGLE_BASE_URL, else the v1beta default; in: each request, out: the base URL without a trailing slash.
+// The google base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return (
-    options?.baseUrl ||
-    options?.env?.["GOOGLE_BASE_URL"] ||
-    getEnv("GOOGLE_BASE_URL") ||
-    DEFAULT_BASE_URL
-  ).replace(/\/+$/, "");
+  return resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options);
 }
 
-// API key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
+// The google key of this request; in: each request, out: the shared resolver.
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
-  const key = getApiKey("google", options?.apiKey, options?.env);
-  if (key) return key;
-  if (hasAuthHeader(options?.headers)) return "unused";
-  return undefined;
+  return resolveProviderApiKey("google", options);
 }
 
-// Strips a google/, gemini/ or models/ prefix; in: generate/stream/getModel, out: the bare model id.
+// The model id without its provider scope; in: each request, out: the bare id.
 function cleanModelId(model: string | ModelSpec): string {
-  const rawId = typeof model === "string" ? model : model.id;
-  return rawId.replace(/^(google\/|gemini\/|models\/)/i, "");
+  return stripModelScope(model, /^(google\/|gemini\/|models\/)/i);
 }
 
 /**
@@ -955,9 +947,7 @@ export class GoogleInteractionsProvider implements Provider {
       let outputEmulated = false;
       let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
       try {
-        outputSpec = normalizeStructuredOutput(
-          options?.output ?? (options as { outputSchema?: unknown })?.outputSchema
-        );
+        outputSpec = normalizeStructuredOutput(options?.output);
       } catch {
         outputSpec = undefined;
       }
@@ -1055,10 +1045,7 @@ export class GoogleInteractionsProvider implements Provider {
     apiKey: string,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(
-      signal,
-      timeoutFor(options as { timeoutMs?: number } | undefined)
-    );
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(method, body, options, apiKey, effective));
       const text = await res.text();
@@ -1308,7 +1295,7 @@ export class GoogleInteractionsProvider implements Provider {
           body,
         };
 
-        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutMs = timeoutFor(options);
         // Opens one SSE connection (the create POST, or a background resume GET). Transient failures
         // (429/5xx/network) are retried before the first byte; a live stream is never retried.
         const open = (target: string, method: "POST" | "GET"): Promise<Response> =>

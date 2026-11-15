@@ -1,6 +1,6 @@
 import { Agent, tool } from "agent-accelerator";
 import { z } from "zod";
-import { fail } from "./_shared";
+import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 interface TinyFishResult {
   position?: number;
@@ -79,7 +79,7 @@ const agent = new Agent({
   name: "Main Agent",
   tools: { web_search },
   thinking: "medium",
-  model: process.env.MODEL,
+  model: MODEL,
   budget: { maxCostUsd: 2, maxTotalSubagents: 6 },
   limits: { requestTimeoutMs: 120_000 },
 
@@ -96,7 +96,7 @@ When answering research questions:
 
   dynamicSubagents: {
     enabled: true,
-    model: process.env.SUB_AGENT_MODEL,
+    model: SUB_AGENT_MODEL,
     maxSpawn: 2,
     thinkingLevel: "medium",
     // Workers get zero tools unless granted here — research workers need search.
@@ -111,10 +111,10 @@ const res = await agent
     onDelta: (d) => process.stdout.write(d),
     onEvent: (e) => {
       if (e.type === "tool_call_complete" && e.toolCall?.name === "web_search") {
-        const q = (e.toolCall.arguments as any)?.query ?? e.toolCall.rawArguments;
+        const q = (e.toolCall.arguments as { query?: string } | undefined)?.query ?? e.toolCall.rawArguments;
         console.log(`\n\x1b[36m↳ [web_search →] model requested search: ${JSON.stringify(q)}\x1b[0m`);
       } else if (e.type === "tool_result" && e.toolResult?.name === "web_search") {
-        const r = e.toolResult.result as any;
+        const r = e.toolResult.result as { results?: unknown[] } | undefined;
         const count = Array.isArray(r?.results) ? r.results.length : "?";
         console.log(
           `\x1b[32m↳ [web_search ←] result arrived: ${count} results in ${e.toolResult.durationMs ?? 0}ms${e.toolResult.isError ? " (error)" : ""}\x1b[0m`

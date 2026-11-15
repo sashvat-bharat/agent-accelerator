@@ -1,6 +1,7 @@
 import { Agent, tool } from "agent-accelerator";
+import type { ThinkingLevel } from "agent-accelerator";
 import { z } from "zod";
-import { fail } from "./_shared";
+import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 // 1. Standard Function Tool (Tools are strictly deterministic functions)
 const get_topic_brief = tool({
@@ -111,8 +112,8 @@ const researcherAgent = new Agent({
   instructions:
     "You are an exhaustive research specialist. Investigate the topic thoroughly, " +
     "providing deep technical breakthroughs, quantifiable metrics, and positive growth indicators.",
-  model: process.env.SUB_AGENT_MODEL,
-  thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
+  model: SUB_AGENT_MODEL,
+  thinking: (process.env.THINKING_LEVEL as ThinkingLevel | undefined) ?? "medium",
   cache: "implicit",
 });
 // agentToTool(researcherAgent) available for manual tool registration; subagents[] below uses isolated Sessions.
@@ -124,9 +125,9 @@ const criticAgent = new Agent({
   instructions:
     "You are a skeptical, rigorous devil's advocate. Stress-test research findings, " +
     "expose hidden economic bottlenecks, unverified assumptions, regulatory barriers, and potential failure points.",
-  model: process.env.SUB_AGENT_MODEL,
+  model: SUB_AGENT_MODEL,
   stateless: true, // One-shot evaluation mode: does not persist history across turns
-  thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
+  thinking: (process.env.THINKING_LEVEL as ThinkingLevel | undefined) ?? "medium",
   cache: "implicit",
 });
 
@@ -141,7 +142,7 @@ const lead = new Agent({
     "3. Pass those research findings to adversarial_critic for rigorous critique.\n" +
     "4. Synthesize both viewpoints into an objective, executive-level decision report with a comparison table.\n" +
     "In your final turn, output your complete executive report directly as your final response.",
-  model: process.env.MODEL,
+  model: MODEL,
   // Clean separation of concerns (v0.4.0: fixed workers as isolated Sessions per call):
   tools: { get_topic_brief },
   subagents: [

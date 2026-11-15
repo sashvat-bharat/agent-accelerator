@@ -3,7 +3,7 @@
  * that turns agent config plus per-run options into what every provider call receives.
  */
 import type { AgentConfig, AgentRunOptions, RetryPolicyConfig, ToolChoiceOption } from "../types/agent.ts";
-import type { ProviderRequestOptions, StructuredOutputSpec } from "../types/model.ts";
+import type { ModelSpec, ProviderRequestOptions, StructuredOutputSpec } from "../types/model.ts";
 import type { CacheOption, ServiceTier, ThinkingConfig, ThinkingLevel } from "../types/core.ts";
 import type { Prompts } from "../prompts/prompts.ts";
 import { normalizeThinkingV2 } from "../tools/tool.ts";
@@ -131,7 +131,11 @@ export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): 
   // Validate model thinking from catalog if model is configured
   if (config.model) {
     try {
-      const rawModel: any = (config.model as any)?.model ? (config.model as any).model : config.model;
+      const wrapped = config.model as { model?: string | ModelSpec } | string | ModelSpec;
+      const rawModel =
+        typeof wrapped === "object" && "model" in wrapped && wrapped.model
+          ? wrapped.model
+          : (wrapped as string | ModelSpec);
       const modelStr = typeof rawModel === "string" ? rawModel : rawModel?.id || "";
       const provStr =
         typeof rawModel === "object" && rawModel?.provider

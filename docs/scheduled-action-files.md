@@ -2,7 +2,7 @@
 
 > The on-disk format of scheduled actions: plain files you can read, back up, diff and (carefully) edit. **From v0.5.5 this format is a stable contract**: it changes only by the rules at the bottom of this page, and every change is listed in the [changelog](#changelog).
 
-Everything lives under one folder, `<home>/scheduled/` (`home` is `Agent({ home })`, then `setHome(dir)`, then `AGENT_ACCEL_HOME`, then `.agent-accel/` in the working directory):
+Everything lives under one folder, `<home>/scheduled/` (`home` is `Agent({ home })`, then `setHome(dir)`, then `.agent-accel/` in the working directory):
 
 ```text
 <home>/scheduled/

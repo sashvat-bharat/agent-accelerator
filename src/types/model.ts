@@ -118,9 +118,9 @@ export interface ModelSpec {
   description?: string;
   family?: string;
   api?: string; // agent-accel-style: openai-completions | openai-responses | anthropic-messages | google-generative-ai etc.
-  /** @deprecated alias for limit.context */
+  /** Alias of `limit.context`. */
   contextWindow: number;
-  /** @deprecated alias for limit.output */
+  /** Alias of `limit.output`. */
   maxOutputTokens: number;
   // Full battle-tested fields (optional for BC with stale per-provider files, required when from catalog)
   limit?: ModelLimit;
@@ -190,6 +190,12 @@ export interface ProviderRequestOptions {
   fetch?: typeof fetch;
   /** The SDK prompts adapters put in a request (`AgentConfig.prompts`); defaults when unset. */
   prompts?: Pick<Prompts, "structuredOutput" | "toolBridge">;
+  /** Per-request timeout in ms (set by the loop from `limits.requestTimeoutMs`; unset = none). */
+  timeoutMs?: number;
+  /** `false` leaves `stream_options` out of a generic OpenAI-compatible request (the `compat.no_stream_options` setting does the same for every call). */
+  streamOptions?: boolean;
+  /** `false` sends no session-affinity headers on a generic OpenAI-compatible request (the `compat.no_session_headers` setting does the same for every call). */
+  sendSessionHeaders?: boolean;
   /** Base backoff delay in ms for provider retries (default 250). */
   retryBaseDelayMs?: number;
   /** Total time budget in ms for provider retries (default 30000). */

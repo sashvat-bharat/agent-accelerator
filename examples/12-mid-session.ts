@@ -1,6 +1,7 @@
 import { Agent, tool } from "agent-accelerator";
+import type { StreamEvent } from "agent-accelerator";
 import { z } from "zod";
-import { fail } from "./_shared";
+import { fail, MODEL } from "./_shared";
 
 const C = "\x1b[36m";
 const G = "\x1b[32m";
@@ -31,7 +32,7 @@ const slow_tool = tool({
 const agent = new Agent({
   name: "MidSession Demo",
   instructions: "Be concise. Call slow_tool exactly once per task, then answer.",
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: MODEL ?? "google/gemini-3.5-flash-lite",
   tools: { slow_tool },
   // "auto" = each message picks steer vs queue. Use "steer"/"queue" to enforce one.
   midSession: { mode: "auto", whenBusy: "auto", maxQueued: 10 },
@@ -41,7 +42,7 @@ const live = () => ({
   stream: true as const,
   ...(SHOW_THINKING ? { onThinkingDelta: (d: string) => process.stdout.write(`${DIM}${d}${R}`) } : {}),
   onDelta: (d: string) => process.stdout.write(d),
-  onEvent: (e: any) => {
+  onEvent: (e: StreamEvent) => {
     if (e.type === "steer_injected") console.log(`\n${Y}↳ steered into this turn${R}`);
     if (e.type === "queued") console.log(`\n${Y}↳ queued for next turn${R}`);
   },

@@ -12,16 +12,13 @@
  *  3. Explicit `{ name, schema, strict }` + streaming deltas.
  *
  * Run: bun examples/13-structured-output.ts
- * Needs: MODEL + provider key (see .env.example). Costs live tokens.
- * Switch providers with zero code change:
- *   MODEL="openai/gpt-4o" / "openrouter/openai/gpt-4o" / "groq/llama-3.3-70b-versatile"
+ * Needs: a provider key (see .env.example); the model comes from examples/models.json. Costs live tokens.
+ * Switch providers by editing examples/models.json (ids must be listed there and exist in the catalog).
  */
 
 import { Agent } from "agent-accelerator";
 import { z } from "zod";
-import { fail } from "./_shared.ts";
-
-const MODEL = process.env.MODEL || "google/gemini-3.5-flash-lite";
+import { fail, MODEL } from "./_shared";
 
 console.log("\x1b[1;36m━━━ Structured Outputs ━━━\x1b[0m");
 console.log(`Model: ${MODEL}\n`);
