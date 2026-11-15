@@ -32,43 +32,58 @@ export function isTransientError(error: unknown): boolean {
 
 const CONCISE = "__agentAccelConcise";
 
+// Reads a nested field of an unknown value (`dig(e, "response", "status")`), undefined when any step is missing; in: the error readers below, out: the value.
+function dig(value: unknown, ...path: string[]): unknown {
+  let cur = value;
+  for (const key of path) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[key];
+  }
+  return cur;
+}
+
+// A non-blank string trimmed, else undefined; in: readProviderMessage, out: the text.
+function text(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 // HTTP status from the shapes provider errors carry, else undefined; in: toConciseProviderError, out: a status.
-function readStatus(error: any): number | undefined {
+function readStatus(error: unknown): number | undefined {
   const s =
-    error?.statusCode ??
-    error?.status ??
-    error?.response?.status ??
-    error?.lastError?.statusCode ??
-    error?.lastError?.status;
+    dig(error, "statusCode") ??
+    dig(error, "status") ??
+    dig(error, "response", "status") ??
+    dig(error, "lastError", "statusCode") ??
+    dig(error, "lastError", "status");
   const n = Number(s);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 // The request URL of an error without its query string; in: toConciseProviderError, out: a string.
-function readUrl(error: any): string {
-  const raw =
-    (typeof error?.url === "string" && error.url) ||
-    (typeof error?.request?.url === "string" && error.request.url) ||
-    "";
-  return raw.split("?")[0];
+function readUrl(error: unknown): string {
+  const direct = dig(error, "url");
+  const nested = dig(error, "request", "url");
+  const raw = (typeof direct === "string" && direct) || (typeof nested === "string" && nested) || "";
+  return raw.split("?")[0] ?? "";
 }
 
 // The provider's own message from the error's data, body or message; in: toConciseProviderError, out: one trimmed line.
-function readProviderMessage(error: any): string {
-  const data = error?.data;
-  if (typeof data?.error?.message === "string" && data.error.message.trim()) return data.error.message.trim();
-  if (typeof data?.error === "string" && data.error.trim()) return data.error.trim();
-  if (typeof data?.message === "string" && data.message.trim()) return data.message.trim();
-  const body = error?.responseBody;
+function readProviderMessage(error: unknown): string {
+  const fromData =
+    text(dig(error, "data", "error", "message")) ??
+    text(dig(error, "data", "error")) ??
+    text(dig(error, "data", "message"));
+  if (fromData) return fromData;
+  const body = dig(error, "responseBody");
   if (typeof body === "string" && body.trim()) {
     try {
-      const parsed = JSON.parse(body);
-      if (typeof parsed?.error?.message === "string" && parsed.error.message.trim()) return parsed.error.message.trim();
-      if (typeof parsed?.message === "string" && parsed.message.trim()) return parsed.message.trim();
+      const parsed: unknown = JSON.parse(body);
+      const fromBody = text(dig(parsed, "error", "message")) ?? text(dig(parsed, "message"));
+      if (fromBody) return fromBody;
     } catch {}
     if (body.length <= 300) return body.trim();
   }
-  return String(error?.message ?? error).slice(0, 300);
+  return String(dig(error, "message") ?? error).slice(0, 300);
 }
 
 // `provider/model` without doubling an existing prefix; in: the error messages, out: a label.
@@ -83,19 +98,15 @@ function displayModel(providerId: string, modelId: string): string {
  * details stay available but non-enumerable, so runtime dumps stay small. An SDK error (already typed) passes through.
  */
 export function toConciseProviderError(error: unknown, providerId: string, modelId: string): Error {
-  if (error instanceof AgentAccelError || (error instanceof Error && (error as any)[CONCISE])) return error;
-  const err = error as any;
+  if (error instanceof AgentAccelError || (error instanceof Error && dig(error, CONCISE))) return error;
+  const err = error;
   const status = readStatus(err);
   const url = readUrl(err);
   let detail = readProviderMessage(err);
   // Append OpenRouter-style raw metadata once (pi api/openai-completions.ts:719
   // rule): normalize already stringifies error.error, so only append raw when
   // absent to avoid double-printing.
-  const rawMeta =
-    (typeof err?.raw === "string" && err.raw.trim() ? err.raw.trim() : undefined) ??
-    (typeof err?.error?.metadata?.raw === "string" && err.error.metadata.raw.trim()
-      ? err.error.metadata.raw.trim()
-      : undefined);
+  const rawMeta = text(dig(err, "raw")) ?? text(dig(err, "error", "metadata", "raw"));
   if (rawMeta && !detail.includes(rawMeta.slice(0, 80))) {
     detail = `${detail}\n${rawMeta.slice(0, 500)}`.slice(0, 800);
   }
@@ -110,25 +121,28 @@ export function toConciseProviderError(error: unknown, providerId: string, model
     model: { value: modelId, enumerable: false },
     url: { value: url, enumerable: false },
     responseBody: {
-      value: typeof err?.responseBody === "string" ? err.responseBody.slice(0, 500) : undefined,
+      value:
+        typeof dig(err, "responseBody") === "string" ? (dig(err, "responseBody") as string).slice(0, 500) : undefined,
       enumerable: false,
     },
     // Forwarded when present (e.g. OpenRouter's canonical `error_type`,
     // which disambiguates lossy native codes). Survives re-wraps so retry
     // helpers never strip it.
-    ...(typeof err?.errorType === "string" ? { errorType: { value: err.errorType, enumerable: false } } : {}),
+    ...(typeof dig(err, "errorType") === "string"
+      ? { errorType: { value: dig(err, "errorType"), enumerable: false } }
+      : {}),
     // The provider's own error code (e.g. Google's `not_found` chain-eviction code, which carries no HTTP status on
     // SSE error frames); `code` itself is the SDK kind (`"provider"`). Survives re-wraps so chain detectors never lose it.
-    ...((typeof err?.code === "string" || typeof err?.code === "number") && err.code !== ""
-      ? { providerCode: { value: err.code, enumerable: false } }
+    ...((typeof dig(err, "code") === "string" || typeof dig(err, "code") === "number") && dig(err, "code") !== ""
+      ? { providerCode: { value: dig(err, "code"), enumerable: false } }
       : {}),
     // Server rate-limit hint in ms (from Retry-After); survives re-wraps so
     // `withRetries` can honor it instead of hammering a 429.
-    ...(typeof err?.retryAfterMs === "number" && Number.isFinite(err.retryAfterMs)
-      ? { retryAfterMs: { value: err.retryAfterMs, enumerable: false } }
+    ...(typeof dig(err, "retryAfterMs") === "number" && Number.isFinite(dig(err, "retryAfterMs"))
+      ? { retryAfterMs: { value: dig(err, "retryAfterMs"), enumerable: false } }
       : {}),
-    ...(typeof (err as { raw?: unknown })?.raw === "string"
-      ? { raw: { value: (err as { raw: string }).raw.slice(0, 500), enumerable: false } }
+    ...(typeof dig(err, "raw") === "string"
+      ? { raw: { value: (dig(err, "raw") as string).slice(0, 500), enumerable: false } }
       : {}),
   });
   return concise;
@@ -151,9 +165,10 @@ const PART_TO_MODALITY: Record<string, "image" | "audio" | "video" | "pdf"> = {
 export function assertModalitiesSupported(context: ProviderContext, providerId: string, modelId: string): void {
   const needed = new Set<string>();
   for (const msg of context.messages) {
-    if (!Array.isArray((msg as any)?.content)) continue;
-    for (const part of (msg as any).content) {
-      const mapped = PART_TO_MODALITY[(part as any)?.type];
+    const content: unknown = dig(msg, "content");
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      const mapped = PART_TO_MODALITY[String(dig(part, "type"))];
       if (mapped) needed.add(mapped);
     }
   }
@@ -190,9 +205,10 @@ export function assertModalitiesSupported(context: ProviderContext, providerId: 
 export function assertNoVideoPartsOnResponses(context: ProviderContext, providerId: string, modelId: string): void {
   let hasVideo = false;
   for (const msg of context.messages) {
-    if (!Array.isArray((msg as any)?.content)) continue;
-    for (const part of (msg as any).content) {
-      if ((part as any)?.type === "video") {
+    const content: unknown = dig(msg, "content");
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (dig(part, "type") === "video") {
         hasVideo = true;
         break;
       }

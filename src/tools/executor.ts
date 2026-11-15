@@ -37,6 +37,17 @@ export interface ExecuteToolsOptions {
 const DEFAULT_TOOL_CONCURRENCY = 8;
 
 // Wall-clock milliseconds; in: the executor's timing, out: a number.
+// What a tool or fetch error may carry; the executor reads these fields off a caught value (type `unknown` otherwise).
+interface ThrownError {
+  message?: string;
+  name?: string;
+  code?: unknown;
+  status?: unknown;
+  statusCode?: unknown;
+  toolTimeout?: boolean;
+  context?: { progress?: unknown };
+}
+
 function nowMs(): number {
   return Date.now();
 }
@@ -140,7 +151,7 @@ export function sanitizeErrorMessage(message: string): string {
 
 // The tool's `maxResultChars` or the 20000 default; in: runSingle, out: the cap on a result kept for the model.
 function resultCharLimit(toolDef: ToolDefinition): number {
-  const configured = integerOption((toolDef as any).maxResultChars);
+  const configured = integerOption(toolDef.maxResultChars);
   return configured && configured > 0 ? configured : DEFAULT_MAX_RESULT_CHARS;
 }
 
@@ -204,9 +215,9 @@ export function toolCallFingerprint(call: ToolCallRecord): string {
  * repeatable, side-effecting tools do not.
  */
 export function isRepeatableTool(toolDef: ToolDefinition): boolean {
-  const explicit = (toolDef as any).repeatable;
+  const explicit = toolDef.repeatable;
   if (typeof explicit === "boolean") return explicit;
-  return (toolDef as any).idempotent === true;
+  return toolDef.idempotent === true;
 }
 
 /**
@@ -444,7 +455,7 @@ async function executeAttempt(
   timeoutMs: number | undefined
 ): Promise<unknown> {
   if (!timeoutMs || timeoutMs <= 0) {
-    return raceAbort(Promise.resolve(toolDef.execute(parsedInput as any, context)), context.signal);
+    return raceAbort(Promise.resolve(toolDef.execute(parsedInput as never, context)), context.signal);
   }
 
   const controller = new AbortController();
@@ -454,11 +465,11 @@ async function executeAttempt(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const startedAt = nowMs();
   const makeTimeoutError = () => {
-    const error: any = new Error(`Tool execution timed out after ${timeoutMs}ms`);
-    error.code = "ETIMEDOUT";
-    error.transient = true;
-    error.toolTimeout = true;
-    return error;
+    return Object.assign(new Error(`Tool execution timed out after ${timeoutMs}ms`), {
+      code: "ETIMEDOUT",
+      transient: true,
+      toolTimeout: true,
+    });
   };
   try {
     const timeout = new Promise<never>((_, reject) => {
@@ -468,7 +479,7 @@ async function executeAttempt(
       }, timeoutMs);
     });
     const result = await Promise.race([
-      raceAbort(Promise.resolve(toolDef.execute(parsedInput as any, executionContext)), context.signal),
+      raceAbort(Promise.resolve(toolDef.execute(parsedInput as never, executionContext)), context.signal),
       timeout,
     ]);
     // A resolved promise can beat a timer callback even when the event loop
@@ -638,8 +649,8 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
 
       // Validate input if Zod schema is provided
       let parsedInput = call.arguments;
-      if (toolDef.input && typeof (toolDef.input as any).safeParse === "function") {
-        const parseRes = (toolDef.input as any).safeParse(call.arguments);
+      if (toolDef.input && typeof toolDef.input.safeParse === "function") {
+        const parseRes = toolDef.input.safeParse(call.arguments);
         if (!parseRes.success) {
           const receivedKeys =
             call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments)
@@ -671,7 +682,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
       // agent loop forever, so retries are always bounded.
       // Attempts run serially in the while loop below — never concurrently —
       // so a non-idempotent tool cannot execute twice at the same time.
-      const isIdempotent = (toolDef as any).idempotent === true;
+      const isIdempotent = toolDef.idempotent === true;
       const maxAttempts = configuredTries && configuredTries > 0 ? configuredTries : isIdempotent ? 3 : 1;
       const timeoutMs = numericOption(toolDef.timeoutMs);
       // Telemetry starts when the tool body is about to run, excluding queue
@@ -687,7 +698,8 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
         try {
           rawResult = await executeAttempt(toolDef, parsedInput, context, timeoutMs);
           break;
-        } catch (err: any) {
+        } catch (caught) {
+          const err = caught as ThrownError | undefined;
           if (signal?.aborted) throw new Error("Tool execution aborted");
           if (stopReason !== undefined) throw err; // ctx.stop: not a failure, never retried
           timedOut = err?.toolTimeout === true;
@@ -779,7 +791,8 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
         isError: false,
         durationMs: elapsedMs(executionStartTime),
       };
-    } catch (err: any) {
+    } catch (caught) {
+      const err = caught as ThrownError | undefined;
       // The developer channel (telemetry bus) gets the full error; the model gets a
       // scrubbed message plus what the tool finished before failing, so it repairs
       // only the remainder instead of repeating completed side effects.
@@ -793,7 +806,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
         progress: capJson(done),
       });
       let message: string;
-      const redactError = (toolDef as any)?.redactError;
+      const redactError = toolDef.redactError;
       if (typeof redactError === "function") {
         try {
           message = String(redactError(err));

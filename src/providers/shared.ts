@@ -102,8 +102,7 @@ export function incompleteStreamError(provider: string, modelId: string): Error 
     provider,
     modelId
   );
-  (err as any).code = "incomplete_stream";
-  return err;
+  return Object.assign(err, { code: "incomplete_stream" });
 }
 
 /**
@@ -177,12 +176,9 @@ export function combinedSignal(
 /** Crypto-backed tool-call id, no Math.random primary. */
 export function newToolCallId(prefix = "call"): string {
   try {
-    const c = (globalThis as any)?.crypto;
-    if (c?.randomUUID) return `${prefix}_${c.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-  } catch {}
-  try {
-    const nc: any = (globalThis as any)?.process?.getBuiltinModule?.("node:crypto") ?? null;
-    if (nc?.randomUUID) return `${prefix}_${nc.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    if (typeof crypto !== "undefined" && crypto.randomUUID) {
+      return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    }
   } catch {}
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }

@@ -1,5 +1,19 @@
 import { z } from "zod";
 
+/** A JSON Schema fragment. */
+type Json = Record<string, unknown>;
+
+// Reads one property of an unknown value, `undefined` when it is not an object; in: the Zod fallback below, out: the property.
+const at = (o: unknown, key: string): unknown =>
+  o !== null && (typeof o === "object" || typeof o === "function") ? (o as Json)[key] : undefined;
+// Calls a method of an unknown value when it has one; in: the Zod fallback below, out: its result.
+const call = (o: unknown, key: string): unknown => {
+  const f = at(o, key);
+  return typeof f === "function" ? (f as () => unknown).call(o) : undefined;
+};
+// A plain, non-array object; in: the schema helpers, out: a type guard.
+const isJson = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
+
 /**
  * Converts a Zod schema or plain JSON object schema into standard JSON Schema for LLMs
  */
@@ -8,7 +22,7 @@ import { z } from "zod";
  *
  * @example `const parameters = zodToJsonSchema(z.object({ query: z.string() }));`
  */
-export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
+export function zodToJsonSchema(schema: unknown): Json {
   if (!schema) {
     return {
       type: "object",
@@ -17,32 +31,19 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
   }
 
   // If already a plain JSON Schema object
-  if (
-    typeof schema === "object" &&
-    schema !== null &&
-    !("parse" in schema) &&
-    !("safeParse" in schema) &&
-    !("_def" in schema)
-  ) {
-    return schema as Record<string, unknown>;
+  if (isJson(schema) && !("parse" in schema) && !("safeParse" in schema) && !("_def" in schema)) {
+    return schema;
   }
 
   // Check if Zod schema
-  if (
-    typeof schema === "object" &&
-    schema !== null &&
-    ("parse" in schema || "_def" in schema || "~standard" in schema)
-  ) {
+  if (isJson(schema) && ("parse" in schema || "_def" in schema || "~standard" in schema)) {
     try {
       // Use zod's native toJSONSchema if available (Zod 4+)
-      if (typeof (z as any).toJSONSchema === "function") {
-        const jsonSchema = (z as any).toJSONSchema(schema);
-        return cleanJsonSchema(jsonSchema);
+      if (typeof z.toJSONSchema === "function") {
+        return cleanJsonSchema(z.toJSONSchema(schema as unknown as z.ZodType));
       }
-      if (typeof (schema as any).toJSONSchema === "function") {
-        const jsonSchema = (schema as any).toJSONSchema();
-        return cleanJsonSchema(jsonSchema);
-      }
+      const own = call(schema, "toJSONSchema");
+      if (isJson(own)) return cleanJsonSchema(own);
     } catch {
       // Fallback manual schema extractor below
     }
@@ -65,66 +66,62 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
  *
  * @example `const clean = cleanJsonSchema(rawSchema);`
  */
-export function cleanJsonSchema(
-  schema: any,
-  rootDefs?: Record<string, any>,
-  seenRefs: Set<string> = new Set()
-): Record<string, unknown> {
+export function cleanJsonSchema(schema: Json, rootDefs?: Json, seenRefs: Set<string> = new Set()): Json {
   if (typeof schema !== "object" || schema === null) {
     return schema;
   }
   // Capture defs at root for $ref resolution
-  const defs = rootDefs ?? schema.$defs ?? schema.definitions;
+  const defs = rootDefs ?? (schema["$defs"] as Json | undefined) ?? (schema["definitions"] as Json | undefined);
   // Handle $ref first
-  if (schema.$ref && typeof schema.$ref === "string" && defs) {
-    const refName = schema.$ref.replace(/^#\/\$defs\//, "").replace(/^#\/definitions\//, "");
+  if (typeof schema["$ref"] === "string" && defs) {
+    const refName = schema["$ref"].replace(/^#\/\$defs\//, "").replace(/^#\/definitions\//, "");
     const target = defs[refName];
-    if (target) {
+    if (isJson(target)) {
       // Merge sibling props (e.g. description) with target
-      const { $ref, ...siblings } = schema;
+      const { $ref: _ref, ...siblings } = schema;
       if (seenRefs.has(refName)) {
         // Recursive schema (AST nodes, trees, nested categories): stop
         // expanding to avoid overflowing the stack; keep siblings.
-        return { type: "object", ...cleanJsonSchema(siblings, defs, seenRefs) } as any;
+        return { type: "object", ...cleanJsonSchema(siblings, defs, seenRefs) };
       }
       seenRefs.add(refName);
       try {
         const resolved = cleanJsonSchema(target, defs, seenRefs);
-        return { ...resolved, ...cleanJsonSchema(siblings, defs, seenRefs) } as any;
+        return { ...resolved, ...cleanJsonSchema(siblings, defs, seenRefs) };
       } finally {
         seenRefs.delete(refName);
       }
     }
   }
-  const { $schema, $defs, definitions, ...rest } = schema;
+  const { $schema: _schema, $defs: _defs, definitions: _definitions, ...rest } = schema;
 
   // Preserve additionalProperties if it was explicitly false, otherwise omit if undefined to keep strictness opt-in
   // (previous version stripped it unconditionally, breaking strict schemas)
 
-  if (rest.type === "object" && !rest.properties) {
-    rest.properties = {};
+  if (rest["type"] === "object" && !rest["properties"]) {
+    rest["properties"] = {};
   }
 
-  if (rest.properties && typeof rest.properties === "object") {
-    const cleanedProps: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(rest.properties)) {
-      cleanedProps[key] = cleanJsonSchema(value, defs, seenRefs);
+  if (isJson(rest["properties"])) {
+    const cleanedProps: Json = {};
+    for (const [key, value] of Object.entries(rest["properties"])) {
+      cleanedProps[key] = isJson(value) ? cleanJsonSchema(value, defs, seenRefs) : value;
     }
-    rest.properties = cleanedProps;
+    rest["properties"] = cleanedProps;
   }
 
-  if (rest.items) {
-    rest.items = cleanJsonSchema(rest.items, defs, seenRefs);
+  if (isJson(rest["items"])) {
+    rest["items"] = cleanJsonSchema(rest["items"], defs, seenRefs);
   }
-  if (rest.anyOf) rest.anyOf = (rest.anyOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
-  if (rest.oneOf) rest.oneOf = (rest.oneOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
-  if (rest.allOf) rest.allOf = (rest.allOf as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
-  if (rest.prefixItems)
-    rest.prefixItems = (rest.prefixItems as any[]).map((v: any) => cleanJsonSchema(v, defs, seenRefs));
+  for (const key of ["anyOf", "oneOf", "allOf", "prefixItems"]) {
+    const list = rest[key];
+    if (Array.isArray(list)) rest[key] = list.map((v) => (isJson(v) ? cleanJsonSchema(v, defs, seenRefs) : v));
+  }
   // Recursively clean nested $ref inside properties that were not top-level
   for (const k of Object.keys(rest)) {
-    if (rest[k] && typeof rest[k] === "object" && !Array.isArray(rest[k]) && (rest[k] as any).$ref) {
-      rest[k] = cleanJsonSchema(rest[k], defs, seenRefs);
+    const v = rest[k];
+    if (isJson(v) && v["$ref"]) {
+      rest[k] = cleanJsonSchema(v, defs, seenRefs);
     }
   }
   return rest;
@@ -133,8 +130,10 @@ export function cleanJsonSchema(
 /**
  * Fallback schema extractor if toJSONSchema is not directly called
  */
-function extractZodObjectSchema(zodSchema: any): Record<string, unknown> {
-  const shape = zodSchema?.shape || zodSchema?._def?.shape?.() || zodSchema?._def?.shape;
+function extractZodObjectSchema(zodSchema: unknown): Json {
+  const def = at(zodSchema, "_def");
+  const rawShape = at(zodSchema, "shape") || call(def, "shape") || at(def, "shape");
+  const shape = isJson(rawShape) ? rawShape : undefined;
   if (!shape) {
     return {
       type: "object",
@@ -142,12 +141,15 @@ function extractZodObjectSchema(zodSchema: any): Record<string, unknown> {
     };
   }
 
-  const properties: Record<string, unknown> = {};
+  const properties: Json = {};
   const required: string[] = [];
 
-  for (const [key, propSchema] of Object.entries(shape as Record<string, any>)) {
+  for (const [key, propSchema] of Object.entries(shape)) {
+    const propDef = at(propSchema, "_def");
     const isOptional =
-      propSchema.isOptional?.() || propSchema._def?.typeName === "ZodOptional" || propSchema._def?.type === "optional";
+      call(propSchema, "isOptional") === true ||
+      at(propDef, "typeName") === "ZodOptional" ||
+      at(propDef, "type") === "optional";
 
     if (!isOptional) {
       required.push(key);
@@ -164,49 +166,74 @@ function extractZodObjectSchema(zodSchema: any): Record<string, unknown> {
 }
 
 // Best-effort JSON Schema for one Zod property when toJSONSchema is unavailable; in: extractZodObjectSchema, out: a schema fragment.
-function inferZodPropertyType(prop: any): Record<string, unknown> {
-  const unwrapped = prop.unwrap?.() || prop._def?.innerType || prop;
-  const description = prop.description || unwrapped.description || prop._def?.description;
+function inferZodPropertyType(prop: unknown): Json {
+  const propDef = at(prop, "_def");
+  const unwrapped = call(prop, "unwrap") || at(propDef, "innerType") || prop;
+  const def = at(unwrapped, "_def");
+  const description = at(prop, "description") || at(unwrapped, "description") || at(propDef, "description");
+  const described = description ? { description } : {};
 
-  const typeName = unwrapped._def?.typeName || unwrapped._def?.type || unwrapped.constructor?.name || "";
+  const typeName = at(def, "typeName") || at(def, "type") || at(at(unwrapped, "constructor"), "name") || "";
   const tn = String(typeName).toLowerCase();
 
-  if (tn.includes("number") || tn === "zodnumber") return { type: "number", ...(description ? { description } : {}) };
-  if (tn.includes("boolean") || tn === "zodboolean")
-    return { type: "boolean", ...(description ? { description } : {}) };
-  if (tn.includes("integer")) return { type: "integer", ...(description ? { description } : {}) };
+  if (tn.includes("number") || tn === "zodnumber") return { type: "number", ...described };
+  if (tn.includes("boolean") || tn === "zodboolean") return { type: "boolean", ...described };
+  if (tn.includes("integer")) return { type: "integer", ...described };
   if (tn.includes("enum") || tn === "zodenum") {
-    const vals = unwrapped._def?.values || unwrapped._def?.entries || [];
-    const arr = Array.isArray(vals) ? vals : Object.values(vals);
-    return { type: "string", enum: arr, ...(description ? { description } : {}) };
+    const vals = at(def, "values") || at(def, "entries") || [];
+    const arr = Array.isArray(vals) ? vals : Object.values(vals as Json);
+    return { type: "string", enum: arr, ...described };
   }
   if (tn.includes("literal")) {
-    const val = unwrapped._def?.value;
-    return { type: val === null ? "null" : typeof val, enum: [val], ...(description ? { description } : {}) };
+    const val = at(def, "value");
+    return { type: val === null ? "null" : typeof val, enum: [val], ...described };
   }
   if (tn.includes("array") || tn === "zodarray") {
-    const elem = unwrapped._def?.type || unwrapped._def?.element || unwrapped._def?.valueType || {};
+    const elem = at(def, "type") || at(def, "element") || at(def, "valueType") || {};
     return {
       type: "array",
       items: inferZodPropertyType(elem),
-      ...(description ? { description } : {}),
+      ...described,
     };
   }
   if (tn.includes("object") || tn === "zodobject") {
     return {
       ...extractZodObjectSchema(unwrapped),
-      ...(description ? { description } : {}),
+      ...described,
     };
   }
   if (tn.includes("union") || tn === "zodunion") {
-    const opts = unwrapped._def?.options || [];
-    return { anyOf: opts.map((o: any) => inferZodPropertyType(o)), ...(description ? { description } : {}) };
+    const opts = at(def, "options");
+    return { anyOf: (Array.isArray(opts) ? opts : []).map((o) => inferZodPropertyType(o)), ...described };
   }
 
   return {
     type: "string",
-    ...(description ? { description } : {}),
+    ...described,
   };
+}
+
+// Removes JSON Schema keywords rejected by Google OpenAPI 3 schemas, deeply; in: stripSchemaForGoogle, out: the cleaned value.
+function stripKeywords(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(stripKeywords);
+  if (!isJson(schema)) return schema;
+  const {
+    $schema: _schema,
+    $defs: _defs,
+    definitions: _definitions,
+    additionalProperties: _additional,
+    ...rest
+  } = schema;
+  const out: Json = { ...rest };
+  if (isJson(out["properties"])) {
+    const cleaned: Json = {};
+    for (const [k, v] of Object.entries(out["properties"])) cleaned[k] = stripKeywords(v);
+    out["properties"] = cleaned;
+  }
+  if (out["items"]) out["items"] = stripKeywords(out["items"]);
+  for (const key of ["anyOf", "oneOf", "allOf"])
+    if (Array.isArray(out[key])) out[key] = (out[key] as unknown[]).map(stripKeywords);
+  return out;
 }
 
 /**
@@ -214,23 +241,6 @@ function inferZodPropertyType(prop: any): Record<string, unknown> {
  * such as $schema, $defs, definitions, and additionalProperties.
  */
 /** Removes JSON Schema keywords rejected by Google OpenAPI 3 schemas. */
-export function stripSchemaForGoogle(schema: any): any {
-  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
-    if (Array.isArray(schema)) return schema.map(stripSchemaForGoogle);
-    return schema;
-  }
-  const { $schema, $defs, definitions, additionalProperties, ...rest } = schema as any;
-  const out: any = { ...rest };
-  if (out.properties && typeof out.properties === "object") {
-    const cleaned: any = {};
-    for (const [k, v] of Object.entries(out.properties)) {
-      cleaned[k] = stripSchemaForGoogle(v);
-    }
-    out.properties = cleaned;
-  }
-  if (out.items) out.items = stripSchemaForGoogle(out.items);
-  if (out.anyOf) out.anyOf = (out.anyOf as any[]).map(stripSchemaForGoogle);
-  if (out.oneOf) out.oneOf = (out.oneOf as any[]).map(stripSchemaForGoogle);
-  if (out.allOf) out.allOf = (out.allOf as any[]).map(stripSchemaForGoogle);
-  return out;
+export function stripSchemaForGoogle(schema: Json): Json {
+  return stripKeywords(schema) as Json;
 }

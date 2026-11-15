@@ -4,7 +4,12 @@ import { clampCacheKey } from "./cache.ts";
 /** True in a browser, worker or React Native scope, where custom headers cause CORS preflights; in: header building, out: a boolean. */
 export function isBrowserRuntime(): boolean {
   try {
-    const g = globalThis as any;
+    const g = globalThis as {
+      window?: { document?: unknown };
+      WorkerGlobalScope?: unknown;
+      importScripts?: unknown;
+      navigator?: { product?: string };
+    };
     if (typeof g.window !== "undefined" && typeof g.window.document !== "undefined") return true;
     // Web Workers / Service Workers have no window.document but are still
     // CORS-constrained browser scopes: custom x-* headers trigger preflights
@@ -21,7 +26,8 @@ export function isBrowserRuntime(): boolean {
 /** Package version for User-Agent strings. Reads the npm-injected env first. */
 export function getPackageVersion(): string {
   try {
-    const v = (globalThis as any).process?.env?.npm_package_version;
+    const v = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+      ?.npm_package_version;
     if (typeof v === "string" && v) return v;
   } catch {}
   return "0.6.9";
@@ -31,7 +37,13 @@ export function getPackageVersion(): string {
 function getAgentAccelUserAgent(): string {
   const version = getPackageVersion();
   try {
-    const os = (globalThis as any).process?.getBuiltinModule?.("node:os") ?? null;
+    const os = (
+      globalThis as {
+        process?: {
+          getBuiltinModule?: (id: string) => { platform(): string; release(): string; arch(): string } | undefined;
+        };
+      }
+    ).process?.getBuiltinModule?.("node:os");
     if (os) {
       return `agent-accel/${version} (${os.platform()} ${os.release()}; ${os.arch()})`;
     }

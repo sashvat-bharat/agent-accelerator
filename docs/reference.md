@@ -24,7 +24,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `stateless` | Clear history around every run | [Agents](guides/agents-and-models.md) |
 | `midSession` | `{ mode \| whenBusy: "steer" \| "queue" \| "auto", maxQueued }` | [Tools](guides/tools-and-streaming.md) |
 | `resume` | `"automatic"` (default) or `"explicit"`: whether a run a crash cut off continues when the Agent is constructed (needs `persist: { dir }` and the same `sessionId`). See `agent.resume()` / `agent.interrupted()` | [Data](guides/data-and-media.md) |
-| `persist`, `home` | Session saving; base folder (`setHome(dir)` / `.agent-accel/`, set in code only). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
+| `persist`, `home` | Session saving (`persist: { dir?, file?, onPersistError?, allowStateless? }`: `onPersistError(error)` is called when a save fails, `allowStateless: true` also saves a `stateless` agent); base folder (`setHome(dir)` / `.agent-accel/`, set in code only). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
 | `toolChoice` | `"auto"`, `"none"`, `"required"`, `"validated"` (Google), `{ tool }` | [Tools](guides/tools-and-streaming.md) |
 | `maxOutputTokens` | Output-token cap for one model call | [Agents](guides/agents-and-models.md) |
 | `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
@@ -37,7 +37,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `hooks` | **Not implemented**; emits `config.unsupported_option`. Use `telemetryBus`. (`logger` and `contextManagement` were removed in 0.7.0.) | |
 
 **`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each chat worker's own per-run cap, default none), `scheduledActionBudget` (the same shape, the cap of each scheduled-action run, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).
-**`midSession`**: `mode`, `whenBusy`, `maxQueued` (20).
+**`midSession`**: `mode`, `whenBusy`, `maxQueued` (20), `maxSteers` (20).
 **`usageLimit`** (the whole chat, for its whole life, workers included; survives restarts): `maxCostUsd`, `maxTotalTokens`. Reaching it throws `BudgetExceededError` ("Usage limit reached").
 
 **`budget`** (per run, includes workers): `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`.
@@ -61,6 +61,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
 | `toolChoice`, `maxOutputTokens` | Same as config |
 | `retry`, `fetch`, `env` | Same as config |
+| `thinkingAsAnswerFallback` | `true`: when a model returns only reasoning text and no answer, that text becomes the answer (default false) |
 
 ## Response
 

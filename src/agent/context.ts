@@ -155,8 +155,8 @@ export class AgentContext {
     const next = new AgentContext(this.systemPrompt);
     // Preserve Uint8Array/ArrayBuffer media via structuredClone when available (M8 fix)
     try {
-      if (typeof (globalThis as any).structuredClone === "function") {
-        next.messages = (globalThis as any).structuredClone(this.messages);
+      if (typeof structuredClone === "function") {
+        next.messages = structuredClone(this.messages);
       } else {
         next.messages = deepCloneValue(this.messages);
       }

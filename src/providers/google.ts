@@ -951,9 +951,7 @@ export class GoogleInteractionsProvider implements Provider {
       let outputEmulated = false;
       let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
       try {
-        outputSpec = normalizeStructuredOutput(
-          options?.output ?? (options as { outputSchema?: unknown })?.outputSchema
-        );
+        outputSpec = normalizeStructuredOutput(options?.output);
       } catch {
         outputSpec = undefined;
       }
@@ -1051,10 +1049,7 @@ export class GoogleInteractionsProvider implements Provider {
     apiKey: string,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(
-      signal,
-      timeoutFor(options as { timeoutMs?: number } | undefined)
-    );
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(method, body, options, apiKey, effective));
       const text = await res.text();
@@ -1304,7 +1299,7 @@ export class GoogleInteractionsProvider implements Provider {
           body,
         };
 
-        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutMs = timeoutFor(options);
         // Opens one SSE connection (the create POST, or a background resume GET). Transient failures
         // (429/5xx/network) are retried before the first byte; a live stream is never retried.
         const open = (target: string, method: "POST" | "GET"): Promise<Response> =>

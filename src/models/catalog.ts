@@ -8,7 +8,18 @@
 import { getShardModels as getRawShardModels, registerCatalogUpdateListener } from "./catalog-cache.ts";
 import { allowedIds, onModelsChange } from "../config/models.ts";
 import { CATALOG_PROVIDERS } from "./catalog-shards.ts";
-import type { ModelSpec, ProviderId, ModelLimit, ModelCost, ModelModalities } from "../types/model.ts";
+import type {
+  ModelSpec,
+  ProviderId,
+  ModelLimit,
+  ModelCost,
+  ModelModalities,
+  RawModelData,
+  ReasoningOption,
+} from "../types/model.ts";
+
+// A models.dev entry as the cache hands it out: every field may be missing.
+type RawEntry = Partial<RawModelData>;
 import type { ThinkingLevel } from "../types/core.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
 
@@ -69,11 +80,11 @@ function normalizeModelIdForLookup(modelId: string): string {
 // Bound lookupCache to 1000 entries LRU: evict oldest on overflow.
 // ---------------------------------------------------------------------------
 const lookupCache = new Map<string, ModelSpec | undefined>();
-const filteredShards = new Map<string, Record<string, any> | undefined>();
+const filteredShards = new Map<string, Record<string, RawEntry> | undefined>();
 
 // The models of one provider as the catalog shows them: the shard, narrowed to the program's allowed list when it set one (`setModels`). Read-time only: the cache files are never rewritten, because several processes may share a home; in: every lookup here, out: id -> entry.
-function getShardModels(provider: string): Record<string, any> | undefined {
-  const raw = getRawShardModels(provider) as Record<string, any> | undefined;
+function getShardModels(provider: string): Record<string, RawEntry> | undefined {
+  const raw = getRawShardModels(provider) as Record<string, RawEntry> | undefined;
   const allowed = raw ? allowedIds(provider) : undefined;
   if (!raw || !allowed) return raw;
   if (!filteredShards.has(provider)) {
@@ -147,7 +158,7 @@ export function getModelSource(provider: string, modelId: string): "catalog" | "
 
 // Derives capability flags (thinking, caching, tools, structured output, modalities) from a raw catalog entry; in: mapModelSpec, out: ModelCapabilities.
 function mapCapabilities(
-  raw: any,
+  raw: RawEntry,
   cost: ModelCost,
   reasoning: boolean,
   toolCall: boolean,
@@ -157,7 +168,7 @@ function mapCapabilities(
     supportsThinking: reasoning,
     supportsThinkingLevel: !!raw.reasoning_options,
     supportsThinkingBudget:
-      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "budget_tokens"),
+      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o) => o.type === "budget_tokens"),
     supportsImplicitCaching: cost.cache_read !== undefined || cost.cache_write !== undefined,
     supportsLongCacheRetention: cost.cache_read !== undefined,
     supportsExplicitCaching: cost.cache_read !== undefined,
@@ -165,17 +176,15 @@ function mapCapabilities(
     supportsStreaming: true,
     supportsStructuredOutput: raw.structured_output === undefined ? true : !!raw.structured_output,
     supportsReasoningToggle:
-      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "toggle"),
+      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o) => o.type === "toggle"),
     supportsReasoningEffort:
-      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o: any) => o.type === "effort"),
-    modalities: [...(modalities.input || []), ...(modalities.output || [])].filter(
-      (v: any, i: any, a: any) => a.indexOf(v) === i
-    ),
+      Array.isArray(raw.reasoning_options) && raw.reasoning_options.some((o) => o.type === "effort"),
+    modalities: [...(modalities.input || []), ...(modalities.output || [])].filter((v, i, a) => a.indexOf(v) === i),
   };
 }
 
 // Turns a raw models.dev entry into a ModelSpec with limits, cost, pricing and capabilities; in: the lookups, out: a ModelSpec.
-function mapModelSpec(provider: string, modelId: string, raw: any): ModelSpec {
+function mapModelSpec(provider: string, modelId: string, raw: RawEntry): ModelSpec {
   const limit: ModelLimit = raw.limit || { context: 128000, output: 8192 };
   const cost: ModelCost = raw.cost || {};
   const modalities: ModelModalities = applyModalityOverrides(
@@ -219,14 +228,14 @@ function mapModelSpec(provider: string, modelId: string, raw: any): ModelSpec {
       cacheWritePerMillion: cost.cache_write,
       inputAudioPerMillion: cost.input_audio,
     },
-    raw,
+    raw: raw as RawModelData,
   };
 }
 
 interface IndexEntry {
   provider: ProviderId;
   key: string;
-  raw: any;
+  raw: RawEntry;
 }
 
 let globalIndex: Map<string, IndexEntry> | null = null;
@@ -238,7 +247,7 @@ function getGlobalIndex(): Map<string, IndexEntry> {
   for (const p of CATALOG_PROVIDERS) {
     const models = getShardModels(p);
     if (!models) continue;
-    for (const [key, raw] of Object.entries(models as Record<string, any>)) {
+    for (const [key, raw] of Object.entries(models)) {
       const entry: IndexEntry = { provider: p as ProviderId, key, raw };
       const lowerKey = key.toLowerCase();
       if (!globalIndex.has(lowerKey)) globalIndex.set(lowerKey, entry);
@@ -283,8 +292,8 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
   ];
 
   for (const p of tryProviders) {
-    const providerData: any = { models: getShardModels(p) };
-    if (!providerData.models) continue;
+    const models = getShardModels(p);
+    if (!models) continue;
     const candidates = [
       modelId,
       normalizeModelIdForLookup(modelId),
@@ -292,7 +301,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
       `${p}/${modelId}`,
     ];
     for (const cand of candidates) {
-      const raw = providerData.models[cand];
+      const raw = models[cand];
       if (raw) {
         result = mapModelSpec(p as ProviderId, cand, raw);
         setLookupCache(cacheKey, result);
@@ -302,13 +311,13 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
     // Tightened fuzzy match — exact, `endsWith("/"+modelId)` boundary,
     // or normalized equality. The old loose `modelId.endsWith(key)` is removed
     // (e.g. "gpt-4o-mini-extra" must not match "mini").
-    for (const [key, raw] of Object.entries(providerData.models as Record<string, any>)) {
+    for (const [key, raw] of Object.entries(models)) {
       if (
         key === modelId ||
         key.endsWith(`/${modelId}`) ||
         normalizeModelIdForLookup(key) === normalizeModelIdForLookup(modelId)
       ) {
-        result = mapModelSpec(p as ProviderId, key, raw as any);
+        result = mapModelSpec(p as ProviderId, key, raw);
         setLookupCache(cacheKey, result);
         return result;
       }
@@ -337,7 +346,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
 /** Thinking capabilities and allowed levels for a catalog model. */
 export interface ModelThinkingInfo {
   supportsThinking: boolean;
-  reasoningOptions?: any[];
+  reasoningOptions?: ReasoningOption[];
   allowedLevels: string[];
   supportsDisable: boolean;
   description: string;
@@ -375,9 +384,9 @@ export function getModelThinkingInfo(provider: string, modelId: string): ModelTh
   }
 
   // Model supports thinking — inspect reasoning_options from models.dev.json
-  const effortOpt: any = reasoningOptions.find((o: any) => o.type === "effort");
-  const toggleOpt: any = reasoningOptions.find((o: any) => o.type === "toggle");
-  const budgetOpt: any = reasoningOptions.find((o: any) => o.type === "budget_tokens");
+  const effortOpt = reasoningOptions.find((o) => o.type === "effort");
+  const toggleOpt = reasoningOptions.find((o) => o.type === "toggle");
+  const budgetOpt = reasoningOptions.find((o) => o.type === "budget_tokens");
 
   const allowed = new Set<string>();
 
@@ -563,9 +572,9 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
   const seen = new Set<string>();
   const out: ModelSpec[] = [];
   for (const alias of aliases) {
-    const data: any = { models: getShardModels(alias) };
-    if (!data.models) continue;
-    for (const [key, raw] of Object.entries(data.models as Record<string, any>)) {
+    const models = getShardModels(alias);
+    if (!models) continue;
+    for (const [key, raw] of Object.entries(models)) {
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(mapModelSpec(alias as ProviderId, key, raw));

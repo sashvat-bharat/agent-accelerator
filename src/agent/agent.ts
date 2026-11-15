@@ -21,8 +21,8 @@ import {
   type ServiceTier,
 } from "../types/core.ts";
 import type { ContentPart } from "../types/message.ts";
-import { AgentResponse, type StreamEvent } from "../types/response.ts";
-import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { AgentResponse, type StreamEvent, type SubAgentExecutionMetadata } from "../types/response.ts";
+import { AssistantMessageEventStream, type StreamEventListener } from "../streaming/event-stream.ts";
 import { AgentContext } from "./context.ts";
 import { resolveModel, resolveModelUnchecked } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
@@ -53,7 +53,7 @@ import {
 export { normalizeThinking, resolveEffectiveThinking };
 export type { AgentRunLimits };
 import { NamedSessions } from "./named-sessions.ts";
-import { RunControl, type QueuedPrompt } from "./run-control.ts";
+import { RunControl, isPiped, type QueuedPrompt } from "./run-control.ts";
 import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
 import { mergeCap } from "./defaults.ts";
 import { applyEditable, toEditableConfig } from "./config-blocks.ts";
@@ -104,7 +104,8 @@ import { SessionJournal } from "../session/journal.ts";
 import { ToolLogs, type ToolLogWriter } from "../session/tool-log.ts";
 import { isLocalPathInput } from "../utils/safe-io.ts";
 import { clearSessionRouting, normalizeStructuredOutput } from "../providers.ts";
-import type { StructuredOutputSpec } from "../types/model.ts";
+import type { ModelSpec, StructuredOutputSpec } from "../types/model.ts";
+import type { ModelProviderInstance } from "../providers/registry.ts";
 import { clearInteractionChains } from "../providers/google.ts";
 import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalog.ts";
 import { buildSessionData, type PersistedAgentSession, type SessionTotals } from "../session/store.ts";
@@ -118,6 +119,9 @@ import { ConfigError, SessionLoadError, ValidationError, isAbortError } from "..
  * properties are attached to AbortController instances.
  */
 const mergeDisposers = new WeakMap<AbortController, () => void>();
+
+/** A type with its `readonly` markers removed (the typed view `importSession` assigns through). */
+type Writable<T> = { -readonly [K in keyof T]: T[K] };
 
 /** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
 export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
@@ -186,13 +190,13 @@ export class Agent {
   /** The SDK prompts in use: the shipped defaults with `AgentConfig.prompts` applied. */
   readonly prompts: Prompts;
   /** Original model string or catalog spec used for resolution. */
-  readonly modelStringOrSpec: string | any;
+  readonly modelStringOrSpec: string | ModelSpec;
   /** Configured dynamic sub-agent model, if enabled. */
-  readonly subagentModel?: string | any;
+  readonly subagentModel?: string | ModelSpec;
   /** Normalized dynamic sub-agent spawning policy. */
   readonly dynamicSubagents?: {
     enabled: boolean;
-    model?: string | any;
+    model?: string | ModelSpec;
     /** Open workers at once; `Infinity` (the default) = no limit. */
     maxSpawn: number;
     thinkingLevel?: ThinkingLevel;
@@ -262,13 +266,13 @@ export class Agent {
   /** Whether history is cleared around each run. */
   readonly stateless: boolean;
   /** Durable persistence target: session file rewritten after every step. */
-  readonly persistConfig?: { dir?: string; file?: string };
+  readonly persistConfig?: AgentConfig["persist"];
   /** Mid-session queue policy for new queries arriving while a run is active. */
   readonly midSessionConfig: Required<Pick<MidSessionConfig, "mode">> & MidSessionConfig & { maxSteers?: number };
   /** Max buffered steer entries per run (default 20). */
   readonly maxSteers: number;
   /**
-   * Normalized run limits. Read from `(config as any).limits`;
+   * Normalized run limits. From `AgentConfig.limits`;
    * sub-agents inherit these unless overridden. `maxTurns`/`deadlineMs`/
    * `maxToolCallsPerRun` default to unlimited; timeouts default to
    * request 300s / first-byte 120s / idle 300s (tolerate reasoning).
@@ -289,6 +293,10 @@ export class Agent {
   /** Log files of tool calls in the persisted session folder (dir mode only). */
   private toolLogs?: ToolLogs;
   private toolLogsDir?: string;
+  /** Live traces of the workers this agent started, by tracking id (saved with the session). @internal */
+  subagentTraces: Record<string, SubAgentTrace> = {};
+  /** The session this agent was started from, for a worker (set by the registry or `fork`). @internal */
+  parentSessionId?: string;
   /** Where each run of the default session began (saved with the session). @internal */
   readonly runMarks: SessionRunMark[] = [];
   /** Tool calls finished in the current run; saved the moment each finishes so a crash never repeats them. @internal */
@@ -349,7 +357,7 @@ export class Agent {
     // Unified model resolution (shared with SubAgent/workers): supports
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
-    this.modelStringOrSpec = modelStringOrSpec as string | any;
+    this.modelStringOrSpec = modelStringOrSpec as string | ModelSpec;
     if ((config as { allowedModels?: unknown }).allowedModels !== undefined) {
       throw new ConfigError(
         "[Agent Accelerator] AgentConfig.allowedModels was removed: set the program's list once with setModels({ default, providers }) (see the models guide)."
@@ -359,7 +367,7 @@ export class Agent {
     const dynRaw = config.dynamicSubagents;
     // Unified worker-model chain: dynamicSubagents.model > subagentModel > saved or default worker model.
     const dynModel = resolveDynamicModelInput(dynRaw, config.subagentModel);
-    this.subagentModel = dynModel as string | any | undefined;
+    this.subagentModel = dynModel;
     if (dynRaw) checkModelAllowed(dynModel); // the developer's worker model must be on the list too
     const dynEnabled = dynRaw ? (dynRaw.enabled ?? true) : false;
     if (dynRaw) {
@@ -421,9 +429,9 @@ export class Agent {
       const workerTimeoutMs = !rawTimeout ? Infinity : Math.max(1, Math.floor(rawTimeout));
       this.dynamicSubagents = {
         enabled: dynEnabled,
-        model: dynModel as string | any | undefined,
+        model: dynModel,
         maxSpawn,
-        thinkingLevel: (dynRaw as any)?.thinkingLevel,
+        thinkingLevel: dynRaw.thinkingLevel,
         tools: dynTools,
         workerTimeoutMs,
         allowScheduledActions: dynRaw.allowScheduledActions === true,
@@ -434,8 +442,11 @@ export class Agent {
           : {}),
       };
     }
-    this.apiKey = (rawModel as any)?.apiKey || config.apiKey;
-    this.baseUrl = (rawModel as any)?.baseUrl || config.baseUrl;
+    const modelHelper = (
+      typeof rawModel === "object" && rawModel !== null && "model" in rawModel ? rawModel : undefined
+    ) as ModelProviderInstance | undefined; // a `ModelProvider.*` result carries its own key, endpoint and level
+    this.apiKey = modelHelper?.apiKey || config.apiKey;
+    this.baseUrl = modelHelper?.baseUrl || config.baseUrl;
     this.customHeaders = config.headers;
     this.maxTurns =
       config.maxTurns === undefined || config.maxTurns === 0 || config.maxTurns === Infinity
@@ -444,7 +455,6 @@ export class Agent {
           ? Math.max(1, Math.floor(config.maxTurns as number))
           : Infinity;
     this.sessionId = config.sessionId || createSessionId();
-    (this as any).subagentTraces = {};
     this.home = resolveHome(config.home);
     // `persist: {}` (neither dir nor file) means the default sessions folder under home.
     this.persistConfig =
@@ -453,8 +463,8 @@ export class Agent {
         : config.persist;
     // `whenBusy` (canonical) wins over legacy `mode`; anything else is "auto".
     const normalizedMode = resolveWhenBusy(config.midSession);
-    const rawMaxQueued = (config.midSession as any)?.maxQueued;
-    const rawMaxSteers = (config.midSession as any)?.maxSteers;
+    const rawMaxQueued = config.midSession?.maxQueued;
+    const rawMaxSteers = config.midSession?.maxSteers;
     this.midSessionConfig = {
       mode: normalizedMode,
       ...(Number.isFinite(rawMaxQueued) && (rawMaxQueued as number) >= 0
@@ -481,7 +491,7 @@ export class Agent {
     this.runLimits = resolveAgentLimits(config as unknown as { limits?: Record<string, unknown> });
 
     // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
-    const mpThinking = (rawModel as any)?.thinkingLevel;
+    const mpThinking = modelHelper?.thinkingLevel;
     this.thinkingConfig = normalizeThinking(config, mpThinking);
 
     // Structured outputs: validate early so invalid schemas fail fast at construction.
@@ -553,7 +563,7 @@ export class Agent {
     const dyn = this.dynamicSubagents;
     if ((dyn?.enabled === true || dyn?.allowScheduledActions) && !this.subagentModel) {
       throw new SubAgentModelError(
-        typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : (this.modelStringOrSpec as any)?.id
+        typeof this.modelStringOrSpec === "string" ? this.modelStringOrSpec : this.modelStringOrSpec?.id
       );
     }
     if (dyn?.enabled === true) {
@@ -990,7 +1000,7 @@ export class Agent {
           type: "queued",
           queuedPrompt: previewPrompt(prompt),
           queueLength: this.rc.queue.length,
-        } as any);
+        });
       } catch {}
     });
   }
@@ -1014,7 +1024,7 @@ export class Agent {
     if (!userSignal) return runController.signal;
     if (userSignal.aborted) {
       try {
-        runController.abort((userSignal as any).reason);
+        runController.abort(userSignal.reason);
       } catch {
         try {
           runController.abort();
@@ -1032,7 +1042,7 @@ export class Agent {
     // Fallback: manual forward without expando (disposer in WeakMap).
     const forward = () => {
       try {
-        runController.abort((userSignal as any).reason);
+        runController.abort(userSignal.reason);
       } catch {
         try {
           runController.abort();
@@ -1256,7 +1266,7 @@ export class Agent {
         }
       }
       if (failedAttempts.length > 0) res = withFailedAttempts(res, failedAttempts);
-      this.mergeSubagentTraces(res.subagents as any);
+      this.mergeSubagentTraces(res.subagents);
       this.persistNow();
       if (this.stateless) {
         targetContext.messages = [];
@@ -1331,7 +1341,7 @@ export class Agent {
       (res) => {
         this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done");
         try {
-          this.mergeSubagentTraces(res.subagents as any);
+          this.mergeSubagentTraces(res.subagents);
           this.persistNow();
         } catch {}
         try {
@@ -1364,8 +1374,7 @@ export class Agent {
   track(trackingId: string): SubAgentTrace | undefined {
     if (!trackingId) return undefined;
     try {
-      const own = (this as any).subagentTraces as Record<string, SubAgentTrace> | undefined;
-      const hit = own?.[trackingId];
+      const hit = this.subagentTraces[trackingId];
       if (hit) return { ...hit, steps: hit.steps.map((s) => ({ ...s })) };
     } catch {}
     // Process-wide store, filtered to sessions THIS agent owns: another
@@ -1387,7 +1396,7 @@ export class Agent {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const id of [
-      ...Object.keys((this as any).subagentTraces ?? {}),
+      ...Object.keys(this.subagentTraces),
       ...listSubAgentTraceIdsForSessions(this.ownedSessionIds()),
     ]) {
       const raw = rawOf(id);
@@ -1415,7 +1424,7 @@ export class Agent {
    * manually. Never throws (failures route to `onPersistError`).
    *
    * Stateless agents skip persistence unless
-   * `(persist as any).allowStateless` is set. Calls in the same tick are
+   * `persist.allowStateless` is set. Calls in the same tick are
    * coalesced via a `queueMicrotask` single flight.
    */
   persistNow(): void {
@@ -1423,7 +1432,7 @@ export class Agent {
     if (!cfg || (!cfg.dir && !cfg.file)) return;
     // No stateless persist by default.
     try {
-      if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
+      if (this.stateless && !cfg.allowStateless) return;
     } catch {}
     if (this.persistScheduled) return;
     this.persistScheduled = true;
@@ -1457,31 +1466,21 @@ export class Agent {
     const cfg = this.persistConfig;
     if (!cfg || (!cfg.dir && !cfg.file)) return;
     try {
-      if (this.stateless && !(cfg as unknown as { allowStateless?: unknown }).allowStateless) return;
+      if (this.stateless && !cfg.allowStateless) return;
     } catch {}
     try {
-      if (cfg.dir) this.journalFor(cfg.dir).sync(this as any);
-      else if (cfg.file) saveSessionFile(cfg.file, this as any, null);
+      if (cfg.dir) this.journalFor(cfg.dir).sync(this);
+      else if (cfg.file) saveSessionFile(cfg.file, this, null);
     } catch (err) {
       // Surface via hook instead of swallowing silently.
       try {
-        (cfg as unknown as { onPersistError?: (e: unknown) => void }).onPersistError?.(err);
+        cfg.onPersistError?.(err);
       } catch {}
     }
   }
 
   /** Merges completed worker metadata (incl. steps) into this agent's trace registry. */
-  private mergeSubagentTraces(
-    subagents: Array<{
-      trackingId?: string;
-      name: string;
-      sessionId?: string;
-      parentSessionId?: string;
-      task: string;
-      steps?: SubAgentTrace["steps"];
-      [k: string]: unknown;
-    }>
-  ): void {
+  private mergeSubagentTraces(subagents: SubAgentExecutionMetadata[]): void {
     if (!subagents || subagents.length === 0) return;
     const rawOf = (id?: string): string | undefined => {
       if (!id) return undefined;
@@ -1489,7 +1488,7 @@ export class Agent {
       return /^[0-9a-f]{32}$/.test(tail) ? tail : id;
     };
     try {
-      const registry = ((this as any).subagentTraces ??= {}) as Record<string, SubAgentTrace>;
+      const registry = this.subagentTraces;
       for (const s of subagents) {
         const raw = rawOf(s.trackingId);
         const key = raw || s.name;
@@ -1523,7 +1522,7 @@ export class Agent {
    * @example `saveSessionFile(".session.json", agent, telemetry)`
    */
   exportSession(telemetry?: SessionTelemetry | SessionTotals | null): PersistedAgentSession {
-    return buildSessionData(this as any, telemetry);
+    return buildSessionData(this, telemetry);
   }
 
   /**
@@ -1546,29 +1545,30 @@ export class Agent {
     checkModelAllowed(data.model); // an imported session may not smuggle in a model outside the list
     checkModelAllowed(data.subagentModel);
     const prevSid = this.sessionId;
-    if (data.sessionId) (this as any).sessionId = data.sessionId;
+    const self: Writable<Agent> = this; // the restored fields are read-only for callers; this typed view lets the class assign them
+    if (data.sessionId) self.sessionId = data.sessionId;
     if (this.sessionId !== prevSid) {
       try {
         this.lockSessionFolder();
       } catch (err) {
-        (this as any).sessionId = prevSid; // the session belongs to another process: keep ours untouched
+        self.sessionId = prevSid; // the session belongs to another process: keep ours untouched
         throw err;
       }
       unregisterSessionFolder(prevSid);
       this.registerTelemetryFolder();
     }
-    if ((data as any).parentSessionId) (this as any).parentSessionId = (data as any).parentSessionId;
-    if ((data as any).subagents && typeof (data as any).subagents === "object") {
+    if (data.parentSessionId) this.parentSessionId = data.parentSessionId;
+    if (data.subagents && typeof data.subagents === "object") {
       try {
-        (this as any).subagentTraces = JSON.parse(JSON.stringify((data as any).subagents));
+        this.subagentTraces = JSON.parse(JSON.stringify(data.subagents));
       } catch {
-        (this as any).subagentTraces = { ...((data as any).subagents as object) };
+        this.subagentTraces = { ...data.subagents } as unknown as Record<string, SubAgentTrace>;
       }
     }
-    if (data.model) (this as any).modelStringOrSpec = data.model;
+    if (data.model) self.modelStringOrSpec = data.model;
     if (data.thinkingLevel) {
-      const lvl = String(data.thinkingLevel);
-      (this as any).thinkingConfig =
+      const lvl = String(data.thinkingLevel) as ThinkingLevel;
+      self.thinkingConfig =
         lvl === "none"
           ? { enabled: false, level: "none", budgetTokens: 0 }
           : lvl === "dynamic"
@@ -1576,17 +1576,16 @@ export class Agent {
             : { enabled: true, level: lvl };
     }
     if (typeof data.instructions === "string") this.instructions = data.instructions;
-    if (data.cache) (this as { cache?: CacheOption }).cache = data.cache;
+    if (data.cache) self.cache = data.cache;
     if (data.subagentModel) {
-      (this as any).subagentModel = data.subagentModel;
-      const dyn = (this as any).dynamicSubagents;
+      self.subagentModel = data.subagentModel;
+      const dyn = this.dynamicSubagents;
       if (dyn) dyn.model = data.subagentModel;
     }
     try {
-      const g: any = globalThis as any;
       this.context.messages = Array.isArray(data.messages)
-        ? typeof g.structuredClone === "function"
-          ? g.structuredClone(data.messages)
+        ? typeof structuredClone === "function"
+          ? structuredClone(data.messages)
           : JSON.parse(JSON.stringify(data.messages))
         : [];
     } catch {
@@ -1724,21 +1723,19 @@ export class Agent {
     const isStream = options?.stream === true;
     if (isStream) {
       const hasCallbacks = !!(options?.onDelta || options?.onThinkingDelta || options?.onEvent);
-      const s = this.stream(prompt, options) as any;
+      const s = this.stream(prompt, options);
       if (hasCallbacks) {
         // Make `await agent.run(..., {stream:true, onDelta})` resolve to final response
         // while still streaming via callbacks. The returned value stays iterable/on-able.
-        const resultPromise = s.result();
-        const hybrid: any = resultPromise;
-        hybrid[Symbol.asyncIterator] = s[Symbol.asyncIterator].bind(s);
-        hybrid.on = s.on.bind(s);
-        hybrid.off = s.off.bind(s);
-        hybrid.result = s.result.bind(s);
-        hybrid.cancel = s.cancel.bind(s);
-        hybrid.onCancel = s.onCancel.bind(s);
-        hybrid.isCancelled = s.isCancelled.bind(s);
-        // also expose push/end/fail for compat, though not needed by caller
-        return hybrid;
+        return Object.assign(s.result(), {
+          [Symbol.asyncIterator]: s[Symbol.asyncIterator].bind(s),
+          on: s.on.bind(s),
+          off: s.off.bind(s),
+          result: s.result.bind(s),
+          cancel: s.cancel.bind(s),
+          onCancel: s.onCancel.bind(s),
+          isCancelled: s.isCancelled.bind(s),
+        });
       }
       return s;
     }
@@ -1782,7 +1779,7 @@ export class Agent {
               type: "queued",
               queuedPrompt: previewPrompt(prompt),
               queueLength: this.rc.queue.length,
-            } as any);
+            });
           } catch {}
         });
       }
@@ -1807,12 +1804,11 @@ export class Agent {
       const stream = this.stream(prompt, runOpts);
       // If callbacks are used, proxy them through string stream as well
       if (runOpts.onDelta || runOpts.onThinkingDelta || runOpts.onEvent) {
-        if (runOpts.onEvent) stream.on("*", runOpts.onEvent as any);
-        if (runOpts.onDelta) stream.on("text_delta", (e: any) => runOpts.onDelta!(e.delta!, e));
-        if (runOpts.onThinkingDelta)
-          stream.on("thinking_delta", (e: any) => runOpts.onThinkingDelta!(e.thinkingDelta!, e));
+        if (runOpts.onEvent) stream.on("*", runOpts.onEvent);
+        if (runOpts.onDelta) stream.on("text_delta", (e) => runOpts.onDelta!(e.delta!, e));
+        if (runOpts.onThinkingDelta) stream.on("thinking_delta", (e) => runOpts.onThinkingDelta!(e.thinkingDelta!, e));
       }
-      const stringStream: any = {
+      const stringStream = {
         [Symbol.asyncIterator]: async function* () {
           try {
             for await (const chunk of stream) {
@@ -1827,19 +1823,20 @@ export class Agent {
           }
         },
         result: () => stream.result(),
-        on: (evt: string, fn: any) => stream.on(evt, fn),
+        on: (evt: string, fn: StreamEventListener) => stream.on(evt, fn),
         cancel: () => stream.cancel(),
-        onCancel: (fn: any) => stream.onCancel(fn),
+        onCancel: (fn: () => void) => stream.onCancel(fn),
         isCancelled: () => stream.isCancelled(),
       };
       // Make await work (resolves to AgentResponse)
       const resultPromise = stream.result();
-      (stringStream as any).then = (res: any, rej: any) => resultPromise.then(res, rej);
-      (stringStream as any).catch = (rej: any) => resultPromise.catch(rej);
-      return stringStream;
+      return Object.assign(stringStream, {
+        then: resultPromise.then.bind(resultPromise),
+        catch: resultPromise.catch.bind(resultPromise),
+      }) as unknown as Promise<AgentResponse> & AsyncIterable<string | StreamEvent>;
     }
 
-    return this.run(prompt, runOpts) as any;
+    return this.run(prompt, runOpts) as unknown as Promise<AgentResponse> & AsyncIterable<string | StreamEvent>;
   }
 
   /**
@@ -1894,7 +1891,7 @@ export class Agent {
                   usage: res.usage,
                   finishReason: res.finishReason,
                   responseId: res.responseId,
-                } as any);
+                });
               } catch {}
               try {
                 stub.end(res);
@@ -1934,17 +1931,10 @@ export class Agent {
             type: "queued",
             queuedPrompt: previewPrompt(prompt),
             queueLength: this.rc.queue.length + 1,
-          } as any);
+          });
         } catch {}
       }
-      const queuedEntry: {
-        prompt: string | ContentPart[];
-        options?: AgentRunOptions;
-        isStream: boolean;
-        deferredStream?: AssistantMessageEventStream;
-        resolve: (res: AgentResponse) => void;
-        reject: (err: unknown) => void;
-      } = {
+      const queuedEntry: QueuedPrompt = {
         prompt,
         options,
         isStream: true,
@@ -1964,7 +1954,7 @@ export class Agent {
       // Forward cancellation before start: drop from queue and fail.
       deferred.onCancel(() => {
         try {
-          const idx = this.rc.queue.indexOf(queuedEntry as any);
+          const idx = this.rc.queue.indexOf(queuedEntry);
           if (idx >= 0) {
             this.rc.queue.splice(idx, 1);
             queuedEntry.reject(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
@@ -1975,9 +1965,9 @@ export class Agent {
         } catch {}
       });
       if (urgent) {
-        this.rc.queueUrgent(queuedEntry as QueuedPrompt);
+        this.rc.queueUrgent(queuedEntry);
       } else {
-        this.rc.queue.push(queuedEntry as any);
+        this.rc.queue.push(queuedEntry);
         this.persistNow();
       }
       // Attach deferred completion to queued promise without exposing it.
@@ -1987,21 +1977,21 @@ export class Agent {
           // If pump already piped via real stream, deferred is already ended.
           // Otherwise (edge), end it here.
           try {
-            if ((deferred as any).__piped !== true) {
+            if (!isPiped(deferred)) {
               deferred.push({
                 type: "done",
                 delta: "",
                 usage: res.usage,
                 finishReason: res.finishReason,
                 responseId: res.responseId,
-              } as any);
+              });
               deferred.end(res);
             }
           } catch {}
         },
         (err) => {
           try {
-            if ((deferred as any).__piped !== true) {
+            if (!isPiped(deferred)) {
               deferred.fail(err instanceof Error ? err : new Error(String(err)));
             }
           } catch {}
@@ -2017,9 +2007,9 @@ export class Agent {
 
   // Attaches the caller's onEvent/onDelta/onThinkingDelta callbacks to a stream; in: stream()/pumpQueue, out: listeners on the stream.
   private wireStreamCallbacks(s: AssistantMessageEventStream, options?: AgentRunOptions): void {
-    if (options?.onEvent) s.on("*", options.onEvent as any);
-    if (options?.onDelta) s.on("text_delta", (e: any) => options.onDelta!(e.delta!, e));
-    if (options?.onThinkingDelta) s.on("thinking_delta", (e: any) => options.onThinkingDelta!(e.thinkingDelta!, e));
+    if (options?.onEvent) s.on("*", options.onEvent);
+    if (options?.onDelta) s.on("text_delta", (e) => options.onDelta!(e.delta!, e));
+    if (options?.onThinkingDelta) s.on("thinking_delta", (e) => options.onThinkingDelta!(e.thinkingDelta!, e));
   }
 }
 

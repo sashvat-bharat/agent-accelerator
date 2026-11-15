@@ -733,7 +733,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     let outputEmulated = false;
     let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
     try {
-      outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+      outputSpec = normalizeStructuredOutput(options?.output);
     } catch {
       outputSpec = undefined;
     }
@@ -791,11 +791,9 @@ export class OpenAICompatibleChatProvider implements Provider {
     // Request usage on streams where supported so terminal accounting
     // arrives on the final chunk. Strict servers that reject unknown fields
     // opt out via the `compat.no_stream_options` setting; an explicit per-call
-    // `(options as any).streamOptions === false` also skips it.
+    // `streamOptions: false` in the request options also skips it.
     if (stream) {
-      const noStreamOptions =
-        (options as { streamOptions?: unknown } | undefined)?.streamOptions === false ||
-        compatSetting().no_stream_options === true;
+      const noStreamOptions = options?.streamOptions === false || compatSetting().no_stream_options === true;
       if (!noStreamOptions) {
         (body as unknown as Record<string, unknown>)["stream_options"] = { include_usage: true };
       }
@@ -817,9 +815,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     // drops affinity headers that trigger CORS preflights / strict 400s.
     // Body `session_id` is already omitted on compat (headers-only affinity).
     try {
-      const noAffinity =
-        (options as { sendSessionHeaders?: unknown } | undefined)?.sendSessionHeaders === false ||
-        compatSetting().no_session_headers === true;
+      const noAffinity = options?.sendSessionHeaders === false || compatSetting().no_session_headers === true;
       if (noAffinity) {
         for (const k of Object.keys(headers)) {
           const lower = k.toLowerCase();
@@ -843,10 +839,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(
-      signal,
-      timeoutFor(options as { timeoutMs?: number } | undefined)
-    );
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
       const text = await res.text();
@@ -995,7 +988,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           body,
         };
 
-        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({

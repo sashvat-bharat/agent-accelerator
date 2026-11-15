@@ -556,7 +556,7 @@ export class OpenAIResponsesProvider implements Provider {
     let outputEmulated = false;
     let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
     try {
-      outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+      outputSpec = normalizeStructuredOutput(options?.output);
     } catch {
       outputSpec = undefined;
     }
@@ -665,10 +665,7 @@ export class OpenAIResponsesProvider implements Provider {
     sessionId: string | undefined,
     signal?: AbortSignal
   ): Promise<{ status: number; statusText: string; headers: Record<string, string>; text: string }> {
-    const { signal: effective, cleanup } = combinedSignal(
-      signal,
-      timeoutFor(options as { timeoutMs?: number } | undefined)
-    );
+    const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
       const text = await res.text();
@@ -834,7 +831,7 @@ export class OpenAIResponsesProvider implements Provider {
         };
 
         // Optional per-call timeout races the linked abort signal.
-        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({

@@ -15,7 +15,7 @@ export function createSessionId(prefix?: string): string {
   const head = prefix ? `${prefix}-` : "";
   let id: string;
   try {
-    const webCrypto = (globalThis as any)?.crypto ?? (typeof crypto !== "undefined" ? crypto : undefined);
+    const webCrypto = typeof crypto !== "undefined" ? crypto : undefined;
     if (webCrypto && typeof webCrypto.randomUUID === "function") {
       id = `${head}${webCrypto.randomUUID()}`;
     } else {
@@ -48,15 +48,8 @@ export function hashSessionPart(value: string): string {
  */
 export function createTrackingId(): string {
   try {
-    const c = (globalThis as any)?.crypto;
-    if (c && typeof c.randomUUID === "function") {
-      return String(c.randomUUID()).replace(/-/g, "").slice(0, 32);
-    }
-  } catch {}
-  try {
-    const nodeCrypto: any = (globalThis as any)?.process?.getBuiltinModule?.("node:crypto") ?? null;
-    if (nodeCrypto?.randomUUID) {
-      return String(nodeCrypto.randomUUID()).replace(/-/g, "").slice(0, 32);
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
     }
   } catch {}
   let out = "";
@@ -83,9 +76,8 @@ export function nowMs(): number {
 // 32 random lowercase hex characters; in: newRunId/newTurnId, out: a string.
 function random32Hex(): string {
   try {
-    const c = (globalThis as any)?.crypto;
-    if (c && typeof c.randomUUID === "function") {
-      return String(c.randomUUID()).replace(/-/g, "").slice(0, 32);
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
     }
   } catch {}
   let out = "";

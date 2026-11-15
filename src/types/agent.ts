@@ -120,7 +120,14 @@ export interface AgentConfig {
    * pretty `.session.json` file. `persist: {}` (neither) uses `<home>/sessions`.
    * Writes are atomic and never fail a turn.
    */
-  persist?: { dir?: string; file?: string };
+  persist?: {
+    dir?: string;
+    file?: string;
+    /** Called with the error when saving fails (a save never fails a turn). Default: ignore. */
+    onPersistError?: (error: unknown) => void;
+    /** `true` also saves a `stateless` agent (it is skipped by default, since its history is cleared around every run). */
+    allowStateless?: boolean;
+  };
   /**
    * How many times a run that FAILED for a transient reason (provider down or overloaded, timeouts, a cut stream, after
    * the provider layer's own `retry` gave up) is tried again from where it stopped, with a growing wait (5 s, 15 s, 45 s,
@@ -290,6 +297,8 @@ export interface MidSessionConfig {
   whenBusy?: MidSessionMode;
   /** Max queued (follow-up) requests buffered while busy. Extra `queue()` calls throw. Defaults to 20. */
   maxQueued?: number;
+  /** Max steer prompts buffered for the active run. Extra `steer()` calls throw. Defaults to 20. */
+  maxSteers?: number;
 }
 
 /** Developer-configured policy for LLM-spawned dynamic sub-agents. */
@@ -382,6 +391,8 @@ export interface AgentRunOptions {
   toolChoice?: ToolChoiceOption;
   /** Per-run output-token cap. */
   maxOutputTokens?: number;
+  /** `true` lets a turn that produced reasoning but no answer text return the reasoning as its answer (default: the empty text is returned as is). */
+  thinkingAsAnswerFallback?: boolean;
   /** Per-run retry override. */
   retry?: RetryPolicyConfig;
   /** Per-run fetch override. */

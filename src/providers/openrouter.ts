@@ -615,7 +615,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     let outputEmulated = false;
     let outputSpec: import("../types/model.ts").StructuredOutputSpec | undefined;
     try {
-      outputSpec = normalizeStructuredOutput(options?.output ?? (options as { outputSchema?: unknown })?.outputSchema);
+      outputSpec = normalizeStructuredOutput(options?.output);
     } catch {
       // why: invalid output shapes fail fast at Agent construction/loop validation.
       outputSpec = undefined;
@@ -745,10 +745,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderGenerateResult> {
     // The whole call stays bounded by `timeoutMs`; the stream's own timer only covers the wait for its first byte.
-    const { signal, cleanup } = combinedSignal(
-      options?.signal,
-      timeoutFor(options as { timeoutMs?: number } | undefined)
-    );
+    const { signal, cleanup } = combinedSignal(options?.signal, timeoutFor(options));
     try {
       // Nobody reads the deltas here, so the stream keeps none (a burst of frames would overflow its buffer for nothing).
       const events = this.streamInto(new AssistantMessageEventStream({ buffer: false }), model, context, {
@@ -830,7 +827,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           body,
         };
 
-        const streamTimeoutMs = timeoutFor(options as { timeoutMs?: number } | undefined);
+        const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
         const res = await openStreamResponse({

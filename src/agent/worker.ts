@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "../types/tool.ts";
 import type { SubAgentStep } from "../types/response.ts";
 import type { AgentConfig } from "../types/agent.ts";
+import type { ModelSpec } from "../types/model.ts";
 import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
 import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
@@ -72,14 +73,14 @@ function unwrapModelInput(configModel: unknown): unknown {
  * `apiKey` / `baseUrl` / `thinkingLevel` inheritance.
  */
 export function resolveMainModel(configModel: AgentConfig["model"]): {
-  modelStringOrSpec: string | Record<string, unknown> | undefined;
+  modelStringOrSpec: string | ModelSpec | undefined;
   rawModel: unknown;
 } {
   const rawModel = unwrapModelInput(configModel) as
     | { model?: unknown; id?: unknown; provider?: unknown }
     | string
     | undefined;
-  let modelStringOrSpec: string | Record<string, unknown> | undefined;
+  let modelStringOrSpec: string | ModelSpec | undefined;
   if (rawModel && typeof rawModel === "object" && "model" in (rawModel as Record<string, unknown>)) {
     modelStringOrSpec = (rawModel as { model: string }).model as string;
   } else if (
@@ -88,11 +89,11 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
     "id" in (rawModel as Record<string, unknown>) &&
     "provider" in (rawModel as Record<string, unknown>)
   ) {
-    modelStringOrSpec = rawModel as Record<string, unknown>;
+    modelStringOrSpec = rawModel as unknown as ModelSpec;
   } else {
     modelStringOrSpec = (rawModel as string | undefined) || chosenModel();
   }
-  return { modelStringOrSpec: modelStringOrSpec as string | Record<string, unknown> | undefined, rawModel };
+  return { modelStringOrSpec, rawModel };
 }
 
 /**
@@ -100,18 +101,18 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
  * `dynamicSubagents.model ?? subagentModel ?? the saved or default worker model`.
  * Unwraps `ModelProviderInstance` / `ModelSpec` the same way.
  */
-export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | Record<string, unknown> | undefined {
+export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | ModelSpec | undefined {
   const dynModelRaw = dynModelRawInput as { model?: unknown; id?: unknown; provider?: unknown } | string | undefined;
-  let dynModel: string | Record<string, unknown> | undefined;
+  let dynModel: string | ModelSpec | undefined;
   if (dynModelRaw && typeof dynModelRaw === "object" && "model" in (dynModelRaw as Record<string, unknown>)) {
-    dynModel = (dynModelRaw as { model: string }).model as unknown as string | Record<string, unknown>;
+    dynModel = (dynModelRaw as { model: string }).model;
   } else if (
     dynModelRaw &&
     typeof dynModelRaw === "object" &&
     "id" in (dynModelRaw as Record<string, unknown>) &&
     "provider" in (dynModelRaw as Record<string, unknown>)
   ) {
-    dynModel = dynModelRaw as Record<string, unknown>;
+    dynModel = dynModelRaw as unknown as ModelSpec;
   } else {
     dynModel = (dynModelRaw as string | undefined) || chosenSubAgentModel();
   }
@@ -126,7 +127,7 @@ export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | R
 export function resolveDynamicModelInput(
   dynamicSubagents: unknown,
   subagentModel: unknown
-): string | Record<string, unknown> | undefined {
+): string | ModelSpec | undefined {
   const dynModelRaw = (dynamicSubagents as { model?: unknown } | undefined)?.model ?? subagentModel;
   return resolveDynamicWorkerModel(dynModelRaw);
 }

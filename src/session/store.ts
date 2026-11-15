@@ -235,7 +235,8 @@ export class SessionTelemetry {
   static fromSaved(
     saved?: PersistedAgentSession | { totals?: SessionTotals; metrics?: Record<string, number> } | null
   ): SessionTelemetry {
-    const raw: any = (saved as any)?.totals ?? (saved as any)?.metrics ?? null;
+    const legacy = saved as { totals?: SessionTotals; metrics?: Record<string, number> } | null | undefined;
+    const raw = legacy?.totals ?? legacy?.metrics ?? null;
     if (!raw) return new SessionTelemetry();
     // Legacy metrics files used {input,output,cacheRead,cacheWrite,reasoning,cost}
     // with identical keys — accept as-is.
@@ -418,8 +419,9 @@ export function stripRedundantRawArguments(messages: Message[]): Message[] {
     if (!Array.isArray((m as Message).content)) return m;
     let changed = false;
     const content = (m as Message).content as ContentPart[];
-    const next = content.map((p: any) => {
-      if (!p || p.type !== "tool_call" || typeof p.rawArguments !== "string") return p;
+    const next = content.map((part) => {
+      const p = part as Extract<ContentPart, { type: "tool_call" }>;
+      if (!p || p.type !== "tool_call" || typeof p.rawArguments !== "string") return part;
       try {
         const parsed: unknown = JSON.parse(p.rawArguments);
         if (stableStringify(parsed) === stableStringify(p.arguments ?? {})) {
@@ -448,7 +450,7 @@ function inlineBinaryMedia(messages: Message[]): Message[] {
     let changed = false;
     const content = (m.content as ContentPart[]).map((part) => {
       const p = part as unknown as Record<string, unknown>;
-      if (!p || typeof p.type !== "string" || !(MEDIA_PART_KEYS as readonly string[]).includes(p.type)) return part;
+      if (!p || typeof p.type !== "string" || !(MEDIA_PART_KEYS as readonly string[]).includes(p["type"])) return part;
       const value = p[p.type];
       if (!(value instanceof Uint8Array) && !(value instanceof ArrayBuffer)) return part;
       changed = true;
@@ -465,16 +467,13 @@ export function buildSessionData(
   agent: SessionAgentLike,
   telemetry?: SessionTelemetry | SessionTotals | null
 ): PersistedAgentSession {
-  const rawModel = agent.modelStringOrSpec as any;
+  const rawModel = agent.modelStringOrSpec as string | { id?: string } | null | undefined;
   const model = typeof rawModel === "string" ? rawModel : (rawModel?.id ?? String(rawModel ?? ""));
-  const rawSub = agent.subagentModel as any;
+  const rawSub = agent.subagentModel as string | { model?: string; id?: string } | null | undefined;
   const subagentModel = typeof rawSub === "string" ? rawSub : (rawSub?.model ?? rawSub?.id ?? undefined);
   const totals = telemetry instanceof SessionTelemetry ? telemetry.toJSON() : (telemetry ?? undefined);
-  const parentSessionId =
-    typeof (agent as any)?.parentSessionId === "string" ? ((agent as any).parentSessionId as string) : undefined;
-  const subagents = snapshotSubagents(
-    (agent as any)?.subagentTraces as Record<string, PersistedSubAgentTrace> | undefined
-  );
+  const parentSessionId = typeof agent.parentSessionId === "string" ? agent.parentSessionId : undefined;
+  const subagents = snapshotSubagents(agent.subagentTraces);
   const messages = inlineBinaryMedia(stripRedundantRawArguments(agent.context.messages));
   // Field order is the on-disk layout contract: identity → config →
   // systemPrompt → totals → messages → lineage/traces. `instructions` is
@@ -878,8 +877,7 @@ export function embeddedMedia(
 // Copy of the messages that keeps media bytes (structuredClone, else JSON); in: extractMediaToDir/resolveMediaPaths, out: a new array.
 function cloneMessages(messages: Message[]): Message[] {
   try {
-    const g: any = globalThis as any;
-    if (typeof g.structuredClone === "function") return g.structuredClone(messages);
+    return structuredClone(messages);
   } catch {}
   try {
     return JSON.parse(JSON.stringify(messages));
@@ -956,10 +954,10 @@ export function resolveMediaPaths(messages: Message[], sessionDir: string): Mess
   for (const msg of cloned) {
     if (!Array.isArray((msg as Message).content)) continue;
     for (const part of (msg as Message).content as ContentPart[]) {
-      const p: any = part as any;
-      if (!p || typeof p.type !== "string") continue;
-      if (!(MEDIA_PART_KEYS as readonly string[]).includes(p.type)) continue;
-      const v = p[p.type] as unknown;
+      const p = part as unknown as Record<string, unknown>;
+      if (!p || typeof p["type"] !== "string") continue;
+      if (!(MEDIA_PART_KEYS as readonly string[]).includes(p["type"])) continue;
+      const v = p[p["type"]] as unknown;
       if (typeof v === "string" && (v === "media" || v.startsWith("media/"))) {
         if (v.includes("..") || path.isAbsolute(v)) continue;
         const resolved = path.resolve(root, v);

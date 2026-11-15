@@ -104,7 +104,7 @@ function metaPath(): string {
 }
 
 // Reads and parses a JSON file, null when missing or damaged; in: the cache loaders, out: the parsed value.
-function readJsonFileSync(filePath: string): any {
+function readJsonFileSync(filePath: string): unknown {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf-8"));
   } catch {
@@ -215,7 +215,7 @@ export function getCatalogStatus(): CatalogStatus {
  * payloads, error envelopes, and other non-catalog JSON (e.g. from mocked
  * `fetch` in tests) BEFORE they can overwrite the good on-disk cache.
  */
-export function isValidCatalogPayload(data: unknown): data is Record<string, any> {
+export function isValidCatalogPayload(data: unknown): data is Record<string, unknown> {
   if (!data || typeof data !== "object" || Array.isArray(data)) return false;
   const entries = Object.entries(data as Record<string, unknown>);
   if (entries.length < 3) return false;
@@ -267,7 +267,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
   // Fetch from models.dev
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let freshData: Record<string, any>;
+  let freshData: Record<string, unknown>;
 
   // A failed refresh keeps whatever is on disk (it may be newer than memory when another process refreshed).
   const fallbackToDiskCache = (): void => {
@@ -312,7 +312,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
       fallbackToDiskCache();
       return getCatalogStatus();
     }
-    freshData = parsed as Record<string, any>;
+    freshData = parsed as Record<string, unknown>;
 
     // Never let a non-catalog payload (mocked fetch, proxy error page,
     // chat-completion stub) overwrite the good on-disk cache.
