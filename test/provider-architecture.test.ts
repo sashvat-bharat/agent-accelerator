@@ -1,7 +1,5 @@
 import { describe, it, expect } from "bun:test";
 import {
-  Agent,
-  tool,
   getProvider,
   resolveModel,
   GoogleInteractionsProvider,
@@ -15,7 +13,6 @@ import {
   OPENAI_MODELS,
   OPENROUTER_MODELS,
 } from "../src/index.ts";
-import { z } from "zod";
 // Minimalist core: legacy wire types removed; structural records used instead.
 type GoogleGenerateContentRequest = Record<string, any>;
 type OpenAIChatCompletionRequest = Record<string, any>;
@@ -23,7 +20,6 @@ type OpenRouterChatRequest = Record<string, any>;
 
 describe("Single-File Provider Architecture & Provider-Specific Types", () => {
   it("should have all providers defined in single .ts files and registered", () => {
-    const google = getProvider("google");
     const openai = getProvider("openai");
     const openrouter = getProvider("openrouter");
     const groq = getProvider("groq"); // Custom provider auto-created

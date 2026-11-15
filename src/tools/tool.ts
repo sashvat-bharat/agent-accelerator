@@ -72,6 +72,7 @@ export function normalizeMaxAttempts(config?: {
 }
 
 /** Complete configuration accepted by {@link tool}. */
+// biome-ignore lint/suspicious/noExplicitAny: `any` lets a record of tools with different input types be one `tools` value (`unknown` breaks it)
 export interface CreateToolOptions<TInput = any, TOutput = any> {
   /** Optional public name; record keys are used when omitted. */
   name?: string;
@@ -148,6 +149,7 @@ export interface CreateToolOptions<TInput = any, TOutput = any> {
  * @typeParam TInput Type inferred from the input schema.
  * @typeParam TOutput Value returned by the implementation.
  */
+// biome-ignore lint/suspicious/noExplicitAny: `any` lets a record of tools with different input types be one `tools` value (`unknown` breaks it)
 export function tool<TInput = any, TOutput = any>(
   options: CreateToolOptions<TInput, TOutput>
 ): ToolDefinition<TInput, TOutput> {

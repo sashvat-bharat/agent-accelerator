@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { OpenRouterChatCompletionsProvider } from "../src/providers/openrouter.ts";
 import { setConfigs } from "../src/index.ts";
 import {

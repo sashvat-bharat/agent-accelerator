@@ -22,8 +22,8 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
 
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": false
   },
   "include": ["src/**/*", "examples/**/*", "test/**/*"],

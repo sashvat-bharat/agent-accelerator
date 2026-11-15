@@ -594,6 +594,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
         const t = line.trim();
         if (!t) continue;
         try {
+          // biome-ignore lint/suspicious/noExplicitAny: legacy session lines come in several old shapes; read field by field
           const obj: any = JSON.parse(t);
           if (obj.type === "session") {
             sessionId = obj.id ?? obj.sessionId ?? sessionId;
@@ -642,6 +643,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
         ...(subagents ? { subagents } : {}),
       };
     }
+    // biome-ignore lint/suspicious/noExplicitAny: legacy session files come in several old shapes; read field by field
     const obj: any = JSON.parse(text);
     if (!obj || typeof obj !== "object") return null;
     // Version check — reject unknown versions, accept legacy shapes

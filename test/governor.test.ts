@@ -124,7 +124,7 @@ describe("Governor", () => {
 });
 
 // A fake provider that counts calls in flight and answers after a short delay.
-function fakeProvider(state: { now: number; peak: number }, mode: "generate" | "stream"): Provider {
+function fakeProvider(state: { now: number; peak: number }, _mode: "generate" | "stream"): Provider {
   const response = () =>
     new AgentResponse({
       text: "ok",

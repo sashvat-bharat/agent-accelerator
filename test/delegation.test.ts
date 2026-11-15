@@ -54,7 +54,6 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
   });
 
   it("should strictly throw SubAgentModelError when dynamicSubagents is enabled but no model is configured", () => {
-    const { SubAgentModelError } = require("../src/index.ts");
     expect(() => {
       new Agent({
         name: "Test_Agent",

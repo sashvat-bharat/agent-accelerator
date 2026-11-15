@@ -38,11 +38,13 @@ export interface ToolExecutionContext {
   stop: (reason: string) => never;
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: `any` lets a record of tools with different input types be one `tools` value (`unknown` breaks it)
 export type ToolExecuteFn<TInput = any, TOutput = any> = (
   input: TInput,
   context: ToolExecutionContext
 ) => Promise<TOutput> | TOutput;
 
+// biome-ignore lint/suspicious/noExplicitAny: `any` lets a record of tools with different input types be one `tools` value (`unknown` breaks it)
 export interface ToolDefinition<TInput = any, TOutput = any> {
   /** Optional public name; record keys are used when omitted. */
   name?: string;

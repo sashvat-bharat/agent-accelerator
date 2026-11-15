@@ -27,7 +27,7 @@
         "noUnusedFunctionParameters": "error"
       },
       "suspicious": {
-        "noExplicitAny": "warn",
+        "noExplicitAny": "error",
         "noConsole": "error"
       }
     }

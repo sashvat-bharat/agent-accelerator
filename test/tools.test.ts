@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { ToolDefinition } from "../src/index.ts";
-import { tool, toStandardToolDeclarations, zodToJsonSchema } from "../src/index.ts";
+import { tool, toStandardToolDeclarations } from "../src/index.ts";
 import { executeToolCalls } from "../src/tools/executor.ts";
 import { z } from "zod";
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { Agent, tool, telemetryBus, clearInteractionChains, TimeoutError } from "../src/index.ts";
-import { clearSessionRouting, clearEmittedWarnings } from "../src/providers.ts";
+import { clearSessionRouting } from "../src/providers.ts";
 import { z } from "zod";
 
 const ORIGINAL_WARN = console.warn;
