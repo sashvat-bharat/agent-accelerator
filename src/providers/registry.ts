@@ -4,6 +4,7 @@ import type { ThinkingLevel } from "../types/core.ts";
 import { OpenAICompatibleChatProvider } from "./openai-compat.ts";
 import { getModelFromCatalog } from "../models/catalog.ts";
 import { getEnv } from "../utils/env.ts";
+import { baseUrlSetting } from "../config/settings.ts";
 import { GoogleInteractionsProvider } from "./google.ts";
 import { OpenRouterChatCompletionsProvider } from "./openrouter.ts";
 import { OpenAIResponsesProvider } from "./openai.ts";
@@ -26,11 +27,11 @@ providerRegistry.set("openai", openaiProvider);
 
 // ---------------------------------------------------------------------------
 // Unified multi-provider layer (all native REST, no SDK transport)
-// Any `MODEL="<prefix>/<model-id>"` works without code changes as long as
-// `{PREFIX}_API_KEY` (+ optional `{PREFIX}_BASE_URL`) is set. Examples:
-//   MODEL="groq/llama-3.3-70b-versatile" + GROQ_API_KEY + GROQ_BASE_URL
-//   MODEL="cerebras/gpt-oss-120b"      + CEREBRAS_API_KEY + CEREBRAS_BASE_URL
-//   MODEL="ollama/qwen2.5-coder"        + OLLAMA_BASE_URL (key optional for local)
+// Any `<prefix>/<model-id>` model works without code changes as long as
+// `{PREFIX}_API_KEY` is set and the endpoint is in the `base_urls.<prefix>` setting. Examples:
+//   "groq/llama-3.3-70b-versatile" + GROQ_API_KEY + base_urls.groq
+//   "cerebras/gpt-oss-120b"        + CEREBRAS_API_KEY + base_urls.cerebras
+//   "ollama/qwen2.5-coder"         + base_urls.ollama (key optional for local)
 // ---------------------------------------------------------------------------
 const FIRST_CLASS = new Set(["google", "gemini", "openrouter", "openai"]);
 
@@ -44,7 +45,7 @@ function removedProviderMessage(id: string): string {
   return (
     `[Agent Accelerator] Provider "${id}" has been removed: OpenCode free models are ` +
     `harness-only and are no longer served over the API. Use google, openai, openrouter, or any ` +
-    `OpenAI-compatible endpoint ({PREFIX}_API_KEY + {PREFIX}_BASE_URL) instead.`
+    `OpenAI-compatible endpoint ({PREFIX}_API_KEY + the base_urls.<prefix> setting) instead.`
   );
 }
 
@@ -118,7 +119,7 @@ export function getProvider(id: ProviderId | string): Provider {
   if (provider) return provider;
   if (!key) {
     throw new ConfigError(
-      `Provider '' is not supported or not registered. Available first-support providers: google, openrouter, openai — or any custom prefix via {PREFIX}_API_KEY + {PREFIX}_BASE_URL.`
+      `Provider '' is not supported or not registered. Available first-support providers: google, openrouter, openai — or any custom prefix via {PREFIX}_API_KEY + the base_urls.<prefix> setting.`
     );
   }
   // Unified layer: lazily create a native OpenAI-compatible provider for any custom prefix.
@@ -151,7 +152,7 @@ export function resolveModel(model: string | ModelSpec): ResolvedModel {
 export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel {
   if (!model || (typeof model === "string" && !model.trim())) {
     throw new ConfigError(
-      "[Agent Accelerator] No model specified. Please specify 'model' in Agent configuration or set the MODEL environment variable."
+      "[Agent Accelerator] No model specified. Pass 'model' in the Agent configuration, or set a default list with setModels() or a saved choice with setModel()."
     );
   }
 
@@ -175,7 +176,7 @@ export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel 
     );
   };
 
-  const hasCustomOpenAIBase = !!(getEnv("OPENAI_BASE_URL") || getEnv("OPENAI_API_BASE"));
+  const hasCustomOpenAIBase = !!baseUrlSetting("openai");
 
   // Explicit prefix with slash — deterministic
   if (modelStr.includes("/")) {
@@ -200,9 +201,7 @@ export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel 
     if (!isExplicitOther && providerPrefix !== "openai") {
       const envName = providerPrefix.toUpperCase().replace(/[^A-Z0-9]/g, "_");
       const hasDedicatedEnv = !!(
-        getEnv(`${envName}_BASE_URL`) ||
-        getEnv(`${envName}_BASEURL`) ||
-        getEnv(`${envName}_API_BASE`) ||
+        baseUrlSetting(providerPrefix) ||
         getEnv(`${envName}_API_KEY`) ||
         getEnv(`${envName}_BASE_API_KEY`)
       );
@@ -279,7 +278,7 @@ export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel 
     };
   }
 
-  // When OPENAI_BASE_URL is set: trust user completely
+  // When the `base_urls.openai` setting is set: trust the program completely
   if (hasCustomOpenAIBase) {
     const p = getProvider("openai");
     const spec = p.getModel(modelStr) || getModelFromCatalog(modelStr, modelStr);

@@ -9,7 +9,7 @@
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   maxTurns: 12, // 0 or omitted = unlimited
   limits: {
     deadlineMs: 120_000, // whole run
@@ -78,7 +78,7 @@ Sources: [OpenAI, Background mode](https://developers.openai.com/api/docs/guides
 
 **`usageLimit` is the spending cap of a chat.** It adds up every model call of the agent and of all its workers (the `subagents` tool, `agent.workers` at any depth, fixed `subagents`) and never resets, so it is the cap to use for "this conversation may cost at most $5". When the total reaches `maxCostUsd` or `maxTotalTokens`, the next model call anywhere in the chat throws a `BudgetExceededError` ("Usage limit reached"); a worker that is asked to run after that answers with the same message and never reaches the provider. A persisted chat starts from what its saved sessions already spent: continue it the usual way (`importSession(loadSessionDir(...).session)`) and the count carries on. Models with unknown pricing add tokens but $0 to the cost, like `budget`. Scheduled actions are not part of the chat and never count.
 
-**Defaults for every agent.** `configure({ usageLimit: { maxCostUsd: 5 }, scheduledActionBudget: { maxCostUsd: 0.5 } })` (call it once at startup, like `setHome()`) sets the two caps for every agent you build afterwards, and so do the env vars `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS`, `AGENT_ACCEL_SCHEDULED_BUDGET_USD` and `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` (a number above 0; anything else throws a `ConfigError` naming the variable). Precedence, field by field: the Agent's own config, then `configure()`, then the env var, then no cap. Each `configure()` call replaces the previous one (`configure({})` clears it). Workers and scheduled runs the SDK builds itself never take these defaults: a chat worker joins its parent's cap and a scheduled run has `scheduledActionBudget`.
+**Defaults for every agent.** The settings `usage_limit` and `scheduled_action_budget` (`{ max_cost_usd?, max_total_tokens? }`, see [Settings in code](#settings-in-code-and-who-may-change-them)) cap every agent you build, e.g. `setConfigs({ values: { usage_limit: { max_cost_usd: 5 }, scheduled_action_budget: { max_cost_usd: 0.5 } } })` once at startup. Precedence, field by field: the Agent's own config, then the setting (the user's value when the program lets them change it, else yours), then no cap. Workers and scheduled runs the SDK builds itself never take these settings: a chat worker joins its parent's cap and a scheduled run has `scheduledActionBudget`. (`configure()` and the `AGENT_ACCEL_*` env vars of earlier releases were removed in 0.7.0.)
 
 A scheduled-action run is capped by `scheduledActionBudget` only. Scheduled actions are detached from the chat, so a run never borrows the agent's own `budget`, the chat workers' `workerBudget` or the chat's `usageLimit`; with no `scheduledActionBudget` a scheduled run has no cap.
 
@@ -86,20 +86,20 @@ Unlimited also means unbounded cost and memory when a model keeps starting worke
 
 ### Concurrency limit
 
-Many agents, workers and scheduled runs can ask a provider for answers at the same moment, and providers answer a flood with 429. Set how many provider calls may run at once, in code, once at startup:
+Many agents, workers and scheduled runs can ask a provider for answers at the same moment, and providers answer a flood with 429. Set how many provider calls may run at once, in the `concurrency` setting, once at startup:
 
 ```ts
-import { configure, getConcurrencyStatus } from "agent-accelerator";
+import { setConfigs, getConcurrencyStatus } from "agent-accelerator";
 
-configure({ concurrency: { maxRequests: 8, perProvider: { google: 4 } } });
+setConfigs({ values: { concurrency: { max_requests: 8, per_provider: { google: 4 } } } });
 console.log(getConcurrencyStatus()); // { limited, active, waiting, byProvider, paused }
 ```
 
-- Off until you set it (no limit). `maxRequests` is the limit across every provider, `perProvider` one limit per provider id (`google`, `openai`, `openrouter`, or a custom prefix). Whole numbers, 1 or more; a wrong value throws a `ConfigError`.
+- Off until you set it (no limit). `max_requests` is the limit across every provider, `per_provider` one limit per provider id (`google`, `openai`, `openrouter`, or a custom prefix). Whole numbers, 1 or more; a wrong value throws a `ConfigError` when the setting is set.
 - It covers every model call of every agent in the process, workers and scheduled runs included. A call over the limit waits in line, in the order it arrived. A call that waits only for its own provider's limit never holds back calls to other providers.
 - A slot is held from the request until the answer ends, the call fails or the stream is cancelled. Time spent waiting does not count toward `requestTimeoutMs`, `firstByteTimeoutMs` or `streamIdleTimeoutMs`, which start once the call really begins. Aborting a run (signal, `interrupt()`) also ends its wait.
 - A call that fails with HTTP 429 and a `Retry-After` pauses that provider: no new call to it starts until the wait has passed (never more than 60 s). Calls already running are not touched and other providers keep going.
-- `configure()` replaces the previous call, so `configure({})` removes the limit. It is one setting for the whole process, not per agent.
+- A new `setConfigs` replaces the previous one, so leaving `concurrency` out removes the limit; if the program lets the user change it, `setConfig("concurrency", ...)` takes effect at once. It is one setting for the whole process, not per agent.
 - Events on `telemetryBus`: `concurrency.queued` (a call had to wait: `provider`, `waiting`, `active`, `paused`) and `concurrency.paused` (`provider`, `ms`, `waiting`).
 
 ### Settings in code and who may change them
@@ -134,7 +134,7 @@ setConfig("usage_limit", { max_cost_usd: 1000 }); // throws SettingNotEditableEr
 | Key | Value |
 |---|---|
 | `usage_limit`, `scheduled_action_budget` | `{ max_cost_usd?, max_total_tokens? }` (numbers above 0, at least one), the same caps as the Agent options `usageLimit` and `dynamicSubagents.scheduledActionBudget` |
-| `concurrency` | `{ max_requests?, per_provider?: { google: 4 } }` (whole numbers >= 1), the same limit as `configure({ concurrency })` |
+| `concurrency` | `{ max_requests?, per_provider?: { google: 4 } }` (whole numbers >= 1), the limit described in [Concurrency limit](#concurrency-limit) |
 | `catalog_refresh` | `"on"` or `"off"` (automatic model-catalog refresh) |
 | `catalog_cache_dir`, `models_dev_sha256` | the catalog cache folder, and a 64-hex checksum pin for the download |
 | `base_urls` | `{ openai: "https://host/v1", ollama: "http://localhost:11434/v1" }`, an http(s) endpoint per provider or custom prefix |
@@ -209,7 +209,7 @@ for (const w of workers) console.log(w.id, w.status, w.turns, w.tokens.thinking,
 ```ts
 import { Agent, BudgetExceededError, ProviderError, TimeoutError, formatErrorPlain, isAbortError } from "agent-accelerator";
 
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite", budget: { maxCostUsd: 0.01 } });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite", budget: { maxCostUsd: 0.01 } });
 
 try {
   await agent.run("Write a long essay.", { signal: AbortSignal.timeout(30_000) });

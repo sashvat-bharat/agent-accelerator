@@ -4,6 +4,7 @@ import {
   resolveModel,
   ModelProvider,
   getProvider,
+  setConfigs,
 } from "../src/index.ts";
 import {
   mapThinkingLevelToOpenAI,
@@ -101,8 +102,8 @@ describe("OpenAI Provider & Responses API Compatibility", () => {
     expect(inst.thinkingLevel).toBe("medium");
   });
 
-  test("should route by changing OPENAI_BASE_URL and OPENAI_BASE_API_KEY (native /responses)", async () => {
-    process.env.OPENAI_BASE_URL = "https://custom-proxy.internal/v1";
+  test("should route by the base_urls.openai setting and OPENAI_BASE_API_KEY (native /responses)", async () => {
+    setConfigs({ values: { catalog_refresh: "off", base_urls: { openai: "https://custom-proxy.internal/v1" } }, editable: [] });
     process.env.OPENAI_BASE_API_KEY = "sk-custom-secret-key";
 
     const provider = new OpenAIResponsesProvider();

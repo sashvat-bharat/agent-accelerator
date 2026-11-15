@@ -16,7 +16,7 @@
  */
 import { ConfigError, SettingNotEditableError } from "../types/errors.ts";
 import { currentUserFile, invalidateUserFile, saveUserFile, warnOnce, configsPath } from "./user-file.ts";
-import { resolveHome } from "../utils/home.ts";
+import { onHomeChange, resolveHome } from "../utils/home.ts";
 
 /** One value-checking rule: returns the cleaned value, or a one-line problem. */
 type Check = (v: unknown) => { value: unknown } | { problem: string };
@@ -94,7 +94,8 @@ const SETTINGS = {
       }
       if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:"))
         return bad(`base_urls.${name} must be an http(s) URL`);
-      out[name.trim().toLowerCase()] = (url as string).trim();
+      const key = name.trim().toLowerCase();
+      out[key === "gemini" ? "google" : key] = (url as string).trim(); // the SDK routes `gemini/...` to `google`
     }
     return ok(out);
   },
@@ -121,6 +122,9 @@ const SETTINGS = {
 /** The name of one setting. */
 export type SettingKey = keyof typeof SETTINGS;
 const KEYS = Object.keys(SETTINGS) as SettingKey[];
+
+/** Every setting name (tests build "everything editable" policies from it). Internal. */
+export const SETTING_KEYS: readonly SettingKey[] = KEYS;
 
 /** The developer's `configs.json`: values plus the keys the end user may change. */
 export interface SettingsJson {
@@ -195,6 +199,19 @@ export function parseConfigs(json: unknown): Policy {
   return freeze({ values, editable });
 }
 
+const changeListeners = new Set<() => void>();
+
+/** Runs `fn` whenever a setting may have changed (`setConfigs`, `setConfig`, a new home): readers that cache a value (the catalog's folder, the concurrency limit) re-read it. Internal. */
+export function onSettingsChange(fn: () => void): void {
+  changeListeners.add(fn);
+}
+
+// Tells the cached readers that settings may have changed; in: setConfigs, setConfig, resetConfigs and a home change, out: the listeners.
+function changed(): void {
+  for (const fn of changeListeners) fn();
+}
+onHomeChange(changed);
+
 let policy: Policy | undefined;
 // Bumped whenever the developer's policy changes, so the checked user values are rebuilt.
 let generation = 0;
@@ -208,6 +225,7 @@ let memo: { file: object; generation: number; values: Map<SettingKey, unknown> }
 export function setConfigs(json: unknown): void {
   policy = parseConfigs(json);
   generation++;
+  changed();
 }
 
 // The user's saved setting values that pass the checks (known key, valid value, not hidden), warning once about each that does not; memoized per file version and policy; in: getSetting and getConfigs, out: key -> frozen value.
@@ -283,11 +301,13 @@ export function setConfig(key: string, value: unknown): void {
     );
   if (value === null || value === undefined) {
     saveUserFile((f) => void delete f.settings[k]);
+    changed();
     return;
   }
   const r = checkValue(k, value);
   if ("problem" in r) throw new ConfigError(`[Agent Accelerator] Invalid value for ${r.problem}`);
   saveUserFile((f) => void (f.settings[k] = r.value));
+  changed();
 }
 
 /** Forgets the developer's settings and what was read from the user's file (tests only; not exported from the barrel). The file itself is not touched. */
@@ -295,4 +315,34 @@ export function resetConfigs(): void {
   policy = undefined;
   generation++;
   invalidateUserFile();
+  changed();
+}
+
+/** The base URL set for a provider or custom prefix (`base_urls`), or `undefined`. */
+export function baseUrlSetting(provider: string): string | undefined {
+  const urls = getSetting("base_urls") as Record<string, string> | undefined;
+  const name = provider.trim().toLowerCase();
+  return urls?.[name === "gemini" ? "google" : name];
+}
+
+/** The `openrouter` settings (`{}` when unset): provider routing and request options. */
+export function openRouterSetting(): Readonly<Record<string, unknown>> {
+  return (getSetting("openrouter") as Record<string, unknown> | undefined) ?? {};
+}
+
+/** The `compat` settings (`{}` when unset): opt-outs for strict OpenAI-compatible endpoints. */
+export function compatSetting(): { no_stream_options?: boolean; no_session_headers?: boolean } {
+  return (getSetting("compat") as { no_stream_options?: boolean; no_session_headers?: boolean } | undefined) ?? {};
+}
+
+/** A spending cap setting as the Agent options spell it, or `undefined` when unset. */
+export function capSetting(
+  key: "usage_limit" | "scheduled_action_budget"
+): { maxCostUsd?: number; maxTotalTokens?: number } | undefined {
+  const v = getSetting(key) as { max_cost_usd?: number; max_total_tokens?: number } | undefined;
+  if (!v) return undefined;
+  return {
+    ...(v.max_cost_usd !== undefined ? { maxCostUsd: v.max_cost_usd } : {}),
+    ...(v.max_total_tokens !== undefined ? { maxTotalTokens: v.max_total_tokens } : {}),
+  };
 }

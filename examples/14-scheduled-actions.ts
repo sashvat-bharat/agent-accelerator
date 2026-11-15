@@ -25,7 +25,7 @@
  * rounded UP to the next whole minute: the run starts at least 1 minute from
  * now and delivers at least 2 minutes from now.
  *
- * Needs: MODEL + SUB_AGENT_MODEL + provider key (see .env.example). Costs live
+ * Needs: a provider key (see .env.example); models come from examples/models.json. Costs live
  * tokens. Files go to ./.agent-accel/demo/ (gitignored): `scheduled/` holds
  * the actions and their results (the demo removes what it creates) and `telemetry/`
  * keeps the event log (`tool.*`, `scheduled_action.*`) for you to inspect.
@@ -37,7 +37,7 @@
 import * as fs from "node:fs";
 import { Agent, tool, telemetryBus } from "agent-accelerator";
 import { z } from "zod";
-import { fail } from "./_shared";
+import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 const C = "\x1b[36m";
 const G = "\x1b[32m";
@@ -50,8 +50,7 @@ const info = (t: string) => console.log(`${B}${t}${R}`);
 const ok = (t: string) => console.log(`${G}${t}${R}`);
 
 const QUICK = process.argv.includes("--quick");
-const MODEL = process.env.MODEL ?? "google/gemini-3.5-flash-lite";
-const WORKER_MODEL = process.env.SUB_AGENT_MODEL ?? MODEL;
+const WORKER_MODEL = SUB_AGENT_MODEL;
 // Isolated from any real .agent-accel/ folder you may have.
 const HOME = ".agent-accel/demo";
 const LEAD_MS = 60_000; // start working 1 minute before delivery

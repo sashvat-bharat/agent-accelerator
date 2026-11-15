@@ -12,7 +12,7 @@ import type { PromptOverrides } from "../prompts/prompts.ts";
 // Canonical homes (one place per setting):
 // - Worker model: `dynamicSubagents.model` only. Top-level `subagentModel`
 //   is a deprecated alias (still honored: dynamicSubagents.model ??
-//   subagentModel ?? SUB_AGENT_MODEL ?? parent model).
+//   subagentModel ?? saved or default worker model).
 // - Session identity: agent-level `sessionId` only (per-run `sessionId`
 //   selects a named session entry).
 // - Model identity: `ModelRef` = string (`provider/model`) | catalog
@@ -146,7 +146,7 @@ export interface AgentConfig {
   resume?: "automatic" | "explicit";
   /**
    * Folder for everything Agent Accelerator writes to disk (`sessions/`,
-   * `scheduled/`, `telemetry/`). Defaults to `setHome()`, then the `AGENT_ACCEL_HOME` env var, then `.agent-accel/` in the working directory.
+   * `scheduled/`, `telemetry/`). Defaults to `setHome()`, then `.agent-accel/` in the working directory (set in code only).
    * An explicit `persist.dir` / `persist.file` still wins for sessions.
    */
   home?: string;
@@ -314,7 +314,7 @@ export interface DynamicSubagentsConfig {
    * default: without it no tool, clock or timer exists. Needs a worker model.
    */
   allowScheduledActions?: boolean;
-  /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then `SUB_AGENT_MODEL` env, then the parent model. */
+  /** Developer-only worker model override. Never choosable by the Main Agent LLM. Falls back to top-level `subagentModel`, then the saved choice or default worker model (`setSubAgentModel` / `setModels`). */
   model?: string | ModelSpec | ModelProviderInstance;
   /** Max workers that may be open at once on this agent (the model must close one before spawning another). Default: no limit; set a whole number >= 1 to cap it. */
   maxSpawn?: number;

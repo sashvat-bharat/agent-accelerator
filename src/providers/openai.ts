@@ -45,7 +45,8 @@ import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey, getEnv } from "../utils/env.ts";
+import { getApiKey } from "../utils/env.ts";
+import { baseUrlSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { clampCacheKey } from "../utils/cache.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
@@ -176,16 +177,9 @@ const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 // Request building (canonical -> Responses)
 // ---------------------------------------------------------------------------
 
-// Endpoint from the option, OPENAI_BASE_URL/OPENAI_API_BASE, else api.openai.com; in: each request, out: the base URL without a trailing slash.
+// Endpoint from the option, the `base_urls.openai` setting, else api.openai.com; in: each request, out: the base URL without a trailing slash.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return (
-    options?.baseUrl ||
-    options?.env?.["OPENAI_BASE_URL"] ||
-    options?.env?.["OPENAI_API_BASE"] ||
-    getEnv("OPENAI_BASE_URL") ||
-    getEnv("OPENAI_API_BASE") ||
-    DEFAULT_BASE_URL
-  ).replace(/\/+$/, "");
+  return (options?.baseUrl || baseUrlSetting("openai") || DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
 // Key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
@@ -700,7 +694,7 @@ export class OpenAIResponsesProvider implements Provider {
     const { message, code, errorType, raw } = readErrorPayload(bodyText);
     const hint =
       status === 401
-        ? " Check OPENAI_API_KEY (no quotes/spaces, correct provider), OPENAI_BASE_URL, and that the key is loaded (bun --env-file=.env.local)."
+        ? " Check OPENAI_API_KEY (no quotes/spaces, correct provider), the base_urls.openai setting, and that the key is loaded (bun --env-file=.env.local)."
         : "";
     const fullMessage = `${message}${hint}`;
     const err: Record<string, unknown> & Error = new Error(fullMessage) as Record<string, unknown> & Error;

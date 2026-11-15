@@ -21,7 +21,7 @@ const lookup_order = tool({
 });
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   tools: { lookup_order }, // record key = tool name (or use an array with `name`)
 });
 
@@ -69,7 +69,7 @@ Text parts become the call's result (what every provider sees). Media (bytes, a 
 ```ts
 import { Agent } from "agent-accelerator";
 
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite" });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite" });
 const abort = new AbortController();
 
 const res = await agent.run("Explain event loops.", {
@@ -94,7 +94,7 @@ Three ways: `agent.stream(prompt)` (iterate events), `agent.run(prompt, { stream
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   midSession: { whenBusy: "auto", maxQueued: 10 },
 });
 

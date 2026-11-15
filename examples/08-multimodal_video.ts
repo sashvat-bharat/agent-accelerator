@@ -1,5 +1,5 @@
 import { Agent } from "agent-accelerator";
-import { fail } from "./_shared";
+import { fail, MODEL } from "./_shared";
 
 // Video input needs a video-capable model: a Gemini model, or an OpenRouter
 // model with video support (Chat Completions `video_url`; free routes may
@@ -8,7 +8,7 @@ import { fail } from "./_shared";
 const agent = new Agent({
   name: "Watcher",
   instructions: "Describe what you see concisely.",
-  model: process.env.MODEL,
+  model: MODEL,
   fileAccess: { roots: ["./examples/files"] },
 });
 

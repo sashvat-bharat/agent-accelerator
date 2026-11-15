@@ -11,8 +11,8 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 |---|---|---|
 | `name`, `description` | Identity; `description` is shown to a parent when this agent is a sub-agent | [Multi-agent](guides/multi-agent.md) |
 | `instructions` | System prompt. Keep stable | [Agents](guides/agents-and-models.md) |
-| `model` | Model string, `ModelSpec` or `ModelProvider.*` instance. Falls back to env `MODEL` | [Agents](guides/agents-and-models.md) |
-| `subagentModel` | Default worker model (then env `SUB_AGENT_MODEL`) | [Multi-agent](guides/multi-agent.md) |
+| `model` | Model string, `ModelSpec` or `ModelProvider.*` instance. Without it, the saved choice or the list default (`setModel` / `setModels`) | [Agents](guides/agents-and-models.md) |
+| `subagentModel` | Default worker model (then the saved or default worker model) | [Multi-agent](guides/multi-agent.md) |
 | `apiKey`, `baseUrl`, `headers` | Per-agent connection overrides | [Agents](guides/agents-and-models.md) |
 | `tools` | Record `{ name: tool }` or array of tools | [Tools](guides/tools-and-streaming.md) |
 | `subagents` | Fixed sub-agents (`Agent`s or `{ name, description, agent }`) | [Multi-agent](guides/multi-agent.md) |
@@ -24,7 +24,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `stateless` | Clear history around every run | [Agents](guides/agents-and-models.md) |
 | `midSession` | `{ mode \| whenBusy: "steer" \| "queue" \| "auto", maxQueued }` | [Tools](guides/tools-and-streaming.md) |
 | `resume` | `"automatic"` (default) or `"explicit"`: whether a run a crash cut off continues when the Agent is constructed (needs `persist: { dir }` and the same `sessionId`). See `agent.resume()` / `agent.interrupted()` | [Data](guides/data-and-media.md) |
-| `persist`, `home` | Session saving; base folder (`setHome(dir)` / `AGENT_ACCEL_HOME` / `.agent-accel/`). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
+| `persist`, `home` | Session saving; base folder (`setHome(dir)` / `.agent-accel/`, set in code only). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
 | `toolChoice` | `"auto"`, `"none"`, `"required"`, `"validated"` (Google), `{ tool }` | [Tools](guides/tools-and-streaming.md) |
 | `maxOutputTokens` | Output-token cap for one model call | [Agents](guides/agents-and-models.md) |
 | `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
@@ -125,7 +125,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `worker.invalid` | A saved `worker.json` is damaged and that worker is skipped |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
 | `config.file_invalid`, `config.file_restored`, `config.file_ignored_key`, `config.saved_model_ignored` | `<home>/configs.json` was not valid or had another version (`data.reason`), was restored from its backup, had an entry that is unknown, invalid or hidden (`data.key`, `data.reason`), or names a saved model that left the program's list |
-| `concurrency.queued` | A provider call had to wait for a free slot (`provider`, `waiting`, `active`, `paused`); only with `configure({ concurrency })` |
+| `concurrency.queued` | A provider call had to wait for a free slot (`provider`, `waiting`, `active`, `paused`); only with the `concurrency` setting |
 | `concurrency.paused` | A provider answered 429 with a `Retry-After`: no new calls to it for `ms` (`provider`, `ms`, `waiting`) |
 | `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle; payloads in [Scheduled action files](scheduled-action-files.md#events) |
 
@@ -152,28 +152,26 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 
 ## Environment variables
 
+Since 0.7.0 the environment holds **API keys and nothing else**. Every other setting is set in code (see [Settings in code](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them)); the old `MODEL`, `SUB_AGENT_MODEL`, `*_BASE_URL`, `OPENROUTER_*`, `COMPAT_*`, `AGENT_ACCEL_*`, `AGENT_CACHE_DIR`, `AGENT_CATALOG_REFRESH` and `MODELS_DEV_SHA256` variables are no longer read.
+
 | Variable | Purpose |
 |---|---|
-| `MODEL` (alias `MODEL_NAME`) | Default model when `model` is not passed |
-| `SUB_AGENT_MODEL` | Default worker model |
 | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY` | Google key (checked in this order of preference) |
-| `GOOGLE_BASE_URL` | Override the Google endpoint |
 | `OPENAI_API_KEY`, `OPENAI_BASE_API_KEY` | OpenAI key |
-| `OPENAI_BASE_URL`, `OPENAI_API_BASE` | OpenAI endpoint; when set, a bare `MODEL` routes to OpenAI |
-| `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` | OpenRouter key and endpoint |
-| `OPENROUTER_ORDER`, `_ONLY`, `_IGNORE`, `_ALLOW_FALLBACKS`, `_REQUIRE_PARAMETERS`, `_ZDR`, `_DATA_COLLECTION`, `_SORT` | OpenRouter provider routing (`provider.*` in the request); see the OpenRouter section of the README |
-| `OPENROUTER_PARALLEL_TOOL_CALLS`, `OPENROUTER_REASONING_EXCLUDE`, `OPENROUTER_USER` | OpenRouter `parallel_tool_calls`, `reasoning.exclude` and `user` |
-| `<PREFIX>_API_KEY`, `<PREFIX>_BASE_URL` | Any OpenAI-compatible endpoint (for `PREFIX/model`), e.g. `GROQ_API_KEY` and `GROQ_BASE_URL`. Base URL is required |
-| `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
-| `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |
-| `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | Code only (no env var): limit provider calls in flight, see [Safety](guides/safety-and-ops.md#concurrency-limit) |
-| `setConfigs(json)`, `getConfigs()`, `setConfig(key, value)`, `setModel(id)`, `setSubAgentModel(id)` | Code only: the program's settings from the exact `configs.json` shape (`values` plus an `editable` list; hidden unless listed). The user's changes and model choice are saved in `<home>/configs.json`. See [Safety](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) |
-| `setModels(json)`, `listModels()` | Code only: the allowed-models list from the exact `models.json` shape, see [Agents and models](guides/agents-and-models.md#the-list-of-allowed-models); a model outside it throws `ModelNotAllowedError` at every run start, in the constructor and in `importSession` |
-| `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS` | Default `usageLimit` for every agent you build (see `configure()` and the safety guide) |
-| `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |
-| `AGENT_CATALOG_REFRESH=off` | Disable automatic model-catalog refresh |
-| `AGENT_ACCEL_HOME` | The single folder for everything the SDK stores (default `.agent-accel/`; `setHome(dir)` does the same in code) |
-| `AGENT_CACHE_DIR` | Overrides only the model catalog cache folder (default `<home>/catalog`, one `<provider>/models.json` per provider plus `meta.json`) |
-| `MODELS_DEV_SHA256` | Optional checksum pin for the downloaded catalog |
+| `OPENROUTER_API_KEY` | OpenRouter key |
+| `<PREFIX>_API_KEY`, `<PREFIX>_BASE_API_KEY` | Key of any OpenAI-compatible endpoint (for `PREFIX/model`), e.g. `GROQ_API_KEY`; local endpoints may omit it |
 
-Library functions read `process.env` only. Pass `env: { ... }` in config or run options to override per agent.
+Where the old variables went:
+
+| Was | Now |
+|---|---|
+| `MODEL`, `MODEL_NAME`, `SUB_AGENT_MODEL` | `setModels({ default: { model, sub_agent_model }, providers })`, and the user's choice with `setModel(id)` / `setSubAgentModel(id)` |
+| `GOOGLE_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENROUTER_BASE_URL`, `<PREFIX>_BASE_URL` | setting `base_urls: { google, openai, openrouter, <prefix> }` (a bare model id routes to OpenAI when `base_urls.openai` is set) |
+| `OPENROUTER_ORDER`, `_ONLY`, `_IGNORE`, `_ALLOW_FALLBACKS`, `_REQUIRE_PARAMETERS`, `_ZDR`, `_DATA_COLLECTION`, `_SORT`, `_PARALLEL_TOOL_CALLS`, `_REASONING_EXCLUDE`, `_USER` | setting `openrouter: { order, only, ignore, allow_fallbacks, require_parameters, zdr, data_collection, sort, parallel_tool_calls, reasoning_exclude, user }` |
+| `COMPAT_NO_STREAM_OPTIONS`, `COMPAT_NO_SESSION_HEADERS` | setting `compat: { no_stream_options, no_session_headers }` |
+| `AGENT_ACCEL_USAGE_LIMIT_USD` / `_TOKENS`, `AGENT_ACCEL_SCHEDULED_BUDGET_USD` / `_TOKENS`, `configure({ usageLimit, scheduledActionBudget })` | settings `usage_limit` and `scheduled_action_budget` (`{ max_cost_usd, max_total_tokens }`) |
+| `configure({ concurrency })` | setting `concurrency: { max_requests, per_provider }`; `getConcurrencyStatus()` is unchanged |
+| `AGENT_CATALOG_REFRESH=off`, `AGENT_CACHE_DIR`, `MODELS_DEV_SHA256` | settings `catalog_refresh: "off"`, `catalog_cache_dir`, `models_dev_sha256` |
+| `AGENT_ACCEL_HOME` | `setHome(dir)` or an Agent's `home` (code only) |
+
+Library functions read `process.env` only for keys. Pass `env: { ... }` in config or run options to override a key per agent.

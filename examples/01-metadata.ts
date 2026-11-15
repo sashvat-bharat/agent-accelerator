@@ -14,6 +14,7 @@
 
 import { Agent, tool, getModelFromCatalog, getModelThinkingInfo, resolveModel } from "agent-accelerator";
 import { z } from "zod";
+import { MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 // ---------------------------------------------------------------------------
 // 1. Tool Setup to demonstrate Tool Calls & Results Metadata
@@ -45,7 +46,7 @@ const get_system_metrics = tool({
 // ---------------------------------------------------------------------------
 // 2. Agent Initialization
 // ---------------------------------------------------------------------------
-const modelToUse = process.env.MODEL || "google/gemini-3.5-flash-lite";
+const modelToUse = MODEL;
 
 let agent: Agent;
 try {
@@ -56,7 +57,7 @@ try {
     model: modelToUse,
     dynamicSubagents: {
       enabled: true,
-      model: process.env.SUB_AGENT_MODEL || "google/gemini-3.5-flash-lite",
+      model: SUB_AGENT_MODEL,
       maxSpawn: 4,
     },
     thinking: (process.env.THINKING_LEVEL as any) ?? "medium",

@@ -280,15 +280,9 @@ describe("scheduled actions config", () => {
   });
 
   it("throws SubAgentModelError when enabled without a worker model", () => {
-    const prev = process.env.SUB_AGENT_MODEL;
-    delete process.env.SUB_AGENT_MODEL;
-    try {
-      expect(
-        () => new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1", dynamicSubagents: { enabled: false, allowScheduledActions: true } })
-      ).toThrow(SubAgentModelError);
-    } finally {
-      if (prev) process.env.SUB_AGENT_MODEL = prev;
-    }
+    expect(
+      () => new Agent({ model: "groq/test-model", apiKey: "k", baseUrl: "https://example.test/v1", dynamicSubagents: { enabled: false, allowScheduledActions: true } })
+    ).toThrow(SubAgentModelError);
   });
 
   it("adds scheduled_actions + get_datetime when on, and keeps a user-defined get_datetime", () => {

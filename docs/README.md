@@ -21,7 +21,7 @@ Agent Accelerator (`agent-accelerator`) gives you **one `Agent` class** over Goo
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   instructions: "You are a concise assistant.",
 });
 

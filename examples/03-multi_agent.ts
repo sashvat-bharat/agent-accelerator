@@ -2,17 +2,17 @@
 
 import * as fs from "node:fs";
 import { Agent } from "agent-accelerator";
-import { fail } from "./_shared";
+import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 let agent: Agent;
 try {
   agent = new Agent({
     name: "Editorial Lead",
     instructions: fs.readFileSync(new URL("./prompts/SYSTEM_PROMPT_AGENT.md", import.meta.url), "utf8"),
-    model: process.env.MODEL,
+    model: MODEL,
     dynamicSubagents: {
       enabled: true,
-      model: process.env.SUB_AGENT_MODEL,
+      model: SUB_AGENT_MODEL,
       maxSpawn: 3,
       thinkingLevel: (process.env.SUB_AGENT_THINKING_LEVEL as any) ?? "low",
     },

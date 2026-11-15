@@ -3,7 +3,6 @@ import type { SubAgentStep } from "../types/response.ts";
 import type { AgentConfig } from "../types/agent.ts";
 import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
-import { getModel, getSubModel } from "../utils/env.ts";
 import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 import { resolveModelUnchecked } from "../providers/registry.ts";
 import { ConfigError } from "../types/errors.ts";
@@ -91,14 +90,14 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
   ) {
     modelStringOrSpec = rawModel as Record<string, unknown>;
   } else {
-    modelStringOrSpec = (rawModel as string | undefined) || chosenModel() || getModel();
+    modelStringOrSpec = (rawModel as string | undefined) || chosenModel();
   }
   return { modelStringOrSpec: modelStringOrSpec as string | Record<string, unknown> | undefined, rawModel };
 }
 
 /**
  * Resolves the dynamic worker model exactly like `Agent` ctor:
- * `dynamicSubagents.model ?? subagentModel ?? SUB_AGENT_MODEL`.
+ * `dynamicSubagents.model ?? subagentModel ?? the saved or default worker model`.
  * Unwraps `ModelProviderInstance` / `ModelSpec` the same way.
  */
 export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | Record<string, unknown> | undefined {
@@ -114,7 +113,7 @@ export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | R
   ) {
     dynModel = dynModelRaw as Record<string, unknown>;
   } else {
-    dynModel = (dynModelRaw as string | undefined) || chosenSubAgentModel() || (getSubModel() as string | undefined);
+    dynModel = (dynModelRaw as string | undefined) || chosenSubAgentModel();
   }
   return dynModel;
 }
@@ -122,7 +121,7 @@ export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | R
 /**
  * Resolves the combined dynamic worker model input
  * (`dynamicSubagents.model ?? subagentModel`) exactly like `Agent` ctor,
- * including the `SUB_AGENT_MODEL` fallback.
+ * including the saved / default worker model fallback.
  */
 export function resolveDynamicModelInput(
   dynamicSubagents: unknown,
@@ -134,18 +133,18 @@ export function resolveDynamicModelInput(
 
 /**
  * Resolves a `SubAgent` model exactly like `SubAgent` ctor:
- * `config.model ?? SUB_AGENT_MODEL ?? MODEL`, throwing with the same message
+ * `config.model ?? saved or default worker model ?? saved or default main model`, throwing with the same message
  * when nothing resolves. Kept here so `Agent` / `SubAgent` share one chain.
  */
 export function resolveSubAgentModel(config: {
   name?: string;
   model?: AgentConfig["model"];
 }): NonNullable<AgentConfig["model"]> {
-  const resolvedModel = config.model ?? chosenSubAgentModel() ?? getSubModel() ?? chosenModel() ?? getModel();
+  const resolvedModel = config.model ?? chosenSubAgentModel() ?? chosenModel();
   if (!resolvedModel) {
     throw new ConfigError(
       `[Agent Accelerator] SubAgent '${config.name || "subagent"}' requires a model. ` +
-        `Specify 'model' in SubAgent config, or set SUB_AGENT_MODEL or MODEL in environment variables.`
+        `Specify 'model' in SubAgent config, or set a default with setModels() or a saved choice with setSubAgentModel().`
     );
   }
   return resolvedModel as NonNullable<AgentConfig["model"]>;
@@ -247,7 +246,7 @@ export function resolveWorkerCredentials(
   return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
 }
 
-// Configs built by `buildDynamicWorkerConfig`: the Agent constructor checks it so SDK-built workers never take `configure()` or env defaults.
+// Configs built by `buildDynamicWorkerConfig`: the Agent constructor checks it so SDK-built workers never take the spending-cap settings.
 const workerConfigs = new WeakSet<object>();
 
 /** True for a config made by `buildDynamicWorkerConfig` (a chat worker or a scheduled run), not by the developer. */

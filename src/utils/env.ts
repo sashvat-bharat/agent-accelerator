@@ -71,13 +71,3 @@ export function getApiKey(provider: string, explicitKey?: string, env?: Provider
       return getEnv(`${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`);
   }
 }
-
-/** Reads MODEL or MODEL_NAME, with an optional fallback. */
-export function getModel(fallback?: string): string | undefined {
-  return getEnv("MODEL") || getEnv("MODEL_NAME") || fallback;
-}
-
-/** Reads SUB_AGENT_MODEL, with an optional fallback. */
-export function getSubModel(fallback?: string): string | undefined {
-  return getEnv("SUB_AGENT_MODEL") || fallback;
-}

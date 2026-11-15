@@ -55,21 +55,14 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
 
   it("should strictly throw SubAgentModelError when dynamicSubagents is enabled but no model is configured", () => {
     const { SubAgentModelError } = require("../src/index.ts");
-    const prevEnv = process.env.SUB_AGENT_MODEL;
-    delete process.env.SUB_AGENT_MODEL;
-
-    try {
-      expect(() => {
-        new Agent({
-          name: "Test_Agent",
-          model: "google/gemini-3.8-flash",
-          apiKey: "TEST_KEY",
-          dynamicSubagents: { enabled: true },
-        });
-      }).toThrow(/sub-agent model is required when dynamic sub-agents are enabled/);
-    } finally {
-      if (prevEnv) process.env.SUB_AGENT_MODEL = prevEnv;
-    }
+    expect(() => {
+      new Agent({
+        name: "Test_Agent",
+        model: "google/gemini-3.8-flash",
+        apiKey: "TEST_KEY",
+        dynamicSubagents: { enabled: true },
+      });
+    }).toThrow(/sub-agent model is required when dynamic sub-agents are enabled/);
   });
 
   it("writes the worker pool and the open-worker limit into the tool manual", () => {
@@ -172,23 +165,14 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(customToolDef.description).toBe("Custom override");
   });
 
-  it("should throw when SubAgent has no model in config and no env variable", () => {
+  it("should throw when SubAgent has no model in config and no saved or default model", () => {
     const { SubAgent } = require("../src/index.ts");
-    const prevSub = process.env.SUB_AGENT_MODEL;
-    const prevModel = process.env.MODEL;
-    delete process.env.SUB_AGENT_MODEL;
-    delete process.env.MODEL;
-    try {
-      expect(() => {
-        new SubAgent({
-          name: "no_model_sub",
-          instructions: "Test instructions",
-        });
-      }).toThrow(/requires a model/i);
-    } finally {
-      if (prevSub) process.env.SUB_AGENT_MODEL = prevSub;
-      if (prevModel) process.env.MODEL = prevModel;
-    }
+    expect(() => {
+      new SubAgent({
+        name: "no_model_sub",
+        instructions: "Test instructions",
+      });
+    }).toThrow(/requires a model/i);
   });
 
   it("should support clean separation of tools: { get_status } and subagents: [critique, researcher]", () => {

@@ -10,7 +10,7 @@ Define specialists once; each becomes a tool `{ task: string }` on the parent.
 ```ts
 import { Agent } from "agent-accelerator";
 
-const model = process.env.MODEL ?? "google/gemini-3.5-flash-lite";
+const model = "google/gemini-3.5-flash-lite";
 
 const researcher = new Agent({ name: "researcher", description: "Finds sourced facts.", model, instructions: "Return findings with sources." });
 const critic = new Agent({ name: "critic", description: "Finds weaknesses in a draft.", model, instructions: "List the top 3 problems." });
@@ -39,10 +39,10 @@ import { z } from "zod";
 const recent_news = tool({ description: "Recent headlines for a topic.", input: z.object({ topic: z.string() }), execute: async ({ topic }) => [`${topic}: headline 1`, `${topic}: headline 2`] });
 
 const lead = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   budget: { maxTotalSubagents: 8, maxCostUsd: 0.5 }, // per run, includes workers
   dynamicSubagents: {
-    model: process.env.SUB_AGENT_MODEL ?? "google/gemini-3.5-flash-lite",
+    model: "google/gemini-3.5-flash-lite",
     maxSpawn: 3, // open workers at once (default: no limit)
     thinkingLevel: "low",
     tools: { recent_news }, // pool: the model grants a subset by name per worker
@@ -58,7 +58,7 @@ for (const id of lead.listTrackedSubAgents()) console.log(id, lead.track(id)?.st
 - **Workers keep their conversation** and have their own instructions and session; `history: N` starts one from a copy of the first N finished turns of the main conversation (`list` shows them; the running turn is never copied, so restate the request in `task`). With `persist: { dir }` they survive a restart. Details below under *Persistent workers*.
 - **Depth.** `maxDepth` caps how many levels of workers may exist below the agent. **By default there is no cap**: a worker can start workers that start workers, as deep as the model goes. Set a whole number >= 1 to limit it (`1` keeps workers flat, `3` allows three levels); in production pair unlimited depth with `workerBudget`, or set a cap. A worker with levels left gets its own `subagents` tool, and its children can only be granted the tools the worker itself was granted (never more than its parent had). Each level is saved inside the one above it, so a restart rebuilds the whole tree.
 - **Spending cap.** `workerBudget: { maxCostUsd?, maxTotalTokens? }` is each worker's own cap, applied as that worker's per-run `budget`: a spawn or a message is one run, and the usage of the worker's own workers counts toward it. Scheduled runs have their own cap, `scheduledActionBudget` (same shape; a run, retries included, is one run). Going over fails that call (`[worker <id>] failed: Token budget exceeded…`), keeps the worker open and leaves the parent alone. It is passed down to the workers' workers; unknown pricing counts $0 toward `maxCostUsd`.
-- **Limits.** `maxSpawn` caps the number of **open** workers (close one to open another); by default there is no cap, like every other budget and limit; `budget.maxTotalSubagents` counts spawns per run. Workers reuse the parent's key only when providers match, and inherit limits, retry, env, fetch, `googleTier`, `fileAccess` and `captureRaw`. The `subagents` tool and `agent.workers` have no timeouts (`workerTimeoutMs` and an action's `timeoutMs` are for scheduled actions). A missing worker model throws `SubAgentModelError` (set `dynamicSubagents.model` or `SUB_AGENT_MODEL`).
+- **Limits.** `maxSpawn` caps the number of **open** workers (close one to open another); by default there is no cap, like every other budget and limit; `budget.maxTotalSubagents` counts spawns per run. Workers reuse the parent's key only when providers match, and inherit limits, retry, env, fetch, `googleTier`, `fileAccess` and `captureRaw`. The `subagents` tool and `agent.workers` have no timeouts (`workerTimeoutMs` and an action's `timeoutMs` are for scheduled actions). A missing worker model throws `SubAgentModelError` (set `dynamicSubagents.model`, or a default worker model with `setModels` / `setSubAgentModel`).
 
 Tracking: `agent.track(id)` (live snapshot with `status` and `steps`), `agent.listTrackedSubAgents()`, `agent.subscribeToSubAgent(id, fn)`; stream events `subagent_delta` and `subagent_complete`. Display ids look like `NAME-{32hex}` (one per run); traces are kept up to 500 / 1 h / 100 steps and are visible only to the agent that started them.
 
@@ -69,7 +69,7 @@ Tracking: `agent.track(id)` (live snapshot with `status` and `steps`), `agent.li
 
 ## Persistent workers (`agent.workers`)
 
-Besides one-shot delegation, an agent can run **workers that keep their conversation**: start one, message it again and again, close it. A worker is a plain `Agent` with its own instructions and tools, on the developer's worker model (`dynamicSubagents.model` or `SUB_AGENT_MODEL`). With `persist: { dir }` on the parent it is saved under `<parent session folder>/workers/<id>/` (own journal, tool logs and `worker.json`), so it is rebuilt with its history after a restart.
+Besides one-shot delegation, an agent can run **workers that keep their conversation**: start one, message it again and again, close it. A worker is a plain `Agent` with its own instructions and tools, on the developer's worker model (`dynamicSubagents.model`, else the saved or default worker model). With `persist: { dir }` on the parent it is saved under `<parent session folder>/workers/<id>/` (own journal, tool logs and `worker.json`), so it is rebuilt with its history after a restart.
 
 ```ts
 const reply = await lead.workers.spawn({
@@ -105,10 +105,10 @@ const recent_news = tool({ description: "Three AI headlines.", input: z.object({
 
 const agent = new Agent({
   name: "Planner", // the creating Agent (by name) runs the action: keep it referenced
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   dynamicSubagents: {
     enabled: false, // scheduling only; no on-the-spot spawning
-    model: process.env.SUB_AGENT_MODEL ?? "google/gemini-3.5-flash-lite",
+    model: "google/gemini-3.5-flash-lite",
     tools: { recent_news },
     allowScheduledActions: true, // adds the scheduled_actions + get_datetime tools
   },
@@ -141,7 +141,7 @@ telemetryBus.onEvent((e) => {
 How it works:
 - **Time format.** `timeToDeliver` is `DD:HH:MM`: `DD` days from today (`00` today, `01` tomorrow, no upper limit), `HH:MM` on a 12-hour clock with `meridiem`. `startCookingInAdvance` and `repeatEvery` are durations (`HH` 00–23). Delivery has **one-minute resolution**. Repeats use calendar days, so 7:00 AM stays 7:00 AM. The lead time must be shorter than the repeat gap.
 - **Lifecycle.** `waiting` → `cooking` → result saved (`ready`) → `delivered` at the delivery time → `waiting` again or `done`. A failed run still writes a file saying why. A run still cooking when the next is due is skipped (`skipped`), never stacked.
-- **Files** (a stable, documented format: see [Scheduled action files](../scheduled-action-files.md)) under `<home>/scheduled/` (`home` defaults to `setHome(dir)`, `AGENT_ACCEL_HOME`, then `.agent-accel/`): one folder per action with its `task.json` (and a `delivery.json` while a result waits) and one `.md` result file per run (its header records the run's exact spending: `turns`, the `tokens` split into fresh input, cache reads and writes, output and thinking, `cacheHitRate`, `costUsd` (`unknown`, never 0, when no price is known) and `costSource`; retries included, failed runs too; plus a `definition` fingerprint of the instructions, task, role and tools the run used, with the exact text saved once per definition in `<id>/definitions/`). Files are re-read and validated before each run, so editing `instructions`/`task` takes effect next run. No keys or tool code are stored.
+- **Files** (a stable, documented format: see [Scheduled action files](../scheduled-action-files.md)) under `<home>/scheduled/` (`home` defaults to `setHome(dir)`, then `.agent-accel/`): one folder per action with its `task.json` (and a `delivery.json` while a result waits) and one `.md` result file per run (its header records the run's exact spending: `turns`, the `tokens` split into fresh input, cache reads and writes, output and thinking, `cacheHitRate`, `costUsd` (`unknown`, never 0, when no price is known) and `costSource`; retries included, failed runs too; plus a `definition` fingerprint of the instructions, task, role and tools the run used, with the exact text saved once per definition in `<id>/definitions/`). Files are re-read and validated before each run, so editing `instructions`/`task` takes effect next run. No keys or tool code are stored.
 - **Events** on `telemetryBus` (`scheduled_action.*`): `created`, `updated`, `started`, `ready`, `failed`, `delivered`, `missed`, `skipped`, `deleted`, `invalid`, `store_corrupt`, `error`.
 - **Time limit of a run.** A scheduled action may carry `timeoutMs` (top level of the action, not inside `scheduled_action`): a run that takes longer is stopped and recorded as failed. By default there is no limit. `dynamicSubagents.workerTimeoutMs` is an optional ceiling: an action cannot ask for more, and it is the limit for actions that set none (`0` and `Infinity` mean no ceiling). The old `dynamicSubagents.timeout`, `modelMaySetTimeout` and the `-1` mode were removed.
 - **Missed runs.** If the process was down at the moment, the SDK emits `missed` once. By default nothing runs by itself: call `runScheduledAction` or `skipScheduledAction`. Set `onMissed` per action to decide in advance: `"skip"` moves to the next time (a one-shot is `done`), `"run"` runs it when the program is back. It also covers a run a crash cut off; an action whose creating Agent is gone stays `missed`. `deleteScheduledAction` refuses while an action is cooking unless `force: true`.

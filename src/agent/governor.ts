@@ -6,26 +6,7 @@
  */
 import { readRetryAfterMs } from "../utils/retry.ts";
 import { telemetryBus } from "../telemetry.ts";
-
-// A one-line problem with a `concurrency` setting, or undefined when it is valid; in: configure(), out: its ConfigError.
-export function checkConcurrencyConfig(raw: unknown): string | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw))
-    return "expected an object like { maxRequests: 8, perProvider: { google: 4 } }";
-  const r = raw as Record<string, unknown>;
-  const whole = (v: unknown): boolean => typeof v === "number" && Number.isInteger(v) && v >= 1;
-  for (const k of Object.keys(r)) {
-    if (k !== "maxRequests" && k !== "perProvider") return `unknown key "${k}" (use maxRequests or perProvider)`;
-  }
-  if (r["maxRequests"] !== undefined && !whole(r["maxRequests"])) return "maxRequests must be a whole number >= 1";
-  const per = r["perProvider"];
-  if (per !== undefined) {
-    if (!per || typeof per !== "object" || Array.isArray(per))
-      return "perProvider must be an object like { google: 4 }";
-    for (const [name, n] of Object.entries(per))
-      if (!whole(n)) return `perProvider.${name} must be a whole number >= 1`;
-  }
-  return undefined;
-}
+import { getSetting } from "../config/settings.ts";
 
 /** What the governor limits; every key is optional and unset means unlimited. */
 export interface GovernorLimits {
@@ -217,17 +198,28 @@ function rateLimitWaitMs(err: unknown): number | undefined {
   return readRetryAfterMs(err);
 }
 
-let current = new Governor();
+// The governor the `concurrency` setting asks for, rebuilt only when that setting changes; a pinned one (tests) wins.
+let pinned: Governor | undefined;
+let fromSettings: { key: string; governor: Governor } | undefined;
 
-/** Sets the limits for every provider call from now on (unset keys are unlimited); calls already running keep their slots. Internal until the public setting lands. */
-export function setGovernorLimits(limits: GovernorLimits = {}, clock?: GovernorClock): void {
-  current.dispose();
-  current = new Governor(limits, clock);
+/** Pins the governor to explicit limits and clock (tests only); `undefined` goes back to the `concurrency` setting. */
+export function setGovernorLimits(limits: GovernorLimits | undefined, clock?: GovernorClock): void {
+  pinned?.dispose();
+  pinned = limits ? new Governor(limits, clock) : undefined;
 }
 
-/** The governor in use now. */
+/** The governor in use now: built from the `concurrency` setting (`max_requests`, `per_provider`), no limit when it is unset. */
 export function getGovernor(): Governor {
-  return current;
+  if (pinned) return pinned;
+  const c = getSetting("concurrency") as { max_requests?: number; per_provider?: Record<string, number> } | undefined;
+  const key = JSON.stringify(c ?? null);
+  if (fromSettings?.key !== key) {
+    fromSettings = {
+      key,
+      governor: new Governor(c ? { maxRequests: c.max_requests, perProvider: c.per_provider } : {}),
+    };
+  }
+  return fromSettings.governor;
 }
 
 /**
@@ -240,7 +232,7 @@ export async function withProviderSlot<T>(
   signal: AbortSignal | undefined,
   task: () => Promise<T>
 ): Promise<T> {
-  const governor = current;
+  const governor = getGovernor();
   if (!governor.limited) return task();
   const release = await governor.acquire(provider, signal);
   try {
@@ -262,5 +254,5 @@ export function getConcurrencyStatus(): {
   byProvider: Record<string, number>;
   paused: string[];
 } {
-  return { limited: current.limited, ...current.status(), paused: current.pausedProviders() };
+  return { limited: getGovernor().limited, ...getGovernor().status(), paused: getGovernor().pausedProviders() };
 }

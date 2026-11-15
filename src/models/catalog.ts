@@ -1,6 +1,6 @@
 /**
  * Model catalog: the single source of truth (models.dev) for context limits, prices, modalities and reasoning options.
- * The data is cached as one small file per provider, `<home>/catalog/<provider>/models.json` (or `AGENT_CACHE_DIR`), with a
+ * The data is cached as one small file per provider, `<home>/catalog/<provider>/models.json` (or the `catalog_cache_dir` setting), with a
  * 12 hour TTL, refreshed in the background and read lazily, one provider at a time (see `catalog-cache.ts` and
  * `catalog-shards.ts`). `GOOGLE_MODELS`, `OPENAI_MODELS`, `ANTHROPIC_MODELS` and `OPENROUTER_MODELS` are lazy views of it.
  */

@@ -20,9 +20,9 @@ Put one provider key in `.env` (Bun loads it automatically):
 | Google Gemini | `google/gemini-3.5-flash-lite` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) |
 | OpenAI | `openai/gpt-4o` | `OPENAI_API_KEY` |
 | OpenRouter | `openrouter/z-ai/glm-5.3-flash` | `OPENROUTER_API_KEY` |
-| Any OpenAI-compatible (Groq, Ollama...) | `groq/llama-3.3-70b-versatile` | `GROQ_API_KEY` + `GROQ_BASE_URL` (local endpoints may omit the key) |
+| Any OpenAI-compatible (Groq, Ollama...) | `groq/llama-3.3-70b-versatile` | `GROQ_API_KEY`, and its endpoint in the `base_urls.groq` setting (local endpoints may omit the key) |
 
-`MODEL` is used when you do not pass `model`; `SUB_AGENT_MODEL` is the default worker model. **Explicit config always beats environment variables.**
+The environment holds API keys only. Pass `model` to the `Agent`, or set a default list once with `setModels` (an `Agent` without a `model` then uses the list's `default.model`, a worker its `default.sub_agent_model`). **An explicit `model` always wins.** Endpoints, limits and other options are settings in code: see [Safety and operations](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them).
 
 ## 3. Your first agent
 
@@ -30,7 +30,7 @@ Put one provider key in `.env` (Bun loads it automatically):
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   instructions: "You are a concise assistant.",
 });
 
@@ -45,7 +45,7 @@ console.log(res.finishReason); // "stop" when it finished normally
 ```ts
 import { Agent } from "agent-accelerator";
 
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite" });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite" });
 
 const stream = agent.stream("Write a haiku about caching.");
 for await (const event of stream) {
@@ -68,7 +68,7 @@ const get_weather = tool({
 });
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   tools: { get_weather },
 });
 

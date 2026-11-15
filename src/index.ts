@@ -68,8 +68,6 @@ export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOpt
 export type { ScheduledActions } from "./scheduler/scheduler.ts";
 export { getDatetimeTool } from "./scheduler/tool.ts";
 export { setHome, resolveHome } from "./utils/home.ts";
-export { configure } from "./agent/defaults.ts";
-export type { AgentDefaults } from "./agent/defaults.ts";
 export { getConcurrencyStatus } from "./agent/governor.ts";
 export { setModels, listModels, setModel, setSubAgentModel } from "./config/models.ts";
 export type { ModelList, ModelOption } from "./config/models.ts";

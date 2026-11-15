@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import { getEnv } from "./env.ts";
 
 /**
  * The Agent Accelerator home: ONE folder that holds everything the SDK stores
@@ -19,9 +18,9 @@ export function setHome(dir?: string): void {
   for (const fn of listeners) fn();
 }
 
-/** The home folder: explicit `home`, else `setHome()`, else `AGENT_ACCEL_HOME`, else `.agent-accel/` in the working directory. */
+/** The home folder: explicit `home`, else `setHome()`, else `.agent-accel/` in the working directory. Set in code only. */
 export function resolveHome(home?: string): string {
-  return path.resolve(home || defaultHome || getEnv("AGENT_ACCEL_HOME") || ".agent-accel");
+  return path.resolve(home || defaultHome || ".agent-accel");
 }
 
 /** Runs `fn` whenever `setHome` changes the default (the catalog cache reloads from the new place). */

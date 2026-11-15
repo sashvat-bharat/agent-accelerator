@@ -150,7 +150,7 @@ export class SubAgentModelError extends ConfigError {
       `[Agent Accelerator] Missing Configuration: a sub-agent model is required when dynamic sub-agents are enabled. ` +
       `Main Agent Model: ${parentName}. ` +
       `Dynamic sub-agent delegation was enabled (dynamicSubagents.enabled), but no model was assigned for sub-agents. ` +
-      `Fix: pass dynamicSubagents.model in Agent config or set SUB_AGENT_MODEL.`;
+      `Fix: pass dynamicSubagents.model in Agent config, or set a default worker model with setModels() or setSubAgentModel().`;
 
     super(formatted, { parentModel: parentName });
     this.name = "SubAgentModelError";
@@ -335,7 +335,7 @@ export class Agent {
     // DX1: only instructions (no systemPrompt alias)
     this.instructions = config.instructions || "";
     this.prompts = resolvePrompts(config.prompts);
-    // Workers and scheduled runs the SDK builds never take developer defaults (`configure()`, env vars).
+    // Workers and scheduled runs the SDK builds never take developer defaults (the spending-cap settings).
     const takesDefaults = !isWorkerConfig(config);
     if (config.usageLimit !== undefined) {
       const problem = checkUsageLimitConfig(config.usageLimit);
@@ -357,7 +357,7 @@ export class Agent {
     }
     checkModelAllowed(modelStringOrSpec); // fail at construction, not at the first run
     const dynRaw = config.dynamicSubagents;
-    // Unified worker-model chain: dynamicSubagents.model > subagentModel > SUB_AGENT_MODEL.
+    // Unified worker-model chain: dynamicSubagents.model > subagentModel > saved or default worker model.
     const dynModel = resolveDynamicModelInput(dynRaw, config.subagentModel);
     this.subagentModel = dynModel as string | any | undefined;
     if (dynRaw) checkModelAllowed(dynModel); // the developer's worker model must be on the list too

@@ -169,7 +169,7 @@ process.stdout.write("ready\\n");
 setInterval(() => {}, 1000);
 `
     );
-    const proc = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "pipe", env: { ...process.env, AGENT_CATALOG_REFRESH: "off" } });
+    const proc = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "pipe", env: process.env as Record<string, string> });
     const reader = proc.stdout.getReader();
     let text = "";
     while (!text.includes("ready")) {

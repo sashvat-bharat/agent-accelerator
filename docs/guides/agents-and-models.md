@@ -10,7 +10,7 @@ import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
   name: "support",
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   instructions: "You are a friendly support agent. Be brief.",
   maxTurns: 10,
 });
@@ -32,7 +32,7 @@ console.log(res2.text);
 | `session(id?)`, `disposeSession(id)`, `clearSessions()` | In-memory named sessions: `run(prompt, { sessionId })` keeps a separate history per id. |
 | `exportSession()`, `importSession()` | Snapshot/restore history (see [Data and media](data-and-media.md)). |
 
-Useful config: `stateless: true` clears history around every run (one-shot judges); `headers`, `apiKey`, `baseUrl` per agent; `maxTurns` (`0`/omitted = unlimited); `agentFromEnv(config)` builds an agent from `MODEL`/`SUB_AGENT_MODEL`. Every key is in [Reference](../reference.md).
+Useful config: `stateless: true` clears history around every run (one-shot judges); `headers`, `apiKey`, `baseUrl` per agent; `maxTurns` (`0`/omitted = unlimited); `agentFromEnv(config)` builds an agent with the saved or default model (`setModels` / `setModel`) when you give none. Every key is in [Reference](../reference.md).
 
 **Recommendations**
 - ✅ Keep `instructions` and the tool set **stable** between calls; put anything that changes per turn in `additionalContext` or the user message.
@@ -48,7 +48,7 @@ Useful config: `stateless: true` clears history around every run (one-shot judge
 | `openai/<id>` | OpenAI Responses API | `OPENAI_API_KEY` |
 | `openrouter/<scope>/<id>` or `scope/id:variant` | OpenRouter Chat Completions | `OPENROUTER_API_KEY` |
 | `<anything-else>/<id>` | Generic OpenAI-compatible Chat Completions | `<PREFIX>_API_KEY` + `<PREFIX>_BASE_URL` |
-| bare `<id>` | Catalog lookup (google, openai, openrouter), else OpenRouter; with `OPENAI_BASE_URL` set it goes to OpenAI | |
+| bare `<id>` | Catalog lookup (google, openai, openrouter), else OpenRouter; with the `base_urls.openai` setting set it goes to OpenAI | |
 
 Rules worth knowing: a custom prefix **never** falls back to another vendor's key or default URL (a missing base URL throws before any network call); local endpoints (localhost, LAN, `*.local`) may omit the key; Gemini older than version 3 is rejected before the network.
 
@@ -132,7 +132,7 @@ The model catalog is filtered when it is read: `getModelsForProvider`, the `*_MO
 ```ts
 import { Agent, ThinkingLevelError } from "agent-accelerator";
 
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite", thinking: "medium" });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite", thinking: "medium" });
 
 try {
   const res = await agent.run("Plan a 3-step database migration.", { thinking: "high" }); // per-run override
@@ -154,7 +154,7 @@ Levels: `none`, `dynamic` (server default), `minimal`, `low`, `medium`, `high`, 
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "openai/gpt-4o",
+  model: "openai/gpt-4o",
   instructions: "Long, stable system prompt...",
   cache: "implicit", // or "5m" | "30m" | "1h" | "12h" where the provider supports it
   serviceTier: "flex", // cheaper, slower; or "priority"
@@ -175,7 +175,7 @@ import { Agent, ValidationError } from "agent-accelerator";
 import { z } from "zod";
 
 const Invoice = z.object({ vendor: z.string(), total: z.number(), currency: z.string() });
-const agent = new Agent({ model: process.env.MODEL ?? "google/gemini-3.5-flash-lite", output: Invoice });
+const agent = new Agent({ model: "google/gemini-3.5-flash-lite", output: Invoice });
 
 try {
   const res = await agent.run("Acme Ltd charged 120.50 EUR for hosting.");

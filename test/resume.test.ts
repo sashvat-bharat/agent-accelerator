@@ -194,9 +194,10 @@ describe("a real kill -9", () => {
     const work = tmp();
     const srcIndex = path.resolve(import.meta.dir, "../src/index.ts");
     const code = `
-      import { Agent, tool } from ${JSON.stringify(srcIndex)};
+      import { Agent, tool, setConfigs } from ${JSON.stringify(srcIndex)};
       import { z } from "zod";
       import * as fs from "node:fs";
+      setConfigs({ values: { catalog_refresh: "off" } });
       const bump = (f) => fs.appendFileSync(process.env.WORK + "/" + f, "x");
       const tools = {
         tool_a: tool({ description: "a", input: z.object({}), execute: async () => { bump("a"); return "A-result"; } }),

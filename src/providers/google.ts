@@ -42,7 +42,8 @@ import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey, getEnv } from "../utils/env.ts";
+import { getApiKey } from "../utils/env.ts";
+import { baseUrlSetting } from "../config/settings.ts";
 import { normalizeMediaInput, inferMimeType } from "../utils/media.ts";
 import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 import { safeStringify } from "../utils/serialization.ts";
@@ -420,14 +421,9 @@ export function clearInteractionChains(sessionId?: string): void {
 // Request building (canonical -> Interactions)
 // ---------------------------------------------------------------------------
 
-// Endpoint from the option, GOOGLE_BASE_URL, else the v1beta default; in: each request, out: the base URL without a trailing slash.
+// Endpoint from the option, the `base_urls.google` setting, else the v1beta default; in: each request, out: the base URL without a trailing slash.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return (
-    options?.baseUrl ||
-    options?.env?.["GOOGLE_BASE_URL"] ||
-    getEnv("GOOGLE_BASE_URL") ||
-    DEFAULT_BASE_URL
-  ).replace(/\/+$/, "");
+  return (options?.baseUrl || baseUrlSetting("google") || DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
 // API key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.

@@ -1,6 +1,6 @@
 import { Agent, tool } from "agent-accelerator";
 import { z } from "zod";
-import { fail } from "./_shared";
+import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 interface TinyFishResult {
   position?: number;
@@ -79,7 +79,7 @@ const agent = new Agent({
   name: "Main Agent",
   tools: { web_search },
   thinking: "medium",
-  model: process.env.MODEL,
+  model: MODEL,
   budget: { maxCostUsd: 2, maxTotalSubagents: 6 },
   limits: { requestTimeoutMs: 120_000 },
 
@@ -96,7 +96,7 @@ When answering research questions:
 
   dynamicSubagents: {
     enabled: true,
-    model: process.env.SUB_AGENT_MODEL,
+    model: SUB_AGENT_MODEL,
     maxSpawn: 2,
     thinkingLevel: "medium",
     // Workers get zero tools unless granted here — research workers need search.

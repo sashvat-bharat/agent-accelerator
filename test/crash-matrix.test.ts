@@ -34,7 +34,7 @@ function tmp(): string {
 
 // Runs `body` in a child process (the prelude supplies the SDK and a hanging/scripted fetch), waits until it prints "ready", then kills it with SIGKILL; in: the child's code + env, out: everything it printed before the kill.
 async function crashChild(body: string, env: Record<string, string>): Promise<string> {
-  const code = `import { Agent, tool } from ${JSON.stringify(srcIndex)};\nimport { z } from "zod";\nimport * as fs from "node:fs";\n${body}`;
+  const code = `import { Agent, tool, setConfigs } from ${JSON.stringify(srcIndex)};\nimport { z } from "zod";\nimport * as fs from "node:fs";\nsetConfigs({ values: { catalog_refresh: "off" } });\n${body}`;
   const child = Bun.spawn(["bun", "-e", code], { cwd: repo, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
   children.push(child);
   const reader = child.stdout.getReader();

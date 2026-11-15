@@ -94,7 +94,8 @@ describe("telemetry bus is the single sink", () => {
       const script = path.join(dir, "probe.ts");
       fs.writeFileSync(
         script,
-        `import { refreshModelCatalog, telemetryBus } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/index.ts"))};
+        `import { refreshModelCatalog, setConfigs, telemetryBus } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/index.ts"))};
+setConfigs({ values: { catalog_cache_dir: ${JSON.stringify(blocker)} } });
 const seen = [];
 telemetryBus.onEvent((e) => seen.push(e.code));
 const mk = () => ({ models: { "gemini-3-x": { id: "gemini-3-x", name: "m" } } });
@@ -102,9 +103,7 @@ globalThis.fetch = async () => new Response(JSON.stringify({ google: mk(), opena
 const st = await refreshModelCatalog({ force: true });
 console.log(JSON.stringify({ loaded: st.loaded, seen }));`
       );
-      const env: Record<string, string> = { ...(process.env as Record<string, string>), AGENT_CACHE_DIR: blocker };
-      delete env.AGENT_CATALOG_REFRESH;
-      const proc = Bun.spawn([process.execPath, script], { env, stdout: "pipe", stderr: "pipe" });
+      const proc = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "pipe" });
       const out = await new Response(proc.stdout).text();
       expect(await proc.exited).toBe(0);
       const res = JSON.parse(out.trim().split("\n").pop()!);

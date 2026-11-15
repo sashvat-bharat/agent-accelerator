@@ -3,24 +3,21 @@ import type { AgentConfig } from "../types/agent.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import { agentToTool } from "./delegation.ts";
 import { resolveSubAgentModel } from "./worker.ts";
-import { getModel, getSubModel } from "../utils/env.ts";
-import { chosenModel } from "../config/models.ts";
+import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 
 /** AgentConfig alias for a delegated worker agent. */
 export interface SubAgentConfig extends AgentConfig {}
 
 /**
- * Canonical env-based construction: builds an `Agent` reading
- * `MODEL`/`SUB_AGENT_MODEL` only for the fields the caller omits, via
- * `getModel()`/`getSubModel()`. Explicit config always wins; constructing an
- * `Agent` with an explicit `model` reads no env for routing. The static
+ * Builds an `Agent` whose model is the saved choice or the program's default (see `setModels` / `setModel`) when the
+ * caller names none. Explicit config always wins. The static
  * `Agent.fromEnv()` (attached below without touching `agent.ts`, owned by
  * another audit lane) delegates here.
  */
 export function agentFromEnv(config?: Omit<AgentConfig, "model"> & { model?: AgentConfig["model"] }): Agent {
   return new Agent({
     ...config,
-    model: config?.model ?? chosenModel() ?? getModel() ?? getSubModel(),
+    model: config?.model ?? chosenModel() ?? chosenSubAgentModel(),
   } as AgentConfig);
 }
 
@@ -32,11 +29,11 @@ export function agentFromEnv(config?: Omit<AgentConfig, "model"> & { model?: Age
  * `agentToTool()`/`buildAgentTools()` (or `subagents: [...]`) instead of
  * subclassing. `SubAgent` stays for compat and receives no new features.
  *
- * It inherits 100% of the capabilities of Agent, defaults to SUB_AGENT_MODEL,
+ * It inherits 100% of the capabilities of Agent, defaults to the saved or default worker model,
  * and provides .asTool() and .toTool() for seamless registration into parent agents.
  *
  * Model fallback chain (canonical): explicit `config.model` ??
- * `SUB_AGENT_MODEL` (`getSubModel()`) ?? `MODEL` (`getModel()`). Missing
+ * saved or default worker model ?? saved or default main model. Missing
  * everything throws. Constructing any `Agent`/`SubAgent` with an explicit
  * `model` reads no env for routing.
  *
@@ -57,7 +54,7 @@ export function agentFromEnv(config?: Omit<AgentConfig, "model"> & { model?: Age
  */
 export class SubAgent extends Agent {
   /**
-   * Creates a delegated worker, defaulting to `SUB_AGENT_MODEL` or `MODEL`
+   * Creates a delegated worker, defaulting to the saved or default worker / main model
    * when `model` is omitted.
    *
    * @param config Worker configuration. It accepts the same options as `Agent`
@@ -76,7 +73,7 @@ export class SubAgent extends Agent {
    * ```
    */
   constructor(config: SubAgentConfig) {
-    // Unified model chain (shared with Agent): explicit > SUB_AGENT_MODEL > MODEL.
+    // Unified model chain (shared with Agent): explicit > saved or default worker model > saved or default main model.
     const resolvedModel = resolveSubAgentModel(config);
 
     super({
@@ -109,7 +106,7 @@ export class SubAgent extends Agent {
 declare module "./agent.ts" {
   namespace Agent {
     /**
-     * Builds an `Agent` from env (`MODEL`/`SUB_AGENT_MODEL`) for omitted
+     * Builds an `Agent` with the saved or default model (`setModels` / `setModel`) for omitted
      * fields. Explicit config always wins. See `agentFromEnv`.
      */
     function fromEnv(

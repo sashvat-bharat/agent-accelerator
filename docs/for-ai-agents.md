@@ -26,7 +26,7 @@
 | Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
 | Change a prompt the SDK sends (tool refusal, worker header, tool manual) | `prompts: { name: "text with {{placeholders}}" }`; keep the original unless you must | [Prompts](guides/prompts.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
-| Limit provider calls running at once (many agents, workers, 429s) | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | [Safety](guides/safety-and-ops.md#concurrency-limit) |
+| Limit provider calls running at once (many agents, workers, 429s) | the `concurrency` setting (`setConfigs({ values: { concurrency: { max_requests, per_provider } } })`), `getConcurrencyStatus()` | [Safety](guides/safety-and-ops.md#concurrency-limit) |
 | Set limits and options in code, and choose what the end user may change | `setConfigs({ values, editable })`, `getConfigs()`, `setConfig(key, value)` | [Safety](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) |
 | Fix the list of models a program may use, let the user pick | `setModels(modelsJson)`, `listModels()` for a picker, `setModel(id)`, `setSubAgentModel(id)` | [Agents](guides/agents-and-models.md#the-list-of-allowed-models) |
 | What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
@@ -49,7 +49,7 @@ const search_docs = tool({
 });
 
 const agent = new Agent({
-  model: process.env.MODEL ?? "google/gemini-3.5-flash-lite",
+  model: "google/gemini-3.5-flash-lite",
   instructions: "You answer questions using the search_docs tool. Be concise.",
   tools: { search_docs },
   maxTurns: 8,
@@ -73,7 +73,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 - **Workers are developer-configured.** The LLM never chooses a worker's model or reasoning level.
 - **Keep a scheduled action's creating `Agent` referenced**; several processes may share a home, and the process that registered the Agent runs and delivers its actions.
 - Never edit the model catalog cache (`<home>/catalog/<provider>/models.json`); use `registerModel()`. It keeps only gemini-3+, gpt-5+, claude-5+ and text-output OpenRouter models: anything else is unknown (no price, permissive thinking).
-- **Everything the SDK stores lives in one folder** (`sessions/` with each session's own `telemetry.ndjson`, `scheduled/`, `telemetry/`, `catalog/`). Move it with `setHome(dir)` or `AGENT_ACCEL_HOME`; never write SDK state elsewhere.
+- **Everything the SDK stores lives in one folder** (`sessions/` with each session's own `telemetry.ndjson`, `scheduled/`, `telemetry/`, `catalog/`). Move it with `setHome(dir)` (or an Agent's `home`); never write SDK state elsewhere.
 
 ## Things that do not exist (do not generate code for them)
 
@@ -99,7 +99,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | `SettingNotEditableError` | `setConfig` on a hidden setting; only keys in `getConfigs()` can be changed |
 | `ModelNotAllowedError` | Model not in the program's `setModels` list; pick one from `err.allowed` |
 | `ThinkingLevelError` | Level unsupported by the model; use one from `err.allowedLevels` |
-| `SubAgentModelError` | Set `dynamicSubagents.model` or `SUB_AGENT_MODEL` |
+| `SubAgentModelError` | Set `dynamicSubagents.model`, or a default worker model (`setModels`, `setSubAgentModel`) |
 | `BudgetExceededError` | Raise `budget` or reduce work; `err.partial` has progress |
 | `SecurityPolicyError` | Path outside `fileAccess.roots`, or a private/loopback URL |
 | `SessionLoadError` | Session file over limits; split or raise `SessionLimits` |

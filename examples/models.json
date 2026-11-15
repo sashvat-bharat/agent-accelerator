@@ -1,0 +1,7 @@
+{
+  "default": { "model": "google/gemini-3.5-flash-lite", "sub_agent_model": "google/gemini-3.5-flash-lite" },
+  "providers": {
+    "google": { "models": ["gemini-3.5-flash-lite", "gemini-3.5-flash"] },
+    "openai": { "models": ["gpt-5.4-nano"] }
+  }
+}

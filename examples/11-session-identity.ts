@@ -15,16 +15,11 @@
  *     loadSessionDir, and resumed with sub-agent traces intact.
  *
  * Run: bun examples/11-session-identity.ts
- * Needs: MODEL, SUB_AGENT_MODEL + provider keys (see .env.example).
+ * Needs: a provider key (see .env.example); the models come from examples/models.json.
  */
 
 import { Agent, sessionDirFor, loadSessionDir, isSessionDescendant, formatSessionCost } from "agent-accelerator";
-import { fail } from "./_shared.ts";
-
-const MODEL = process.env.MODEL;
-const SUB_AGENT_MODEL = process.env.SUB_AGENT_MODEL;
-if (!MODEL) fail(new Error("Missing MODEL env (see .env.example)."));
-if (!SUB_AGENT_MODEL) fail(new Error("Missing SUB_AGENT_MODEL env (see .env.example)."));
+import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 // Colors: white is reserved for model answer text only. Thinking is grey,
 // everything else uses vibrant colors so streams are easy to tell apart.
@@ -218,7 +213,7 @@ if (!loaded) fail(new Error("Could not reload session dir " + dir));
 console.log(CYAN + "reloaded session: " + loaded!.session.sessionId + RESET);
 console.log(CYAN + "sub-agent traces: " + Object.keys(loaded!.session.subagents ?? {}).join(", ") + RESET);
 
-const resumer = new Agent({ name: "Resumer", model: MODEL! });
+const resumer = new Agent({ name: "Resumer", model: MODEL });
 resumer.importSession(loaded!.session);
 console.log(GREEN + "resumed messages: " + resumer.context.messages.length + RESET);
 console.log(GREEN + "resumed worker traces: " + resumer.listTrackedSubAgents().join(", ") + RESET);

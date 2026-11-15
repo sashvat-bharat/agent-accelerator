@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
-import { getEnv } from "../utils/env.ts";
+import { getSetting, onSettingsChange } from "../config/settings.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { onHomeChange, resolveHome } from "../utils/home.ts";
 import { writeFileDurable } from "../utils/durable.ts";
@@ -84,16 +84,16 @@ function notifyUpdateListeners(): void {
 
 /**
  * Catalog cache directory: `<home>/catalog` (the single Agent Accelerator home,
- * see `resolveHome`), or `AGENT_CACHE_DIR` when set (read-only or serverless
+ * see `resolveHome`), or the `catalog_cache_dir` setting when set (read-only or serverless
  * filesystems).
  */
 export function getCacheDir(): string {
-  const override = getEnv("AGENT_CACHE_DIR");
-  if (override && override.trim()) return path.resolve(override.trim());
+  const override = getSetting("catalog_cache_dir"); // the `catalog_cache_dir` setting (read-only or serverless filesystems)
+  if (typeof override === "string" && override) return path.resolve(override);
   return path.join(resolveHome(), "catalog");
 }
 
-/** Shard path: `<cacheDir>/<provider>/models.json`, honoring AGENT_CACHE_DIR. */
+/** Shard path: `<cacheDir>/<provider>/models.json`, honoring the `catalog_cache_dir` setting. */
 export function getCacheFilePath(provider: CatalogProvider): string {
   return path.join(getCacheDir(), provider, "models.json");
 }
@@ -117,9 +117,9 @@ function writeJsonFileSync(filePath: string, data: unknown): void {
   writeFileDurable(filePath, JSON.stringify(data), { backup: false });
 }
 
-/** Verifies optional sha256 pin from MODELS_DEV_SHA256. Returns false on mismatch. */
+/** Verifies the optional sha256 pin (`models_dev_sha256` setting). Returns false on mismatch. */
 export function verifyCatalogSha256(text: string): boolean {
-  const pin = getEnv("MODELS_DEV_SHA256")?.trim().toLowerCase();
+  const pin = getSetting("models_dev_sha256") as string | undefined;
   if (!pin) return true;
   const hex = createHash("sha256").update(text, "utf8").digest("hex").toLowerCase();
   return hex === pin;
@@ -158,6 +158,15 @@ function loadMeta(fromCache: boolean): void {
 loadMeta(true);
 // `setHome()` moves the cache folder: reload from the new place.
 onHomeChange(() => {
+  loadMeta(true);
+  notifyUpdateListeners();
+});
+// A new `catalog_cache_dir` setting moves the cache folder too.
+let loadedDir = getCacheDir();
+onSettingsChange(() => {
+  const dir = getCacheDir();
+  if (dir === loadedDir) return;
+  loadedDir = dir;
   loadMeta(true);
   notifyUpdateListeners();
 });
@@ -289,7 +298,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
       fallbackToDiskCache();
       return getCatalogStatus();
     }
-    // Optional sha256 pin via MODELS_DEV_SHA256.
+    // Optional sha256 pin (`models_dev_sha256` setting).
     if (!verifyCatalogSha256(text)) {
       clearTimeout(timer);
       fallbackToDiskCache();
@@ -360,10 +369,9 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
   return getCatalogStatus();
 }
 
-/** True when `AGENT_CATALOG_REFRESH` is `off`/`0`/`false`: never touch the network automatically. */
+/** True when the `catalog_refresh` setting is `"off"`: never touch the network automatically. */
 function automaticRefreshDisabled(): boolean {
-  const v = getEnv("AGENT_CATALOG_REFRESH")?.trim().toLowerCase();
-  return v === "off" || v === "0" || v === "false";
+  return getSetting("catalog_refresh") === "off";
 }
 
 /**
@@ -376,7 +384,7 @@ function automaticRefreshDisabled(): boolean {
  *   never delayed by models.dev being slow or unreachable.
  * - Nothing loaded yet (cold start): waits for the download.
  * - A failed refresh is not retried automatically for 10 minutes.
- * - `AGENT_CATALOG_REFRESH=off` disables automatic refreshes entirely
+ * - the `catalog_refresh: "off"` setting disables automatic refreshes entirely
  *   (air-gapped hosts, hermetic tests); `force` and `refreshModelCatalog`
  *   still work.
  */

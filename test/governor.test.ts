@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { setConfig, setConfigs, setHome } from "../src/index.ts";
+import { SETTING_KEYS, resetConfigs } from "../src/config/settings.ts";
 import { Governor, getGovernor, setGovernorLimits, withProviderSlot } from "../src/agent/governor.ts";
 import { runAgentLoop, streamAgentLoop } from "../src/agent/loop.ts";
 import { AgentContext } from "../src/agent/context.ts";
@@ -6,7 +11,7 @@ import { AssistantMessageEventStream } from "../src/streaming/event-stream.ts";
 import { AgentResponse } from "../src/types/response.ts";
 import type { Provider } from "../src/types/model.ts";
 
-afterEach(() => setGovernorLimits({}));
+afterEach(() => setGovernorLimits(undefined)); // back to the `concurrency` setting
 
 const tick = (ms = 1) => new Promise((r) => setTimeout(r, ms));
 
@@ -314,22 +319,51 @@ describe("429 pause", () => {
   });
 });
 
-describe("public setting", () => {
-  test("configure({ concurrency }) sets the limits, configure({}) clears them", async () => {
-    const { configure, getConcurrencyStatus } = await import("../src/index.ts");
-    configure({ concurrency: { maxRequests: 2, perProvider: { google: 1 } } });
+describe("the concurrency setting", () => {
+  const settings = (concurrency?: unknown) =>
+    setConfigs({ values: { catalog_refresh: "off", ...(concurrency ? { concurrency } : {}) }, editable: [...SETTING_KEYS] });
+
+  test("the setting turns the limit on, and changing it rebuilds the governor", async () => {
+    const { getConcurrencyStatus } = await import("../src/index.ts");
+    expect(getConcurrencyStatus().limited).toBe(false);
+    settings({ max_requests: 2, per_provider: { google: 1 } });
     expect(getConcurrencyStatus()).toEqual({ limited: true, active: 0, waiting: 0, byProvider: {}, paused: [] });
     const r = await withProviderSlot("google", undefined, async () => getConcurrencyStatus());
     expect(r.active).toBe(1);
     expect(r.byProvider).toEqual({ google: 1 });
-    configure({});
+    settings();
     expect(getConcurrencyStatus().limited).toBe(false);
   });
 
-  test("a bad concurrency value is a ConfigError naming the problem", async () => {
-    const { configure } = await import("../src/index.ts");
-    for (const bad of [{ maxRequests: 0 }, { maxRequests: 1.5 }, { perProvider: { a: -1 } }, { perProvider: [] }, { nope: 1 }, 5]) {
-      expect(() => configure({ concurrency: bad as never })).toThrow(/configure\(\): invalid concurrency/);
+  test("the limit is read from the setting on every call, so a user's setConfig takes effect at once", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "gov-home-"));
+    setHome(home);
+    try {
+      settings({ max_requests: 3 });
+      expect(getGovernor().limited).toBe(true);
+      setConfig("concurrency", { max_requests: 1 });
+      let peak = 0;
+      let now = 0;
+      await Promise.all(
+        Array.from({ length: 6 }, () =>
+          withProviderSlot("a", undefined, async () => {
+            peak = Math.max(peak, ++now);
+            await tick(2);
+            now--;
+          })
+        )
+      );
+      expect(peak).toBe(1); // the user's value (1) replaced the developer's (3)
+    } finally {
+      resetConfigs();
+      setHome(undefined);
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a bad concurrency value is refused by the settings, naming the problem", () => {
+    for (const bad of [{ max_requests: 0 }, { max_requests: 1.5 }, { per_provider: { a: -1 } }, { per_provider: [] }, { nope: 1 }, 5]) {
+      expect(() => settings(bad)).toThrow(/Invalid configs.*concurrency/);
     }
   });
 

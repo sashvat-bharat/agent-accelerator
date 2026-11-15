@@ -210,7 +210,7 @@ export function lockFolder(folder: string): void {
       if (processAlive(owner.pid)) {
         throw new ConfigError(
           `[Agent Accelerator] Folder "${dir}" is already in use by process ${owner.pid} (started ${String(owner.startedAt)}). ` +
-            `Only one process may use it at a time: stop that process or use another folder (Agent \`home\`, setHome(), AGENT_ACCEL_HOME). ` +
+            `Only one process may use it at a time: stop that process or use another folder (Agent \`home\` or setHome()). ` +
             `If that process is gone, delete "${lockFile}".`
         );
       }

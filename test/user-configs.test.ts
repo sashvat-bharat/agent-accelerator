@@ -73,7 +73,8 @@ describe("configs.json", () => {
 
   test("a hand edit is read at the next start", () => {
     fs.mkdirSync(home, { recursive: true });
-    fs.writeFileSync(file(), JSON.stringify({ concurrency: { max_requests: 5 } })); // no version: counts as 1
+    fs.writeFileSync(file(), JSON.stringify({ concurrency: { max_requests: 5 } }));
+    restart(); // a restart: the file is read again // no version: counts as 1
     expect(getSetting("concurrency")).toEqual({ max_requests: 5 });
   });
 
@@ -81,6 +82,7 @@ describe("configs.json", () => {
     setConfigs({ values: { usage_limit: { max_cost_usd: 5 } }, editable: ["concurrency"] });
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(file(), JSON.stringify({ version: 1, usage_limit: { max_cost_usd: 1000 }, concurrency: { max_requests: 3 } }));
+    restart(); // a restart: the file is read again
     expect(getSetting("usage_limit")).toEqual({ max_cost_usd: 5 });
     expect(getSetting("concurrency")).toEqual({ max_requests: 3 }); // the allowed key still loads
     const w = events.filter((e) => e.code === "config.file_ignored_key");
@@ -92,6 +94,7 @@ describe("configs.json", () => {
   test("a file loaded before the policy is checked when the policy arrives", () => {
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(file(), JSON.stringify({ version: 1, concurrency: { max_requests: 3 } }));
+    restart(); // a restart: the file is read again
     expect(getSetting("concurrency")).toEqual({ max_requests: 3 }); // no policy yet: everything editable
     setConfigs({ values: { concurrency: { max_requests: 8 } }, editable: [] });
     expect(getSetting("concurrency")).toEqual({ max_requests: 8 });
@@ -101,14 +104,16 @@ describe("configs.json", () => {
   test("unknown keys and invalid values are ignored with a warning, the rest loads", () => {
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(file(), JSON.stringify({ version: 1, nope: 1, catalog_refresh: "maybe", concurrency: { max_requests: 4 } }));
+    restart(); // a restart: the file is read again
     expect(getSetting("concurrency")).toEqual({ max_requests: 4 });
-    expect(getSetting("catalog_refresh")).toBeUndefined();
+    expect(getSetting("catalog_refresh")).toBe("off"); // the invalid value in the file is ignored: the developer value stays
     expect(events.filter((e) => e.code === "config.file_ignored_key").map((e) => e.data.reason).sort()).toEqual(["invalid", "unknown"]);
   });
 
   test("unknown keys are kept when the file is rewritten", () => {
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(file(), JSON.stringify({ version: 1, future_setting: { a: 1 } }));
+    restart(); // a restart: the file is read again
     setConfig("concurrency", { max_requests: 2 });
     expect(written()).toEqual({ version: 1, future_setting: { a: 1 }, concurrency: { max_requests: 2 } });
   });
@@ -116,6 +121,7 @@ describe("configs.json", () => {
   test("a corrupt file is set aside, reported, and defaults apply", () => {
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(file(), "{ not json");
+    restart(); // a restart: the file is read again
     expect(getSetting("concurrency")).toBeUndefined();
     expect(codes()).toContain("config.file_invalid");
     expect(fs.readdirSync(home).some((f) => f.startsWith("configs.json.corrupt-"))).toBe(true);
@@ -136,6 +142,7 @@ describe("configs.json", () => {
   test("a file of another version is ignored", () => {
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(file(), JSON.stringify({ version: 2, concurrency: { max_requests: 9 } }));
+    restart(); // a restart: the file is read again
     expect(getSetting("concurrency")).toBeUndefined();
     expect(events.find((e) => e.code === "config.file_invalid")?.data.reason).toBe("version");
     expect(fs.existsSync(file())).toBe(true); // not renamed: it is a newer format, not damage
@@ -153,6 +160,7 @@ describe("configs.json", () => {
     // another process saves a different key while this one still holds the old copy in memory
     const body = written();
     fs.writeFileSync(file(), JSON.stringify({ ...body, catalog_refresh: "off" }));
+    restart(); // a restart: the file is read again
     setConfig("compat", { no_stream_options: true });
     expect(written()).toEqual({ version: 1, concurrency: { max_requests: 2 }, catalog_refresh: "off", compat: { no_stream_options: true } });
   });
@@ -219,12 +227,13 @@ describe("crash safety", () => {
     const script = path.join(path.dirname(home), "writer.ts");
     fs.writeFileSync(
       script,
-      `import { setConfig } from ${JSON.stringify(path.resolve("src/index.ts"))};
+      `import { setConfig, setHome } from ${JSON.stringify(path.resolve("src/index.ts"))};
+       setHome(process.env.CHILD_HOME!);
        process.stdout.write("ready\\n");
        for (let i = 1; ; i++) setConfig("concurrency", { max_requests: 1 + (i % 50) });`
     );
     for (let round = 0; round < 4; round++) {
-      const child = Bun.spawn(["bun", script], { env: { ...process.env, AGENT_ACCEL_HOME: home, AGENT_CATALOG_REFRESH: "off" }, stdout: "pipe", stderr: "ignore" });
+      const child = Bun.spawn(["bun", script], { env: { ...process.env, CHILD_HOME: home }, stdout: "pipe", stderr: "ignore" });
       const reader = child.stdout.getReader();
       await reader.read(); // the child is running
       await new Promise((r) => setTimeout(r, 60 + round * 40));

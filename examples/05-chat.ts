@@ -6,7 +6,7 @@
  * `agent.importSession` / `agent.exportSession`.
  * Everything lives under the Agent Accelerator home (`.agent-accel/`):
  * `sessions/<sessionId>/{session.json, media/*}` and, with `telemetry.persist`,
- * `telemetry/<date>.ndjson` (tool calls, warnings). Move it with `setHome(dir)` or AGENT_ACCEL_HOME.
+ * `telemetry/<date>.ndjson` (tool calls, warnings). Move it with `setHome(dir)`.
  *
  * Run: bun run examples/05-chat.ts
  */
@@ -31,6 +31,7 @@ import {
   formatSessionCost,
   formatSessionBanner,
 } from "agent-accelerator";
+import { MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 // ---------------------------------------------------------------------------
 // 1. Storage: <home>/sessions/<sessionId>/{session.json, media/*}
@@ -71,7 +72,7 @@ function loadPrompt(): string {
 // 2. Agent setup (strictly hardcoded to "high" thinking)
 // ---------------------------------------------------------------------------
 const THINKING_LEVEL = "high" as const;
-const initialModel = saved?.model ?? process.env.MODEL ?? "google/gemini-3.5-flash-lite";
+const initialModel = saved?.model ?? MODEL;
 
 const agent = new Agent({
   name: "Chat Agent",
@@ -80,7 +81,7 @@ const agent = new Agent({
   model: initialModel,
   dynamicSubagents: {
     enabled: true,
-    model: saved?.subagentModel ?? process.env.SUB_AGENT_MODEL,
+    model: saved?.subagentModel ?? SUB_AGENT_MODEL,
     maxSpawn: 4,
   },
   thinking: THINKING_LEVEL,

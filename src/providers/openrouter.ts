@@ -42,7 +42,8 @@ import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey, getEnv } from "../utils/env.ts";
+import { getApiKey } from "../utils/env.ts";
+import { baseUrlSetting, openRouterSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { safeStringify } from "../utils/serialization.ts";
@@ -161,14 +162,9 @@ const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
 
-// Endpoint from the option, OPENROUTER_BASE_URL, else openrouter.ai; in: each request, out: the base URL without a trailing slash.
+// Endpoint from the option, the `base_urls.openrouter` setting, else openrouter.ai; in: each request, out: the base URL without a trailing slash.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return (
-    options?.baseUrl ||
-    options?.env?.["OPENROUTER_BASE_URL"] ||
-    getEnv("OPENROUTER_BASE_URL") ||
-    DEFAULT_BASE_URL
-  ).replace(/\/+$/, "");
+  return (options?.baseUrl || baseUrlSetting("openrouter") || DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
 // Key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
@@ -202,68 +198,31 @@ function midStreamStatus(code: unknown, errorType: unknown): number | undefined 
   return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
 }
 
-// OpenRouter options that come from env vars, never from AgentConfig (provider routing, `parallel_tool_calls`, `reasoning.exclude`, `user`). A per-Agent `env` wins over the process env; nothing is sent when no variable is set; a bad value is a ConfigError before any network call. NOT supported on purpose (the owner does not want them for now): `reasoning.max_tokens` and `trace`; in: buildBody, out: the extra body fields.
-const ROUTING_LISTS = { OPENROUTER_ORDER: "order", OPENROUTER_ONLY: "only", OPENROUTER_IGNORE: "ignore" } as const;
-const ROUTING_FLAGS = {
-  OPENROUTER_ALLOW_FALLBACKS: "allow_fallbacks",
-  OPENROUTER_REQUIRE_PARAMETERS: "require_parameters",
-  OPENROUTER_ZDR: "zdr",
-} as const;
-function openRouterEnvOptions(options?: ProviderRequestOptions): {
+// The OpenRouter request options from the `openrouter` setting (provider routing, `parallel_tool_calls`, `reasoning.exclude`, `user`), already checked by the settings layer; nothing is sent for a key that is not set. NOT supported on purpose (the owner does not want them for now): `reasoning.max_tokens` and `trace`; in: buildBody, out: the extra body fields.
+const ROUTING_KEYS = [
+  "order",
+  "only",
+  "ignore",
+  "allow_fallbacks",
+  "require_parameters",
+  "zdr",
+  "data_collection",
+  "sort",
+] as const;
+function openRouterOptions(): {
   provider?: Record<string, unknown>;
   parallel_tool_calls?: boolean;
   reasoning_exclude?: boolean;
   user?: string;
 } {
-  const read = (name: string): string | undefined => {
-    const own = options?.env?.[name]?.trim();
-    return own ? own : getEnv(name);
-  };
-  const bad = (name: string, value: string, expected: string): never => {
-    throw new ConfigError(`[Agent Accelerator] Invalid ${name} ${JSON.stringify(value)}: expected ${expected}.`);
-  };
-  const flag = (name: string): boolean | undefined => {
-    const v = read(name);
-    if (v === undefined) return undefined;
-    const t = v.toLowerCase();
-    if (t === "true" || t === "1") return true;
-    if (t === "false" || t === "0") return false;
-    return bad(name, v, "true or false");
-  };
+  const s = openRouterSetting();
   const provider: Record<string, unknown> = {};
-  for (const [name, field] of Object.entries(ROUTING_LISTS)) {
-    const v = read(name);
-    if (v === undefined) continue;
-    const list = v
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-    if (list.length === 0) bad(name, v, "a comma-separated list of provider slugs");
-    provider[field] = list;
-  }
-  for (const [name, field] of Object.entries(ROUTING_FLAGS)) {
-    const v = flag(name);
-    if (v !== undefined) provider[field] = v;
-  }
-  const collection = read("OPENROUTER_DATA_COLLECTION");
-  if (collection !== undefined) {
-    if (collection !== "allow" && collection !== "deny") bad("OPENROUTER_DATA_COLLECTION", collection, "allow or deny");
-    provider["data_collection"] = collection;
-  }
-  const sort = read("OPENROUTER_SORT");
-  if (sort !== undefined) {
-    if (sort !== "price" && sort !== "throughput" && sort !== "latency")
-      bad("OPENROUTER_SORT", sort, "price, throughput or latency");
-    provider["sort"] = sort;
-  }
-  const parallel = flag("OPENROUTER_PARALLEL_TOOL_CALLS");
-  const exclude = flag("OPENROUTER_REASONING_EXCLUDE");
-  const user = read("OPENROUTER_USER");
+  for (const key of ROUTING_KEYS) if (s[key] !== undefined) provider[key] = s[key];
   return {
     ...(Object.keys(provider).length > 0 ? { provider } : {}),
-    ...(parallel !== undefined ? { parallel_tool_calls: parallel } : {}),
-    ...(exclude !== undefined ? { reasoning_exclude: exclude } : {}),
-    ...(user ? { user } : {}),
+    ...(typeof s["parallel_tool_calls"] === "boolean" ? { parallel_tool_calls: s["parallel_tool_calls"] } : {}),
+    ...(typeof s["reasoning_exclude"] === "boolean" ? { reasoning_exclude: s["reasoning_exclude"] } : {}),
+    ...(typeof s["user"] === "string" ? { user: s["user"] } : {}),
   };
 }
 
@@ -690,7 +649,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     if (orTools) body.tools = orTools;
     const toolChoice = mapToolChoiceToOpenRouterChat(options?.toolChoice);
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
-    const env = openRouterEnvOptions(options);
+    const env = openRouterOptions();
     if (effort || env.reasoning_exclude !== undefined)
       body.reasoning = {
         ...(effort ? { effort } : {}),
