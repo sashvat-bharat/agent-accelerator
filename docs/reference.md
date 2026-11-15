@@ -165,6 +165,7 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
 | `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |
 | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | Code only (no env var): limit provider calls in flight, see [Safety](guides/safety-and-ops.md#concurrency-limit) |
+| `setModels(json)`, `listModels()` | Code only: the allowed-models list from the exact `models.json` shape, see [Agents and models](guides/agents-and-models.md#the-list-of-allowed-models) |
 | `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS` | Default `usageLimit` for every agent you build (see `configure()` and the safety guide) |
 | `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |
 | `AGENT_CATALOG_REFRESH=off` | Disable automatic model-catalog refresh |

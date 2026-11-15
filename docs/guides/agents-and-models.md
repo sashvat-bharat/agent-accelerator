@@ -88,6 +88,35 @@ Unsupported options are **warned on the telemetry bus and dropped**, never sent.
 - There are no `stop` or `seed` options (both removed in 0.6.0).
 - 💡 Switching providers mid-session is supported; the conversation history is provider-neutral.
 
+### The list of allowed models
+
+A program that ships to other people (a harness, a binary) often needs one fixed list of models. Write it as `models.json`, embed it in your code and hand it to `setModels`; the SDK never reads it from disk, so an end user cannot change it by editing a file in their home folder.
+
+```json
+{
+  "default": { "model": "google/gemini-4-argon", "sub_agent_model": "google/gemini-4-argon" },
+  "providers": {
+    "google": { "models": ["gemini-4-argon", "gemini-4-carbon"] },
+    "anthropic": { "models": ["claude-opus-5-5"] },
+    "openrouter": { "models": ["meta/muse-ember"] }
+  }
+}
+```
+
+```ts
+import { setModels, listModels } from "agent-accelerator";
+import models from "./models.json";
+
+setModels(models);                 // validates everything first
+for (const m of listModels()!.models) console.log(m.model); // "google/gemini-4-argon", ... for a picker
+```
+
+- Models sit under their provider **without** the `provider/` prefix; the SDK joins them into `provider/model`. OpenRouter ids keep their own slash (`"meta/muse-ember"` becomes `openrouter/meta/muse-ember`). Use real catalog ids (Anthropic ids use dashes: `claude-opus-5-5`).
+- `default.model` and `default.sub_agent_model` are full `provider/model` strings and must be in the list. The list means "any of these": it is not a fallback order, and the model never picks from it.
+- The shape is exact. A wrong shape, an unknown key, a provider with no models, an empty, duplicate or wildcard (`*`) entry, a `provider/`-prefixed entry or a default outside the list throws one `ConfigError` that lists every problem, and nothing changes.
+- `listModels()` returns `{ default: { model, sub_agent_model }, models: [{ provider, id, model }] }`, deeply frozen, or `undefined` until `setModels` is called. Calling `setModels` again replaces the list.
+- This is a guardrail inside your program, not a security wall: code running in the same process can call `setModels` too.
+
 ## Thinking (reasoning)
 
 ```ts

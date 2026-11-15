@@ -71,6 +71,8 @@ export { setHome, resolveHome } from "./utils/home.ts";
 export { configure } from "./agent/defaults.ts";
 export type { AgentDefaults } from "./agent/defaults.ts";
 export { getConcurrencyStatus } from "./agent/governor.ts";
+export { setModels, listModels } from "./config/models.ts";
+export type { ModelList, ModelOption } from "./config/models.ts";
 export type { GovernorLimits } from "./agent/governor.ts";
 export type {
   ScheduledActionInput,
