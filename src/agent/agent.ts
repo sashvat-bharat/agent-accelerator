@@ -986,22 +986,48 @@ export class Agent {
       );
     }
     if (!this.rc.current) return this.run(prompt, options) as Promise<AgentResponse>;
+    return this.enqueueFollowUp(prompt, options);
+  }
+
+  // Throws when `midSession.mode` forbids the requested enqueue kind; in: run() and stream() while busy, out: nothing or a ConfigError.
+  private assertEnqueueAllowed(requested: AgentRunOptions["enqueue"]): void {
+    const enforced = this.midSessionConfig.mode;
+    if (
+      requested &&
+      requested !== "interrupt" &&
+      (enforced === "steer" || enforced === "queue") &&
+      requested !== enforced
+    ) {
+      throw new ConfigError(
+        `[Agent Accelerator] enqueue "${requested}" is disabled by midSession.mode "${enforced}". Use ${enforced}() or set mode to "auto"/"${requested}".`
+      );
+    }
+  }
+
+  // Throws when the follow-up queue is at `midSession.maxQueued`; in: every queueing path except interrupt, out: nothing or a ValidationError.
+  private assertQueueRoom(): void {
     const max = this.midSessionConfig.maxQueued ?? 20;
     if (this.rc.queue.length >= max) {
       throw new ValidationError(
         `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
       );
     }
+  }
+
+  // Tells the active stream (if any) that a follow-up was queued; in: queue paths, out: a `queued` event with the new length.
+  private announceQueued(prompt: string | ContentPart[], queueLength: number): void {
+    try {
+      this.rc.current?.outerStream?.push({ type: "queued", queuedPrompt: previewPrompt(prompt), queueLength });
+    } catch {}
+  }
+
+  // Adds a non-streaming follow-up to the waiting queue after the room check, saves it and announces it; in: queue() and run() while busy, out: the promise of that later run.
+  private enqueueFollowUp(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse> {
+    this.assertQueueRoom();
     return new Promise<AgentResponse>((resolve, reject) => {
       this.rc.queue.push({ prompt, options, isStream: false, resolve, reject });
       this.persistNow();
-      try {
-        this.rc.current?.outerStream?.push({
-          type: "queued",
-          queuedPrompt: previewPrompt(prompt),
-          queueLength: this.rc.queue.length,
-        });
-      } catch {}
+      this.announceQueued(prompt, this.rc.queue.length);
     });
   }
 
@@ -1747,42 +1773,19 @@ export class Agent {
           this.rc.queueUrgent({ prompt, options, isStream: false, resolve, reject })
         );
       }
-      const enforced = this.midSessionConfig.mode;
-      const requested = options?.enqueue;
-      if (requested && (enforced === "steer" || enforced === "queue") && requested !== enforced) {
-        throw new ConfigError(
-          `[Agent Accelerator] enqueue "${requested}" is disabled by midSession.mode "${enforced}". Use ${enforced}() or set mode to "auto"/"${requested}".`
-        );
-      }
-      const mode = this.rc.resolveEnqueueMode(requested);
+      this.assertEnqueueAllowed(options?.enqueue);
+      const mode = this.rc.resolveEnqueueMode(options?.enqueue);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
         return this.rc.steerInto(this.rc.current, prompt, options);
-      } else {
-        if (this.midSessionConfig.mode === "steer") {
-          throw new ConfigError(
-            '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
-          );
-        }
-        this.assertPromptValid(prompt);
-        const max = this.midSessionConfig.maxQueued ?? 20;
-        if (this.rc.queue.length >= max) {
-          throw new ValidationError(
-            `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
-          );
-        }
-        return new Promise<AgentResponse>((resolve, reject) => {
-          this.rc.queue.push({ prompt, options, isStream: false, resolve, reject });
-          this.persistNow();
-          try {
-            this.rc.current?.outerStream?.push({
-              type: "queued",
-              queuedPrompt: previewPrompt(prompt),
-              queueLength: this.rc.queue.length,
-            });
-          } catch {}
-        });
       }
+      if (this.midSessionConfig.mode === "steer") {
+        throw new ConfigError(
+          '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
+        );
+      }
+      this.assertPromptValid(prompt);
+      return this.enqueueFollowUp(prompt, options);
     }
 
     return this.startNonStreamingRun(prompt, options);
@@ -1853,18 +1856,9 @@ export class Agent {
     this.assertPromptValid(prompt);
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
     if (this.rc.current) {
-      const enforcedStream = this.midSessionConfig.mode;
       const urgent = options?.enqueue === "interrupt"; // stops the active run and goes first, in every mode and whatever the queue holds
       const requestedStream = options?.enqueue === "interrupt" ? undefined : options?.enqueue;
-      if (
-        requestedStream &&
-        (enforcedStream === "steer" || enforcedStream === "queue") &&
-        requestedStream !== enforcedStream
-      ) {
-        throw new ConfigError(
-          `[Agent Accelerator] enqueue "${requestedStream}" is disabled by midSession.mode "${enforcedStream}". Use ${enforcedStream}() or set mode to "auto"/"${requestedStream}".`
-        );
-      }
+      this.assertEnqueueAllowed(requestedStream);
       const mode = urgent ? "queue" : this.rc.resolveEnqueueMode(requestedStream);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
@@ -1916,24 +1910,11 @@ export class Agent {
         );
       }
       this.assertPromptValid(prompt);
-      const max = this.midSessionConfig.maxQueued ?? 20;
-      if (!urgent && this.rc.queue.length >= max) {
-        throw new ValidationError(
-          `[Agent Accelerator] Queue is full (${this.rc.queue.length}/${max}). Wait for the active run to finish or increase midSession.maxQueued.`
-        );
-      }
+      if (!urgent) this.assertQueueRoom();
       const deferred = new AssistantMessageEventStream();
       this.wireStreamCallbacks(deferred, options);
       // Notify the active stream (if any) that a follow-up was queued.
-      if (!urgent) {
-        try {
-          this.rc.current.outerStream?.push({
-            type: "queued",
-            queuedPrompt: previewPrompt(prompt),
-            queueLength: this.rc.queue.length + 1,
-          });
-        } catch {}
-      }
+      if (!urgent) this.announceQueued(prompt, this.rc.queue.length + 1);
       const queuedEntry: QueuedPrompt = {
         prompt,
         options,
