@@ -42,11 +42,9 @@ import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey } from "../utils/env.ts";
-import { baseUrlSetting, openRouterSetting } from "../config/settings.ts";
+import { openRouterSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { ConfigError, isAbortError } from "../types/errors.ts";
 import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
@@ -64,12 +62,15 @@ import {
   toolTurnFinishReason,
   combinedSignal,
   timeoutFor,
-  hasAuthHeader,
   clampToolCallId,
   openStreamResponse,
   retryOptionsFrom,
   headersToRecord,
   parseRetryAfterMs,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+  stripModelScope,
+  resultToOutput,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -162,26 +163,23 @@ const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
 
-// Endpoint from the option, the `base_urls.openrouter` setting, else openrouter.ai; in: each request, out: the base URL without a trailing slash.
+// The openrouter base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return (options?.baseUrl || baseUrlSetting("openrouter") || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  return resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options);
 }
 
-// Key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
+// The openrouter key of this request; in: each request, out: the shared resolver.
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
-  const key = getApiKey("openrouter", options?.apiKey, options?.env);
-  if (key) return key;
-  if (hasAuthHeader(options?.headers)) return "unused";
-  return undefined;
+  return resolveProviderApiKey("openrouter", options);
 }
 
 /**
  * Strips ONLY the `openrouter/` prefix. Scoped ids (`scope/model:variant`)
  * and bare ids pass through untouched — the router resolves them.
  */
+// The model id without its provider scope; in: each request, out: the bare id.
 function cleanModelId(model: string | ModelSpec): string {
-  const rawId = typeof model === "string" ? model : model.id;
-  return rawId.replace(/^openrouter\//i, "");
+  return stripModelScope(model, /^openrouter\//i);
 }
 
 // The HTTP status of an error chunk inside a stream (the HTTP status itself is 200): its numeric `code`, else the status of its retryable `error_type` (errors-and-debugging.md, "Typed Error Codes"); in: the chunk's error, out: streamInto, where it makes the error retryable.
@@ -389,12 +387,6 @@ function storedReplay(m: { providerSteps?: { provider: string; steps: unknown[] 
     ...(details.length > 0 ? { reasoning_details: details } : {}),
     ...(annotations.length > 0 ? { annotations } : {}),
   };
-}
-
-// A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
-function resultToOutput(result: unknown): string {
-  if (typeof result === "string") return result;
-  return safeStringify(result);
 }
 
 /**

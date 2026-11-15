@@ -6,6 +6,10 @@
  * across the four REST transports, plus timeout/signal and id helpers.
  */
 import { toConciseProviderError } from "../utils/errors.ts";
+import { getApiKey } from "../utils/env.ts";
+import { baseUrlSetting } from "../config/settings.ts";
+import { safeStringify } from "../utils/serialization.ts";
+import type { ModelSpec, ProviderRequestOptions } from "../types/model.ts";
 import { withRetries } from "../utils/retry.ts";
 import { redactHeadersCentral } from "../utils/cache.ts";
 import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
@@ -456,4 +460,33 @@ export function failStream(eventStream: AssistantMessageEventStream, linked: Abo
   const isAbort =
     linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
   eventStream.fail(isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw);
+}
+
+/** A tool result as the text of a tool message or function_call_output; in: each adapter's history builder, out: a string. */
+export function resultToOutput(result: unknown): string {
+  if (typeof result === "string") return result;
+  return safeStringify(result);
+}
+
+/** The model id without its provider scope (`prefix` matches the scope, case-insensitive); in: a first-class adapter, out: the bare id. */
+export function stripModelScope(model: string | ModelSpec, prefix: RegExp): string {
+  const rawId = typeof model === "string" ? model : model.id;
+  return rawId.replace(prefix, "");
+}
+
+/** The key of a first-class provider (option, then environment), `unused` when custom headers carry the auth; in: each request, out: the key or undefined. */
+export function resolveProviderApiKey(provider: string, options?: ProviderRequestOptions): string | undefined {
+  const key = getApiKey(provider, options?.apiKey, options?.env);
+  if (key) return key;
+  if (hasAuthHeader(options?.headers)) return "unused";
+  return undefined;
+}
+
+/** The base URL of a first-class provider (option, then the `base_urls` setting, then its default) without trailing slashes; in: each request, out: a URL. */
+export function resolveProviderBaseUrl(
+  provider: string,
+  defaultBaseUrl: string,
+  options?: ProviderRequestOptions
+): string {
+  return (options?.baseUrl || baseUrlSetting(provider) || defaultBaseUrl).replace(/\/+$/, "");
 }

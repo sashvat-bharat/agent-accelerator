@@ -45,12 +45,9 @@ import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey } from "../utils/env.ts";
-import { baseUrlSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { clampCacheKey } from "../utils/cache.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOnResponses } from "../utils/errors.ts";
 import { ConfigError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
@@ -70,11 +67,14 @@ import {
   toolTurnFinishReason,
   combinedSignal,
   timeoutFor,
-  hasAuthHeader,
   openStreamResponse,
   retryOptionsFrom,
   headersToRecord,
   parseRetryAfterMs,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+  stripModelScope,
+  resultToOutput,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -177,23 +177,20 @@ const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 // Request building (canonical -> Responses)
 // ---------------------------------------------------------------------------
 
-// Endpoint from the option, the `base_urls.openai` setting, else api.openai.com; in: each request, out: the base URL without a trailing slash.
+// The openai base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return (options?.baseUrl || baseUrlSetting("openai") || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  return resolveProviderBaseUrl("openai", DEFAULT_BASE_URL, options);
 }
 
-// Key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
+// The openai key of this request; in: each request, out: the shared resolver.
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
-  const key = getApiKey("openai", options?.apiKey, options?.env);
-  if (key) return key;
-  if (hasAuthHeader(options?.headers)) return "unused";
-  return undefined;
+  return resolveProviderApiKey("openai", options);
 }
 
 /** Strips ONLY the `openai/` prefix. Bare ids pass through untouched. */
+// The model id without its provider scope; in: each request, out: the bare id.
 function cleanModelId(model: string | ModelSpec): string {
-  const rawId = typeof model === "string" ? model : model.id;
-  return rawId.replace(/^openai\//i, "");
+  return stripModelScope(model, /^openai\//i);
 }
 
 // Canonical tool declarations as Responses function tools; in: options.tools, out: request `tools`.
@@ -259,12 +256,6 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
     }
   }
   return blocks;
-}
-
-// A tool result as the text of a function_call_output item; in: fullHistoryInput, out: a string.
-function resultToOutput(result: unknown): string {
-  if (typeof result === "string") return result;
-  return safeStringify(result);
 }
 
 // Makes an id safe for the Responses wire (allowed characters, at most 64, no trailing underscores); in: fullHistoryInput, out: the id.

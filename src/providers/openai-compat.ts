@@ -57,7 +57,6 @@ import { getApiKey } from "../utils/env.ts";
 import { baseUrlSetting, compatSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { safeStringify } from "../utils/serialization.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
@@ -84,6 +83,7 @@ import {
   retryOptionsFrom,
   headersToRecord,
   parseRetryAfterMs,
+  resultToOutput,
 } from "./shared.ts";
 import { getModelFromCatalog, createGenericModelSpec, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
@@ -379,12 +379,6 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
     // video/file never reach here: assertNoVideoOrFileParts runs first.
   }
   return blocks;
-}
-
-// A tool result as the text of a tool message; in: fullHistoryMessages, out: a string.
-function resultToOutput(result: unknown): string {
-  if (typeof result === "string") return result;
-  return safeStringify(result);
 }
 
 /**

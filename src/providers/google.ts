@@ -42,8 +42,6 @@ import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
-import { getApiKey } from "../utils/env.ts";
-import { baseUrlSetting } from "../config/settings.ts";
 import { normalizeMediaInput, inferMimeType } from "../utils/media.ts";
 import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 import { safeStringify } from "../utils/serialization.ts";
@@ -60,13 +58,15 @@ import {
   isNotFoundChainError,
   combinedSignal,
   timeoutFor,
-  hasAuthHeader,
   openStreamResponse,
   retryOptionsFrom,
   headersToRecord,
   parseRetryAfterMs,
   linkStreamAbort,
   withAbortTimer,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+  stripModelScope,
 } from "./shared.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
@@ -421,23 +421,19 @@ export function clearInteractionChains(sessionId?: string): void {
 // Request building (canonical -> Interactions)
 // ---------------------------------------------------------------------------
 
-// Endpoint from the option, the `base_urls.google` setting, else the v1beta default; in: each request, out: the base URL without a trailing slash.
+// The google base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return (options?.baseUrl || baseUrlSetting("google") || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  return resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options);
 }
 
-// API key from the option or env, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
+// The google key of this request; in: each request, out: the shared resolver.
 function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
-  const key = getApiKey("google", options?.apiKey, options?.env);
-  if (key) return key;
-  if (hasAuthHeader(options?.headers)) return "unused";
-  return undefined;
+  return resolveProviderApiKey("google", options);
 }
 
-// Strips a google/, gemini/ or models/ prefix; in: generate/stream/getModel, out: the bare model id.
+// The model id without its provider scope; in: each request, out: the bare id.
 function cleanModelId(model: string | ModelSpec): string {
-  const rawId = typeof model === "string" ? model : model.id;
-  return rawId.replace(/^(google\/|gemini\/|models\/)/i, "");
+  return stripModelScope(model, /^(google\/|gemini\/|models\/)/i);
 }
 
 /**
