@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { Agent, tool, DEFAULT_PROMPTS, ConfigError, executeToolCalls } from "../src/index.ts";
+import { Agent, tool, DEFAULT_PROMPTS, ConfigError } from "../src/index.ts";
+import { executeToolCalls } from "../src/tools/executor.ts";
 import { fillPrompt, resolvePrompts } from "../src/prompts/prompts.ts";
 import { ensureToolPairing } from "../src/agent/loop.ts";
 import { AgentContext } from "../src/agent/context.ts";

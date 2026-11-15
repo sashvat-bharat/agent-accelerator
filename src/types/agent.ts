@@ -179,7 +179,7 @@ export interface AgentConfig {
   fetch?: typeof fetch;
   /** Provider/env overrides forwarded to key resolution. */
   env?: Record<string, string>;
-  /** @deprecated Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
+  /** Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
   hooks?: unknown;
   /**
    * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning text). An event

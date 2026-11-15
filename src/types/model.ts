@@ -118,9 +118,9 @@ export interface ModelSpec {
   description?: string;
   family?: string;
   api?: string; // agent-accel-style: openai-completions | openai-responses | anthropic-messages | google-generative-ai etc.
-  /** @deprecated alias for limit.context */
+  /** Alias of `limit.context`. */
   contextWindow: number;
-  /** @deprecated alias for limit.output */
+  /** Alias of `limit.output`. */
   maxOutputTokens: number;
   // Full battle-tested fields (optional for BC with stale per-provider files, required when from catalog)
   limit?: ModelLimit;

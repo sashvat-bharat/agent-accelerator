@@ -148,7 +148,7 @@ When `dynamicSubagents.enabled` is set without a resolvable worker model, constr
 
 ```ts
 await agent.run(prompt, opts?) // non-streaming, or streaming when opts.stream is true
-agent.ask(prompt, optsOrBool?) // deprecated (use run): string deltas when streaming, otherwise same as run
+agent.ask(prompt, optsOrBool?) // shorthand for run: string deltas when streaming, otherwise same as run
 agent.stream(prompt, opts?) // AssistantMessageEventStream
 agent.steer(prompt) / agent.queue(prompt) // while busy: join the active run / start after it
 agent.interrupt() // stop the active run now (provider request aborted, stream cancelled, tools get ctx.signal)
@@ -229,7 +229,7 @@ stream.off("text_delta", handler);
 
 ## SubAgent
 
-`SubAgent extends Agent` for fixed worker roles. It is a deprecated compat alias: prefer a plain `Agent` exposed via `subagents: [...]`, `agentToTool()` or `buildAgentTools()`.
+`SubAgent extends Agent` for fixed worker roles. It is a thin wrapper that gets no new features; a plain `Agent` exposed via `subagents: [...]`, `agentToTool()` or `buildAgentTools()` does the same.
 
 ```ts
 import { Agent, SubAgent } from "agent-accelerator";
@@ -450,7 +450,6 @@ const agent = new Agent({
 * `toStandardToolDeclarations(record | array)` — converts tools to `{ name, description, parameters }` for providers.
 * `zodToJsonSchema(schema)` — converts Zod schemas using native conversion with a fallback extractor.
 * `cleanJsonSchema(schema)` — removes `$schema`, `$defs`, and `definitions`, resolves `$ref`, and preserves explicit `additionalProperties`.
-* `executeToolCalls({ tools, toolCalls, agentName?, parallel?, signal?, sessionId? })` — executes tool calls. Calls validate Zod input, use bounded parallelism, enforce per-tool timeouts, retry transient failures, recover namespace/camel-case tool-name aliases, and return `ToolResultRecord[]`. Missing tools and aborts are represented as error results rather than thrown.
 
 The agent loop answers the 3rd consecutive identical call (same name and arguments) with a `repeat_blocked` error, so the model can reuse the prior result or change its arguments. Tools marked `repeatable: true`, or `idempotent: true` unless `repeatable` is set, are exempt.
 
@@ -1399,8 +1398,6 @@ never in the gitignored snapshot.
 * `createSessionId(prefix?)` — creates a random UUID session ID (`${prefix}-<uuid>` when a prefix is given), clamped to 64 characters for affinity.
 * `createTrackingId()` — system-generated 32-char TrackingID for one sub-agent worker (`NAME-{TrackingID}`).
 * `createChildSessionId(parentId, tag)` / `createFixedChildSessionId(parentId, name)` / `isSessionDescendant(child, parent)` — provider-safe (≤64 chars) child session IDs with parent-hash lineage.
-* `getEnv(key, fallback?)` — resolves an environment variable.
-* `getApiKey(provider, explicit?, env?)` — resolves API keys using the configured environment lookup order.
 * `buildSessionHeaders(provider, cache?, custom?, sessionId?)` — builds provider-specific affinity headers. Normally handled automatically.
 * Two retry layers: `retry` repeats one failed provider CALL (seconds); `runRetries` repeats a whole failed RUN from where it stopped (minutes, `agent.run_retry` on the bus) while the agent stays busy, so queued prompts wait.
 * `withRetries(fn, { maxRetries?, maxRetryDelayMs?, signal?, label? })` / `isTransientError(err)` — bounded retries for transient provider failures (defaults: 2 retries, 5s cap, aborts never retried).

@@ -3,19 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import type { ScheduledActionRecord } from "../src/types/scheduler.ts";
 import * as path from "node:path";
-import {
-  Agent,
-  SubAgentModelError,
-  ConfigError,
-  ValidationError,
-  tool,
-  telemetryBus,
-  executeToolCalls,
-  getDatetimeTool,
-  type AgentConfig,
-  type ScheduledActionInput,
-  type TelemetryEvent,
-} from "../src/index.ts";
+import { Agent, SubAgentModelError, ConfigError, ValidationError, tool, telemetryBus, getDatetimeTool, type AgentConfig, type ScheduledActionInput, type TelemetryEvent } from "../src/index.ts";
+import { executeToolCalls } from "../src/tools/executor.ts";
 import { z } from "zod";
 import {
   getScheduler,

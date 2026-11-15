@@ -26,7 +26,7 @@ console.log(res.text);
 console.log(res.subagents.map((s) => `${s.name}: ${s.usage.totalTokens} tokens`));
 ```
 
-Each call runs on its own isolated copy (`fork`), so parallel calls to one worker really run in parallel. `agentToTool(agent)` and `buildAgentTools([...])` expose the same idea manually. The `SubAgent` class still works but is **deprecated**: use a plain `Agent` plus `subagents`.
+Each call runs on its own isolated copy (`fork`), so parallel calls to one worker really run in parallel. `agentToTool(agent)` and `buildAgentTools([...])` expose the same idea manually. The `SubAgent` class still works but gets no new features: use a plain `Agent` plus `subagents`.
 
 ## Dynamic sub-agents
 

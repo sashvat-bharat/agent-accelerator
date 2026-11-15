@@ -126,7 +126,8 @@ describe("modality guard (catalog-driven)", () => {
   });
 
   it("accepts pdf on test-model via user-registered override", async () => {
-    const { assertNoVideoPartsOnResponses, registerModel, clearCustomModels } = await import("../src/index.ts");
+    const { registerModel, clearCustomModels } = await import("../src/index.ts");
+    const { assertNoVideoPartsOnResponses } = await import("../src/utils/errors.ts");
     clearCustomModels();
     registerModel({
       id: "acme/test-model",

@@ -25,9 +25,8 @@ export function agentFromEnv(config?: Omit<AgentConfig, "model"> & { model?: Age
  * SubAgent is a specialized Agent designed for modular delegation,
  * evaluation, reviewing, or parallel task execution.
  *
- * @deprecated Prefer composing a plain `Agent` and exposing it via
- * `agentToTool()`/`buildAgentTools()` (or `subagents: [...]`) instead of
- * subclassing. `SubAgent` stays for compat and receives no new features.
+ * A thin wrapper that receives no new features: a plain `Agent` exposed via `agentToTool()`/`buildAgentTools()` (or
+ * `subagents: [...]`) does the same without subclassing.
  *
  * It inherits 100% of the capabilities of Agent, defaults to the saved or default worker model,
  * and provides .asTool() and .toTool() for seamless registration into parent agents.

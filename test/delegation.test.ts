@@ -275,7 +275,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
   });
 
   it("should scope worker traces to the owning agent's sessions (no cross-tenant reads)", async () => {
-    const { executeToolCalls } = require("../src/index.ts");
+    const { executeToolCalls } = require("../src/tools/executor.ts");
     const worker = new SubAgent({
       name: "tenant_worker",
       description: "Does work",
@@ -324,7 +324,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
   });
 
   it("runs parallel calls to the same fixed worker concurrently, each with its own answer", async () => {
-    const { executeToolCalls } = require("../src/index.ts");
+    const { executeToolCalls } = require("../src/tools/executor.ts");
     const sse = (task: string) =>
       [
         { event_type: "step.delta", index: 0, delta: { type: "text", text: `answer:${task}` } },
@@ -372,7 +372,8 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     // Regression: `parent-sub-adversarial_critic` (65 chars) 400d on OpenAI
     // (`Invalid 'prompt_cache_key': string too long`), yielding 0-tok
     // `provider: unknown` sub-agents. Child ids must fit 64 chars.
-    const { SubAgent, executeToolCalls } = require("../src/index.ts");
+    const { SubAgent } = require("../src/index.ts");
+    const { executeToolCalls } = require("../src/tools/executor.ts");
 
     const critic = new SubAgent({
       name: "adversarial_critic",

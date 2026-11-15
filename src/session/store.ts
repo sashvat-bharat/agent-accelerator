@@ -167,10 +167,7 @@ function specFor(modelStr: string): ReturnType<typeof getModelFromCatalog> {
   }
 }
 
-/** Context window for telemetry display. Falls back to 1M like the chat CLI.
- * @deprecated Kept for compat; new code should use
- * `getSessionContextWindowOrUndefined` and handle `undefined` explicitly.
- */
+/** Context window for telemetry display, 1M when the model is unknown (`getSessionContextWindowOrUndefined` says when it is unknown). */
 export function getSessionContextWindow(modelStr: string): number {
   try {
     const spec = specFor(modelStr);

@@ -128,7 +128,7 @@ describe("Single-File Provider Architecture & Provider-Specific Types", () => {
     expect(resolvedLite.modelId).toBe("gemini-3.5-flash-lite");
 
     // Thinking maps to the canonical Google level (no budget field exists natively).
-    const { mapThinkingLevelToGoogle } = await import("../src/index.ts");
+    const { mapThinkingLevelToGoogle } = await import("../src/providers.ts");
     expect(mapThinkingLevelToGoogle("high")).toEqual({ thinkingLevel: "high" });
   });
 });
