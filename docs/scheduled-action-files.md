@@ -176,6 +176,7 @@ The action's `id` stays the same when you change its instructions, so each run h
 - A run describes the action **as it was when the run started**, not as it is now.
 - Deleting an action keeps its run files and its `definitions/` folder; `purge: true` removes them with the action's folder.
 - To see why two results differ, compare the `definition` of their run files, then diff the two definition files.
+- [`examples/16-definition-history.ts`](../examples/16-definition-history.ts) shows it end to end, offline: one action run with changed instructions, a failed run, and the diff of two definition files.
 
 ## Reading the files
 

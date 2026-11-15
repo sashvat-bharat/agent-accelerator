@@ -1449,6 +1449,10 @@ bun run examples/14-scheduled-actions.ts [--quick]
 bun run examples/15-durable-agent.ts
 # a durable agent: killed mid-tool (SIGKILL), picked up by a new process (interrupted()/resume()),
 # finished tools not repeated, run retry, ctx.stop approval, tool logs (about 5 s of waiting)
+
+bun run examples/16-definition-history.ts
+# offline (scripted model, no key, no cost): the same scheduled action run with changed instructions;
+# each run file names the definition it started with, even a failed run, and the old definition file is kept
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
@@ -1532,7 +1536,7 @@ src/
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
 └── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, retry, errors
-examples/        # live demos 01-15 (no 10; see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
+examples/        # demos 01-16 (no 10; see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
 test/            # unit + mocked-provider tests mirroring src/
 ```
 
