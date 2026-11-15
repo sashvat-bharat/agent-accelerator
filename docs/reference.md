@@ -140,6 +140,7 @@ All extend `AgentAccelError` (`code`, `retryable`, `context`).
 | `BudgetExceededError` | `budget` or `limits.maxTotalTokens` / `deadlineMs` / `maxToolCallsPerRun` exceeded; partial usage attached |
 | `ToolError` | A tool failed in a way surfaced to the caller |
 | `ValidationError` | Structured output or scheduled-action input did not validate; input the model cannot take (an unsupported modality), before any network call; an empty prompt; a call made the wrong way (a streaming option on `steer`/`queue`/`interrupt(message)`, `resume()` while busy, a full queue or steer inbox); a bad session id, `registerModel` spec or media input |
+| `SettingNotEditableError` | `setConfig` on a setting the program keeps hidden (a `ConfigError`, never retried); `key` names it |
 | `ModelNotAllowedError` | A model outside the program's `setModels` list (a `ConfigError`, never retried); `model` and `allowed` say what was asked and what is available |
 | `ThinkingLevelError` | Level not supported by the model (a `ConfigError`); `allowedLevels` lists valid ones |
 | `SubAgentModelError` | Dynamic workers or scheduling without a worker model |
@@ -165,6 +166,7 @@ Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"
 | `COMPAT_NO_STREAM_OPTIONS=1` | Do not send `stream_options` to a generic endpoint |
 | `COMPAT_NO_SESSION_HEADERS=1` | Do not send session/affinity headers to a generic endpoint |
 | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | Code only (no env var): limit provider calls in flight, see [Safety](guides/safety-and-ops.md#concurrency-limit) |
+| `setConfigs(json)`, `getConfigs()`, `setConfig(key, value)` | Code only: the program's settings from the exact `configs.json` shape (`values` plus an `editable` list; hidden unless listed), see [Safety](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) |
 | `setModels(json)`, `listModels()` | Code only: the allowed-models list from the exact `models.json` shape, see [Agents and models](guides/agents-and-models.md#the-list-of-allowed-models); a model outside it throws `ModelNotAllowedError` at every run start, in the constructor and in `importSession` |
 | `AGENT_ACCEL_USAGE_LIMIT_USD`, `AGENT_ACCEL_USAGE_LIMIT_TOKENS` | Default `usageLimit` for every agent you build (see `configure()` and the safety guide) |
 | `AGENT_ACCEL_SCHEDULED_BUDGET_USD`, `AGENT_ACCEL_SCHEDULED_BUDGET_TOKENS` | Default `dynamicSubagents.scheduledActionBudget` |

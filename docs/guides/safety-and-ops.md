@@ -102,6 +102,50 @@ console.log(getConcurrencyStatus()); // { limited, active, waiting, byProvider, 
 - `configure()` replaces the previous call, so `configure({})` removes the limit. It is one setting for the whole process, not per agent.
 - Events on `telemetryBus`: `concurrency.queued` (a call had to wait: `provider`, `waiting`, `active`, `paused`) and `concurrency.paused` (`provider`, `ms`, `waiting`).
 
+### Settings in code and who may change them
+
+A program that ships to other people (a harness, a binary) sets its limits and options in code, and decides which of them the end user may change. Write them as `configs.json`, embed it in your code and hand it to `setConfigs`; the SDK never reads the developer's file from disk.
+
+```json
+{
+  "values": {
+    "usage_limit": { "max_cost_usd": 5 },
+    "concurrency": { "max_requests": 8, "per_provider": { "google": 4 } },
+    "catalog_refresh": "on",
+    "openrouter": { "sort": "price" }
+  },
+  "editable": ["concurrency", "catalog_refresh"]
+}
+```
+
+```ts
+import { setConfigs, getConfigs, setConfig } from "agent-accelerator";
+import configs from "./configs.json";
+
+setConfigs(configs);                              // validates everything first
+getConfigs();                                     // { concurrency: {...}, catalog_refresh: "on" }: only the editable ones
+setConfig("concurrency", { max_requests: 2 });    // ok: editable
+setConfig("usage_limit", { max_cost_usd: 1000 }); // throws SettingNotEditableError: hidden
+```
+
+- **Access has two levels.** A setting is `hidden` unless its key is in `editable`: a hidden setting only ever has the developer's value and never appears in `getConfigs()`. An editable one has the user's value when they set one, else the developer's, else the built-in default (unlimited, off). Nothing is editable until you list it. With no `setConfigs` call at all there is no developer policy, so every setting is editable.
+- **The settings** (all optional, snake_case, whole objects are replaced, never merged):
+
+| Key | Value |
+|---|---|
+| `usage_limit`, `scheduled_action_budget` | `{ max_cost_usd?, max_total_tokens? }` (numbers above 0, at least one), the same caps as the Agent options `usageLimit` and `dynamicSubagents.scheduledActionBudget` |
+| `concurrency` | `{ max_requests?, per_provider?: { google: 4 } }` (whole numbers >= 1), the same limit as `configure({ concurrency })` |
+| `catalog_refresh` | `"on"` or `"off"` (automatic model-catalog refresh) |
+| `catalog_cache_dir`, `models_dev_sha256` | the catalog cache folder, and a 64-hex checksum pin for the download |
+| `base_urls` | `{ openai: "https://host/v1", ollama: "http://localhost:11434/v1" }`, an http(s) endpoint per provider or custom prefix |
+| `openrouter` | `{ order?, only?, ignore?, allow_fallbacks?, require_parameters?, zdr?, data_collection?, sort?, parallel_tool_calls?, reasoning_exclude?, user? }`, the OpenRouter request options |
+| `compat` | `{ no_stream_options?, no_session_headers? }`, opt-outs for strict OpenAI-compatible endpoints |
+
+- **One error lists every problem.** A wrong shape, an unknown key or setting, a bad value or a key listed twice in `editable` throws one `ConfigError`, and a failed `setConfigs` changes nothing. `setConfigs` again replaces the developer's settings.
+- **`setConfig(key, value)`** changes one editable setting. `null` removes the user's value, so the developer's value (or the default) applies again. An unknown key or a bad value is a `ConfigError`; a hidden key is a `SettingNotEditableError` (a `ConfigError`, never retried). A user value is ignored as soon as its setting becomes hidden.
+- `getConfigs()` returns the editable settings with their current value, `null` meaning "not set, the default applies", frozen.
+- This is a guardrail inside your program, not a security wall: code in the same process can call `setConfigs` too.
+
 ### Network timeouts
 
 The only limits that are on by default are three network timeouts. They are not budgets: they exist so a silent connection fails instead of hanging forever. Change them in `limits` (agent level; workers and scheduled runs inherit them):
@@ -165,7 +209,7 @@ try {
 }
 ```
 
-All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError` (`ModelNotAllowedError` for a model off the `setModels` list), `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError` and `SubAgentModelError` (both `ConfigError`s). Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line `ProviderError`s: `err.code` is `"provider"` (`"incomplete_stream"` for a cut stream) and `err.retryable` is true for HTTP 408/425/429/5xx, network errors and a cut stream; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `providerCode` (the provider's own error code), `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
+All SDK errors extend `AgentAccelError` (`code`, `retryable`, `context`): `ConfigError` (`ModelNotAllowedError` for a model off the `setModels` list, `SettingNotEditableError` for a hidden setting), `ProviderError`, `TimeoutError`, `BudgetExceededError`, `ToolError`, `ValidationError`, `SessionLoadError`, `SecurityPolicyError` (and `RemoteFetchError`), plus `ThinkingLevelError` and `SubAgentModelError` (both `ConfigError`s). Abort means `signal.aborted` or `name === "AbortError"` only. Provider failures are one-line `ProviderError`s: `err.code` is `"provider"` (`"incomplete_stream"` for a cut stream) and `err.retryable` is true for HTTP 408/425/429/5xx, network errors and a cut stream; details (`statusCode`, `provider`, `model`, `url`, `responseBody`, `errorType`, `providerCode` (the provider's own error code), `retryAfterMs`, `raw`) are non-enumerable so logs stay small.
 
 ## Telemetry
 

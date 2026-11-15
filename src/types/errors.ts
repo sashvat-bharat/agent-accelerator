@@ -76,6 +76,16 @@ export class ModelNotAllowedError extends ConfigError {
   }
 }
 
+/** A setting the program keeps hidden (or an unknown one) was changed through `setConfig`. A `ConfigError`: never retried. */
+export class SettingNotEditableError extends ConfigError {
+  readonly key: string;
+  constructor(key: string, message: string) {
+    super(message, { key });
+    this.name = "SettingNotEditableError";
+    this.key = key;
+  }
+}
+
 export class ProviderError extends AgentAccelError {
   readonly status?: number;
   constructor(

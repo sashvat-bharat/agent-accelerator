@@ -27,6 +27,7 @@
 | Change a prompt the SDK sends (tool refusal, worker header, tool manual) | `prompts: { name: "text with {{placeholders}}" }`; keep the original unless you must | [Prompts](guides/prompts.md) |
 | Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
 | Limit provider calls running at once (many agents, workers, 429s) | `configure({ concurrency: { maxRequests, perProvider } })`, `getConcurrencyStatus()` | [Safety](guides/safety-and-ops.md#concurrency-limit) |
+| Set limits and options in code, and choose what the end user may change | `setConfigs({ values, editable })`, `getConfigs()`, `setConfig(key, value)` | [Safety](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) |
 | Fix the list of models a program may use | `setModels(modelsJson)`, `listModels()` for a picker | [Agents](guides/agents-and-models.md#the-list-of-allowed-models) |
 | What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
 | Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, the model list (`setModels`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
@@ -95,6 +96,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 | Symptom | Likely cause and fix |
 |---|---|
 | `ConfigError` before any request | No key or base URL for that prefix. Set `<PREFIX>_API_KEY` and `<PREFIX>_BASE_URL` |
+| `SettingNotEditableError` | `setConfig` on a hidden setting; only keys in `getConfigs()` can be changed |
 | `ModelNotAllowedError` | Model not in the program's `setModels` list; pick one from `err.allowed` |
 | `ThinkingLevelError` | Level unsupported by the model; use one from `err.allowedLevels` |
 | `SubAgentModelError` | Set `dynamicSubagents.model` or `SUB_AGENT_MODEL` |

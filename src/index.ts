@@ -73,6 +73,8 @@ export type { AgentDefaults } from "./agent/defaults.ts";
 export { getConcurrencyStatus } from "./agent/governor.ts";
 export { setModels, listModels } from "./config/models.ts";
 export type { ModelList, ModelOption } from "./config/models.ts";
+export { setConfigs, getConfigs, setConfig } from "./config/settings.ts";
+export type { SettingKey, SettingsJson } from "./config/settings.ts";
 export type { GovernorLimits } from "./agent/governor.ts";
 export type {
   ScheduledActionInput,
@@ -225,6 +227,7 @@ export {
   SessionLoadError,
   SecurityPolicyError,
   ModelNotAllowedError,
+  SettingNotEditableError,
   isAbortError,
   formatErrorPlain,
 } from "./types/errors.ts";

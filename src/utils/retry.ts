@@ -22,6 +22,7 @@ export function isRetryableRun(error: unknown): boolean {
       "SessionLoadError",
       "ThinkingLevelError",
       "ModelNotAllowedError",
+      "SettingNotEditableError",
       "ToolError",
     ].includes(String(name))
   )
