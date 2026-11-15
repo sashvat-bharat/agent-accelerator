@@ -12,6 +12,9 @@
  *   4. A run that fails still records the definition it started with.
  *   5. Compare two results: read the `definition` of each run file, then diff the two definition files.
  *
+ * It also works as a smoke check: it asserts the contracts above and exits with code 1 (one line on stderr) if any
+ * of them stops holding. Run 2 is the control: its hash must equal run 1's.
+ *
  * Run:  bun run examples/16-definition-history.ts
  * Needs: nothing. The model is a scripted stand-in (no network, no key, no cost) that answers one line or three bullets
  * depending on the instructions it receives. Files go to ./.agent-accel/demo-definitions/ (gitignored; wiped at the
@@ -59,6 +62,14 @@ const scriptedFetch = (async (_url: string, init: { body: string }) => {
     { status: 200 }
   );
 }) as unknown as typeof fetch;
+
+// Throws when `ok` is false, so a regression ends the demo with exit code 1 (via `fail`); in: each contract below, out: a printed check mark.
+function check(ok: boolean, what: string): void {
+  if (!ok) throw new Error(`contract broken: ${what}`);
+  console.log(`  ${G}✔${R} ${DIM}${what}${R}`);
+}
+
+const DEFINITION_HASH = /^[0-9a-f]{12}$/;
 
 type Delivery = { id: string; file: string; status: string };
 
@@ -135,22 +146,33 @@ async function main(): Promise<void> {
   head("1. First run");
   const a = await runOnce("run 1");
   console.log(`  definition files: ${definitionFiles().join(", ")}`);
+  check(DEFINITION_HASH.test(a.header["definition"] ?? ""), "run 1 names a definition");
+  check(definitionFiles().length === 1, "one definition file after run 1");
 
   head("2. Same action, nothing changed");
   const again = await runOnce("run 2");
-  console.log(
-    `  definition files: ${definitionFiles().join(", ")}  (still one: ${again.header["definition"] === a.header["definition"]})`
+  console.log(`  definition files: ${definitionFiles().join(", ")}`);
+  check(
+    again.header["definition"] === a.header["definition"],
+    "run 2 (nothing changed) has the same definition as run 1"
   );
+  check(definitionFiles().length === 1, "still one definition file after run 2");
 
   head("3. Change the instructions (the id stays the same)");
   agent.scheduled.update(action.id, { instructions: "You write a brief in exactly three bullets." });
   const b = await runOnce("run 3");
   console.log(`  definition files: ${definitionFiles().join(", ")}  (the old one is kept)`);
+  check(b.header["definition"] !== a.header["definition"], "changed instructions give run 3 a new definition");
+  check(definitionFiles().length === 2, "two definition files, the first one kept");
+  check(b.body !== a.body, "the two runs produced different results");
 
   head("4. A failing run still records its definition");
   agent.scheduled.update(action.id, { task: "Write today's brief. FAIL-ON-PURPOSE" });
   const failed = await runOnce("run 4");
   console.log(`  ${DIM}the run started with a third definition: ${failed.header["definition"]}${R}`);
+  check(failed.header["status"] === "failed", "run 4 failed");
+  check(DEFINITION_HASH.test(failed.header["definition"] ?? ""), "the failed run still names its definition");
+  check(definitionFiles().includes(`${failed.header["definition"]}.json`), "and its definition file exists");
 
   head("5. Why do run 1 and run 3 differ?");
   const hashA = a.header["definition"]!;
@@ -165,7 +187,8 @@ async function main(): Promise<void> {
     console.log(`    ${G}+ ${JSON.stringify(defB[key])}${R}`);
   }
 
-  console.log(`\n${DIM}Look at the files in ${path.join(HOME, "scheduled", actionId)} (wiped at the next start).${R}`);
+  console.log(`\n${G}All contracts hold.${R}`);
+  console.log(`${DIM}Look at the files in ${path.join(HOME, "scheduled", actionId)} (wiped at the next start).${R}`);
 }
 
 main().catch(fail);
