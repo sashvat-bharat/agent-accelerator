@@ -1,4 +1,5 @@
 import { Agent, tool } from "agent-accelerator";
+import type { ThinkingLevel } from "agent-accelerator";
 import { z } from "zod";
 import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
@@ -112,7 +113,7 @@ const researcherAgent = new Agent({
     "You are an exhaustive research specialist. Investigate the topic thoroughly, " +
     "providing deep technical breakthroughs, quantifiable metrics, and positive growth indicators.",
   model: SUB_AGENT_MODEL,
-  thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
+  thinking: (process.env.THINKING_LEVEL as ThinkingLevel | undefined) ?? "medium",
   cache: "implicit",
 });
 // agentToTool(researcherAgent) available for manual tool registration; subagents[] below uses isolated Sessions.
@@ -126,7 +127,7 @@ const criticAgent = new Agent({
     "expose hidden economic bottlenecks, unverified assumptions, regulatory barriers, and potential failure points.",
   model: SUB_AGENT_MODEL,
   stateless: true, // One-shot evaluation mode: does not persist history across turns
-  thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
+  thinking: (process.env.THINKING_LEVEL as ThinkingLevel | undefined) ?? "medium",
   cache: "implicit",
 });
 

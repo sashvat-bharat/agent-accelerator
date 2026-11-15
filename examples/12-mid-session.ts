@@ -1,4 +1,5 @@
 import { Agent, tool } from "agent-accelerator";
+import type { StreamEvent } from "agent-accelerator";
 import { z } from "zod";
 import { fail, MODEL } from "./_shared";
 
@@ -41,7 +42,7 @@ const live = () => ({
   stream: true as const,
   ...(SHOW_THINKING ? { onThinkingDelta: (d: string) => process.stdout.write(`${DIM}${d}${R}`) } : {}),
   onDelta: (d: string) => process.stdout.write(d),
-  onEvent: (e: any) => {
+  onEvent: (e: StreamEvent) => {
     if (e.type === "steer_injected") console.log(`\n${Y}↳ steered into this turn${R}`);
     if (e.type === "queued") console.log(`\n${Y}↳ queued for next turn${R}`);
   },

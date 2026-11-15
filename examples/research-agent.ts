@@ -111,10 +111,10 @@ const res = await agent
     onDelta: (d) => process.stdout.write(d),
     onEvent: (e) => {
       if (e.type === "tool_call_complete" && e.toolCall?.name === "web_search") {
-        const q = (e.toolCall.arguments as any)?.query ?? e.toolCall.rawArguments;
+        const q = (e.toolCall.arguments as { query?: string } | undefined)?.query ?? e.toolCall.rawArguments;
         console.log(`\n\x1b[36m↳ [web_search →] model requested search: ${JSON.stringify(q)}\x1b[0m`);
       } else if (e.type === "tool_result" && e.toolResult?.name === "web_search") {
-        const r = e.toolResult.result as any;
+        const r = e.toolResult.result as { results?: unknown[] } | undefined;
         const count = Array.isArray(r?.results) ? r.results.length : "?";
         console.log(
           `\x1b[32m↳ [web_search ←] result arrived: ${count} results in ${e.toolResult.durationMs ?? 0}ms${e.toolResult.isError ? " (error)" : ""}\x1b[0m`

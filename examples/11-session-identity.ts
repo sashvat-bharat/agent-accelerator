@@ -124,11 +124,14 @@ process.stdout.write(res.text + "\n");
 // Worker boxes, rendered whole from finished traces (no live streaming here;
 // realtime consumers use `subagent_delta` events or track() subscriptions).
 for (const s of res.subagents) {
-  const id = (s as any).trackingId as string | undefined;
+  const id = s.trackingId as string | undefined;
   const trace = id ? agent.track(id) : undefined;
   const box: WorkerBox = { label: shortLabel(id ?? s.name), color: nextBoxColor() };
   printBoxHeader(box);
-  const thinking = trace?.steps.map((st) => st.thinking).find((t) => t) ?? (trace as any)?.thinking ?? s.thinking;
+  const thinking =
+    trace?.steps.map((st) => st.thinking).find((t) => t) ??
+    (trace as { thinking?: string } | undefined)?.thinking ??
+    s.thinking;
   if (thinking) {
     for (const line of String(thinking).split("\n")) flushBoxLines(box, "~ " + line, true);
   }
@@ -160,7 +163,7 @@ for (const s of res.subagents) {
       formatSessionCost(s.usage?.cost?.totalCost ?? 0) +
       RESET
   );
-  console.log("  session: " + (s.sessionId ?? "(none)") + " TrackingID: " + ((s as any).trackingId ?? "(none)"));
+  console.log("  session: " + (s.sessionId ?? "(none)") + " TrackingID: " + (s.trackingId ?? "(none)"));
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +175,7 @@ for (const s of res.subagents) {
   const descendant = realChild !== "(none)" && isSessionDescendant(realChild, agent.sessionId);
   console.log(CYAN + "- " + s.name + RESET);
   console.log("  session:    " + realChild + " (" + realChild.length + " chars)");
-  console.log("  TrackingID: " + ((s as any).trackingId ?? "(none)"));
+  console.log("  TrackingID: " + (s.trackingId ?? "(none)"));
   console.log("  descendant of this parent: " + (descendant ? GREEN + "true" + RESET : YELLOW + "false" + RESET));
 }
 console.log(
@@ -190,7 +193,7 @@ console.log(
 console.log(CYAN + "\n--- track() (per-worker traces) ---" + RESET);
 console.log("tracked workers: " + agent.listTrackedSubAgents().join(", "));
 for (const s of res.subagents) {
-  const id = (s as any).trackingId as string | undefined;
+  const id = s.trackingId as string | undefined;
   if (!id) continue;
   const trace = agent.track(id);
   console.log(GREEN + "- " + id + RESET + " status=" + trace?.status + " steps=" + (trace?.steps.length ?? 0));

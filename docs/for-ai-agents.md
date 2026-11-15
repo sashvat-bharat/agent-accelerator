@@ -65,7 +65,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 ## Hard rules
 
 - **Stable prompts.** Never put timestamps or per-request data in `instructions` or change the tool set between calls; use `additionalContext`.
-- **Explicit config wins** over env. A custom provider prefix needs its own `<PREFIX>_API_KEY` and `<PREFIX>_BASE_URL`; never reuse another vendor's key.
+- **Explicit config wins** over env. A custom provider prefix needs its own `<PREFIX>_API_KEY` and its endpoint in the `base_urls.<prefix>` setting; never reuse another vendor's key.
 - **Bound everything unattended:** nothing is limited by default except three network timeouts, so set `maxTurns`, `limits.deadlineMs`, `budget`, a `signal`, and for workers `usageLimit` / `dynamicSubagents.workerBudget` / `scheduledActionBudget` / `maxSpawn` / `maxDepth` (all unlimited until set). `0` or `Infinity` turns a network timeout off.
 - **Branch on error classes and `err.retryable`, never on message text.** Use `isAbortError(err)` for cancellation.
 - **Unknown cost is `undefined`**, not zero.
@@ -95,7 +95,7 @@ console.log(res.text, res.usage.cost ?? "cost unknown");
 
 | Symptom | Likely cause and fix |
 |---|---|
-| `ConfigError` before any request | No key or base URL for that prefix. Set `<PREFIX>_API_KEY` and `<PREFIX>_BASE_URL` |
+| `ConfigError` before any request | No key or base URL for that prefix. Set `<PREFIX>_API_KEY` and the `base_urls.<prefix>` setting |
 | `SettingNotEditableError` | `setConfig` on a hidden setting; only keys in `getConfigs()` can be changed |
 | `ModelNotAllowedError` | Model not in the program's `setModels` list; pick one from `err.allowed` |
 | `ThinkingLevelError` | Level unsupported by the model; use one from `err.allowedLevels` |

@@ -154,7 +154,7 @@ Levels: `none`, `dynamic` (server default), `minimal`, `low`, `medium`, `high`, 
 import { Agent } from "agent-accelerator";
 
 const agent = new Agent({
-  model: "openai/gpt-4o",
+  model: "openai/gpt-5.5",
   instructions: "Long, stable system prompt...",
   cache: "implicit", // or "5m" | "30m" | "1h" | "12h" where the provider supports it
   serviceTier: "flex", // cheaper, slower; or "priority"

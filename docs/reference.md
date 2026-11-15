@@ -19,7 +19,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `dynamicSubagents` | The `subagents` tool, persistent workers and scheduled actions (keys below) | [Multi-agent](guides/multi-agent.md) |
 | `thinking`, `thinkingLevel` | Reasoning level (`thinking` wins; `thinkingLevel` is legacy) | [Agents](guides/agents-and-models.md) |
 | `cache`, `serviceTier`, `googleTier` | `"implicit"\|"5m"\|"30m"\|"1h"\|"12h"` cache lifetime, `flex`/`priority`, Google chain TTL (`free` 23 h, `paid` 54 d) | [Agents](guides/agents-and-models.md) |
-| `sessionId` | Default session key (clamped to 64 chars) | [Data](guides/data-and-media.md) |
+| `sessionId` | Default session key. Generated ids are clamped to 64 chars; one you pass must match `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` (else `ValidationError` when the session is saved to a folder) | [Data](guides/data-and-media.md) |
 | `maxTurns` | Model calls per run; `0`/omitted = unlimited | [Safety](guides/safety-and-ops.md) |
 | `stateless` | Clear history around every run | [Agents](guides/agents-and-models.md) |
 | `midSession` | `{ mode \| whenBusy: "steer" \| "queue" \| "auto", maxQueued }` | [Tools](guides/tools-and-streaming.md) |
@@ -67,7 +67,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 
 `AgentResponse` fields: `text`, `parsed` (structured output), `thinking`, `thoughtSignature`, `toolCalls`, `toolResults`, `subagents`, `usage`, `responseId`, `model`, `provider`, `finishReason`, `rawFinishReason`, `durationMs`, `raw` (per `captureRaw`), `turns`. A failed run attaches the same shape as `err.partial`.
 
-`finishReason`: `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `stopped` (a tool called `ctx.stop`), `error` (or a provider string; the original stays in `rawFinishReason`).
+`finishReason`: `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `stopped` (a tool called `ctx.stop`), `error` (a finish reason the SDK does not know becomes `error`; the original stays in `rawFinishReason`).
 
 `usage`: `inputTokens` (includes the cache reads and writes), `outputTokens` (includes `thinkingTokens`), `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `inputDetails` (`audioTokens`, `videoTokens`) and `outputDetails` (`audioTokens`, `imageTokens`) when OpenRouter reports media tokens (subsets of input and output, for reading only: they never change the cost), optional `cost`. Without a provider-reported cost, `cost` is estimated per turn from the catalog: fresh input, cache reads and cache writes each at their own price (a missing cache price bills at the input rate), scaled by `serviceTier`.
 
@@ -113,7 +113,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `provider_warning` | A provider-specific option was dropped (e.g. `thinking: "none"` on Google) |
 | `agent.max_turns_truncated` | Run stopped at `maxTurns` with tool work pending |
 | `turn.thinking` | Full reasoning text of a turn (bus only) |
-| `cache_clamp` | A session/affinity key was shortened to 64 chars |
+| `cache_clamp` | A provider's cached-token count was larger than its input count and was reduced to it |
 | `interaction_chain_evicted`, `interaction_chain_ttl_expired`, `interaction_history_shrink` | Google chaining: server chain dropped, expired, or input tokens fell |
 | `stream_buffer_overflow`, `stream_event_oversize` | Stream buffer limits hit |
 | `catalog_cache_write_failed` | Model catalog could not be saved |
@@ -147,7 +147,7 @@ All extend `AgentAccelError` (`code`, `retryable`, `context`).
 | `SessionLoadError` | A valid session file exceeds limits (never quarantined) |
 | `SecurityPolicyError`, `RemoteFetchError` | File root or private-host policy refused a path or URL |
 
-Abort detection: `isAbortError(err)` (`signal.aborted` or `name === "AbortError"`, never message text).
+Abort detection: `isAbortError(err)` (true only when `name === "AbortError"`; never message text, and a signal's `aborted` flag alone is not checked).
 
 ## Environment variables
 

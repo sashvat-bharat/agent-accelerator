@@ -13,6 +13,7 @@
  */
 
 import { Agent, tool, getModelFromCatalog, getModelThinkingInfo, resolveModel } from "agent-accelerator";
+import type { AgentResponse, ThinkingLevel } from "agent-accelerator";
 import { z } from "zod";
 import { MODEL, SUB_AGENT_MODEL } from "./_shared";
 
@@ -60,15 +61,15 @@ try {
       model: SUB_AGENT_MODEL,
       maxSpawn: 4,
     },
-    thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
+    thinking: (process.env.THINKING_LEVEL as ThinkingLevel | undefined) ?? "medium",
     cache: "implicit",
     captureRaw: "redacted",
     budget: { maxCostUsd: 2 },
     limits: { requestTimeoutMs: 300_000, streamIdleTimeoutMs: 300_000 },
     tools: { get_system_metrics },
   });
-} catch (err: any) {
-  console.error(`\n${err.message}\n`);
+} catch (err) {
+  console.error(`\n${(err as Error).message}\n`);
   process.exit(1);
 }
 
@@ -115,7 +116,7 @@ const streamEventsLog: string[] = [];
 const prompt = "Inspect the system telemetry for cluster 'us-east-prod-1' and provide a 2-sentence executive summary.";
 console.log(`\x1b[90mUser Prompt: "${prompt}"\x1b[0m\n`);
 
-let response: any;
+let response: AgentResponse;
 try {
   response = await agent.run(prompt, {
     stream: true,
@@ -136,8 +137,8 @@ try {
       }
     },
   });
-} catch (err: any) {
-  console.error(`\n\x1b[31mExecution Failed: ${err.message}\x1b[0m\n`);
+} catch (err) {
+  console.error(`\n\x1b[31mExecution Failed: ${(err as Error).message}\x1b[0m\n`);
   process.exit(1);
 }
 
@@ -199,7 +200,7 @@ console.log(`res.usage.cost.totalCost:      ${formatDollar(response.usage.cost?.
 console.log("\x1b[1;33m[6] TOOL CALLS & TOOL RESULTS METADATA\x1b[0m");
 console.log("─".repeat(70));
 console.log(`Total Tool Calls Executed: ${response.toolCalls.length}`);
-response.toolCalls.forEach((call: any, idx: number) => {
+response.toolCalls.forEach((call, idx: number) => {
   console.log(`  [Call #${idx + 1}] ID: ${call.id}`);
   console.log(`    • Function Name:     ${call.name}`);
   console.log(`    • Parsed Arguments:  ${JSON.stringify(call.arguments)}`);
@@ -209,7 +210,7 @@ response.toolCalls.forEach((call: any, idx: number) => {
 });
 
 console.log(`\nTotal Tool Results Received: ${response.toolResults.length}`);
-response.toolResults.forEach((res: any, idx: number) => {
+response.toolResults.forEach((res, idx: number) => {
   console.log(`  [Result #${idx + 1}] ID: ${res.id}`);
   console.log(`    • Function Name:     ${res.name}`);
   console.log(`    • Result Data:       ${JSON.stringify(res.result)}`);
@@ -224,7 +225,7 @@ console.log("");
 console.log("\x1b[1;33m[7] SUB-AGENT EXECUTION METADATA (res.subagents)\x1b[0m");
 console.log("─".repeat(70));
 if (response.subagents && response.subagents.length > 0) {
-  response.subagents.forEach((sub: any, idx: number) => {
+  response.subagents.forEach((sub, idx: number) => {
     console.log(`  [Subagent #${idx + 1}] "${sub.name}" (Role: ${sub.role ?? "General"})`);
     console.log(`    • Model / Provider:  ${sub.provider}/${sub.model}`);
     console.log(`    • Task Given:        "${sub.task}"`);

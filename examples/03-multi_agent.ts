@@ -2,6 +2,7 @@
 
 import * as fs from "node:fs";
 import { Agent } from "agent-accelerator";
+import type { CacheOption, ThinkingLevel } from "agent-accelerator";
 import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
 let agent: Agent;
@@ -14,15 +15,15 @@ try {
       enabled: true,
       model: SUB_AGENT_MODEL,
       maxSpawn: 3,
-      thinkingLevel: (process.env.SUB_AGENT_THINKING_LEVEL as any) ?? "low",
+      thinkingLevel: (process.env.SUB_AGENT_THINKING_LEVEL as ThinkingLevel | undefined) ?? "low",
     },
-    thinking: (process.env.THINKING_LEVEL as any) ?? "medium",
-    cache: (process.env.CACHE as any) ?? "implicit",
+    thinking: (process.env.THINKING_LEVEL as ThinkingLevel | undefined) ?? "medium",
+    cache: (process.env.CACHE as CacheOption | undefined) ?? "implicit",
     budget: { maxCostUsd: 5, maxTotalSubagents: 12 },
     limits: { requestTimeoutMs: 300_000 },
   });
-} catch (err: any) {
-  console.error(`\n${err.message}\n`);
+} catch (err) {
+  console.error(`\n${(err as Error).message}\n`);
   process.exit(1);
 }
 
@@ -79,7 +80,7 @@ async function ask(prompt: string) {
   );
   if (res.subagents?.length) {
     console.log(
-      `\x1b[90m  subagents: ${res.subagents.map((s: any) => `${s.name}:ok (${formatCost(s.usage?.cost?.totalCost ?? 0)})`).join(", ")}\x1b[0m`
+      `\x1b[90m  subagents: ${res.subagents.map((s) => `${s.name}:ok (${formatCost(s.usage?.cost?.totalCost ?? 0)})`).join(", ")}\x1b[0m`
     );
   }
   return res;

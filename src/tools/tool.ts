@@ -127,7 +127,7 @@ export interface CreateToolOptions<TInput = any, TOutput = any> {
  *
  * The returned definition can be supplied in `AgentConfig.tools`. The model
  * receives the name, description, and generated JSON Schema; the runtime then
- * validates arguments, applies timeout/retry/concurrency policies, executes
+ * validates arguments, applies timeout, `maxTries`/`idempotent` retry and concurrency policies, executes
  * the function, and makes its result safe for model context.
  *
  * @example

@@ -134,13 +134,13 @@ export interface ResolvedModel {
 }
 
 /**
- * Resolves a model string (e.g. "google/model-id", "openai/gpt-4o", "openrouter/scope/model:variant")
+ * Resolves a model string (e.g. "google/model-id", "openai/gpt-5.5", "openrouter/scope/model:variant")
  * or ModelSpec into provider instance and model ID.
  */
 /**
  * Resolves `provider/model`, catalog specs, scoped OpenRouter IDs, and custom prefixes.
  *
- * @example `const { provider, modelId } = resolveModel("openai/gpt-4o");`
+ * @example `const { provider, modelId } = resolveModel("openai/gpt-5.5");`
  */
 export function resolveModel(model: string | ModelSpec): ResolvedModel {
   const resolved = resolveModelUnchecked(model);
@@ -339,7 +339,7 @@ export const ModelProvider = {
     };
   },
 
-  /** Builds an OpenRouter model selection. @example `ModelProvider.OpenRouter("openai/gpt-4o")` */
+  /** Builds an OpenRouter model selection. @example `ModelProvider.OpenRouter("openai/gpt-5.5")` */
   OpenRouter(
     model: string,
     apiKey?: string,
@@ -353,7 +353,7 @@ export const ModelProvider = {
     };
   },
 
-  /** Builds an OpenAI model selection. @example `ModelProvider.OpenAI("gpt-4o")` */
+  /** Builds an OpenAI model selection. @example `ModelProvider.OpenAI("gpt-5.5")` */
   OpenAI(
     model: string,
     apiKey?: string,

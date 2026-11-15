@@ -8,7 +8,7 @@
 
 A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
 
-Agent Accelerator supports `google`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`.
+Agent Accelerator supports `google`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using the `{PREFIX}_API_KEY` key and the `base_urls.{prefix}` setting.
 
 
 ```ts
@@ -44,7 +44,7 @@ pnpm add agent-accelerator
 yarn add agent-accelerator
 ```
 
-Requires `bun` or `node 22+`.
+Built and tested on Bun (the package publishes TypeScript source, so run it with `bun`).
 
 The only dependency is `zod` (a peer dependency: install it next to the SDK and import `z` from `"zod"`). All provider transports are native REST (`fetch`, no SDK).
 
@@ -122,7 +122,7 @@ An `Agent` holds:
 | `model`           | `string \| ModelSpec \| ModelProviderInstance`       | Model identifier, such as `"google/gemini-3.5-flash-lite"`. Use `ModelProvider.*` or `ModelSpec` to pin a provider and credentials. Without it, the saved choice or the list default (`setModel` / `setModels`). |
 | `instructions`    | `string`                                             | System prompt. Keep it stable; place per-turn additions in `additionalContext`.                                                                            |
 | `tools`           | `Record<string, ToolDefinition> \| ToolDefinition[]` | Deterministic functions the model can call. See [Tools](#tools).                                                                                          |
-| `subagents`       | `SubAgent[] \| Agent[]`                              | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
+| `subagents`       | `(Agent \| { name, description, agent })[]`                            | Pre-defined workers. Each worker becomes a callable tool. Useful for fixed roles such as researcher or critic.                                             |
 | `subagentModel`   | `string \| ModelSpec \| ModelProviderInstance`       | Developer-only model for dynamically spawned workers. Never choosable by the Main Agent. Deprecated alias of `dynamicSubagents.model` (which wins). Without it, the saved or default worker model (`setSubAgentModel` / `setModels`). |
 | `dynamicSubagents` | `DynamicSubagentsConfig`                            | Enables and constrains LLM-spawned workers: `{ enabled, model?, maxSpawn?, maxDepth?, workerBudget?, scheduledActionBudget?, thinkingLevel?, tools?, workerTimeoutMs?, allowScheduledActions? }` (`workerTimeoutMs` is for scheduled actions only). See [Pre-defined vs Dynamic Delegation](#pre-defined-vs-dynamic-delegation) and [Scheduled actions](#scheduled-actions). |
 | `thinking`        | `ThinkingOption`                                     | Canonical reasoning option: `none \| dynamic \| minimal \| low \| medium \| high \| xhigh \| max`, or `{ level, budgetTokens }`. Legacy `thinkingLevel` still works (canonical wins). Validated against the model catalog before a request.                                      |
@@ -602,7 +602,7 @@ Any other provider prefix is treated as an OpenAI-compatible custom provider.
 * `"google/<id>"` → Google AI Studio at `generativelanguage.googleapis.com`.
 * `"openrouter/<scope>/<model>"` or `"scope/model:variant"` → OpenRouter.
 * `"openai/<id>"` → OpenAI.
-* `"groq/<id>"`, `"ollama/<id>"`, etc. → custom providers using `{PREFIX}_API_KEY` and `{PREFIX}_BASE_URL`. The API key is optional for local endpoints.
+* `"groq/<id>"`, `"ollama/<id>"`, etc. → custom providers using `{PREFIX}_API_KEY` and the `base_urls.{prefix}` setting. The API key is optional for local endpoints.
 * A bare `"some-model"` uses OpenAI when the `base_urls.openai` setting is set. Otherwise, catalog lookup is attempted, followed by an `openrouter` fallback.
 
 Model resolution never silently selects a default model: an empty model throws.
@@ -1532,7 +1532,7 @@ src/
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
 └── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, retry, errors
-examples/        # live demos 01-14 (see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
+examples/        # live demos 01-15 (no 10; see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
 test/            # unit + mocked-provider tests mirroring src/
 ```
 

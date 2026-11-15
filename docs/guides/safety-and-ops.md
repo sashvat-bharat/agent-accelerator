@@ -171,7 +171,7 @@ The only limits that are on by default are three network timeouts. They are not 
 
 ```ts
 const agent = new Agent({
-  model: "openai/gpt-5",
+  model: "openai/gpt-5.5",
   limits: {
     requestTimeoutMs: 600_000, // a slow reasoning model answering without streaming: give it 10 minutes
     firstByteTimeoutMs: 0, // 0 (or Infinity) turns this timeout off
@@ -260,7 +260,7 @@ Be aware (pre-1.0):
 - **One process per session folder.** A session you persist is locked (`<session folder>/.lock`): a second process opening the same session fails fast with a `ConfigError` instead of silently losing updates, while other sessions of the same home stay free; a lock left by a killed process is taken over, and local disks only. Scheduled actions can be shared by several processes (one folder and a short lock per action). Writes are durable (fsync + `.bak` + atomic rename), so a crash or power cut never leaves a torn file; a damaged `task.json`, `delivery.json` or `session.json` is restored from its `.bak`. Telemetry NDJSON is appended without fsync.
 - Scheduled actions: creating Agent held weakly; `run_now` never retries; no spending guardrail except `dynamicSubagents.scheduledActionBudget`; no timezone/DST logic; run only while the process lives.
 - Not implemented: the `hooks` config key (it only warns); `thinking.budgetTokens` forwarding.
-- Stateless adapters resend the full history every turn; whole-session snapshots are rewritten each step.
+- Stateless adapters resend the full history every turn; `persist.file` rewrites the whole snapshot each step, `persist.dir` appends to a journal.
 - An idle process that imported the SDK uses about 40 MB (Bun itself 17 MB, `zod` 10 MB, the SDK 12 MB; the model catalog is read lazily and is tiny). 100 parallel streaming runs add about 20 MB at their peak (`bun run bench` measures both). The SDK is not yet tuned further for tiny-memory hosts.
 - The SSRF guard resolves DNS before `fetch` (a DNS-rebinding window remains). Local disk only; no network drives.
 - A major robustness and scale refactor (multi-process safety, durability, memory diet) is planned.
