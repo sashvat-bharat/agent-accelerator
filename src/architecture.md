@@ -10,7 +10,7 @@ The whole SDK. `index.ts` is the only public entry (`main`/`module`/`types`); ev
 | `update-models.ts`  | CLI behind `bun run update-models` (refreshes the model catalog cache).                                                                                                     |
 | `providers.ts`      | Provider-agnostic mappers (thinking, cache, tool choice, structured output, generation params). No HTTP.                                                                    |
 | `agent/`            | `Agent`, the model-to-tools loop, workers, delegation.                                                                                                                      |
-| `providers/`        | One adapter per wire (Google, OpenAI, OpenRouter, OpenAI-compatible), the registry, shared helpers.                                                                         |
+| `providers/`        | One adapter per wire (Google, OpenAI, Anthropic, OpenRouter, OpenAI-compatible), the registry, shared helpers.                                                              |
 | `models/`           | The model catalog (a small per-provider extract of models.dev) and its cache.                                                                                               |
 | `tools/`            | `tool()`, schemas, the executor.                                                                                                                                            |
 | `streaming/`        | The event stream and the SSE parser.                                                                                                                                        |

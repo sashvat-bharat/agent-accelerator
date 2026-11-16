@@ -9,7 +9,7 @@ import type { Prompts } from "../prompts/prompts.ts";
 // Known first-class: google | openrouter | openai, plus aliases. Allow string for future.
 // ---------------------------------------------------------------------------
 /** Supported provider IDs plus arbitrary custom prefixes. */
-export type ProviderId = "google" | "openrouter" | "openai" | (string & {});
+export type ProviderId = "google" | "openrouter" | "openai" | "anthropic" | (string & {});
 
 // ---------------------------------------------------------------------------
 // Raw models.dev shapes — battle-tested, 1:1 with https://models.dev/api.json

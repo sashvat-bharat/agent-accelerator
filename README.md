@@ -57,12 +57,13 @@ GEMINI_API_KEY=...
 OPENROUTER_API_KEY=...
 OPENAI_API_KEY=...
 # or OPENAI_BASE_API_KEY=...
+ANTHROPIC_API_KEY=...
 
 # Any OpenAI-compatible endpoint: only its key goes in the environment
 # GROQ_API_KEY="..."
 ```
 
-**The environment holds API keys and nothing else** (`GEMINI_API_KEY` / `GOOGLE_API_KEY`, `OPENAI_API_KEY` / `OPENAI_BASE_API_KEY`, `OPENROUTER_API_KEY`, `{PREFIX}_API_KEY`). Everything else is set in code (since 0.7.0 the settings env vars are gone):
+**The environment holds API keys and nothing else** (`GEMINI_API_KEY` / `GOOGLE_API_KEY`, `OPENAI_API_KEY` / `OPENAI_BASE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `{PREFIX}_API_KEY`). Everything else is set in code (since 0.7.0 the settings env vars are gone):
 
 ```ts
 import { Agent, setConfigs, setModels } from "agent-accelerator";
@@ -594,6 +595,7 @@ First-class provider IDs are:
 * `google`
 * `openrouter`
 * `openai`
+* `anthropic`
 
 Any other provider prefix is treated as an OpenAI-compatible custom provider.
 
@@ -602,6 +604,7 @@ Any other provider prefix is treated as an OpenAI-compatible custom provider.
 * `"google/<id>"` → Google AI Studio at `generativelanguage.googleapis.com`.
 * `"openrouter/<scope>/<model>"` or `"scope/model:variant"` → OpenRouter.
 * `"openai/<id>"` → OpenAI.
+* `"anthropic/<id>"` → Anthropic (Messages API). A bare Claude id the catalog knows (`"claude-sonnet-5-5"`) goes there too.
 * `"groq/<id>"`, `"ollama/<id>"`, etc. → custom providers using `{PREFIX}_API_KEY` and the `base_urls.{prefix}` setting. The API key is optional for local endpoints.
 * A bare `"some-model"` uses OpenAI when the `base_urls.openai` setting is set. Otherwise, catalog lookup is attempted, followed by an `openrouter` fallback.
 
@@ -720,6 +723,21 @@ It also:
 * pins cache affinity with `prompt_cache_key` (clamped to 64 chars);
 * rejects `video` parts up front with a one-line error (the Responses wire carries text/image/file only);
 * sends `max_output_tokens` when set; never sends `temperature`, `top_p`, or background/conversation fields.
+
+### Anthropic
+
+`AnthropicMessagesProvider` and `ANTHROPIC_MODELS` provide Anthropic support over the Messages API (`POST {baseUrl}/messages`, default `https://api.anthropic.com/v1`, key `ANTHROPIC_API_KEY`, endpoint override with the `base_urls.anthropic` setting). It targets the Claude 5 family (the catalog lists Claude 5 and newer) and sends API version `2026-10-21`; a `headers` entry named `anthropic-version` overrides it. No `anthropic-beta` header is ever sent.
+
+Every turn is stateless: the full history is sent each time. Roles alternate, tool results travel in one user message ahead of any text, and tool ids from other providers are made valid on the call and its result.
+
+* **Thinking:** Claude 5 models think adaptively by default. A level other than `dynamic` sends `output_config.effort` (`minimal` becomes `low`) and `thinking: { type: "adaptive", display: "summarized" }`, so `thinking_delta` events carry readable text (Anthropic's own default hides it). `none` uses the model's off switch where it has one (`between_tools` on Sonnet 5.5, `disabled` on Haiku 5.5, Opus 5, Sonnet 5), else warns and uses effort `low`. The signed thinking blocks of the **current tool loop** are stored as `providerSteps` and replayed unmodified (the API rejects an edited block); those of finished turns are not resent.
+* **Caching:** `cache` `implicit` (and unset) puts an automatic top-level `cache_control` breakpoint on the last block; `5m` and `1h` set its TTL; `30m` and `12h` warn and fall back. Anthropic reports cache reads and writes **outside** `input_tokens`; the SDK adds them back, so `cacheReadTokens` and `cacheWriteTokens` are subsets of `inputTokens` like everywhere else. Cache writes are priced from the catalog's single cache-write price (the 5 minute rate), so a `1h` write is under-estimated.
+* **Tool choice:** `required` and pinned functions map to `any` / `tool`. Opus 5.5, Sonnet 5.5 and the Fable/Mythos 5.1 and 5.2 models reject forced tool use with a 400, so there it warns once and uses automatic choice. `validated` is Google-only.
+* **Structured output:** `output_config.format` (`json_schema`, no beta header). The schema is cleaned to the supported subset (closed objects, numeric/length constraints moved into the description); the answer is still validated against your original schema. Strict tools get the same cleaning.
+* **Input:** text, images (JPEG, PNG, GIF, WebP; URL or base64), PDF and plain-text documents (URL or base64). Audio and video are rejected before the network.
+* **Output controls:** `max_tokens` is required, so it defaults to the catalog's output limit capped at 64,000 (set `maxOutputTokens` to change it). `temperature`, `top_p` and `top_k` are never sent (a 400 under this API version). `serviceTier: "priority"` sends `service_tier: "auto"`; `flex` has no equivalent and warns.
+* **Errors:** a one-line `ProviderError` with the status, Anthropic's error type and the `request_id`. 429, 5xx, 504 and 529 (overloaded) are retryable, an `error` event inside a stream too; the monthly spend-cap 429 (`enforced_spend_limit_reached`) is never retried. A stream that ends without `message_stop` fails as a retryable `incomplete_stream`. A call cut by `max_tokens` is never executed.
+* **Not supported:** server tools (web search, web fetch, code execution), the Batches, Files and token-counting endpoints, citations and prefill.
 
 ### OpenRouter
 
@@ -858,6 +876,7 @@ One value sets the prompt-cache lifetime. Each provider honours only the values 
 | OpenRouter, `anthropic/*` models | `implicit`, `5m`, `1h` | top-level `cache_control: { type: "ephemeral", ttl }` |
 | OpenRouter, other models | `implicit` | nothing (automatic caching + sticky routing) |
 | OpenAI | `implicit`, `12h` | `12h` sends `prompt_cache_retention: "24h"` when the catalog allows long retention |
+| Anthropic | `implicit`, `5m`, `1h` | top-level `cache_control: { type: "ephemeral" }` (`implicit` and unset), with `ttl` for `5m` / `1h` |
 | Custom endpoints | `implicit` | nothing (strict endpoints reject unknown fields) |
 
 Session files written before 0.5.1 with the old `{ retention }` object still load (`short`=`5m`, `medium`=`1h`, `long`=`12h`). Passing the object form to `new Agent()` throws `ConfigError`.
@@ -1177,7 +1196,7 @@ The model catalog is synced from [models.dev](https://models.dev) into a small l
 | --- | --- |
 | `google` | `gemini-3*` and newer (`gemini-4*` ...) |
 | `openai` | `gpt-5*` and newer (`gpt-6*` ...) |
-| `anthropic` | `claude-*-5*` and newer (kept ready for the native Anthropic provider) |
+| `anthropic` | `claude-*-5*` and newer |
 | `openrouter` | every model whose only output is text |
 
 Only the fields the SDK reads are saved (limits, prices, modalities, reasoning options, flags). Any other model or provider is **unknown** to the catalog: no price (cost stays unknown), permissive thinking levels, no modality guard. Use `registerModel()` to describe one. A model only OpenRouter lists, such as `openai/gpt-4o`, is found through its OpenRouter entry.
@@ -1529,7 +1548,7 @@ src/
 ├── scheduler/  # Scheduled actions: clock, store, tool
 ├── prompts/    # The SDK's own prompts as .md files, DEFAULT_PROMPTS, AgentConfig.prompts
 ├── session/    # Session persistence + telemetry (snapshots, hit rates, .session.json store)
-├── providers/  # native REST adapters (google/openai/openrouter/openai-compat) + registry + canonical contract
+├── providers/  # native REST adapters (google/openai/anthropic/openrouter/openai-compat) + registry + canonical contract
 ├── models/     # Dynamic catalog cache, parser, verified overrides
 ├── data/       # Dynamic model catalog cache (gitignored, excluded from bundle)
 ├── tools/      # tool(), schema, executor

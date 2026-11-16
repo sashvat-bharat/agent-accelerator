@@ -87,6 +87,8 @@ Part types: `text`, `image`, `audio`, `video`, `file`. MIME types are inferred f
 
 **On OpenRouter**, images and videos given as web links are passed through untouched; everything else is inlined as base64. Audio is always inlined (audio links are downloaded) and sent with its real format: `wav`, `mp3`, `aiff`, `aac`, `ogg`, `flac` or `m4a`, found from `mimeType`, the file extension or the first bytes. A QuickTime video is sent as `video/mov`. Supported video types: MP4, MPEG, MOV and WebM; sizes and durations are limited by the model and the route, and their errors come back as they are. A web link the route cannot fetch comes back as a bare "Provider returned error"; the SDK adds a hint to that error saying a remote image or video link may be the cause (pass the file itself instead).
 
+**On Anthropic**, images are JPEG, PNG, GIF or WebP and documents are PDF or plain text, each as a URL (Anthropic fetches it) or inline base64; local files and other URLs are read and inlined. Audio, video and any other file type fail before the network with a one-line error. Anthropic's limits (docs, not enforced by the SDK): 128 MB per request, 10 MB and 8000 px per image, 600 PDF pages (100 when the model's context window is under 1M tokens). `resolution` and `processing` are ignored with a warning.
+
 **On Google**, links Google can fetch itself are sent as a `uri` (no download, no inlining): YouTube video links, Files API links (`https://generativelanguage.googleapis.com/v1beta/files/...` or `/v1/files/...`), `gs://` objects, and public `https://` URLs whose type (from `mimeType` or the extension) Google fetches: PDF, CSV, plain text/HTML/CSS/XML/RTF/JS, JSON, PNG/JPEG/WebP/BMP images and common video formats (max 15 MB per URL). Everything else, including **all audio URLs** and `http://` links, is downloaded and inlined. Inline types are checked before the network: images PNG/JPEG/WebP/HEIC/HEIF/GIF/BMP/TIFF, audio WAV/MP3/AIFF/AAC/OGG/FLAC/MPEG/M4A/L16/OPUS/ALAW/MULAW/WebM, video MP4/MPEG/MPG/MOV/AVI/FLV/WebM/WMV/3GPP, documents **PDF and CSV only** (convert other documents to text first). Google allows 100 MB inline per request (50 MB per PDF). Images and videos accept an optional `resolution` (`"low" | "medium" | "high" | "ultra_high"`) that trades detail for input tokens, e.g. `{ type: "image", image: "./chart.png", resolution: "high" }`; OpenRouter sends an image's `resolution` as `image_url.detail` (`low`, `auto`, `high`, `original`); other providers (and OpenRouter videos) ignore it with a warning.
 
 **Recommendations:** ✅ prefer URLs for large media (not inlined). ✅ Restrict local reads with `fileAccess.roots`. ❌ Don't pass untrusted paths without `roots`.
@@ -105,7 +107,7 @@ console.log(telemetry.formatBar(res)); // tokens, cache hit rates, cost, context
 console.log(telemetry.totals); // { input, output, cacheRead, cacheWrite, reasoning, cost }
 ```
 
-`res.usage` has `inputTokens`, `outputTokens`, `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`, and, on OpenRouter, `inputDetails` (`audioTokens`, `videoTokens`) and `outputDetails` (`audioTokens`, `imageTokens`) when the route reports them (subsets of input and output, report only). Cached tokens are always a subset of input. Cost is the provider's reported total when present (OpenRouter), else computed from catalog prices with integer micro-USD maths, including tiered prices above 200k context and service-tier multipliers (flex 0.5x, priority 2x). **Unknown pricing stays unknown**, never a made-up zero. Sub-agent usage is added to the parent's total.
+`res.usage` has `inputTokens`, `outputTokens`, `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `cost`, and, on OpenRouter, `inputDetails` (`audioTokens`, `videoTokens`) and `outputDetails` (`audioTokens`, `imageTokens`) when the route reports them (subsets of input and output, report only). Cached tokens are always a subset of input (Anthropic reports them outside its `input_tokens`; the SDK adds them back). Cost is the provider's reported total when present (OpenRouter), else computed from catalog prices with integer micro-USD maths, including tiered prices above 200k context and service-tier multipliers (flex 0.5x, priority 2x). **Unknown pricing stays unknown**, never a made-up zero. Sub-agent usage is added to the parent's total.
 
 ## Model catalog
 
@@ -115,7 +117,7 @@ The SDK reads limits, prices, modalities and reasoning options from a small cach
 | --- | --- |
 | `google` | `gemini-3*` and newer (`gemini-4*` ...) |
 | `openai` | `gpt-5*` and newer (`gpt-6*` ...) |
-| `anthropic` | `claude-*-5*` and newer (kept ready for the native Anthropic provider) |
+| `anthropic` | `claude-*-5*` and newer |
 | `openrouter` | every model whose only output is text |
 
 Only the fields the SDK reads are saved (limits, prices, modalities, reasoning options, flags). Any other model or provider is **unknown** to the catalog: no price (cost stays unknown), permissive thinking levels, no modality guard. Use `registerModel()` to describe one. A model only OpenRouter lists, such as `openai/gpt-4o`, is found through its OpenRouter entry.

@@ -1,6 +1,6 @@
 # Agent Accelerator
 
-> Thin, typed TypeScript SDK (Bun, ships TypeScript source): one `Agent` class over Google Gemini, OpenAI, OpenRouter and any OpenAI-compatible endpoint. Tools, streaming, sub-agents, scheduled actions, mid-session steer/queue/interrupt, durable sessions, structured output, multimodal input, prompt caching, budgets/retries, telemetry bus, safe file/URL handling. Pre-1.0: pin a version. Import everything from "agent-accelerator". Paths are relative to docs/.
+> Thin, typed TypeScript SDK (Bun, ships TypeScript source): one `Agent` class over Google Gemini, OpenAI, Anthropic, OpenRouter and any OpenAI-compatible endpoint. Tools, streaming, sub-agents, scheduled actions, mid-session steer/queue/interrupt, durable sessions, structured output, multimodal input, prompt caching, budgets/retries, telemetry bus, safe file/URL handling. Pre-1.0: pin a version. Import everything from "agent-accelerator". Paths are relative to docs/.
 
 - [For AI agents](for-ai-agents.md): decision table, templates, hard rules, what does NOT exist, error-to-fix lookup
 - [Getting started](getting-started.md): install, keys, first agent, concepts

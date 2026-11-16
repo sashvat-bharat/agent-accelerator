@@ -8,22 +8,25 @@ import { baseUrlSetting } from "../config/settings.ts";
 import { GoogleInteractionsProvider } from "./google.ts";
 import { OpenRouterChatCompletionsProvider } from "./openrouter.ts";
 import { OpenAIResponsesProvider } from "./openai.ts";
+import { AnthropicMessagesProvider } from "./anthropic.ts";
 import { assertModelAllowed } from "../config/models.ts";
 
 const providerRegistry = new Map<ProviderId, Provider>();
 
-// Google + OpenAI + OpenRouter are served by dedicated native REST adapters
-// (`./google.ts` Interactions, `./openai.ts` Responses, `./openrouter.ts`
-// Chat Completions). Any other prefix is served by the generic native
+// Google + OpenAI + Anthropic + OpenRouter are served by dedicated native REST adapters
+// (`./google.ts` Interactions, `./openai.ts` Responses, `./anthropic.ts` Messages,
+// `./openrouter.ts` Chat Completions). Any other prefix is served by the generic native
 // OpenAI-compatible Chat Completions adapter (`./openai-compat.ts`).
 const googleProvider = new GoogleInteractionsProvider();
 const openrouterProvider = new OpenRouterChatCompletionsProvider();
 const openaiProvider = new OpenAIResponsesProvider();
+const anthropicProvider = new AnthropicMessagesProvider();
 
 providerRegistry.set("google", googleProvider);
 providerRegistry.set("gemini", googleProvider);
 providerRegistry.set("openrouter", openrouterProvider);
 providerRegistry.set("openai", openaiProvider);
+providerRegistry.set("anthropic", anthropicProvider);
 
 // ---------------------------------------------------------------------------
 // Unified multi-provider layer (all native REST, no SDK transport)
@@ -33,7 +36,7 @@ providerRegistry.set("openai", openaiProvider);
 //   "cerebras/gpt-oss-120b"        + CEREBRAS_API_KEY + base_urls.cerebras
 //   "ollama/qwen2.5-coder"         + base_urls.ollama (key optional for local)
 // ---------------------------------------------------------------------------
-const FIRST_CLASS = new Set(["google", "gemini", "openrouter", "openai"]);
+const FIRST_CLASS = new Set(["google", "gemini", "openrouter", "openai", "anthropic"]);
 
 // Removed providers: fail loudly instead of misrouting. OpenCode free models
 // are harness-only since 2026, so the opencode/opencode-go prefixes no longer
@@ -44,7 +47,7 @@ const REMOVED_PROVIDERS = new Set(["opencode", "opencode-go"]);
 function removedProviderMessage(id: string): string {
   return (
     `[Agent Accelerator] Provider "${id}" has been removed: OpenCode free models are ` +
-    `harness-only and are no longer served over the API. Use google, openai, openrouter, or any ` +
+    `harness-only and are no longer served over the API. Use google, openai, anthropic, openrouter, or any ` +
     `OpenAI-compatible endpoint ({PREFIX}_API_KEY + the base_urls.<prefix> setting) instead.`
   );
 }
@@ -119,7 +122,7 @@ export function getProvider(id: ProviderId | string): Provider {
   if (provider) return provider;
   if (!key) {
     throw new ConfigError(
-      `Provider '' is not supported or not registered. Available first-support providers: google, openrouter, openai — or any custom prefix via {PREFIX}_API_KEY + the base_urls.<prefix> setting.`
+      `Provider '' is not supported or not registered. Available first-support providers: google, openrouter, openai, anthropic — or any custom prefix via {PREFIX}_API_KEY + the base_urls.<prefix> setting.`
     );
   }
   // Unified layer: lazily create a native OpenAI-compatible provider for any custom prefix.
@@ -195,6 +198,16 @@ export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel 
       return { provider: p, modelId: remainingModel, modelSpec: spec as ModelSpec };
     }
 
+    // 1b. Explicit anthropic/ prefix routes to the native Messages adapter
+    if (providerPrefix === "anthropic") {
+      const p = getProvider("anthropic");
+      const spec =
+        p.getModel(remainingModel) ||
+        getModelFromCatalog("anthropic", remainingModel) ||
+        getModelFromCatalog(remainingModel, remainingModel);
+      return { provider: p, modelId: remainingModel, modelSpec: spec as ModelSpec };
+    }
+
     // 2. Unified layer: any non-first-class prefix routes to auto-created custom provider
     const isExplicitOther = ["google", "gemini", "openrouter"].includes(providerPrefix);
 
@@ -257,6 +270,7 @@ export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel 
       tryCatalogLookup(providerPrefix, remainingModel) ||
       tryCatalogLookup("google", remainingModel) ||
       tryCatalogLookup("openai", remainingModel) ||
+      tryCatalogLookup("anthropic", remainingModel) ||
       tryCatalogLookup("openrouter", remainingModel) ||
       getModelFromCatalog(modelStr, modelStr);
     if (prioritizedUnknown) {
@@ -289,6 +303,7 @@ export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel 
   const prioritized =
     tryCatalogLookup("google", modelStr) ||
     tryCatalogLookup("openai", modelStr) ||
+    tryCatalogLookup("anthropic", modelStr) ||
     tryCatalogLookup("openrouter", modelStr) ||
     getModelFromCatalog(modelStr, modelStr);
   if (prioritized) {
@@ -361,6 +376,20 @@ export const ModelProvider = {
   ): ModelProviderInstance {
     return {
       model: model.startsWith("openai/") ? model : `openai/${model}`,
+      apiKey,
+      baseUrl: options?.baseUrl,
+      thinkingLevel: options?.thinkingLevel,
+    };
+  },
+
+  /** Builds an Anthropic model selection. @example `ModelProvider.Anthropic("claude-sonnet-5-5")` */
+  Anthropic(
+    model: string,
+    apiKey?: string,
+    options?: { thinkingLevel?: ThinkingLevel; baseUrl?: string }
+  ): ModelProviderInstance {
+    return {
+      model: model.startsWith("anthropic/") ? model : `anthropic/${model}`,
       apiKey,
       baseUrl: options?.baseUrl,
       thinkingLevel: options?.thinkingLevel,
