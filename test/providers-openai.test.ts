@@ -108,6 +108,40 @@ describe("Canonical OpenAI mappings", () => {
     }
   });
 
+  it("GPT-5.6 and later: 30m / 12h set prompt_cache_options.ttl and never prompt_cache_retention", async () => {
+    clearEmittedWarnings();
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+    };
+    const w = captureWarnings();
+    try {
+      const provider = new OpenAIResponsesProvider();
+      const ctx = { messages: [{ role: "user" as const, content: "Hi" }] };
+      for (const [model, cache] of [
+        ["gpt-6.1-sol", "30m"],
+        ["gpt-5.6-terra", "12h"],
+        ["gpt-6-luna", "implicit"],
+        ["gpt-6.1-sol", "5m"],
+        ["gpt-5.5", "30m"],
+      ] as const) {
+        await provider.generate(model, ctx, { apiKey: "k", cache });
+      }
+      expect(bodies[0].prompt_cache_options).toEqual({ ttl: "30m" });
+      expect(bodies[1].prompt_cache_options).toEqual({ ttl: "12h" });
+      expect(bodies[2].prompt_cache_options).toBeUndefined();
+      expect(bodies[3].prompt_cache_options).toBeUndefined(); // 5m is unsupported: warned and dropped
+      expect(bodies[4].prompt_cache_options).toBeUndefined(); // gpt-5.5 predates the field
+      for (const b of bodies) expect(b.prompt_cache_retention).toBeUndefined();
+      expect(w.messages.some((m) => /5m \(openai\/gpt-6\.1-sol\)/.test(m))).toBe(true);
+      expect(w.messages.some((m) => /30m \(openai\/gpt-5\.5\)/.test(m))).toBe(true); // gpt-5.5 has no 30m
+    } finally {
+      w.restore();
+      clearEmittedWarnings();
+    }
+  });
+
   it("maps tool choice (required native, function pin verbatim)", () => {
     expect(mapToolChoiceToOpenAI(undefined)).toBeUndefined();
     expect(mapToolChoiceToOpenAI("auto")).toBeUndefined();

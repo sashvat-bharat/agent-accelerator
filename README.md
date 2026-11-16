@@ -875,7 +875,8 @@ One value sets the prompt-cache lifetime. Each provider honours only the values 
 | Google (Interactions) | `implicit` | nothing (implicit caching is always on) |
 | OpenRouter, `anthropic/*` models | `implicit`, `5m`, `1h` | top-level `cache_control: { type: "ephemeral", ttl }` |
 | OpenRouter, other models | `implicit` | nothing (automatic caching + sticky routing) |
-| OpenAI | `implicit`, `12h` | `12h` sends `prompt_cache_retention: "24h"` when the catalog allows long retention |
+| OpenAI, GPT-5.6 and later (`gpt-5.6-*`, `gpt-6*`) | `implicit`, `30m`, `12h` | `30m` / `12h` send `prompt_cache_options: { ttl }` (the minimum lifetime of every cache write; `30m` is the API default) |
+| OpenAI, older models | `implicit`, `12h` | `12h` sends `prompt_cache_retention: "24h"` when the catalog allows long retention |
 | Anthropic | `implicit`, `5m`, `1h` | top-level `cache_control: { type: "ephemeral" }` (`implicit` and unset), with `ttl` for `5m` / `1h` |
 | Custom endpoints | `implicit` | nothing (strict endpoints reject unknown fields) |
 

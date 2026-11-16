@@ -123,6 +123,7 @@ interface ResponsesRequestBody {
   reasoning?: { effort: string };
   service_tier?: string;
   prompt_cache_key?: string;
+  prompt_cache_options?: { ttl: "30m" | "12h" };
   store?: boolean;
   stream?: boolean;
   text?: {
@@ -191,6 +192,14 @@ function resolveApiKey(options?: ProviderRequestOptions): string | undefined {
 // The model id without its provider scope; in: each request, out: the bare id.
 function cleanModelId(model: string | ModelSpec): string {
   return stripModelScope(model, /^openai\//i);
+}
+
+// True for GPT-5.6 and later (gpt-5.6-*, gpt-6*), which take `prompt_cache_options.ttl` (30m or 12h); older models take `prompt_cache_retention`; in: buildBody, out: which cache wire to use.
+function usesCacheOptions(modelId: string): boolean {
+  const m = /^gpt-(\d+)(?:\.(\d+))?/i.exec(modelId);
+  if (!m) return false;
+  const major = Number(m[1]);
+  return major >= 6 || (major === 5 && Number(m[2] ?? 0) >= 6);
 }
 
 // Canonical tool declarations as Responses function tools; in: options.tools, out: request `tools`.
@@ -535,8 +544,14 @@ export class OpenAIResponsesProvider implements Provider {
   ): Promise<ResponsesRequestBody> {
     const { effort } = mapThinkingLevelToOpenAI(options?.thinking?.level);
     const serviceTier = mapServiceTierToOpenAI(options?.serviceTier);
-    // `12h` maps to `prompt_cache_retention: "24h"`; everything else stays on implicit prompt_cache_key affinity.
-    const cache = resolveCache("openai", options?.cache, ["implicit", "12h"], `openai/${modelId}`);
+    // GPT-5.6 and later: `30m` / `12h` set `prompt_cache_options.ttl`. Older models: `12h` maps to `prompt_cache_retention: "24h"`; everything else stays on implicit prompt_cache_key affinity.
+    const cacheOptions = usesCacheOptions(modelId);
+    const cache = resolveCache(
+      "openai",
+      options?.cache,
+      cacheOptions ? ["implicit", "30m", "12h"] : ["implicit", "12h"],
+      `openai/${modelId}`
+    );
     warnIgnoredMediaResolution("openai", context.messages, `openai/${modelId}`);
     warnIgnoredVideoProcessing("openai", context.messages, `openai/${modelId}`);
     warnIgnoredToolMedia("openai", context.messages, `openai/${modelId}`);
@@ -604,8 +619,12 @@ export class OpenAIResponsesProvider implements Provider {
       const cacheKey = clampCacheKey(sessionId);
       if (cacheKey) body.prompt_cache_key = cacheKey;
     }
+    // GPT-5.6 and later: the request-level minimum lifetime of every cache write (`prompt_cache_retention` is deprecated there).
+    if (cacheOptions && (cache === "30m" || cache === "12h")) {
+      body.prompt_cache_options = { ttl: cache };
+    }
     // Long retention: `prompt_cache_retention: "24h"` when the catalog supports it.
-    if (cache === "12h") {
+    else if (cache === "12h") {
       let supportsLong = true;
       try {
         const spec = getModelFromCatalog("openai", modelId);
