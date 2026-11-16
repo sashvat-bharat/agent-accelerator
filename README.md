@@ -8,7 +8,7 @@
 
 A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
 
-Agent Accelerator supports `google`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using the `{PREFIX}_API_KEY` key and the `base_urls.{prefix}` setting.
+Agent Accelerator supports `google`, `openai`, `anthropic`, `openrouter`, and any OpenAI-compatible endpoint using the `{PREFIX}_API_KEY` key and the `base_urls.{prefix}` setting.
 
 
 ```ts
