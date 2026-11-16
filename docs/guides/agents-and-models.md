@@ -46,9 +46,10 @@ Useful config: `stateless: true` clears history around every run (one-shot judge
 |---|---|---|
 | `google/<id>` (or `gemini/<id>`) | Google Interactions API | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
 | `openai/<id>` | OpenAI Responses API | `OPENAI_API_KEY` |
+| `anthropic/<id>` | Anthropic Messages API | `ANTHROPIC_API_KEY` |
 | `openrouter/<scope>/<id>` or `scope/id:variant` | OpenRouter Chat Completions | `OPENROUTER_API_KEY` |
 | `<anything-else>/<id>` | Generic OpenAI-compatible Chat Completions | `<PREFIX>_API_KEY` + `<PREFIX>_BASE_URL` |
-| bare `<id>` | Catalog lookup (google, openai, openrouter), else OpenRouter; with the `base_urls.openai` setting set it goes to OpenAI | |
+| bare `<id>` | Catalog lookup (google, openai, anthropic, openrouter), else OpenRouter; with the `base_urls.openai` setting set it goes to OpenAI | |
 
 Rules worth knowing: a custom prefix **never** falls back to another vendor's key or default URL (a missing base URL throws before any network call); local endpoints (localhost, LAN, `*.local`) may omit the key; Gemini older than version 3 is rejected before the network.
 
@@ -164,7 +165,7 @@ const res = await agent.run("Hello");
 console.log(res.usage.cachedTokens, "of", res.usage.inputTokens, "input tokens were cached");
 ```
 
-Prefix caching is automatic; you earn hits by keeping the start of the prompt identical. `cache` takes one value: Google and custom endpoints support `implicit` only, OpenRouter adds `5m`/`1h` for `anthropic/*` models, OpenAI adds `12h` (sent as a 24 h retention). Any other value warns once and falls back to the provider default. Session ids are clamped to 64 characters for affinity headers/keys.
+Prefix caching is automatic; you earn hits by keeping the start of the prompt identical. `cache` takes one value: Google and custom endpoints support `implicit` only, Anthropic and OpenRouter (for `anthropic/*` models) add `5m`/`1h`, OpenAI adds `12h` (sent as a 24 h retention). Any other value warns once and falls back to the provider default. Session ids are clamped to 64 characters for affinity headers/keys.
 
 **Recommendations:** ✅ stable `instructions` + stable tool order + stable `sessionId`; ✅ measure with `cachedTokens` or `SessionTelemetry` ([Data and media](data-and-media.md)). ❌ No timestamps or random text in `instructions`.
 

@@ -11,6 +11,8 @@ export function isTransientError(error: unknown): boolean {
   if (!error) return false;
   if (isAbortError(error)) return false;
   const err = error as Record<string, unknown>;
+  // An adapter's explicit "never retry" (e.g. Anthropic's monthly spend-cap 429, also once wrapped as a ProviderError) beats the status rules below.
+  if (err["transient"] === false || (err as { retryable?: unknown }).retryable === false) return false;
   if (err["transient"] === true) return true;
   if ((err as { retryable?: unknown }).retryable === true) return true;
   const status = Number(

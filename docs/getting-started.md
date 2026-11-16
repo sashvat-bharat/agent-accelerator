@@ -19,6 +19,7 @@ Put one provider key in `.env` (Bun loads it automatically):
 |---|---|---|
 | Google Gemini | `google/gemini-3.5-flash-lite` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) |
 | OpenAI | `openai/gpt-5.5` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic/claude-sonnet-5-5` | `ANTHROPIC_API_KEY` |
 | OpenRouter | `openrouter/z-ai/glm-5.3-flash` | `OPENROUTER_API_KEY` |
 | Any OpenAI-compatible (Groq, Ollama...) | `groq/llama-3.3-70b-versatile` | `GROQ_API_KEY`, and its endpoint in the `base_urls.groq` setting (local endpoints may omit the key) |
 

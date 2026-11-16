@@ -2,7 +2,7 @@
 
 > Build, run and operate AI agents with one small TypeScript SDK. Written to be read by humans and implemented from by AI agents.
 
-Agent Accelerator (`agent-accelerator`) gives you **one `Agent` class** over Google Gemini, OpenAI, OpenRouter and any OpenAI-compatible endpoint, plus tools, streaming, sub-agents, scheduled actions, durable sessions, budgets, telemetry and safe file/URL handling. No provider SDKs; the only runtime dependency is `zod`.
+Agent Accelerator (`agent-accelerator`) gives you **one `Agent` class** over Google Gemini, OpenAI, Anthropic, OpenRouter and any OpenAI-compatible endpoint, plus tools, streaming, sub-agents, scheduled actions, durable sessions, budgets, telemetry and safe file/URL handling. No provider SDKs; the only runtime dependency is `zod`.
 
 > **Status:** pre-1.0. Pin an exact version. Current limits are listed honestly in [Safety and operations](guides/safety-and-ops.md#known-limitations).
 

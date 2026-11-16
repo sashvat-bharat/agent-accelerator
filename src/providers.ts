@@ -720,3 +720,185 @@ export function augmentSystemPromptWithStructuredOutput(
   if (systemPrompt.includes(instruction)) return systemPrompt;
   return `${systemPrompt}\n\n${instruction}`;
 }
+
+// ---------------------------------------------------------------------------
+// Anthropic Messages mappers (pure: all HTTP and wire parsing live in providers/anthropic.ts)
+// ---------------------------------------------------------------------------
+
+/** Anthropic `thinking` request value: adaptive (with visible summaries) or one of the "off" shapes some models accept. */
+export type AnthropicThinking = { type: "adaptive"; display: "summarized" } | { type: "disabled" | "between_tools" };
+
+/** Anthropic `output_config.effort` values. */
+export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * Maps a canonical ThinkingLevel onto Anthropic 5.x thinking. Thinking is adaptive and on by default, so a level only sets
+ * `output_config.effort` and asks for summarized thinking text (the default `display` is "omitted": an empty text plus a signature).
+ * `none` uses the model's own off switch (`off`) when it has one, else the lowest effort; `minimal` is `low`; `dynamic` omits everything.
+ */
+export function mapThinkingLevelToAnthropic(
+  level: ThinkingLevel | string | undefined,
+  off: { type: "disabled" | "between_tools" } | undefined,
+  modelRef: string
+): { thinking?: AnthropicThinking; effort?: AnthropicEffort } {
+  if (!level) return {};
+  const norm = String(level).toLowerCase().trim();
+  if (norm === "dynamic") return {};
+  if (norm === "none") {
+    if (off) return { thinking: off };
+    emitProviderWarning({
+      provider: "anthropic",
+      capability: "thinking level",
+      requested: `none (${modelRef})`,
+      reason: "this model always thinks and has no off switch.",
+      fallback: "adaptive thinking at effort low",
+    });
+    return { effort: "low" };
+  }
+  if (norm === "minimal") {
+    emitProviderWarning({
+      provider: "anthropic",
+      capability: "thinking level",
+      requested: `minimal (${modelRef})`,
+      reason: "Anthropic's lowest effort is low.",
+      fallback: "effort low",
+    });
+    return { thinking: { type: "adaptive", display: "summarized" }, effort: "low" };
+  }
+  if (norm === "low" || norm === "medium" || norm === "high" || norm === "xhigh" || norm === "max") {
+    return { thinking: { type: "adaptive", display: "summarized" }, effort: norm };
+  }
+  return {};
+}
+
+/** Maps canonical ServiceTier onto Anthropic `service_tier`: `priority` is `auto` (use Priority Tier capacity when the account has it); `flex` has no equivalent. */
+export function mapServiceTierToAnthropic(tier: ServiceTier | undefined): "auto" | undefined {
+  if (!tier) return undefined;
+  if (tier === "priority") return "auto";
+  emitProviderWarning({
+    provider: "anthropic",
+    capability: "service tier",
+    requested: tier,
+    reason: "Anthropic's service_tier is auto or standard_only: there is no flex tier on the Messages API.",
+    fallback: "the standard tier (no service_tier is sent)",
+  });
+  return undefined;
+}
+
+/** Anthropic `tool_choice` wire values (`auto` is the server default and is never sent). */
+export type AnthropicToolChoice = { type: "none" } | { type: "any" } | { type: "tool"; name: string };
+
+/**
+ * Maps canonical toolChoice onto Anthropic `tool_choice`. `required` is `any` and a pinned function is `tool`; models that reject forced
+ * tool use (`forcedSupported: false`) and the Google-only `validated` mode warn once and fall back to automatic choice.
+ */
+export function mapToolChoiceToAnthropic(
+  choice: "auto" | "none" | "required" | "validated" | { type: "function"; function: { name: string } } | undefined,
+  forcedSupported: boolean,
+  modelRef: string
+): AnthropicToolChoice | undefined {
+  if (!choice || choice === "auto") return undefined;
+  if (choice === "none") return { type: "none" };
+  if (choice === "validated") {
+    warnValidatedToolChoice("anthropic");
+    return undefined;
+  }
+  if (!forcedSupported) {
+    emitProviderWarning({
+      provider: "anthropic",
+      capability: "tool choice",
+      requested: `${choice === "required" ? "required" : "a pinned tool"} (${modelRef})`,
+      reason: 'this model rejects tool_choice "any" and "tool" with a 400.',
+      fallback: "automatic tool choice",
+    });
+    return undefined;
+  }
+  if (choice === "required") return { type: "any" };
+  const name = choice.function?.name;
+  return name ? { type: "tool", name } : undefined;
+}
+
+const ANTHROPIC_SCHEMA_FORMATS = new Set([
+  "date-time",
+  "time",
+  "date",
+  "duration",
+  "email",
+  "hostname",
+  "uri",
+  "ipv4",
+  "ipv6",
+  "uuid",
+]);
+const ANTHROPIC_DROPPED_KEYWORDS = [
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "minLength",
+  "maxLength",
+  "maxItems",
+  "uniqueItems",
+  "minProperties",
+  "maxProperties",
+] as const;
+
+// Rewrites one JSON Schema node (and its children) into Anthropic's strict subset: objects closed with additionalProperties:false, unsupported constraints moved into the description; in: mapOutputToAnthropic and strict tool schemas, out: the cleaned copy.
+function cleanSchemaForAnthropic(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(cleanSchemaForAnthropic);
+  if (!isPlainObject(node)) return node;
+  const out: Record<string, unknown> = { ...node };
+  delete out["$schema"];
+  const notes: string[] = [];
+  for (const kw of ANTHROPIC_DROPPED_KEYWORDS) {
+    if (kw in out) {
+      notes.push(`${kw}: ${JSON.stringify(out[kw])}`);
+      delete out[kw];
+    }
+  }
+  if (typeof out["minItems"] === "number" && out["minItems"] > 1) {
+    notes.push(`minItems: ${out["minItems"]}`);
+    delete out["minItems"];
+  }
+  if (typeof out["format"] === "string" && !ANTHROPIC_SCHEMA_FORMATS.has(out["format"])) {
+    notes.push(`format: ${out["format"]}`);
+    delete out["format"];
+  }
+  if ("oneOf" in out && !("anyOf" in out)) {
+    out["anyOf"] = out["oneOf"];
+    delete out["oneOf"];
+  }
+  if (out["type"] === "object" || isPlainObject(out["properties"])) out["additionalProperties"] = false;
+  for (const key of ["properties", "$defs", "definitions"] as const) {
+    const group = out[key];
+    if (isPlainObject(group)) {
+      out[key] = Object.fromEntries(Object.entries(group).map(([k, v]) => [k, cleanSchemaForAnthropic(v)]));
+    }
+  }
+  for (const key of ["items", "anyOf", "allOf", "prefixItems"] as const) {
+    if (key in out) out[key] = cleanSchemaForAnthropic(out[key]);
+  }
+  if (notes.length > 0) {
+    const base = typeof out["description"] === "string" && out["description"] ? `${out["description"]} ` : "";
+    out["description"] = `${base}(${notes.join("; ")})`;
+  }
+  return out;
+}
+
+/** A JSON Schema in the subset Anthropic's grammar accepts (strict tools and structured output share it); in: tool parameters or an output spec, out: the wire schema. */
+export function anthropicSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  return cleanSchemaForAnthropic(schema) as Record<string, unknown>;
+}
+
+/**
+ * Maps a normalized spec onto Anthropic `output_config.format` (`{ type: json_schema, schema }`, GA, no beta header).
+ * The wire has no name or strict flag: the grammar is always enforced. The schema is cleaned to the supported subset; the loop
+ * still validates the answer against the original schema.
+ */
+export function mapOutputToAnthropic(
+  spec: StructuredOutputSpec | undefined
+): { format: { type: "json_schema"; schema: Record<string, unknown> } } | undefined {
+  if (!spec) return undefined;
+  return { format: { type: "json_schema", schema: anthropicSchema(spec.schema) } };
+}

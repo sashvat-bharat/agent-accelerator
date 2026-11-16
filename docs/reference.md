@@ -157,6 +157,7 @@ Since 0.7.0 the environment holds **API keys and nothing else**. Every other set
 |---|---|
 | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY` | Google key (checked in this order of preference) |
 | `OPENAI_API_KEY`, `OPENAI_BASE_API_KEY` | OpenAI key |
+| `ANTHROPIC_API_KEY` | Anthropic key |
 | `OPENROUTER_API_KEY` | OpenRouter key |
 | `<PREFIX>_API_KEY`, `<PREFIX>_BASE_API_KEY` | Key of any OpenAI-compatible endpoint (for `PREFIX/model`), e.g. `GROQ_API_KEY`; local endpoints may omit it |
 
@@ -165,7 +166,7 @@ Where the old variables went:
 | Was | Now |
 |---|---|
 | `MODEL`, `MODEL_NAME`, `SUB_AGENT_MODEL` | `setModels({ default: { model, sub_agent_model }, providers })`, and the user's choice with `setModel(id)` / `setSubAgentModel(id)` |
-| `GOOGLE_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENROUTER_BASE_URL`, `<PREFIX>_BASE_URL` | setting `base_urls: { google, openai, openrouter, <prefix> }` (a bare model id routes to OpenAI when `base_urls.openai` is set) |
+| `GOOGLE_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENROUTER_BASE_URL`, `<PREFIX>_BASE_URL` | setting `base_urls: { google, openai, anthropic, openrouter, <prefix> }` (a bare model id routes to OpenAI when `base_urls.openai` is set) |
 | `OPENROUTER_ORDER`, `_ONLY`, `_IGNORE`, `_ALLOW_FALLBACKS`, `_REQUIRE_PARAMETERS`, `_ZDR`, `_DATA_COLLECTION`, `_SORT`, `_PARALLEL_TOOL_CALLS`, `_REASONING_EXCLUDE`, `_USER` | setting `openrouter: { order, only, ignore, allow_fallbacks, require_parameters, zdr, data_collection, sort, parallel_tool_calls, reasoning_exclude, user }` |
 | `COMPAT_NO_STREAM_OPTIONS`, `COMPAT_NO_SESSION_HEADERS` | setting `compat: { no_stream_options, no_session_headers }` |
 | `AGENT_ACCEL_USAGE_LIMIT_USD` / `_TOKENS`, `AGENT_ACCEL_SCHEDULED_BUDGET_USD` / `_TOKENS`, `configure({ usageLimit, scheduledActionBudget })` | settings `usage_limit` and `scheduled_action_budget` (`{ max_cost_usd, max_total_tokens }`) |
