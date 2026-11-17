@@ -9,6 +9,8 @@ import {
 import { getProvider, resolveModel } from "../src/providers/registry.ts";
 import { parseStreamedToolArguments } from "../src/providers.ts";
 import { mockFetchOnce, captureWarnings } from "./helpers.ts";
+import { priceUsage } from "../src/session/store.ts";
+import { getModelFromCatalog } from "../src/models/catalog.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -140,6 +142,31 @@ describe("Canonical OpenAI mappings", () => {
       w.restore();
       clearEmittedWarnings();
     }
+  });
+
+  it("reads cache_write_tokens as a subset of input and prices it at the catalog write rate", async () => {
+    const reply = {
+      ...TEXT_RESPONSE,
+      usage: {
+        input_tokens: 1000,
+        input_tokens_details: { cached_tokens: 300, cache_write_tokens: 500 },
+        output_tokens: 100,
+        total_tokens: 1100,
+      },
+    };
+    (globalThis as any).fetch = async () => new Response(JSON.stringify(reply), { status: 200 });
+    const provider = new OpenAIResponsesProvider();
+    const res = await provider.generate("gpt-6.1-sol", { messages: [{ role: "user" as const, content: "Hi" }] }, { apiKey: "k" });
+    expect(res.usage.cacheReadTokens).toBe(300);
+    expect(res.usage.cacheWriteTokens).toBe(500);
+    // gpt-6.1-sol: input $2, cache read $0.1, cache write $2.5, output $10 per 1M: 200*2 + 300*0.1 + 500*2.5 + 100*10 micro-USD
+    const priced = priceUsage(res.usage, getModelFromCatalog("openai", "gpt-6.1-sol"));
+    expect(priced?.breakdown.totalMicroUSD).toBe(400 + 30 + 1250 + 1000);
+    // A report that claims more writes than input is clamped, never negative.
+    const odd = { ...reply, usage: { ...reply.usage, input_tokens_details: { cached_tokens: 900, cache_write_tokens: 500 } } };
+    (globalThis as any).fetch = async () => new Response(JSON.stringify(odd), { status: 200 });
+    const res2 = await provider.generate("gpt-6.1-sol", { messages: [{ role: "user" as const, content: "Hi" }] }, { apiKey: "k" });
+    expect(res2.usage.cacheWriteTokens).toBe(100);
   });
 
   it("maps tool choice (required native, function pin verbatim)", () => {

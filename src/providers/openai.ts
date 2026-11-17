@@ -165,7 +165,7 @@ interface ResponsesObject {
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number };
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     output_tokens_details?: { reasoning_tokens?: number };
     [k: string]: unknown;
   };
@@ -407,13 +407,15 @@ function mapUsage(raw?: ResponsesObject["usage"]): TokenUsage {
   const output = raw?.output_tokens ?? 0;
   // Canonical invariant: cache hits are a SUBSET of input.
   const cached = Math.min(raw?.input_tokens_details?.cached_tokens ?? 0, input);
+  // GPT-5.6 and later report the tokens written to the cache (billed at the cache-write rate, not on top of input): a subset of input like the reads.
+  const written = Math.min(raw?.input_tokens_details?.cache_write_tokens ?? 0, Math.max(0, input - cached));
   return {
     inputTokens: input,
     outputTokens: output,
     totalTokens: raw?.total_tokens ?? input + output,
     cachedTokens: cached,
     cacheReadTokens: cached,
-    cacheWriteTokens: 0,
+    cacheWriteTokens: written,
     thinkingTokens: raw?.output_tokens_details?.reasoning_tokens ?? 0,
   };
 }

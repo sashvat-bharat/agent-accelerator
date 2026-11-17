@@ -721,6 +721,7 @@ It also:
 
 * passes `service_tier` (`flex` | `priority`);
 * pins cache affinity with `prompt_cache_key` (clamped to 64 chars);
+* reports cache reads and (GPT-5.6 and later) cache writes in `usage`; writes are priced at the catalog's `cache_write` price, which is the `30m` rate, so a `12h` write (billed at about twice that) is under-estimated;
 * rejects `video` parts up front with a one-line error (the Responses wire carries text/image/file only);
 * sends `max_output_tokens` when set; never sends `temperature`, `top_p`, or background/conversation fields.
 
