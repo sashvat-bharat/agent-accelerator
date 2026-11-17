@@ -8,7 +8,7 @@
 
 A thin, typed transport SDK for calling LLMs through a single `Agent` interface.
 
-Agent Accelerator supports `google`, `openrouter`, `openai`, and any OpenAI-compatible endpoint using the `{PREFIX}_API_KEY` key and the `base_urls.{prefix}` setting.
+Agent Accelerator supports `google`, `openai`, `anthropic`, `openrouter`, and any OpenAI-compatible endpoint using the `{PREFIX}_API_KEY` key and the `base_urls.{prefix}` setting.
 
 
 ```ts
@@ -721,6 +721,10 @@ It also:
 
 * passes `service_tier` (`flex` | `priority`);
 * pins cache affinity with `prompt_cache_key` (clamped to 64 chars);
+* keeps the model's reasoning across a tool loop: with `store: false` a reasoning model returns encrypted reasoning items, which are saved with the turn and sent back, exactly as received, with the tool results of the same run (OpenAI asks for this; the reasoning of finished turns is not resent). Requests for catalog reasoning models include `reasoning.encrypted_content`;
+* reports cache reads and (GPT-5.6 and later) cache writes in `usage`; writes are priced at the catalog's `cache_write` price, which is the `30m` rate, so a `12h` write (billed at about twice that) is under-estimated;
+* reads the stream's own endings: `response.incomplete` (finish `length`, or `refusal` for `content_filter`), `response.failed` and `error` (a `server_error` or `rate_limit_exceeded` code is retryable, other codes are not), and reasoning summaries (`summary_text` entries and `response.reasoning_summary_text.delta`) as `thinking`;
+* keeps tool-call ids valid and distinct across providers: ids from Google, Anthropic or OpenRouter are made safe (letters, digits, `_`, `-`, at most 64 characters, a hash when cut) the same way on the call and on its result;
 * rejects `video` parts up front with a one-line error (the Responses wire carries text/image/file only);
 * sends `max_output_tokens` when set; never sends `temperature`, `top_p`, or background/conversation fields.
 
@@ -875,7 +879,8 @@ One value sets the prompt-cache lifetime. Each provider honours only the values 
 | Google (Interactions) | `implicit` | nothing (implicit caching is always on) |
 | OpenRouter, `anthropic/*` models | `implicit`, `5m`, `1h` | top-level `cache_control: { type: "ephemeral", ttl }` |
 | OpenRouter, other models | `implicit` | nothing (automatic caching + sticky routing) |
-| OpenAI | `implicit`, `12h` | `12h` sends `prompt_cache_retention: "24h"` when the catalog allows long retention |
+| OpenAI, GPT-5.6 and later (`gpt-5.6-*`, `gpt-6*`) | `implicit`, `30m`, `12h` | `30m` / `12h` send `prompt_cache_options: { ttl }` (the minimum lifetime of every cache write; `30m` is the API default) |
+| OpenAI, older models | `implicit`, `12h` | `12h` sends `prompt_cache_retention: "24h"` when the catalog allows long retention |
 | Anthropic | `implicit`, `5m`, `1h` | top-level `cache_control: { type: "ephemeral" }` (`implicit` and unset), with `ttl` for `5m` / `1h` |
 | Custom endpoints | `implicit` | nothing (strict endpoints reject unknown fields) |
 
@@ -1387,9 +1392,9 @@ documents. The supported lists are the `GOOGLE_*_MIME` constants at the top of
 sets how much detail Google spends on one image or video, and so how many
 input tokens it costs (image: 280 / 560 / 1120 / 2240; video per frame:
 `low` and `medium` 70, `high` 280). Omit it for Google's default. On
-OpenRouter an image's `resolution` is sent as `image_url.detail` (`low` → `low`,
-`medium` → `auto`, `high` → `high`, `ultra_high` → `original`, which OpenRouter
-downgrades to `high` where unsupported); a video's `resolution` is ignored. Other
+OpenRouter and OpenAI an image's `resolution` is sent as `detail` (`low` → `low`,
+`medium` → `auto`, `high` → `high`, `ultra_high` → `original`; OpenRouter
+downgrades `original` to `high` where unsupported); a video's `resolution` is ignored. Other
 providers (and OpenRouter videos) ignore it with one `provider_warning`.
 
 `processing` (`VideoProcessing`: `"static" | "agentic"`) sets how Google reads one

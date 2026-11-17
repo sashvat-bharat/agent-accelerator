@@ -117,6 +117,7 @@ export {
 } from "./providers/google.ts";
 export { OpenRouterChatCompletionsProvider } from "./providers/openrouter.ts";
 export { OpenAIResponsesProvider } from "./providers/openai.ts";
+export { AnthropicMessagesProvider } from "./providers/anthropic.ts";
 
 export {
   GOOGLE_MODELS,

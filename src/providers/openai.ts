@@ -40,7 +40,7 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, ContentPart } from "../types/message.ts";
+import type { ProviderContext, ContentPart, ProviderSteps } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -75,6 +75,8 @@ import {
   resolveProviderBaseUrl,
   stripModelScope,
   resultToOutput,
+  hasTruncatedToolArguments,
+  shortHashId,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -102,7 +104,7 @@ import {
 
 type ResponseContentPart =
   | { type: "input_text"; text: string }
-  | { type: "input_image"; image_url: string; detail?: string }
+  | { type: "input_image"; image_url: string; detail?: "low" | "auto" | "high" | "original" }
   | { type: "input_file"; file_url: string; filename?: string }
   | { type: "output_text"; text: string; annotations?: unknown[] }
   | { type: "reasoning_text"; text: string }
@@ -123,6 +125,8 @@ interface ResponsesRequestBody {
   reasoning?: { effort: string };
   service_tier?: string;
   prompt_cache_key?: string;
+  include?: string[];
+  prompt_cache_options?: { ttl: "30m" | "12h" };
   store?: boolean;
   stream?: boolean;
   text?: {
@@ -146,7 +150,7 @@ interface ResponsesOutputItem {
   status?: string;
   role?: string;
   content?: Array<{ type?: string; text?: string; annotations?: unknown[] }>;
-  summary?: string[];
+  summary?: Array<string | { type?: string; text?: string }>;
   encrypted_content?: string;
   output?: unknown;
   [k: string]: unknown;
@@ -164,7 +168,7 @@ interface ResponsesObject {
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number };
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     output_tokens_details?: { reasoning_tokens?: number };
     [k: string]: unknown;
   };
@@ -193,6 +197,14 @@ function cleanModelId(model: string | ModelSpec): string {
   return stripModelScope(model, /^openai\//i);
 }
 
+// True for GPT-5.6 and later (gpt-5.6-*, gpt-6*), which take `prompt_cache_options.ttl` (30m or 12h); older models take `prompt_cache_retention`; in: buildBody, out: which cache wire to use.
+function usesCacheOptions(modelId: string): boolean {
+  const m = /^gpt-(\d+)(?:\.(\d+))?/i.exec(modelId);
+  if (!m) return false;
+  const major = Number(m[1]);
+  return major >= 6 || (major === 5 && Number(m[2] ?? 0) >= 6);
+}
+
 // Canonical tool declarations as Responses function tools; in: options.tools, out: request `tools`.
 function toOpenAITools(tools?: StandardToolDeclaration[]): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined;
@@ -203,6 +215,15 @@ function toOpenAITools(tools?: StandardToolDeclaration[]): Array<Record<string, 
     parameters: (t.parameters || { type: "object", properties: {} }) as Record<string, unknown>,
     ...(t.strict !== undefined ? { strict: t.strict } : {}),
   }));
+}
+
+// `ImagePart.resolution` as the Responses `input_image.detail` (low, high, auto, original); in: contentPartsToBlocks, out: the detail to send, or none.
+const IMAGE_DETAIL = { low: "low", medium: "auto", high: "high", ultra_high: "original" } as const;
+
+// The `detail` field of an image part, empty when it sets no resolution; in: contentPartsToBlocks, out: spread into the block.
+function imageDetail(part: ContentPart): { detail?: (typeof IMAGE_DETAIL)[keyof typeof IMAGE_DETAIL] } {
+  const resolution = part.type === "image" ? part.resolution : undefined;
+  return resolution ? { detail: IMAGE_DETAIL[resolution] } : {};
 }
 
 // Text and media parts as input_text, input_image and input_file blocks; web links pass through, the rest is inlined as data URLs; in: a user message's parts, out: fullHistoryInput.
@@ -223,7 +244,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
       // PDFs with "Failed to download file." Let OpenAI fetch instead.
       if (typeof raw === "string" && (raw.startsWith("http://") || raw.startsWith("https://"))) {
         if (part.type === "image") {
-          blocks.push({ type: "input_image", image_url: raw });
+          blocks.push({ type: "input_image", image_url: raw, ...imageDetail(part) });
         } else {
           const filename = (part as { filename?: string }).filename;
           blocks.push({
@@ -244,7 +265,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
       // verdict surfaces if rejected (catalog modality gate fails fast first).
       // `filename` is forwarded when the canonical part carries one (PDFs).
       if (part.type === "image") {
-        blocks.push({ type: "input_image", image_url: norm.dataUrl });
+        blocks.push({ type: "input_image", image_url: norm.dataUrl, ...imageDetail(part) });
       } else {
         const filename = (part as { filename?: string }).filename;
         blocks.push({
@@ -261,7 +282,8 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
 // Makes an id safe for the Responses wire (allowed characters, at most 64, no trailing underscores); in: fullHistoryInput, out: the id.
 function normalizeResponsesIdPart(part: string): string {
   const sanitized = String(part ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
-  const truncated = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
+  // A hard cut would give two long ids with the same first 64 characters the same id; a hash of the whole id keeps them apart.
+  const truncated = sanitized.length > 64 ? `${sanitized.slice(0, 64 - 9)}_${shortHashId(String(part))}` : sanitized;
   return truncated.replace(/_+$/, "") || "fc_unknown";
 }
 
@@ -272,6 +294,33 @@ function normalizeResponsesItemId(itemId: string): string {
     norm = normalizeResponsesIdPart(`fc_${norm}`);
   }
   return norm;
+}
+
+// The text of one reasoning summary entry: the API sends `{ type: "summary_text", text }`, older mocks a plain string; in: parseResponse and the stream, out: the text or "".
+function summaryText(entry: unknown): string {
+  if (typeof entry === "string") return entry;
+  const text = (entry as { text?: unknown } | null)?.text;
+  return typeof text === "string" ? text : "";
+}
+
+// The HTTP status a response error code stands for, so the retry layers classify it: a server error and a rate limit are transient, every other code (invalid prompt, policy ...) is not; in: the failed-response and error-event paths, out: failure.statusCode.
+function errorCodeStatus(code: unknown): number | undefined {
+  if (code === "server_error") return 500;
+  if (code === "rate_limit_exceeded") return 429;
+  return undefined;
+}
+
+// The output items of a turn worth replaying (reasoning, function calls, messages), kept exactly as received, only for a turn that has reasoning and no cut-off tool call (a cut call is replayed as `{}`, never verbatim); in: parseResponse and the stream, out: providerSteps.
+function replayItems(
+  output: ResponsesOutputItem[] | undefined,
+  toolCalls: ToolCallRecord[]
+): ProviderSteps | undefined {
+  const keep = (output ?? []).filter(
+    (i) => i.type === "reasoning" || i.type === "function_call" || i.type === "message"
+  );
+  if (!keep.some((i) => i.type === "reasoning") || toolCalls.some((c) => hasTruncatedToolArguments(c.arguments)))
+    return undefined;
+  return { provider: "openai", steps: keep };
 }
 
 /**
@@ -303,9 +352,26 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
     }
   }
 
+  // Assistant turns after the last user message (the current tool loop) replay the items the model returned, reasoning included.
+  let lastUser = -1;
+  context.messages.forEach((m, i) => {
+    if (m.role === "user") lastUser = i;
+  });
   const items: ResponseInputItem[] = [];
-  for (const m of context.messages) {
+  for (let i = 0; i < context.messages.length; i++) {
+    const m = context.messages[i]!;
     if (m.role === "system") continue;
+    if (m.role === "assistant" && i > lastUser && m.providerSteps?.provider === "openai") {
+      for (const step of m.providerSteps.steps as ResponseInputItem[]) {
+        // A result is sent with the normalized call id, so the call it answers carries the same one (a no-op for real `call_...` ids).
+        items.push(
+          step.type === "function_call"
+            ? { ...step, call_id: normalizeResponsesIdPart(String((step as { call_id?: unknown }).call_id ?? "")) }
+            : step
+        );
+      }
+      continue;
+    }
     if (m.role === "user") {
       if (typeof m.content === "string") {
         if (m.content)
@@ -349,8 +415,7 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
         } else if (part.type === "text" && part.text) {
           texts.push(part.text);
         }
-        // Prior-turn reasoning is NOT resent: reasoning items require
-        // provider-minted ids that canonical history does not retain.
+        // Reasoning of finished turns is not resent; the current tool loop replays its stored items above.
       }
       if (texts.length > 0) {
         items.push({
@@ -398,13 +463,15 @@ function mapUsage(raw?: ResponsesObject["usage"]): TokenUsage {
   const output = raw?.output_tokens ?? 0;
   // Canonical invariant: cache hits are a SUBSET of input.
   const cached = Math.min(raw?.input_tokens_details?.cached_tokens ?? 0, input);
+  // GPT-5.6 and later report the tokens written to the cache (billed at the cache-write rate, not on top of input): a subset of input like the reads.
+  const written = Math.min(raw?.input_tokens_details?.cache_write_tokens ?? 0, Math.max(0, input - cached));
   return {
     inputTokens: input,
     outputTokens: output,
     totalTokens: raw?.total_tokens ?? input + output,
     cachedTokens: cached,
     cacheReadTokens: cached,
-    cacheWriteTokens: 0,
+    cacheWriteTokens: written,
     thinkingTokens: raw?.output_tokens_details?.reasoning_tokens ?? 0,
   };
 }
@@ -424,6 +491,8 @@ function parseResponse(
     const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
     if (response.error?.code !== undefined) failure["code"] = response.error.code;
     if (typeof response.error?.type === "string") failure["errorType"] = response.error.type;
+    const status = errorCodeStatus(response.error?.code);
+    if (status !== undefined) failure["statusCode"] = status;
     throw toConciseProviderError(failure, "openai", modelId);
   }
 
@@ -453,7 +522,8 @@ function parseResponse(
         }
       }
       for (const s of item.summary ?? []) {
-        if (typeof s === "string" && s) thinkingParts.push(s);
+        const text = summaryText(s);
+        if (text) thinkingParts.push(text);
       }
     } else if (item.type === "function_call") {
       const args = parseArguments(item.arguments);
@@ -481,8 +551,7 @@ function parseResponse(
   return {
     text,
     // Trim/collapse reasoning assembly (provider summaries can trail with
-    // blank lines). Prior-turn reasoning is never resent by this adapter, so
-    // this is fully cache-safe.
+    // blank lines). Display-only: the replayed reasoning is the stored item, not this text.
     thinking: normalizeThinkingParts(thinkingParts),
     thoughtSignature: undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
@@ -493,6 +562,7 @@ function parseResponse(
     provider: "openai",
     raw,
     durationMs,
+    providerSteps: replayItems(response.output, toolCalls),
   };
 }
 
@@ -535,9 +605,15 @@ export class OpenAIResponsesProvider implements Provider {
   ): Promise<ResponsesRequestBody> {
     const { effort } = mapThinkingLevelToOpenAI(options?.thinking?.level);
     const serviceTier = mapServiceTierToOpenAI(options?.serviceTier);
-    // `12h` maps to `prompt_cache_retention: "24h"`; everything else stays on implicit prompt_cache_key affinity.
-    const cache = resolveCache("openai", options?.cache, ["implicit", "12h"], `openai/${modelId}`);
-    warnIgnoredMediaResolution("openai", context.messages, `openai/${modelId}`);
+    // GPT-5.6 and later: `30m` / `12h` set `prompt_cache_options.ttl`. Older models: `12h` maps to `prompt_cache_retention: "24h"`; everything else stays on implicit prompt_cache_key affinity.
+    const cacheOptions = usesCacheOptions(modelId);
+    const cache = resolveCache(
+      "openai",
+      options?.cache,
+      cacheOptions ? ["implicit", "30m", "12h"] : ["implicit", "12h"],
+      `openai/${modelId}`
+    );
+    warnIgnoredMediaResolution("openai", context.messages, `openai/${modelId}`, ["video"]);
     warnIgnoredVideoProcessing("openai", context.messages, `openai/${modelId}`);
     warnIgnoredToolMedia("openai", context.messages, `openai/${modelId}`);
 
@@ -583,6 +659,8 @@ export class OpenAIResponsesProvider implements Provider {
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;
+    // Stateless reasoning models return encrypted reasoning items to replay on the next request (GPT-5.6 and later do it by default; older ones need this).
+    if (getModelFromCatalog("openai", modelId)?.reasoning === true) body.include = ["reasoning.encrypted_content"];
     // max_output_tokens.
     Object.assign(body, mapGenerationParamsToOpenAI(options));
     // Structured outputs: Responses `text.format{type:json_schema,name,schema,strict}`.
@@ -604,8 +682,12 @@ export class OpenAIResponsesProvider implements Provider {
       const cacheKey = clampCacheKey(sessionId);
       if (cacheKey) body.prompt_cache_key = cacheKey;
     }
+    // GPT-5.6 and later: the request-level minimum lifetime of every cache write (`prompt_cache_retention` is deprecated there).
+    if (cacheOptions && (cache === "30m" || cache === "12h")) {
+      body.prompt_cache_options = { ttl: cache };
+    }
     // Long retention: `prompt_cache_retention: "24h"` when the catalog supports it.
-    if (cache === "12h") {
+    else if (cache === "12h") {
       let supportsLong = true;
       try {
         const spec = getModelFromCatalog("openai", modelId);
@@ -864,6 +946,7 @@ export class OpenAIResponsesProvider implements Provider {
         let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
+        let completedOutput: ResponsesOutputItem[] | undefined;
         const handleMessage = (data: string): void => {
           if (!data || data === "[DONE]") {
             if (data === "[DONE]") sawFinishReason = sawFinishReason || completedBody !== undefined || sawUsage;
@@ -880,12 +963,15 @@ export class OpenAIResponsesProvider implements Provider {
           const type = msg["type"] as string;
           if (!type) return;
           if (type === "error") {
-            const errObj = (msg["error"] as { message?: string; code?: string | number; type?: string }) ?? {};
+            // The documented `error` event carries code and message at the top level; an `error` object inside it is tolerated too.
+            const errObj = (msg["error"] ?? msg) as { message?: string; code?: string | number; type?: string };
             const message =
               typeof errObj.message === "string" && errObj.message ? errObj.message : "OpenAI streaming error";
             const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
             if (errObj.code !== undefined) failure["code"] = errObj.code;
             if (typeof errObj.type === "string") failure["errorType"] = errObj.type;
+            const status = errorCodeStatus(errObj.code);
+            if (status !== undefined) failure["statusCode"] = status;
             failure["url"] = url;
             throw toConciseProviderError(failure, "openai", clean);
           }
@@ -913,6 +999,21 @@ export class OpenAIResponsesProvider implements Provider {
               thinkingDelta: msg["delta"] as string,
               partialThinking: thinking,
             });
+          } else if (type === "response.reasoning_summary_text.delta" && typeof msg["delta"] === "string") {
+            thinking += msg["delta"] as string;
+            eventStream.push({
+              type: "thinking_delta",
+              thinkingDelta: msg["delta"] as string,
+              partialThinking: thinking,
+            });
+          } else if (
+            type === "response.reasoning_summary_part.added" &&
+            Number(msg["summary_index"] ?? 0) > 0 &&
+            thinking
+          ) {
+            // A new summary part starts a new paragraph.
+            thinking += "\n\n";
+            eventStream.push({ type: "thinking_delta", thinkingDelta: "\n\n", partialThinking: thinking });
           } else if (type === "response.output_item.added") {
             const index = (msg["output_index"] as number) ?? 0;
             const item = (msg["item"] as Record<string, unknown>) ?? {};
@@ -940,9 +1041,15 @@ export class OpenAIResponsesProvider implements Provider {
               entry.startArgs = "";
               entry.deltaArgs = msg["arguments"] as string;
             }
-          } else if (type === "response.completed" || type === "response.failed" || type === "response.done") {
+          } else if (
+            type === "response.completed" ||
+            type === "response.failed" ||
+            type === "response.incomplete" ||
+            type === "response.done"
+          ) {
             const response = (msg["response"] as ResponsesObject) ?? {};
             completedBody = msg["response"];
+            completedOutput = response.output;
             if (response.id) responseId = response.id;
             if (response.usage) {
               usage = mapUsage(response.usage);
@@ -956,6 +1063,8 @@ export class OpenAIResponsesProvider implements Provider {
               const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
               if (response.error?.code !== undefined) failure["code"] = response.error.code;
               if (typeof response.error?.type === "string") failure["errorType"] = response.error.type;
+              const status = errorCodeStatus(response.error?.code);
+              if (status !== undefined) failure["statusCode"] = status;
               throw toConciseProviderError(failure, "openai", clean);
             }
             // Non-streaming maps `incomplete` → `length` (max tokens). Streaming
@@ -963,7 +1072,7 @@ export class OpenAIResponsesProvider implements Provider {
             // Content-filter incompletes surface as `refusal`.
             const incompleteReason = (response as { incomplete_details?: { reason?: string } }).incomplete_details
               ?.reason;
-            if (response.status === "incomplete") {
+            if (response.status === "incomplete" || type === "response.incomplete") {
               finishReason = incompleteReason === "content_filter" ? "refusal" : "length";
               sawFinishReason = true;
             }
@@ -995,7 +1104,8 @@ export class OpenAIResponsesProvider implements Provider {
                 }
               }
               for (const s of item.summary ?? []) {
-                if (typeof s === "string" && s) parts.push(s);
+                const text = summaryText(s);
+                if (text) parts.push(text);
               }
               for (const p of parts) {
                 if (p && !thinking.includes(p)) {
@@ -1081,6 +1191,7 @@ export class OpenAIResponsesProvider implements Provider {
             response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
           },
           durationMs: Date.now() - startTime,
+          providerSteps: replayItems(completedOutput, toolCalls),
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);

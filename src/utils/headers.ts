@@ -30,7 +30,7 @@ export function getPackageVersion(): string {
       ?.npm_package_version;
     if (typeof v === "string" && v) return v;
   } catch {}
-  return "0.7.5";
+  return "0.8.0";
 }
 
 // User-Agent string with version and platform; in: AGENT_ACCEL_USER_AGENT, out: a string.
