@@ -1389,9 +1389,9 @@ documents. The supported lists are the `GOOGLE_*_MIME` constants at the top of
 sets how much detail Google spends on one image or video, and so how many
 input tokens it costs (image: 280 / 560 / 1120 / 2240; video per frame:
 `low` and `medium` 70, `high` 280). Omit it for Google's default. On
-OpenRouter an image's `resolution` is sent as `image_url.detail` (`low` → `low`,
-`medium` → `auto`, `high` → `high`, `ultra_high` → `original`, which OpenRouter
-downgrades to `high` where unsupported); a video's `resolution` is ignored. Other
+OpenRouter and OpenAI an image's `resolution` is sent as `detail` (`low` → `low`,
+`medium` → `auto`, `high` → `high`, `ultra_high` → `original`; OpenRouter
+downgrades `original` to `high` where unsupported); a video's `resolution` is ignored. Other
 providers (and OpenRouter videos) ignore it with one `provider_warning`.
 
 `processing` (`VideoProcessing`: `"static" | "agentic"`) sets how Google reads one

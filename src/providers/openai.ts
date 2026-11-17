@@ -102,7 +102,7 @@ import {
 
 type ResponseContentPart =
   | { type: "input_text"; text: string }
-  | { type: "input_image"; image_url: string; detail?: string }
+  | { type: "input_image"; image_url: string; detail?: "low" | "auto" | "high" | "original" }
   | { type: "input_file"; file_url: string; filename?: string }
   | { type: "output_text"; text: string; annotations?: unknown[] }
   | { type: "reasoning_text"; text: string }
@@ -214,6 +214,15 @@ function toOpenAITools(tools?: StandardToolDeclaration[]): Array<Record<string, 
   }));
 }
 
+// `ImagePart.resolution` as the Responses `input_image.detail` (low, high, auto, original); in: contentPartsToBlocks, out: the detail to send, or none.
+const IMAGE_DETAIL = { low: "low", medium: "auto", high: "high", ultra_high: "original" } as const;
+
+// The `detail` field of an image part, empty when it sets no resolution; in: contentPartsToBlocks, out: spread into the block.
+function imageDetail(part: ContentPart): { detail?: (typeof IMAGE_DETAIL)[keyof typeof IMAGE_DETAIL] } {
+  const resolution = part.type === "image" ? part.resolution : undefined;
+  return resolution ? { detail: IMAGE_DETAIL[resolution] } : {};
+}
+
 // Text and media parts as input_text, input_image and input_file blocks; web links pass through, the rest is inlined as data URLs; in: a user message's parts, out: fullHistoryInput.
 async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseContentPart[]> {
   const blocks: ResponseContentPart[] = [];
@@ -232,7 +241,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
       // PDFs with "Failed to download file." Let OpenAI fetch instead.
       if (typeof raw === "string" && (raw.startsWith("http://") || raw.startsWith("https://"))) {
         if (part.type === "image") {
-          blocks.push({ type: "input_image", image_url: raw });
+          blocks.push({ type: "input_image", image_url: raw, ...imageDetail(part) });
         } else {
           const filename = (part as { filename?: string }).filename;
           blocks.push({
@@ -253,7 +262,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
       // verdict surfaces if rejected (catalog modality gate fails fast first).
       // `filename` is forwarded when the canonical part carries one (PDFs).
       if (part.type === "image") {
-        blocks.push({ type: "input_image", image_url: norm.dataUrl });
+        blocks.push({ type: "input_image", image_url: norm.dataUrl, ...imageDetail(part) });
       } else {
         const filename = (part as { filename?: string }).filename;
         blocks.push({
@@ -554,7 +563,7 @@ export class OpenAIResponsesProvider implements Provider {
       cacheOptions ? ["implicit", "30m", "12h"] : ["implicit", "12h"],
       `openai/${modelId}`
     );
-    warnIgnoredMediaResolution("openai", context.messages, `openai/${modelId}`);
+    warnIgnoredMediaResolution("openai", context.messages, `openai/${modelId}`, ["video"]);
     warnIgnoredVideoProcessing("openai", context.messages, `openai/${modelId}`);
     warnIgnoredToolMedia("openai", context.messages, `openai/${modelId}`);
 

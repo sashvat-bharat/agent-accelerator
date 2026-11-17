@@ -169,6 +169,41 @@ describe("Canonical OpenAI mappings", () => {
     expect(res2.usage.cacheWriteTokens).toBe(100);
   });
 
+  it("maps image resolution to input_image.detail (no warning)", async () => {
+    clearEmittedWarnings();
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_url: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+    };
+    const w = captureWarnings();
+    try {
+      const provider = new OpenAIResponsesProvider();
+      const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+      const image = (resolution?: "low" | "medium" | "high" | "ultra_high", image = png) => ({
+        type: "image" as const,
+        image,
+        ...(resolution ? { resolution } : {}),
+      });
+      const content = [
+        { type: "text" as const, text: "look" },
+        image("low"),
+        image("medium"),
+        image("high"),
+        image("ultra_high", "https://example.com/a.png"),
+        image(),
+      ];
+      await provider.generate("gpt-5.5", { messages: [{ role: "user" as const, content }] }, { apiKey: "k" });
+      const blocks = bodies[0].input[0].content.filter((b: any) => b.type === "input_image");
+      expect(blocks.map((b: any) => b.detail)).toEqual(["low", "auto", "high", "original", undefined]);
+      expect(blocks[3].image_url).toBe("https://example.com/a.png");
+      expect(w.messages.some((m) => /media resolution/i.test(m))).toBe(false);
+    } finally {
+      w.restore();
+      clearEmittedWarnings();
+    }
+  });
+
   it("maps tool choice (required native, function pin verbatim)", () => {
     expect(mapToolChoiceToOpenAI(undefined)).toBeUndefined();
     expect(mapToolChoiceToOpenAI("auto")).toBeUndefined();

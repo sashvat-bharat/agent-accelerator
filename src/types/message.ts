@@ -9,7 +9,7 @@ export interface TextPart {
   thoughtSignature?: string;
 }
 
-/** Detail level a provider spends on one image or video (more detail = more input tokens). Google (images and videos) and OpenRouter (images, as `image_url.detail`) honour it; other providers ignore it with a warning. */
+/** Detail level a provider spends on one image or video (more detail = more input tokens). Google (images and videos), OpenRouter and OpenAI (images, as `detail`) honour it; other providers ignore it with a warning. */
 export type MediaResolution = "low" | "medium" | "high" | "ultra_high";
 
 /** How a provider reads a video: `"static"` (fixed-rate frames, the default) or `"agentic"` (the model navigates the timeline and loads only what the prompt needs). Only Google honours it, and agentic mode only on some Gemini models; other providers ignore it with a warning. */
