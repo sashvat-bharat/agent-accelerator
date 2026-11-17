@@ -40,7 +40,7 @@ import type {
   ProviderGenerateResult,
   ProviderRawData,
 } from "../types/model.ts";
-import type { ProviderContext, ContentPart } from "../types/message.ts";
+import type { ProviderContext, ContentPart, ProviderSteps } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -75,6 +75,7 @@ import {
   resolveProviderBaseUrl,
   stripModelScope,
   resultToOutput,
+  hasTruncatedToolArguments,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -123,6 +124,7 @@ interface ResponsesRequestBody {
   reasoning?: { effort: string };
   service_tier?: string;
   prompt_cache_key?: string;
+  include?: string[];
   prompt_cache_options?: { ttl: "30m" | "12h" };
   store?: boolean;
   stream?: boolean;
@@ -292,6 +294,19 @@ function normalizeResponsesItemId(itemId: string): string {
   return norm;
 }
 
+// The output items of a turn worth replaying (reasoning, function calls, messages), kept exactly as received, only for a turn that has reasoning and no cut-off tool call (a cut call is replayed as `{}`, never verbatim); in: parseResponse and the stream, out: providerSteps.
+function replayItems(
+  output: ResponsesOutputItem[] | undefined,
+  toolCalls: ToolCallRecord[]
+): ProviderSteps | undefined {
+  const keep = (output ?? []).filter(
+    (i) => i.type === "reasoning" || i.type === "function_call" || i.type === "message"
+  );
+  if (!keep.some((i) => i.type === "reasoning") || toolCalls.some((c) => hasTruncatedToolArguments(c.arguments)))
+    return undefined;
+  return { provider: "openai", steps: keep };
+}
+
 /**
  * Builds the FULL explicit history (stateless — no server state, no
  * chaining). Assistant items intentionally carry no provider `id`/`status`:
@@ -321,9 +336,26 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
     }
   }
 
+  // Assistant turns after the last user message (the current tool loop) replay the items the model returned, reasoning included.
+  let lastUser = -1;
+  context.messages.forEach((m, i) => {
+    if (m.role === "user") lastUser = i;
+  });
   const items: ResponseInputItem[] = [];
-  for (const m of context.messages) {
+  for (let i = 0; i < context.messages.length; i++) {
+    const m = context.messages[i]!;
     if (m.role === "system") continue;
+    if (m.role === "assistant" && i > lastUser && m.providerSteps?.provider === "openai") {
+      for (const step of m.providerSteps.steps as ResponseInputItem[]) {
+        // A result is sent with the normalized call id, so the call it answers carries the same one (a no-op for real `call_...` ids).
+        items.push(
+          step.type === "function_call"
+            ? { ...step, call_id: normalizeResponsesIdPart(String((step as { call_id?: unknown }).call_id ?? "")) }
+            : step
+        );
+      }
+      continue;
+    }
     if (m.role === "user") {
       if (typeof m.content === "string") {
         if (m.content)
@@ -367,8 +399,7 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
         } else if (part.type === "text" && part.text) {
           texts.push(part.text);
         }
-        // Prior-turn reasoning is NOT resent: reasoning items require
-        // provider-minted ids that canonical history does not retain.
+        // Reasoning of finished turns is not resent; the current tool loop replays its stored items above.
       }
       if (texts.length > 0) {
         items.push({
@@ -501,8 +532,7 @@ function parseResponse(
   return {
     text,
     // Trim/collapse reasoning assembly (provider summaries can trail with
-    // blank lines). Prior-turn reasoning is never resent by this adapter, so
-    // this is fully cache-safe.
+    // blank lines). Display-only: the replayed reasoning is the stored item, not this text.
     thinking: normalizeThinkingParts(thinkingParts),
     thoughtSignature: undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
@@ -513,6 +543,7 @@ function parseResponse(
     provider: "openai",
     raw,
     durationMs,
+    providerSteps: replayItems(response.output, toolCalls),
   };
 }
 
@@ -609,6 +640,8 @@ export class OpenAIResponsesProvider implements Provider {
     if (toolChoice !== undefined) body.tool_choice = toolChoice;
     if (effort) body.reasoning = { effort };
     if (serviceTier) body.service_tier = serviceTier;
+    // Stateless reasoning models return encrypted reasoning items to replay on the next request (GPT-5.6 and later do it by default; older ones need this).
+    if (getModelFromCatalog("openai", modelId)?.reasoning === true) body.include = ["reasoning.encrypted_content"];
     // max_output_tokens.
     Object.assign(body, mapGenerationParamsToOpenAI(options));
     // Structured outputs: Responses `text.format{type:json_schema,name,schema,strict}`.
@@ -894,6 +927,7 @@ export class OpenAIResponsesProvider implements Provider {
         let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
+        let completedOutput: ResponsesOutputItem[] | undefined;
         const handleMessage = (data: string): void => {
           if (!data || data === "[DONE]") {
             if (data === "[DONE]") sawFinishReason = sawFinishReason || completedBody !== undefined || sawUsage;
@@ -973,6 +1007,7 @@ export class OpenAIResponsesProvider implements Provider {
           } else if (type === "response.completed" || type === "response.failed" || type === "response.done") {
             const response = (msg["response"] as ResponsesObject) ?? {};
             completedBody = msg["response"];
+            completedOutput = response.output;
             if (response.id) responseId = response.id;
             if (response.usage) {
               usage = mapUsage(response.usage);
@@ -1111,6 +1146,7 @@ export class OpenAIResponsesProvider implements Provider {
             response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
           },
           durationMs: Date.now() - startTime,
+          providerSteps: replayItems(completedOutput, toolCalls),
         });
         eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
         eventStream.end(finalResponse);

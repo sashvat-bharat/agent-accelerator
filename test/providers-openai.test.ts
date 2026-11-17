@@ -633,3 +633,156 @@ describe("OpenAIResponsesProvider (REST, mocked)", () => {
     expect(iteratedError ?? resultError).toBeTruthy();
   });
 });
+
+describe("OpenAI reasoning replay (current tool loop)", () => {
+  const REASONING = {
+    type: "reasoning",
+    id: "rs_abc",
+    summary: [],
+    encrypted_content: "ENC123==",
+    status: "completed",
+  };
+  const CALL = { type: "function_call", id: "fc_1", call_id: "call_1", name: "get_weather", arguments: '{"city":"Paris"}' };
+  const OUTPUT = [REASONING, CALL];
+  const toolReply = {
+    ...TEXT_RESPONSE,
+    id: "resp-r1",
+    output: OUTPUT,
+  };
+  const user = (content: string) => ({ role: "user" as const, content });
+  const assistant = (steps?: unknown[]) => ({
+    role: "assistant" as const,
+    content: [{ type: "tool_call" as const, id: "fc_1", name: "get_weather", arguments: { city: "Paris" }, callId: "call_1" }],
+    ...(steps ? { providerSteps: { provider: "openai", steps } } : {}),
+  });
+  const toolResult = {
+    role: "tool" as const,
+    name: "get_weather",
+    content: [{ type: "tool_result" as const, id: "fc_1", name: "get_weather", result: "sunny" }],
+  };
+  const capture = (): any[] => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+    };
+    return bodies;
+  };
+
+  it("asks for encrypted reasoning only on catalog reasoning models", async () => {
+    const bodies = capture();
+    const provider = new OpenAIResponsesProvider();
+    await provider.generate("gpt-5.5", { messages: [user("Hi")] }, { apiKey: "k" });
+    await provider.generate("gpt-4o", { messages: [user("Hi")] }, { apiKey: "k" });
+    expect(bodies[0].include).toEqual(["reasoning.encrypted_content"]);
+    expect(bodies[1].include).toBeUndefined();
+  });
+
+  it("keeps a turn's reasoning, call and message items exactly as received", async () => {
+    (globalThis as any).fetch = async () => new Response(JSON.stringify(toolReply), { status: 200 });
+    const res = await new OpenAIResponsesProvider().generate("gpt-5.5", { messages: [user("Hi")] }, { apiKey: "k" });
+    expect(res.providerSteps).toEqual({ provider: "openai", steps: OUTPUT });
+    // A turn without reasoning keeps nothing: it is rebuilt from text and calls as before.
+    (globalThis as any).fetch = async () => new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+    const plain = await new OpenAIResponsesProvider().generate("gpt-5.5", { messages: [user("Hi")] }, { apiKey: "k" });
+    expect(plain.providerSteps).toBeUndefined();
+  });
+
+  it("replays the stored items of the current loop and pairs the result with the same call id", async () => {
+    const bodies = capture();
+    await new OpenAIResponsesProvider().generate(
+      "gpt-5.5",
+      { messages: [user("Weather?"), assistant([REASONING, CALL]), toolResult] },
+      { apiKey: "k" }
+    );
+    const input = bodies[0].input;
+    expect(input.map((i: any) => i.type)).toEqual(["message", "reasoning", "function_call", "function_call_output"]);
+    expect(input[1]).toEqual(REASONING); // byte for byte, encrypted content included
+    expect(input[2].call_id).toBe("call_1");
+    expect(input[3].call_id).toBe("call_1");
+    expect(input.filter((i: any) => i.type === "function_call").length).toBe(1); // not rebuilt a second time
+  });
+
+  it("does not replay the reasoning of a finished turn", async () => {
+    const bodies = capture();
+    const finished = { role: "assistant" as const, content: "It is sunny.", providerSteps: { provider: "openai", steps: [REASONING] } };
+    await new OpenAIResponsesProvider().generate(
+      "gpt-5.5",
+      { messages: [user("Weather?"), assistant([REASONING, CALL]), toolResult, finished, user("And tomorrow?")] },
+      { apiKey: "k" }
+    );
+    expect(bodies[0].input.some((i: any) => i.type === "reasoning")).toBe(false);
+    expect(bodies[0].input.filter((i: any) => i.type === "function_call").length).toBe(1); // rebuilt from the stored call
+  });
+
+  it("ignores steps stored by another provider and rebuilds the call", async () => {
+    const bodies = capture();
+    const foreign = { ...assistant(), providerSteps: { provider: "google", steps: [{ type: "thought" }] } };
+    await new OpenAIResponsesProvider().generate(
+      "gpt-5.5",
+      { messages: [user("Weather?"), foreign, toolResult] },
+      { apiKey: "k" }
+    );
+    expect(bodies[0].input.map((i: any) => i.type)).toEqual(["message", "function_call", "function_call_output"]);
+  });
+
+  it("keeps nothing when a tool call arrived cut off (it is replayed as {} and never verbatim)", async () => {
+    const cut = { ...toolReply, output: [REASONING, { ...CALL, arguments: '{"city":"Pa' }] };
+    (globalThis as any).fetch = async () => new Response(JSON.stringify(cut), { status: 200 });
+    const res = await new OpenAIResponsesProvider().generate("gpt-5.5", { messages: [user("Hi")] }, { apiKey: "k" });
+    expect(res.providerSteps).toBeUndefined();
+  });
+
+  it("a streamed turn keeps the completed output items too", async () => {
+    const sse = [
+      'data: {"type":"response.created","response":{"id":"resp-s"}}',
+      "",
+      `data: ${JSON.stringify({ type: "response.output_item.added", output_index: 1, item: { ...CALL, arguments: "" } })}`,
+      "",
+      `data: ${JSON.stringify({ type: "response.function_call_arguments.done", output_index: 1, arguments: CALL.arguments })}`,
+      "",
+      `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-s", status: "completed", output: OUTPUT, usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 } } })}`,
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async () =>
+      new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const stream = new OpenAIResponsesProvider().stream("gpt-5.5", { messages: [user("Hi")] }, { apiKey: "k" });
+    for await (const _ of stream) {
+      // drained
+    }
+    expect((await stream.result()).providerSteps).toEqual({ provider: "openai", steps: OUTPUT });
+  });
+});
+
+describe("OpenAI reasoning replay through the Agent loop", () => {
+  it("the second request of a tool loop carries the first turn's reasoning item, and the saved session keeps it", async () => {
+    const { Agent } = await import("../src/agent/agent.ts");
+    const { tool } = await import("../src/tools/tool.ts");
+    const bodies: any[] = [];
+    const reasoning = { type: "reasoning", id: "rs_9", summary: [], encrypted_content: "ENC==" };
+    const call = { type: "function_call", id: "fc_9", call_id: "call_9", name: "ping", arguments: "{}" };
+    const replies = [
+      { ...TEXT_RESPONSE, id: "r1", output: [reasoning, call] },
+      TEXT_RESPONSE,
+    ];
+    const agent = new Agent({
+      model: "openai/gpt-5.5",
+      apiKey: "k",
+      runRetries: 0,
+      tools: { ping: tool({ description: "ping", input: {}, execute: async () => "pong" }) },
+      fetch: (async (_u: unknown, req: any) => {
+        bodies.push(JSON.parse(req.body));
+        return new Response(JSON.stringify(replies[bodies.length - 1]), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    await agent.run("Ping it");
+    expect(bodies.length).toBe(2);
+    expect(bodies[1].input.map((i: any) => i.type)).toEqual(["message", "reasoning", "function_call", "function_call_output"]);
+    expect(bodies[1].input[1]).toEqual(reasoning);
+    const saved = JSON.parse(JSON.stringify(agent.exportSession()));
+    const withSteps = saved.messages.find((m: any) => m.providerSteps);
+    expect(withSteps.providerSteps.steps[0]).toEqual(reasoning);
+  });
+});

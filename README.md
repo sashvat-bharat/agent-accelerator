@@ -721,6 +721,7 @@ It also:
 
 * passes `service_tier` (`flex` | `priority`);
 * pins cache affinity with `prompt_cache_key` (clamped to 64 chars);
+* keeps the model's reasoning across a tool loop: with `store: false` a reasoning model returns encrypted reasoning items, which are saved with the turn and sent back, exactly as received, with the tool results of the same run (OpenAI asks for this; the reasoning of finished turns is not resent). Requests for catalog reasoning models include `reasoning.encrypted_content`;
 * reports cache reads and (GPT-5.6 and later) cache writes in `usage`; writes are priced at the catalog's `cache_write` price, which is the `30m` rate, so a `12h` write (billed at about twice that) is under-estimated;
 * rejects `video` parts up front with a one-line error (the Responses wire carries text/image/file only);
 * sends `max_output_tokens` when set; never sends `temperature`, `top_p`, or background/conversation fields.
