@@ -76,6 +76,7 @@ import {
   stripModelScope,
   resultToOutput,
   hasTruncatedToolArguments,
+  shortHashId,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -149,7 +150,7 @@ interface ResponsesOutputItem {
   status?: string;
   role?: string;
   content?: Array<{ type?: string; text?: string; annotations?: unknown[] }>;
-  summary?: string[];
+  summary?: Array<string | { type?: string; text?: string }>;
   encrypted_content?: string;
   output?: unknown;
   [k: string]: unknown;
@@ -281,7 +282,8 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ResponseConte
 // Makes an id safe for the Responses wire (allowed characters, at most 64, no trailing underscores); in: fullHistoryInput, out: the id.
 function normalizeResponsesIdPart(part: string): string {
   const sanitized = String(part ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
-  const truncated = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
+  // A hard cut would give two long ids with the same first 64 characters the same id; a hash of the whole id keeps them apart.
+  const truncated = sanitized.length > 64 ? `${sanitized.slice(0, 64 - 9)}_${shortHashId(String(part))}` : sanitized;
   return truncated.replace(/_+$/, "") || "fc_unknown";
 }
 
@@ -292,6 +294,20 @@ function normalizeResponsesItemId(itemId: string): string {
     norm = normalizeResponsesIdPart(`fc_${norm}`);
   }
   return norm;
+}
+
+// The text of one reasoning summary entry: the API sends `{ type: "summary_text", text }`, older mocks a plain string; in: parseResponse and the stream, out: the text or "".
+function summaryText(entry: unknown): string {
+  if (typeof entry === "string") return entry;
+  const text = (entry as { text?: unknown } | null)?.text;
+  return typeof text === "string" ? text : "";
+}
+
+// The HTTP status a response error code stands for, so the retry layers classify it: a server error and a rate limit are transient, every other code (invalid prompt, policy ...) is not; in: the failed-response and error-event paths, out: failure.statusCode.
+function errorCodeStatus(code: unknown): number | undefined {
+  if (code === "server_error") return 500;
+  if (code === "rate_limit_exceeded") return 429;
+  return undefined;
 }
 
 // The output items of a turn worth replaying (reasoning, function calls, messages), kept exactly as received, only for a turn that has reasoning and no cut-off tool call (a cut call is replayed as `{}`, never verbatim); in: parseResponse and the stream, out: providerSteps.
@@ -475,6 +491,8 @@ function parseResponse(
     const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
     if (response.error?.code !== undefined) failure["code"] = response.error.code;
     if (typeof response.error?.type === "string") failure["errorType"] = response.error.type;
+    const status = errorCodeStatus(response.error?.code);
+    if (status !== undefined) failure["statusCode"] = status;
     throw toConciseProviderError(failure, "openai", modelId);
   }
 
@@ -504,7 +522,8 @@ function parseResponse(
         }
       }
       for (const s of item.summary ?? []) {
-        if (typeof s === "string" && s) thinkingParts.push(s);
+        const text = summaryText(s);
+        if (text) thinkingParts.push(text);
       }
     } else if (item.type === "function_call") {
       const args = parseArguments(item.arguments);
@@ -944,12 +963,15 @@ export class OpenAIResponsesProvider implements Provider {
           const type = msg["type"] as string;
           if (!type) return;
           if (type === "error") {
-            const errObj = (msg["error"] as { message?: string; code?: string | number; type?: string }) ?? {};
+            // The documented `error` event carries code and message at the top level; an `error` object inside it is tolerated too.
+            const errObj = (msg["error"] ?? msg) as { message?: string; code?: string | number; type?: string };
             const message =
               typeof errObj.message === "string" && errObj.message ? errObj.message : "OpenAI streaming error";
             const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
             if (errObj.code !== undefined) failure["code"] = errObj.code;
             if (typeof errObj.type === "string") failure["errorType"] = errObj.type;
+            const status = errorCodeStatus(errObj.code);
+            if (status !== undefined) failure["statusCode"] = status;
             failure["url"] = url;
             throw toConciseProviderError(failure, "openai", clean);
           }
@@ -977,6 +999,21 @@ export class OpenAIResponsesProvider implements Provider {
               thinkingDelta: msg["delta"] as string,
               partialThinking: thinking,
             });
+          } else if (type === "response.reasoning_summary_text.delta" && typeof msg["delta"] === "string") {
+            thinking += msg["delta"] as string;
+            eventStream.push({
+              type: "thinking_delta",
+              thinkingDelta: msg["delta"] as string,
+              partialThinking: thinking,
+            });
+          } else if (
+            type === "response.reasoning_summary_part.added" &&
+            Number(msg["summary_index"] ?? 0) > 0 &&
+            thinking
+          ) {
+            // A new summary part starts a new paragraph.
+            thinking += "\n\n";
+            eventStream.push({ type: "thinking_delta", thinkingDelta: "\n\n", partialThinking: thinking });
           } else if (type === "response.output_item.added") {
             const index = (msg["output_index"] as number) ?? 0;
             const item = (msg["item"] as Record<string, unknown>) ?? {};
@@ -1004,7 +1041,12 @@ export class OpenAIResponsesProvider implements Provider {
               entry.startArgs = "";
               entry.deltaArgs = msg["arguments"] as string;
             }
-          } else if (type === "response.completed" || type === "response.failed" || type === "response.done") {
+          } else if (
+            type === "response.completed" ||
+            type === "response.failed" ||
+            type === "response.incomplete" ||
+            type === "response.done"
+          ) {
             const response = (msg["response"] as ResponsesObject) ?? {};
             completedBody = msg["response"];
             completedOutput = response.output;
@@ -1021,6 +1063,8 @@ export class OpenAIResponsesProvider implements Provider {
               const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
               if (response.error?.code !== undefined) failure["code"] = response.error.code;
               if (typeof response.error?.type === "string") failure["errorType"] = response.error.type;
+              const status = errorCodeStatus(response.error?.code);
+              if (status !== undefined) failure["statusCode"] = status;
               throw toConciseProviderError(failure, "openai", clean);
             }
             // Non-streaming maps `incomplete` → `length` (max tokens). Streaming
@@ -1028,7 +1072,7 @@ export class OpenAIResponsesProvider implements Provider {
             // Content-filter incompletes surface as `refusal`.
             const incompleteReason = (response as { incomplete_details?: { reason?: string } }).incomplete_details
               ?.reason;
-            if (response.status === "incomplete") {
+            if (response.status === "incomplete" || type === "response.incomplete") {
               finishReason = incompleteReason === "content_filter" ? "refusal" : "length";
               sawFinishReason = true;
             }
@@ -1060,7 +1104,8 @@ export class OpenAIResponsesProvider implements Provider {
                 }
               }
               for (const s of item.summary ?? []) {
-                if (typeof s === "string" && s) parts.push(s);
+                const text = summaryText(s);
+                if (text) parts.push(text);
               }
               for (const p of parts) {
                 if (p && !thinking.includes(p)) {

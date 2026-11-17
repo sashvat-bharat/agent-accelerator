@@ -786,3 +786,154 @@ describe("OpenAI reasoning replay through the Agent loop", () => {
     expect(withSteps.providerSteps.steps[0]).toEqual(reasoning);
   });
 });
+
+describe("OpenAI streaming vocabulary (audit)", () => {
+  const sse = (...events: unknown[]): string => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("") + "data: [DONE]\n\n";
+  const serve = (body: string): void => {
+    (globalThis as any).fetch = async () =>
+      new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  };
+  const run = async (body: string) => {
+    serve(body);
+    const stream = new OpenAIResponsesProvider().stream("gpt-5.5", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k" });
+    const events: any[] = [];
+    for await (const e of stream) events.push(e);
+    return { events, result: await stream.result() };
+  };
+  const usage = { input_tokens: 12, output_tokens: 34, total_tokens: 46 };
+  const text = { type: "response.output_text.delta", delta: "Partial answer" };
+
+  it("response.incomplete ends the stream: usage kept, finish reason length", async () => {
+    const { result } = await run(
+      sse(
+        { type: "response.created", response: { id: "r1" } },
+        text,
+        { type: "response.incomplete", response: { id: "r1", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, usage } }
+      )
+    );
+    expect(result.text).toBe("Partial answer");
+    expect(result.finishReason).toBe("length");
+    expect(result.usage.outputTokens).toBe(34);
+  });
+
+  it("response.incomplete with content_filter is a refusal", async () => {
+    const { result } = await run(
+      sse(text, { type: "response.incomplete", response: { id: "r2", status: "incomplete", incomplete_details: { reason: "content_filter" }, usage } })
+    );
+    expect(result.finishReason).toBe("refusal");
+  });
+
+  it("streams reasoning summary deltas, with a paragraph break between summary parts", async () => {
+    const { events, result } = await run(
+      sse(
+        { type: "response.reasoning_summary_part.added", summary_index: 0 },
+        { type: "response.reasoning_summary_text.delta", summary_index: 0, delta: "First idea." },
+        { type: "response.reasoning_summary_part.added", summary_index: 1 },
+        { type: "response.reasoning_summary_text.delta", summary_index: 1, delta: "Second idea." },
+        text,
+        {
+          type: "response.completed",
+          response: {
+            id: "r3",
+            status: "completed",
+            output: [{ type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "First idea." }, { type: "summary_text", text: "Second idea." }] }],
+            usage,
+          },
+        }
+      )
+    );
+    expect(events.filter((e) => e.type === "thinking_delta").map((e) => e.thinkingDelta).join("")).toBe("First idea.\n\nSecond idea.");
+    expect(result.thinking).toBe("First idea.\n\nSecond idea."); // the completed item adds nothing twice
+  });
+
+  it("reads summary_text objects of a non-streaming reasoning item", async () => {
+    const reply = {
+      ...TEXT_RESPONSE,
+      output: [
+        { type: "reasoning", id: "rs_2", summary: [{ type: "summary_text", text: "Checked the units." }] },
+        ...TEXT_RESPONSE.output,
+      ],
+    };
+    (globalThis as any).fetch = async () => new Response(JSON.stringify(reply), { status: 200 });
+    const res = await new OpenAIResponsesProvider().generate("gpt-5.5", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k" });
+    expect(res.thinking).toBe("Checked the units.");
+  });
+
+  it("marks server_error and rate_limit_exceeded as retryable, other error codes not", async () => {
+    const failure = async (code: string, shape: "failed" | "error") => {
+      serve(
+        sse(
+          shape === "failed"
+            ? { type: "response.failed", response: { id: "r", status: "failed", error: { code, message: "boom" } } }
+            : { type: "error", code, message: "boom" }
+        )
+      );
+      const stream = new OpenAIResponsesProvider().stream("gpt-5.5", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k" });
+      try {
+        for await (const _ of stream) {
+          // drained
+        }
+        await stream.result();
+      } catch (e: any) {
+        return e;
+      }
+      throw new Error("expected a failure");
+    };
+    expect((await failure("server_error", "failed")).retryable).toBe(true);
+    expect((await failure("rate_limit_exceeded", "error")).retryable).toBe(true);
+    expect((await failure("invalid_prompt", "failed")).retryable).toBe(false);
+    // The non-streaming path classifies the same way.
+    (globalThis as any).fetch = async () =>
+      new Response(JSON.stringify({ ...TEXT_RESPONSE, status: "failed", error: { code: "server_error", message: "boom" } }), { status: 200 });
+    const err: any = await new OpenAIResponsesProvider()
+      .generate("gpt-5.5", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", maxRetries: 0 })
+      .catch((e) => e);
+    expect(err.retryable).toBe(true);
+  });
+});
+
+describe("OpenAI tool-call ids from any provider (audit)", () => {
+  it("pairs every result with its call, keeps ids within 64 characters and distinct", async () => {
+    const bodies: any[] = [];
+    (globalThis as any).fetch = async (_u: unknown, req: any) => {
+      bodies.push(JSON.parse(req.body));
+      return new Response(JSON.stringify(TEXT_RESPONSE), { status: 200 });
+    };
+    const long1 = `call_${"a".repeat(80)}1`;
+    const long2 = `call_${"a".repeat(80)}2`; // same first 64 characters as long1
+    const ids = [
+      { id: "call_abc123" }, // Google-style, no callId
+      { id: "fc_x|call_y" }, // pipe id from another adapter
+      { id: "toolu_01Ab-Cd" }, // Anthropic
+      { id: long1 },
+      { id: long2 },
+      { id: "weird id!.with*chars" },
+    ];
+    const assistant = {
+      role: "assistant" as const,
+      content: ids.map((c) => ({ type: "tool_call" as const, id: c.id, name: "t", arguments: {} })),
+    };
+    const results = {
+      role: "tool" as const,
+      name: "t",
+      content: ids.map((c) => ({ type: "tool_result" as const, id: c.id, name: "t", result: "ok" })),
+    };
+    await new OpenAIResponsesProvider().generate(
+      "gpt-5.5",
+      { messages: [{ role: "user", content: "Go" }, assistant, results] },
+      { apiKey: "k" }
+    );
+    const input = bodies[0].input;
+    const calls = input.filter((i: any) => i.type === "function_call");
+    const outs = input.filter((i: any) => i.type === "function_call_output");
+    expect(calls.length).toBe(6);
+    expect(outs.map((o: any) => o.call_id)).toEqual(calls.map((c: any) => c.call_id));
+    expect(new Set(calls.map((c: any) => c.call_id)).size).toBe(6);
+    expect(new Set(calls.map((c: any) => c.id)).size).toBe(6);
+    for (const i of [...calls.map((c: any) => c.call_id), ...calls.map((c: any) => c.id)]) {
+      expect(i.length).toBeLessThanOrEqual(64);
+      expect(i).toMatch(/^[a-zA-Z0-9_-]+$/);
+    }
+    for (const c of calls) expect(c.id.startsWith("fc_")).toBe(true);
+  });
+});
