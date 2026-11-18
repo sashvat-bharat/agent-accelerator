@@ -69,6 +69,8 @@ import {
   stripModelScope,
 } from "./shared.ts";
 import { telemetryBus } from "../telemetry.ts";
+import { googleGenerateImage } from "./google-image.ts";
+import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
@@ -1086,6 +1088,15 @@ export class GoogleInteractionsProvider implements Provider {
     const retryAfterMs = parseRetryAfterMs(headers);
     if (retryAfterMs !== undefined) (err as Record<string, unknown>)["retryAfterMs"] = retryAfterMs;
     throw toConciseProviderError(err, "google", modelId);
+  }
+
+  // Makes one picture with a Gemini image model (see google-image.ts); in: generateImage, out: the picture and usage.
+  generateImage(
+    modelId: string,
+    request: ProviderImageRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderImageResult> {
+    return googleGenerateImage(cleanModelId(modelId), request, options);
   }
 
   /** Poll delays (ms) for background interactions: before the first poll, then between polls. */

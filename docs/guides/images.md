@@ -42,6 +42,7 @@ Only `model` and `prompt` are required (the prompt may be up to 32,000 character
 
 ## How each provider is called
 
+- **Google** (`gemini-nano-banana-2.1`, `gemini-3.1-flash-lite-image`): the Interactions endpoint, `POST /interactions`. The ratio, size tier and file type go in `response_format`, the thinking level in `generation_config`, reference images are input blocks. One request makes one picture, so `n` runs one request per picture. The picture is the `model_output` step's image; the interim "thought images" are never returned and Google does not charge for them, but thinking tokens are billed (they are part of the cost the SDK reports). Search grounding is never requested. The key is `GEMINI_API_KEY` or `GOOGLE_API_KEY`; the endpoint can be moved with the `base_urls.google` setting or `baseUrl`. Google stores interactions by default, as for chat.
 - **OpenAI** (`gpt-image-*`): the Image API, `POST /images/generations`, or `/images/edits` when `images` are given (they travel as data URLs). One request returns up to 10 pictures; the key is `OPENAI_API_KEY` (or `OPENAI_BASE_API_KEY`) and the endpoint can be moved with the `base_urls.openai` setting or `baseUrl`. A moderation block (`moderation_blocked`) is never retried: the error says at which stage and in which categories, and that the prompt or images must change. Streaming partial images, masks, markup, SVG and GIF output are not used.
 
 ## Cost
