@@ -1193,6 +1193,26 @@ const res = await agent.run([...]).catch(fail);
 ```
 
 ---
+## Image generation
+
+`generateImage` makes pictures with a supported image model (Google `gemini-nano-banana-2.1` and `gemini-3.1-flash-lite-image`; OpenAI `gpt-image-2.5` and `2.6`, sunburst and flare). One call, one `ImageResult`:
+
+```ts
+import { generateImage } from "agent-accelerator";
+
+const result = await generateImage({
+  model: "google/gemini-nano-banana-2.1",
+  prompt: "A nano banana dish in a fancy restaurant",
+  aspectRatio: "16:9",
+  resolution: "2K",
+});
+await result.image.save("banana.png");
+```
+
+Every option is checked against what that model supports: a ratio, size tier, quality, format, thinking level or reference-image count it does not take is one `ValidationError` listing every problem, and a control the model does not have is dropped with a single `provider_warning`. `listImageModels()` shows what each model accepts and what it costs. Full guide: [Generating images](docs/guides/images.md).
+
+---
+
 ## Model Catalog & Dynamic 12-Hour TTL Sync
 
 The model catalog is synced from [models.dev](https://models.dev) into a small local cache, so the multi-megabyte snapshot never ships in the package. The full models.dev payload is downloaded, filtered and thrown away: it is never saved, and importing the SDK loads no model data. Each provider is one small file read on its first lookup (`<home>/catalog/<provider>/models.json`, about 200 KB in all, `meta.json` beside them). The cache has a **12-hour TTL**:

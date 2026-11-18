@@ -98,6 +98,16 @@ export {
 } from "./models/catalog.ts";
 export { CATALOG_PROVIDERS } from "./models/catalog-shards.ts";
 export { listImageModels, getImageModel } from "./models/image-models.ts";
+export { generateImage } from "./image/generate.ts";
+export { ImageResult, GeneratedImage } from "./image/result.ts";
+export type {
+  ImageOptions,
+  ImageInput,
+  ImageResolution,
+  ImageFormat,
+  ProviderImageRequest,
+  ProviderImageResult,
+} from "./types/image.ts";
 export type { ImageModelInfo, ImageTokenPrices, ImageSizeRules } from "./models/image-models.ts";
 export type { CatalogProvider } from "./models/catalog-shards.ts";
 export { resolveEffectiveThinking } from "./agent/options.ts";

@@ -1,0 +1,16 @@
+# src/image/
+
+Image generation: `generateImage` and its pieces. The supported models and their facts are in `../models/image-models.ts`; the wire code of each provider is in `../providers/<provider>.ts` (`Provider.generateImage`).
+
+| File          | What it is                                                                                                                                                                                                                                                                                                                                                              |
+| :------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `request.ts`  | `resolveImageRequest`: checks an `ImageOptions` against the model's table entry (aspect ratios, tiers, exact-size rules, quality, format, background, thinking, reference-image count, prompt length, `n`), computes the exact size for models that take one, and returns the final request plus warnings. Pure. `estimateImageCostUsd`, `MAX_IMAGES`.                  |
+| `generate.ts` | `generateImage`: model lookup (`ConfigError` with the reason), `setModels` check, request check, warnings on the bus, reference images read (`fileAccess`), cost estimate vs `budget`, parallel requests when `n` exceeds the model's per-request maximum (each under `withProviderSlot`, timeout and abort bounded), usage added up, zero images is a `ProviderError`. |
+| `result.ts`   | `GeneratedImage` (bytes, `base64`, `dataUrl`, `save`, `toPart`, small `toJSON`) and `ImageResult`.                                                                                                                                                                                                                                                                      |
+
+## Invariants
+
+- A value outside a model's list is a problem (one `ValidationError` for all of them); a control the model does not have is a warning and is dropped. Nothing is guessed and nothing is silently changed.
+- The adapter receives a checked request (`ProviderImageRequest`) and `count` never exceeds the model's `imagesPerRequest.max`; it never validates options itself.
+- A call that returns has at least one picture. When one parallel request fails the rest are aborted, the first real error is thrown and the finished pictures are on `error.partial.images`.
+- `ImageResult` and `GeneratedImage` never put the bytes in JSON.

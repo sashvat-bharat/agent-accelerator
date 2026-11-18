@@ -128,6 +128,10 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `concurrency.paused` | A provider answered 429 with a `Retry-After`: no new calls to it for `ms` (`provider`, `ms`, `waiting`) |
 | `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle; payloads in [Scheduled action files](scheduled-action-files.md#events) |
 
+## Image generation
+
+`generateImage(options)` returns an `ImageResult`; `listImageModels(provider?)` and `getImageModel(model)` describe the supported image models. Options, result fields and errors: [Generating images](guides/images.md).
+
 ## Errors
 
 All extend `AgentAccelError` (`code`, `retryable`, `context`).
