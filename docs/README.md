@@ -38,7 +38,7 @@ console.log(res.usage);
 | Let the model call my functions, stream the answer, redirect a busy agent | [Tools and streaming](guides/tools-and-streaming.md) |
 | Split work across helper agents, or run work later on a schedule | [Multi-agent and scheduling](guides/multi-agent.md) |
 | Save/resume chats, send images and PDFs, track cost, manage the model catalog | [Data and media](guides/data-and-media.md) |
-| Make pictures with Google or OpenAI image models | [Generating images](guides/images.md) |
+| Make pictures with Google, OpenAI or OpenRouter image models; edit them; let an agent make them | [Generating images](guides/images.md) |
 | Set limits, budgets, retries; handle errors; observe; keep things safe | [Safety and operations](guides/safety-and-ops.md) |
 | Read or replace the prompts the SDK sends (tool refusals, worker headers, tool manuals) | [Prompts](guides/prompts.md) |
 

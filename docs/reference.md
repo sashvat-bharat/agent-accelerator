@@ -130,7 +130,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 
 ## Image generation
 
-`generateImage(options)` returns an `ImageResult`; `listImageModels(provider?)` and `getImageModel(model)` describe the supported image models. Options, result fields and errors: [Generating images](guides/images.md).
+`generateImage(options)` returns an `ImageResult`; `listImageModels(provider?)` and `getImageModel(model)` describe the supported image models; `image.edit(prompt, options?)` changes a picture; `imageTool(options)` is a tool that lets a text agent make pictures. Options, result fields and errors: [Generating images](guides/images.md).
 
 ## Errors
 

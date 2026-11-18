@@ -1512,6 +1512,11 @@ bun run examples/15-durable-agent.ts
 bun run examples/16-definition-history.ts
 # offline (scripted model, no key, no cost): the same scheduled action run with changed instructions;
 # each run file names the definition it started with, even a failed run, and the old definition file is kept
+
+bun run examples/17-image-generation.ts [--live <image model>]
+# offline by default (scripted providers, no key, no cost): make and save a picture, the one-error-lists-everything
+# validation, a dropped control with one warning, image.edit (Google chains, other models get a reference),
+# and a text agent with imageTool; --live <model> makes a real picture and edits it (costs money)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
@@ -1595,7 +1600,7 @@ src/
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
 └── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, retry, errors
-examples/        # demos 01-16 (no 10; see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
+examples/        # demos 01-17 (no 10; see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
 test/            # unit + mocked-provider tests mirroring src/
 ```
 

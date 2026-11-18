@@ -106,3 +106,5 @@ When one of several parallel requests fails, the others are aborted (so they sto
 - Import `generateImage` from `agent-accelerator`; the model is a `provider/model` string from `listImageModels()`. Do not invent model ids and do not pass the models of other providers.
 - Never combine `size` with `aspectRatio` or `resolution`. Read the model's entry (`getImageModel(model)`) for what it accepts instead of guessing.
 - `result.image` is never undefined. Save with `await result.image.save(path)`.
+- To change a picture call `image.edit(prompt)`; do not resend it by hand. To let a text agent make pictures use `imageTool({ model, allow, maxImages })` in `tools`; set `allow` only for options the model actually has (it throws at creation otherwise).
+- Runnable demo (offline, no key): `bun run examples/17-image-generation.ts`.
