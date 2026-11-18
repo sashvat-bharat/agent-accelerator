@@ -25,6 +25,7 @@ export function priceImageUsage(
   const { prices } = def;
   const input = count(usage.inputTokens);
   const output = count(usage.outputTokens);
+  if (input === 0 && output === 0) return undefined; // the provider reported no usage: unknown, not $0
 
   // Input: one price when text and image input cost the same (both Google models); else it needs the split, or no reference images.
   let inputMicro: number;

@@ -8,6 +8,7 @@ const NB = model("google/gemini-nano-banana-2.1");
 const LITE = model("google/gemini-3.1-flash-lite-image");
 const SUN25 = model("openai/gpt-image-2.5-sunburst");
 const SUN26 = model("openai/gpt-image-2.6-sunburst");
+const OR26 = model("openrouter/openai/gpt-image-2.6-sunburst");
 const ask = (def: typeof NB, o: Partial<ImageOptions> = {}) => resolveImageRequest({ model: def.model, prompt: "A fox", ...o }, def);
 const message = (def: typeof NB, o: Partial<ImageOptions>): string => {
   try {
@@ -117,5 +118,21 @@ describe("image cost estimate", () => {
     expect(estimateImageCostUsd(NB, undefined, 3)).toBeCloseTo(0.1008, 6); // the default tier
     expect(estimateImageCostUsd(LITE, "1K", 2)).toBeCloseTo(0.0672, 6);
     expect(estimateImageCostUsd(SUN25, "1K", 1)).toBeUndefined();
+  });
+});
+
+describe("image request: OpenAI models through OpenRouter (a ratio, no size or tier)", () => {
+  it("accepts its 14 ratios and passes the ratio on as is", () => {
+    expect(ask(OR26, { aspectRatio: "21:9", quality: "xhigh", n: 4 }).request).toMatchObject({ aspectRatio: "21:9", quality: "xhigh", count: 4 });
+    expect(ask(OR26, { aspectRatio: "3:1" }).request.aspectRatio).toBe("3:1");
+    expect(message(OR26, { aspectRatio: "5:1" })).toMatch(/"5:1" is not available on openrouter\/openai\/gpt-image-2\.6-sunburst\. It makes: 1:1, 3:2/);
+    expect(message(OR26, { images: Array.from({ length: 17 }, () => "x") })).toMatch(/at most 16/);
+  });
+
+  it("drops a size tier or an exact size with a warning, since the model only takes a ratio", () => {
+    const { request, warnings } = ask(OR26, { resolution: "2K", size: "1536x864" });
+    expect(request.resolution).toBeUndefined();
+    expect(request.size).toBeUndefined();
+    expect(warnings.map((w) => w.capability).sort()).toEqual(["resolution", "size"]);
   });
 });

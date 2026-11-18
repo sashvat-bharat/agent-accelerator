@@ -18,7 +18,7 @@ console.log(result.usage, result.model, result.provider);
 
 ## Which models
 
-Only the models in `listImageModels()` are supported: Google `gemini-nano-banana-2.1` and `gemini-3.1-flash-lite-image`, and OpenAI `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`. Any other model is a `ConfigError` that says why (for example `gpt-image-1` was shut down by OpenAI on 23 Oct 2026) and lists the supported ones. Each entry of `listImageModels()` says what that model accepts: aspect ratios, resolution tiers or exact-size rules, quality levels, output formats, reference-image limit, thinking levels, token limits and prices. Google's Search grounding is never used. A model outside a `setModels` list is refused like any other model.
+Only the models in `listImageModels()` are supported: Google `gemini-nano-banana-2.1` and `gemini-3.1-flash-lite-image`, OpenAI `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`, and the same four OpenAI models through OpenRouter (`openrouter/openai/gpt-image-2.6-sunburst` ...). Through OpenRouter a model has the same prices and limits but takes an `aspectRatio` and no `size` or `resolution`. Any other model is a `ConfigError` that says why (for example `gpt-image-1` was shut down by OpenAI on 23 Oct 2026) and lists the supported ones. Each entry of `listImageModels()` says what that model accepts: aspect ratios, resolution tiers or exact-size rules, quality levels, output formats, reference-image limit, thinking levels, token limits and prices. Google's Search grounding is never used. A model outside a `setModels` list is refused like any other model.
 
 ## Options
 
@@ -43,6 +43,7 @@ Only `model` and `prompt` are required (the prompt may be up to 32,000 character
 ## How each provider is called
 
 - **Google** (`gemini-nano-banana-2.1`, `gemini-3.1-flash-lite-image`): the Interactions endpoint, `POST /interactions`. The ratio, size tier and file type go in `response_format`, the thinking level in `generation_config`, reference images are input blocks. One request makes one picture, so `n` runs one request per picture. The picture is the `model_output` step's image; the interim "thought images" are never returned and Google does not charge for them, but thinking tokens are billed (they are part of the cost the SDK reports). Search grounding is never requested. The key is `GEMINI_API_KEY` or `GOOGLE_API_KEY`; the endpoint can be moved with the `base_urls.google` setting or `baseUrl`. Google stores interactions by default, as for chat.
+- **OpenRouter** (`openrouter/openai/gpt-image-*`): OpenRouter's Image API, `POST /images`, with the OpenAI model id. Reference images go in `input_references`. The `aspect_ratio`, `quality`, `output_format`, `background` and `n` (up to 10 in one request) are sent as set; the developer's provider routing (`order`, `only`, `ignore`, `allow_fallbacks`, `require_parameters`, `zdr`, `data_collection`, `sort`) and `user` come from the `openrouter` setting, exactly as for chat. OpenRouter reports the USD cost of the call and the SDK uses it as the price. A failed generation is a 502 that OpenRouter does not bill and the SDK retries; a 402 means too little credit. The key is `OPENROUTER_API_KEY`.
 - **OpenAI** (`gpt-image-*`): the Image API, `POST /images/generations`, or `/images/edits` when `images` are given (they travel as data URLs). One request returns up to 10 pictures; the key is `OPENAI_API_KEY` (or `OPENAI_BASE_API_KEY`) and the endpoint can be moved with the `base_urls.openai` setting or `baseUrl`. A moderation block (`moderation_blocked`) is never retried: the error says at which stage and in which categories, and that the prompt or images must change. Streaming partial images, masks, markup, SVG and GIF output are not used.
 
 ## Cost
@@ -54,7 +55,7 @@ Only `model` and `prompt` are required (the prompt may be up to 32,000 character
 The request is checked against the model before anything is sent.
 
 - A value outside the model's list (an aspect ratio, tier, quality, format, thinking level or too many reference images) is one `ValidationError` that lists every problem and what the model does accept, so one fix round is enough.
-- A control the model does not have at all (`quality`, `background` or `size` on a Google model; `thinking` on an OpenAI model) is dropped with a single `provider_warning` on the telemetry bus, so the same code keeps working across models.
+- A control the model does not have at all (`quality`, `background` or `size` on a Google model; `thinking` on an OpenAI model; `size` or `resolution` through OpenRouter) is dropped with a single `provider_warning` on the telemetry bus, so the same code keeps working across models.
 - Flash Lite warns when you send several reference images (Google says it is not optimized for them); OpenAI sizes above 2560x1440 on the 2.5 models warn that OpenAI calls them experimental.
 
 ## The result

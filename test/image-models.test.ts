@@ -5,7 +5,7 @@ import { unsupportedImageModelReason } from "../src/models/image-models.ts";
 const USD = (tokens: number, perMillion: number) => (tokens * perMillion) / 1_000_000;
 
 describe("the supported image models", () => {
-  it("are exactly two Google and four OpenAI image-generation models, sorted", () => {
+  it("are two Google, four OpenAI and the same four OpenAI models through OpenRouter, sorted", () => {
     expect(listImageModels().map((m) => m.model)).toEqual([
       "google/gemini-3.1-flash-lite-image",
       "google/gemini-nano-banana-2.1",
@@ -13,7 +13,12 @@ describe("the supported image models", () => {
       "openai/gpt-image-2.5-sunburst",
       "openai/gpt-image-2.6-flare",
       "openai/gpt-image-2.6-sunburst",
+      "openrouter/openai/gpt-image-2.5-flare",
+      "openrouter/openai/gpt-image-2.5-sunburst",
+      "openrouter/openai/gpt-image-2.6-flare",
+      "openrouter/openai/gpt-image-2.6-sunburst",
     ]);
+    expect(listImageModels("openrouter")).toHaveLength(4);
     expect(listImageModels("google").map((m) => m.id)).toEqual(["gemini-3.1-flash-lite-image", "gemini-nano-banana-2.1"]);
     expect(listImageModels("gemini")).toHaveLength(2); // the SDK routes gemini/ to google
     expect(listImageModels("anthropic")).toEqual([]);
@@ -26,8 +31,10 @@ describe("the supported image models", () => {
       expect(m.formats.length).toBeGreaterThan(0);
       expect(m.imagesPerRequest.max).toBeGreaterThanOrEqual(1);
       expect(m.prices.imageOutput).toBeGreaterThan(0);
-      // exactly one way to say what size: tiers (Google) or exact-size rules (OpenAI)
-      expect(Boolean(m.resolutions) !== Boolean(m.sizeRules)).toBe(true);
+      // how a size is asked: tiers (Google), exact-size rules (OpenAI), or the aspect ratio alone (OpenRouter)
+      expect(Boolean(m.resolutions) && Boolean(m.sizeRules)).toBe(false);
+      if (m.provider === "openrouter") expect(m.resolutions || m.sizeRules).toBeUndefined();
+      else expect(Boolean(m.resolutions) !== Boolean(m.sizeRules)).toBe(true);
     }
   });
 
@@ -77,12 +84,32 @@ describe("the supported image models", () => {
     }
   });
 
+  it("the OpenAI models through OpenRouter: same model, prices and limits; a ratio but no size, tier or batch", () => {
+    for (const id of ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare", "gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]) {
+      const direct = getImageModel(`openai/${id}`)!;
+      const via = getImageModel(`openrouter/openai/${id}`)!;
+      expect(via).toMatchObject({ provider: "openrouter", id: `openai/${id}`, model: `openrouter/openai/${id}` });
+      expect(via.prices).toEqual(direct.prices);
+      expect(via.limits).toEqual(direct.limits);
+      expect(via.quality).toEqual(direct.quality);
+      expect(via.referenceImages).toEqual({ max: 16 });
+      expect(via.aspectRatios).toHaveLength(14);
+      expect(via.aspectRatios).toContain("21:9");
+      expect(via.sizeRules).toBeUndefined();
+      expect(via.batchPrices).toBeUndefined();
+      expect(direct.batchPrices !== undefined).toBe(id.includes("2.5")); // the direct models are unchanged
+    }
+    expect(getImageModel("openrouter/openai/gpt-image-2.6-flare")!.limits.inputTokens).toBe(400_000);
+  });
+
   it("finds a model by full string or bare id, and never returns an unsupported one", () => {
     expect(getImageModel("gemini-nano-banana-2.1")?.provider).toBe("google");
     expect(getImageModel("gemini/gemini-nano-banana-2.1")?.provider).toBe("google");
     expect(getImageModel("openai/gemini-nano-banana-2.1")).toBeUndefined();
     expect(getImageModel("google/gemini-3.1-flash-image")).toBeUndefined();
     expect(getImageModel("google/gemini-3-pro-image")).toBeUndefined();
+    expect(getImageModel("openai/gpt-image-2.6-sunburst")?.provider).toBe("openai"); // not the OpenRouter route
+    expect(getImageModel("openrouter/openai/gpt-image-1")).toBeUndefined();
   });
 
   it("explains why a model is not supported: retired, or just not on the list", () => {

@@ -10,7 +10,7 @@ Image generation: `generateImage` and its pieces. The supported models and their
 
 ## Invariants
 
-- A value outside a model's list is a problem (one `ValidationError` for all of them); a control the model does not have is a warning and is dropped. Nothing is guessed and nothing is silently changed.
+- A value outside a model's list is a problem (one `ValidationError` for all of them); a control the model does not have (including `resolution` or `size` on a model that only takes a ratio) is a warning and is dropped. Nothing is guessed and nothing is silently changed.
 - The adapter receives a checked request (`ProviderImageRequest`) and `count` never exceeds the model's `imagesPerRequest.max`; it never validates options itself.
 - A call that returns has at least one picture. When one parallel request fails the rest are aborted, the first real error is thrown and the finished pictures are on `error.partial.images`.
 - `ImageResult` and `GeneratedImage` never put the bytes in JSON.

@@ -131,6 +131,7 @@ The image-generation models the SDK supports are a small curated table (`src/mod
 | `gemini-nano-banana-2.1` | `google` | 14 (1:1, 1:4, 1:8, 2:3, 3:2, 3:4, 4:1, 4:3, 4:5, 5:4, 8:1, 9:16, 16:9, 21:9) | 1K, 2K, 4K | up to 14 | minimal, medium (default), high | $30 / 1M tokens ($0.0336 at 1K) |
 | `gemini-3.1-flash-lite-image` | `google` | 10 (1:1, 3:2, 2:3, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9) | 1K | not optimized for several | minimal (default), high | $30 / 1M tokens ($0.0336 at 1K) |
 | `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gpt-image-2.6-sunburst`, `gpt-image-2.6-flare` | `openai` | any from 1:3 to 3:1 | exact `WIDTHxHEIGHT` (multiples of 16, at most 3840 px, 0.65 to 8.3 megapixels) | up to 16 | none | $30 / 1M tokens |
+| the same four, as `openrouter/openai/gpt-image-...` | `openrouter` | 14 (1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16, 21:9, 4:5, 5:4, 2:1, 1:2, 3:1, 1:3) | by aspect ratio only | up to 16 | none | $30 / 1M tokens |
 
 Other Google image models and OpenAI's deprecated ones (`gpt-image-2`, `gpt-image-1.5`, `gpt-image-1-mini`, `chatgpt-image-latest`; `gpt-image-1` was shut down on 23 Oct 2026) are not supported. Google's Search grounding is never used.
 

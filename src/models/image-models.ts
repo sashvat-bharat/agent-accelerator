@@ -40,7 +40,7 @@ export interface ImageSizeRules {
 export interface ImageModelInfo {
   /** The full `provider/id` string to pass as `model`. */
   model: string;
-  provider: "google" | "openai";
+  provider: "google" | "openai" | "openrouter";
   id: string;
   name: string;
   description: string;
@@ -148,7 +148,7 @@ function openai(
 }
 
 /** Every supported image-generation model. Frozen: read it through `listImageModels` / `getImageModel`. */
-const TABLE: readonly ImageModelInfo[] = [
+const GOOGLE_MODELS: readonly ImageModelInfo[] = [
   {
     model: "google/gemini-nano-banana-2.1",
     provider: "google",
@@ -196,6 +196,10 @@ const TABLE: readonly ImageModelInfo[] = [
     prices: { textInput: 0.25, textOutput: 1.5, imageInput: 0.25, imageOutput: GOOGLE_IMAGE_TOKENS },
     batchPrices: { textInput: 0.125, textOutput: 0.75, imageInput: 0.125, imageOutput: 15 },
   },
+];
+
+/** The four OpenAI image models (direct). */
+const OPENAI_MODELS: readonly ImageModelInfo[] = [
   openai(
     "gpt-image-2.5-sunburst",
     "GPT Image 2.5 Sunburst",
@@ -232,6 +236,39 @@ const TABLE: readonly ImageModelInfo[] = [
   ),
 ];
 
+// The aspect ratios OpenRouter lists for the OpenAI image models (it takes a ratio, no exact size or tier; `auto` is just leaving it out).
+const OPENROUTER_RATIOS = [
+  "1:1",
+  "3:2",
+  "2:3",
+  "4:3",
+  "3:4",
+  "16:9",
+  "9:16",
+  "21:9",
+  "4:5",
+  "5:4",
+  "2:1",
+  "1:2",
+  "3:1",
+  "1:3",
+] as const;
+
+// The same OpenAI model reached through OpenRouter's Image API: the same model, prices and limits (OpenRouter passes them through), but it takes `aspectRatio` and not an exact size or a tier, and has no batch; in: the OpenAI entries, out: their OpenRouter entries.
+function viaOpenRouter(m: ImageModelInfo): ImageModelInfo {
+  const { sizeRules: _sizeRules, batchPrices: _batchPrices, ...rest } = m;
+  return {
+    ...rest,
+    model: `openrouter/openai/${m.id}`,
+    provider: "openrouter",
+    id: `openai/${m.id}`,
+    name: `${m.name} (via OpenRouter)`,
+    aspectRatios: OPENROUTER_RATIOS,
+  };
+}
+
+const TABLE: readonly ImageModelInfo[] = [...GOOGLE_MODELS, ...OPENAI_MODELS, ...OPENAI_MODELS.map(viaOpenRouter)];
+
 /** Models that used to be supported or that people still ask for, and what to use instead. Only OpenAI has any. */
 const RETIRED: Readonly<Record<string, string>> = {
   "gpt-image-1": "was shut down by OpenAI on 23 Oct 2026",
@@ -255,7 +292,7 @@ function split(model: string): { provider?: string; id: string } {
 }
 
 /**
- * The supported image-generation models, sorted by `model`; pass a provider (`"google"`, `"openai"`) to see only its
+ * The supported image-generation models, sorted by `model`; pass a provider (`"google"`, `"openai"`, `"openrouter"`) to see only its
  * models. Each entry says what the model accepts (aspect ratios, sizes, quality levels, reference images, thinking
  * levels), its limits and its prices. The list is the same for everyone: a `setModels` list does not hide a model here (it
  * still stops a run on a model outside it).

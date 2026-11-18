@@ -56,6 +56,11 @@ describe("priceImageUsage: OpenAI (text in $5/M, image in $8/M, image out $30/M,
     expect(micro(SUN, { inputTokens: 2365, outputTokens: 196, totalTokens: 2561 }, { images: 1, references: 2 })).toBeUndefined();
   });
 
+  it("is unknown when the provider reported no usage at all (never $0)", () => {
+    expect(micro(SUN, { inputTokens: 0, outputTokens: 0, totalTokens: 0 })).toBeUndefined();
+    expect(micro(NB, { inputTokens: 0, outputTokens: 0, totalTokens: 0 })).toBeUndefined();
+  });
+
   it("never reads more image tokens than were sent or written", () => {
     expect(micro(SUN, { inputTokens: 10, outputTokens: 50, totalTokens: 60, inputDetails: { imageTokens: 99 } }, { images: 1, references: 1 })).toBe(10 * 8 + 50 * 30);
   });

@@ -43,6 +43,8 @@ import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
 import { openRouterSetting } from "../config/settings.ts";
+import { openrouterGenerateImage } from "./openrouter-image.ts";
+import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
@@ -71,6 +73,7 @@ import {
   resolveProviderBaseUrl,
   stripModelScope,
   resultToOutput,
+  OPENROUTER_ROUTING_KEYS,
 } from "./shared.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -197,16 +200,6 @@ function midStreamStatus(code: unknown, errorType: unknown): number | undefined 
 }
 
 // The OpenRouter request options from the `openrouter` setting (provider routing, `parallel_tool_calls`, `reasoning.exclude`, `user`), already checked by the settings layer; nothing is sent for a key that is not set. NOT supported on purpose (the owner does not want them for now): `reasoning.max_tokens` and `trace`; in: buildBody, out: the extra body fields.
-const ROUTING_KEYS = [
-  "order",
-  "only",
-  "ignore",
-  "allow_fallbacks",
-  "require_parameters",
-  "zdr",
-  "data_collection",
-  "sort",
-] as const;
 function openRouterOptions(): {
   provider?: Record<string, unknown>;
   parallel_tool_calls?: boolean;
@@ -215,7 +208,7 @@ function openRouterOptions(): {
 } {
   const s = openRouterSetting();
   const provider: Record<string, unknown> = {};
-  for (const key of ROUTING_KEYS) if (s[key] !== undefined) provider[key] = s[key];
+  for (const key of OPENROUTER_ROUTING_KEYS) if (s[key] !== undefined) provider[key] = s[key];
   return {
     ...(Object.keys(provider).length > 0 ? { provider } : {}),
     ...(typeof s["parallel_tool_calls"] === "boolean" ? { parallel_tool_calls: s["parallel_tool_calls"] } : {}),
@@ -576,6 +569,15 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       this.models.find((m) => m.id === modelId || m.id === clean) ||
       createGenericModelSpec(this.id, clean)
     );
+  }
+
+  // Makes pictures with an image model through OpenRouter's Image API (see openrouter-image.ts); in: generateImage, out: the pictures and usage.
+  generateImage(
+    modelId: string,
+    request: ProviderImageRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderImageResult> {
+    return openrouterGenerateImage(cleanModelId(modelId), request, options);
   }
 
   // Builds the Chat request (messages, tools, tool_choice, reasoning, tier, cache_control, generation controls, response_format, session_id); in: streamInto, out: the body.

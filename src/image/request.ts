@@ -139,11 +139,17 @@ export function resolveImageRequest(
     problems.push(
       `resolution: "${resolution}" is not available on ${def.model}. It makes: ${list(def.resolutions)}${def.resolutions.length === 1 ? " only" : ""}.`
     );
-  if (resolution !== undefined && !def.resolutions && !rules)
-    problems.push(`resolution: ${def.model} has no size control.`);
+  if (resolution !== undefined && !def.resolutions && !rules) {
+    drop("resolution", resolution, "this model has no size tiers: it makes pictures by aspectRatio.");
+    resolution = undefined;
+  }
   if (size !== undefined) {
     if (!rules) {
-      drop("size", size, "this model makes pictures by aspectRatio and resolution, not exact sizes.");
+      drop(
+        "size",
+        size,
+        "this model makes pictures by aspectRatio (and resolution where it has tiers), not exact sizes."
+      );
       size = undefined;
     } else if (aspectRatio !== undefined || resolution !== undefined) {
       problems.push("size: cannot be combined with aspectRatio or resolution; give an exact size OR a ratio and tier.");
