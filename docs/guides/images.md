@@ -40,6 +40,10 @@ Only `model` and `prompt` are required (the prompt may be up to 32,000 character
 | `fileAccess` | `{ roots }`: local reference images must be inside these folders. |
 | `apiKey`, `baseUrl`, `headers`, `env`, `fetch`, `captureRaw` | As on `AgentConfig`. |
 
+## Cost
+
+`result.usage` is what the provider reported, and `result.usage.cost` is filled in for you: the provider's own cost when it sends one, else the price worked out from the reported tokens and the model's table entry (`listImageModels()` has every price). Image output bills at the image rate ($30 per 1M tokens on all supported models) and everything else the model writes (text, thinking) at the text rate, so a Google call is priced from its image/text split. An OpenAI call that sent reference images is priced from its text/image input split. A cost the table cannot work out exactly stays unknown (`usage.cost` is unset), never a made-up number, and when you ask for several pictures one unpriced request makes the total unknown instead of a partial sum. Cache hits are not priced (the Image API and the Google image models report none). Example: one 1K Nano Banana 2.1 picture is 1,120 image tokens, $0.0336.
+
 ## What a model cannot do
 
 The request is checked against the model before anything is sent.

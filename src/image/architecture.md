@@ -14,3 +14,4 @@ Image generation: `generateImage` and its pieces. The supported models and their
 - The adapter receives a checked request (`ProviderImageRequest`) and `count` never exceeds the model's `imagesPerRequest.max`; it never validates options itself.
 - A call that returns has at least one picture. When one parallel request fails the rest are aborted, the first real error is thrown and the finished pictures are on `error.partial.images`.
 - `ImageResult` and `GeneratedImage` never put the bytes in JSON.
+- Cost: the provider's reported cost wins, else the table prices the reported tokens, else it is unknown (never 0, never a partial sum). Adapters report `outputDetails.imageTokens` (and, when reference images are sent, `inputDetails.imageTokens` / `textTokens`) so the split is exact; Google falls back to the table's tokens per picture.

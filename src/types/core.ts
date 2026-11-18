@@ -42,10 +42,10 @@ export interface TokenUsage {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   thinkingTokens?: number;
-  /** Media part of `inputTokens` (a subset, report only: pricing never reads it). OpenRouter reports audio and video. */
-  inputDetails?: { audioTokens?: number; videoTokens?: number };
-  /** Media part of `outputTokens` (a subset, report only). OpenRouter reports audio and image. */
-  outputDetails?: { audioTokens?: number; imageTokens?: number };
+  /** Media part of `inputTokens` (a subset). Chat pricing never reads it; image-model pricing does (`imageTokens`, `textTokens`). OpenRouter reports audio and video; OpenAI and Google image calls report image and text. */
+  inputDetails?: { audioTokens?: number; videoTokens?: number; imageTokens?: number; textTokens?: number };
+  /** Media part of `outputTokens` (a subset). Chat pricing never reads it; image-model pricing does (`imageTokens`). OpenRouter reports audio and image; Google and OpenAI image calls report image (and text). */
+  outputDetails?: { audioTokens?: number; imageTokens?: number; textTokens?: number };
   cost?: {
     inputCost?: number;
     outputCost?: number;

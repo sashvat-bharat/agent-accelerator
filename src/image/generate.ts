@@ -17,6 +17,7 @@ import type { ProviderRequestOptions } from "../types/model.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ImageOptions, ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { estimateImageCostUsd, resolveImageRequest } from "./request.ts";
+import { priceImageUsage, sumCosts } from "./pricing.ts";
 import { GeneratedImage, ImageResult } from "./result.ts";
 
 /** Default time one provider request may take (image models can think for a while). */
@@ -49,14 +50,24 @@ function bounded<T>(task: () => Promise<T>, ms: number, signal: AbortSignal): Pr
   });
 }
 
-// Adds one usage into a running total (tokens and provider-reported cost); in: generateImage after each request, out: the total.
+// Adds one usage into a running total: tokens always; the cost parts only through `sumCosts`, so an unpriced call keeps the total cost unknown; in: generateImage after the requests, out: the total.
 function addUsage(total: TokenUsage, u: TokenUsage): void {
   total.inputTokens += u.inputTokens || 0;
   total.outputTokens += u.outputTokens || 0;
   total.totalTokens += u.totalTokens || 0;
   for (const k of ["cachedTokens", "cacheReadTokens", "cacheWriteTokens", "thinkingTokens"] as const)
     if (u[k] !== undefined) total[k] = (total[k] ?? 0) + (u[k] ?? 0);
-  if (u.cost?.totalCost !== undefined) total.cost = { totalCost: (total.cost?.totalCost ?? 0) + u.cost.totalCost };
+  for (const [group, parts] of [
+    ["inputDetails", ["audioTokens", "videoTokens", "imageTokens", "textTokens"]],
+    ["outputDetails", ["audioTokens", "imageTokens", "textTokens"]],
+  ] as const) {
+    for (const part of parts) {
+      const v = (u[group] as Record<string, number | undefined> | undefined)?.[part];
+      if (v === undefined) continue;
+      const into = ((total[group] as Record<string, number> | undefined) ??= {});
+      into[part] = (into[part] ?? 0) + v;
+    }
+  }
 }
 
 // Reads every reference image: a picture the SDK made goes in as its bytes, anything else through the media normalizer (local paths must be inside `fileAccess.roots` when set); in: generateImage, out: the normalized media.
@@ -164,7 +175,20 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
     const res = await withProviderSlot(def.provider, signal, () =>
       bounded(() => provider.generateImage!(def.id, body, { ...providerOptions, signal }), timeoutMs, signal)
     );
-    spent.usd += res.usage.cost?.totalCost ?? 0; // a price the provider did not report counts as 0 here, never a guess
+    // The provider's own cost wins; else the table prices the reported tokens; else it stays unknown (and counts as 0 for the budget).
+    if (res.usage.cost?.totalCost === undefined) {
+      const priced = priceImageUsage(def, res.usage, {
+        images: res.images.length,
+        references: references.length,
+        ...(request.resolution ? { resolution: request.resolution } : {}),
+      });
+      if (priced)
+        res.usage = {
+          ...res.usage,
+          cost: { inputCost: priced.inputCost, outputCost: priced.outputCost, totalCost: priced.totalCost },
+        };
+    }
+    spent.usd += res.usage.cost?.totalCost ?? 0;
     if (maxCost !== undefined && spent.usd > maxCost)
       throw Object.assign(
         new BudgetExceededError(
@@ -212,6 +236,8 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
   }
   const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   for (const r of done) addUsage(usage, r.usage);
+  const cost = sumCosts(done.map((r) => r.usage.cost));
+  if (cost) usage.cost = cost;
   const first = done[0]!;
   const text = done
     .map((r) => r.text)

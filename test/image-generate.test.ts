@@ -197,10 +197,14 @@ describe("generateImage: limits, budget, abort", () => {
     expect(ok.requests).toBe(1);
   });
 
-  it("an unknown price never stops a budgeted call (it counts as 0)", async () => {
+  it("an unknown price never stops a budgeted call (it counts as 0), and a known one does", async () => {
+    // reference images were sent and OpenAI's usage has no image/text split: the table cannot price it exactly
     fake("openai", async (_m, req) => reply(req.count, { provider: "openai" }));
-    const r = await generateImage({ model: SUN, prompt: "x", budget: { maxCostUsd: 0.01 } });
+    const png = `data:image/png;base64,${Buffer.from(PNG(1)).toString("base64")}`;
+    const r = await generateImage({ model: SUN, prompt: "x", images: [png], budget: { maxCostUsd: 0.01 } });
     expect(r.usage.cost).toBeUndefined();
+    // the same usage without references is priced from the table (10 text tokens + 1120 image tokens = $0.03365) and is over $0.01
+    await expect(generateImage({ model: SUN, prompt: "x", budget: { maxCostUsd: 0.01 } })).rejects.toBeInstanceOf(BudgetExceededError);
   });
 
   it("when one of several requests fails the others are aborted and the cause is what is thrown, with the finished pictures attached", async () => {
