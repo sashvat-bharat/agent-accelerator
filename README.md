@@ -1206,6 +1206,18 @@ The model catalog is synced from [models.dev](https://models.dev) into a small l
 
 Only the fields the SDK reads are saved (limits, prices, modalities, reasoning options, flags). Any other model or provider is **unknown** to the catalog: no price (cost stays unknown), permissive thinking levels, no modality guard. Use `registerModel()` to describe one. A model only OpenRouter lists, such as `openai/gpt-4o`, is found through its OpenRouter entry.
 
+### Image models
+
+The image-generation models the SDK supports are a small curated table (`src/models/image-models.ts`), not read from models.dev, which has no price or limits for them. `listImageModels(provider?)` returns them and `getImageModel("google/gemini-nano-banana-2.1")` returns one. Each entry says what that model accepts and what it costs: its aspect ratios, resolution tiers or exact-size rules, quality levels, output formats, reference-image limit, thinking levels, token limits, and prices per 1M tokens (standard and batch). Only image-generation models are in it:
+
+| Model | Provider | Aspect ratios | Sizes | Reference images | Thinking | Image output |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gemini-nano-banana-2.1` | `google` | 14 (1:1, 1:4, 1:8, 2:3, 3:2, 3:4, 4:1, 4:3, 4:5, 5:4, 8:1, 9:16, 16:9, 21:9) | 1K, 2K, 4K | up to 14 | minimal, medium (default), high | $30 / 1M tokens ($0.0336 at 1K) |
+| `gemini-3.1-flash-lite-image` | `google` | 10 (1:1, 3:2, 2:3, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9) | 1K | not optimized for several | minimal (default), high | $30 / 1M tokens ($0.0336 at 1K) |
+| `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gpt-image-2.6-sunburst`, `gpt-image-2.6-flare` | `openai` | any from 1:3 to 3:1 | exact `WIDTHxHEIGHT` (multiples of 16, at most 3840 px, 0.65 to 8.3 megapixels) | up to 16 | none | $30 / 1M tokens |
+
+Other Google image models and OpenAI's deprecated ones (`gpt-image-2`, `gpt-image-1.5`, `gpt-image-1-mini`, `chatgpt-image-latest`; `gpt-image-1` was shut down on 23 Oct 2026) are not supported. Google's Search grounding is never used.
+
 - **Automated 12-hour validation**: `.run()`, `.ask()` and `.stream()` check `<home>/catalog/meta.json`. Within 12 hours it reads from disk with no network delay. After that the expired catalog is served immediately and refreshed from `https://models.dev/api.json` in the background (8 s timeout). Only a cold start, with nothing loaded yet, waits for the download. A failed refresh pauses automatic refreshes for 10 minutes.
 - **Git & Package Safety**: The cache lives in the single Agent Accelerator home (`<home>/catalog/`, `.agent-accel/` by default and gitignored), never inside the package or scattered in the project.
 - **Spending caps**: the `usage_limit` and `scheduled_action_budget` settings (`{ max_cost_usd?, max_total_tokens? }`) cap every agent you build; an Agent's own `usageLimit` / `dynamicSubagents.scheduledActionBudget` wins field by field. Workers and scheduled runs built by the SDK never take them. (`configure()` and the `AGENT_ACCEL_*` env vars were removed in 0.7.0.)
