@@ -50,6 +50,27 @@ Only `model` and `prompt` are required (the prompt may be up to 32,000 character
 
 `await image.edit("Make it night")` changes a picture and returns a new `ImageResult`. It uses the model and the connection settings (key, endpoint, headers, `fetch`, retry, timeout) of the call that made the picture; pass options to override them, including `model`. Nothing else carries over, so ask again for a ratio, size, quality or `n`. On the same Google model the call continues the stored conversation (the model remembers the picture, and edits chain); on any other model, including a different Google model, the picture is sent as the first reference image and counts against the model's reference limit. `generateImage({ ..., continueFrom: image })` does the same by hand. A picture that did not come from `generateImage` (for example `new GeneratedImage(bytes, "image/png")`) needs `{ model }`.
 
+## Letting an agent make pictures: `imageTool`
+
+```ts
+import { Agent, imageTool } from "agent-accelerator";
+
+const designer = new Agent({
+  model: "google/gemini-3.5-flash-lite",
+  tools: {
+    make_image: imageTool({
+      model: "openai/gpt-image-2.6-flare", // the developer's choice, never the LLM's
+      dir: "./out", // default: <home>/images
+      defaults: { aspectRatio: "1:1", quality: "medium" }, // fixed; also takes apiKey, fetch, retry ...
+      allow: ["aspectRatio"], // what the LLM may set besides the prompt (default: none)
+      maxImages: 4, // a cap for the life of this tool object (default 8): every picture costs money
+    }),
+  },
+});
+```
+
+The tool saves each picture as `<words-of-the-prompt>-<n>.<ext>` (never overwriting) and tells the model the paths. An `allow` option becomes an enum of what that model accepts. A wrong setup (unsupported model, an `allow` entry the model lacks, `defaults` it cannot take) throws when the tool is created. Past `maxImages` the model is told the limit is used up and nothing more is requested. With `show: true` the model also sees the pictures (Google agents; other providers get the text only, with one warning). The spend is a worker line (`role: "image"`) in `agent.usageReport()` and in its total.
+
 ## Cost
 
 `result.usage` is what the provider reported, and `result.usage.cost` is filled in for you: the provider's own cost when it sends one, else the price worked out from the reported tokens and the model's table entry (`listImageModels()` has every price). Image output bills at the image rate ($30 per 1M tokens on all supported models) and everything else the model writes (text, thinking) at the text rate, so a Google call is priced from its image/text split. An OpenAI call that sent reference images is priced from its text/image input split. A cost the table cannot work out exactly stays unknown (`usage.cost` is unset), never a made-up number, and when you ask for several pictures one unpriced request makes the total unknown instead of a partial sum. Cache hits are not priced (the Image API and the Google image models report none). Example: one 1K Nano Banana 2.1 picture is 1,120 image tokens, $0.0336.

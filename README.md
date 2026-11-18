@@ -1208,6 +1208,7 @@ const result = await generateImage({
 });
 await result.image.save("banana.png");
 const night = await result.image.edit("Make it night"); // continues from the picture
+// let a text agent make pictures: tools: { make_image: imageTool({ model: "openai/gpt-image-2.6-flare" }) }
 ```
 
 Every option is checked against what that model supports: a ratio, size tier, quality, format, thinking level or reference-image count it does not take is one `ValidationError` listing every problem, and a control the model does not have is dropped with a single `provider_warning`. `listImageModels()` shows what each model accepts and what it costs. Full guide: [Generating images](docs/guides/images.md).

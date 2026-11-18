@@ -99,6 +99,8 @@ export {
 export { CATALOG_PROVIDERS } from "./models/catalog-shards.ts";
 export { listImageModels, getImageModel } from "./models/image-models.ts";
 export { generateImage } from "./image/generate.ts";
+export { imageTool } from "./image/tool.ts";
+export type { ImageToolOptions, ImageToolOption } from "./image/tool.ts";
 export { ImageResult, GeneratedImage } from "./image/result.ts";
 export type {
   ImageOptions,
