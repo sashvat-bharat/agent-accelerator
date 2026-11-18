@@ -151,6 +151,7 @@ export async function googleGenerateImage(
     input,
     ...(Object.keys(responseFormat).length > 0 ? { response_format: { type: "image", ...responseFormat } } : {}),
     ...(request.thinking ? { generation_config: { thinking_level: request.thinking } } : {}),
+    ...(request.previousInteractionId ? { previous_interaction_id: request.previousInteractionId } : {}),
   };
   const headers: Record<string, string> = { "Content-Type": "application/json", ...options?.headers };
   if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "x-goog-api-key", apiKey);

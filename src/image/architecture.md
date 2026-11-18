@@ -15,3 +15,5 @@ Image generation: `generateImage` and its pieces. The supported models and their
 - A call that returns has at least one picture. When one parallel request fails the rest are aborted, the first real error is thrown and the finished pictures are on `error.partial.images`.
 - `ImageResult` and `GeneratedImage` never put the bytes in JSON.
 - Cost: the provider's reported cost wins, else the table prices the reported tokens, else it is unknown (never 0, never a partial sum). Adapters report `outputDetails.imageTokens` (and, when reference images are sent, `inputDetails.imageTokens` / `textTokens`) so the split is exact; Google falls back to the table's tokens per picture.
+
+`GeneratedImage.edit()` / `continueFrom`: `generate.ts` attaches an origin (model, Google interaction id, connection settings) to each picture in a module-private WeakMap (`result.ts`), never in the object or its JSON. A continuation on the same Google model sends `previous_interaction_id`; otherwise the picture is prepended to the reference images before validation.

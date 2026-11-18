@@ -102,6 +102,7 @@ export { generateImage } from "./image/generate.ts";
 export { ImageResult, GeneratedImage } from "./image/result.ts";
 export type {
   ImageOptions,
+  ImageEditOptions,
   ImageInput,
   ImageResolution,
   ImageFormat,

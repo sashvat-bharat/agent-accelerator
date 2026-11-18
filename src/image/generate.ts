@@ -15,10 +15,10 @@ import { applyCaptureRaw } from "../utils/raw-capture.ts";
 import { BudgetExceededError, ConfigError, ProviderError, TimeoutError, ValidationError } from "../types/errors.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
 import type { TokenUsage } from "../types/core.ts";
-import type { ImageOptions, ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
+import type { ImageEditOptions, ImageOptions, ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { estimateImageCostUsd, resolveImageRequest } from "./request.ts";
 import { priceImageUsage, sumCosts } from "./pricing.ts";
-import { GeneratedImage, ImageResult } from "./result.ts";
+import { GeneratedImage, ImageResult, attachOrigin, originOf } from "./result.ts";
 
 /** Default time one provider request may take (image models can think for a while). */
 const DEFAULT_TIMEOUT_MS = 300_000;
@@ -106,7 +106,14 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
       `[Agent Accelerator] ${unsupportedImageModelReason(String(opts?.model ?? "")) ?? "No model given."}`
     );
   assertModelAllowed(def.provider, def.id);
-  const { request, warnings } = resolveImageRequest(opts, def);
+  // Continuing from a picture: on the same Google model the stored interaction is continued; anywhere else the picture is the first reference image.
+  const from = opts.continueFrom;
+  if (from !== undefined && !(from instanceof GeneratedImage))
+    throw new ValidationError("[Agent Accelerator] continueFrom must be a picture from generateImage.");
+  const origin = from ? originOf(from) : undefined;
+  const chainId = from && def.provider === "google" && origin?.model === def.model ? origin.chainId : undefined;
+  const effective: ImageOptions = from && !chainId ? { ...opts, images: [from, ...(opts.images ?? [])] } : opts;
+  const { request, warnings } = resolveImageRequest(effective, def);
   for (const w of warnings)
     emitProviderWarning({
       provider: def.provider,
@@ -131,7 +138,7 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
       );
   }
 
-  const references = await readReferences(opts);
+  const references = await readReferences(effective);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const retry = opts.retry ?? {};
   const providerOptions: ProviderRequestOptions = {
@@ -164,6 +171,7 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
       prompt: request.prompt,
       images: references,
       count,
+      ...(chainId ? { previousInteractionId: chainId } : {}),
       ...(request.aspectRatio ? { aspectRatio: request.aspectRatio } : {}),
       ...(request.resolution ? { resolution: request.resolution } : {}),
       ...(request.size ? { size: request.size } : {}),
@@ -225,7 +233,28 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
     throw err;
   }
 
-  const images = done.flatMap((r) => r.images.map((i) => new GeneratedImage(i.bytes, i.mimeType)));
+  const inherit: ImageEditOptions = {
+    ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+    ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}),
+    ...(opts.headers ? { headers: opts.headers } : {}),
+    ...(opts.env ? { env: opts.env } : {}),
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
+    ...(opts.retry ? { retry: opts.retry } : {}),
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.captureRaw ? { captureRaw: opts.captureRaw } : {}),
+    ...(opts.fileAccess ? { fileAccess: opts.fileAccess } : {}),
+  };
+  const images = done.flatMap((r) =>
+    r.images.map((i) => {
+      const img = new GeneratedImage(i.bytes, i.mimeType);
+      attachOrigin(img, {
+        model: def.model,
+        ...(def.provider === "google" && r.responseId ? { chainId: r.responseId } : {}),
+        inherit,
+      });
+      return img;
+    })
+  );
   if (images.length === 0) {
     const why = done.map((r) => r.text || r.finishReason).find(Boolean);
     throw new ProviderError(`[${def.model}] returned no image${why ? `: ${why}` : ""}.`, {

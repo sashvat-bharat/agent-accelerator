@@ -54,7 +54,16 @@ export interface ImageOptions {
   fetch?: typeof fetch;
   /** What `ImageResult.raw` keeps of the wire exchange (same policy as `AgentConfig.captureRaw`). */
   captureRaw?: CaptureRawMode;
+  /**
+   * Continue from a picture an earlier call made: `prompt` says what to change. On the same Google model the call continues
+   * that conversation (the model remembers the picture); on every other model the picture is sent as the first reference
+   * image. `image.edit(prompt)` does this with the model and connection settings of the call that made the picture.
+   */
+  continueFrom?: GeneratedImage;
 }
+
+/** What `GeneratedImage.edit` takes: any option of `generateImage` except the prompt, with the model defaulting to the picture's own. */
+export type ImageEditOptions = Omit<ImageOptions, "model" | "prompt" | "continueFrom"> & { model?: string };
 
 /** What an adapter receives: the request already checked and with its reference images read. */
 export interface ProviderImageRequest {
@@ -70,6 +79,8 @@ export interface ProviderImageRequest {
   thinking?: ThinkingLevel;
   /** How many pictures THIS call must return (never above the model's per-request maximum). */
   count: number;
+  /** Google: continue the stored interaction that made the previous picture (the picture is then not in `images`). */
+  previousInteractionId?: string;
 }
 
 /** What an adapter returns for one call. */
