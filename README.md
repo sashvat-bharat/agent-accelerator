@@ -1193,6 +1193,28 @@ const res = await agent.run([...]).catch(fail);
 ```
 
 ---
+## Image generation
+
+`generateImage` makes pictures with a supported image model (Google `gemini-nano-banana-2.1` and `gemini-3.1-flash-lite-image`; OpenAI `gpt-image-2.5` and `2.6`, sunburst and flare). One call, one `ImageResult`:
+
+```ts
+import { generateImage } from "agent-accelerator";
+
+const result = await generateImage({
+  model: "google/gemini-nano-banana-2.1",
+  prompt: "A nano banana dish in a fancy restaurant",
+  aspectRatio: "16:9",
+  resolution: "2K",
+});
+await result.image.save("banana.png");
+const night = await result.image.edit("Make it night"); // continues from the picture
+// let a text agent make pictures: tools: { make_image: imageTool({ model: "openai/gpt-image-2.6-flare" }) }
+```
+
+Every option is checked against what that model supports: a ratio, size tier, quality, format, thinking level or reference-image count it does not take is one `ValidationError` listing every problem, and a control the model does not have is dropped with a single `provider_warning`. `listImageModels()` shows what each model accepts and what it costs. Full guide: [Generating images](docs/guides/images.md).
+
+---
+
 ## Model Catalog & Dynamic 12-Hour TTL Sync
 
 The model catalog is synced from [models.dev](https://models.dev) into a small local cache, so the multi-megabyte snapshot never ships in the package. The full models.dev payload is downloaded, filtered and thrown away: it is never saved, and importing the SDK loads no model data. Each provider is one small file read on its first lookup (`<home>/catalog/<provider>/models.json`, about 200 KB in all, `meta.json` beside them). The cache has a **12-hour TTL**:
@@ -1205,6 +1227,19 @@ The model catalog is synced from [models.dev](https://models.dev) into a small l
 | `openrouter` | every model whose only output is text |
 
 Only the fields the SDK reads are saved (limits, prices, modalities, reasoning options, flags). Any other model or provider is **unknown** to the catalog: no price (cost stays unknown), permissive thinking levels, no modality guard. Use `registerModel()` to describe one. A model only OpenRouter lists, such as `openai/gpt-4o`, is found through its OpenRouter entry.
+
+### Image models
+
+The image-generation models the SDK supports are a small curated table (`src/models/image-models.ts`), not read from models.dev, which has no price or limits for them. `listImageModels(provider?)` returns them and `getImageModel("google/gemini-nano-banana-2.1")` returns one. Each entry says what that model accepts and what it costs: its aspect ratios, resolution tiers or exact-size rules, quality levels, output formats, reference-image limit, thinking levels, token limits, and prices per 1M tokens (standard and batch). Only image-generation models are in it:
+
+| Model | Provider | Aspect ratios | Sizes | Reference images | Thinking | Image output |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gemini-nano-banana-2.1` | `google` | 14 (1:1, 1:4, 1:8, 2:3, 3:2, 3:4, 4:1, 4:3, 4:5, 5:4, 8:1, 9:16, 16:9, 21:9) | 1K, 2K, 4K | up to 14 | minimal, medium (default), high | $30 / 1M tokens ($0.0336 at 1K) |
+| `gemini-3.1-flash-lite-image` | `google` | 10 (1:1, 3:2, 2:3, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9) | 1K | not optimized for several | minimal (default), high | $30 / 1M tokens ($0.0336 at 1K) |
+| `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gpt-image-2.6-sunburst`, `gpt-image-2.6-flare` | `openai` | any from 1:3 to 3:1 | exact `WIDTHxHEIGHT` (multiples of 16, at most 3840 px, 0.65 to 8.3 megapixels) | up to 16 | none | $30 / 1M tokens |
+| the same four, as `openrouter/openai/gpt-image-...` | `openrouter` | 14 (1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16, 21:9, 4:5, 5:4, 2:1, 1:2, 3:1, 1:3) | by aspect ratio only | up to 16 | none | $30 / 1M tokens |
+
+Other Google image models and OpenAI's deprecated ones (`gpt-image-2`, `gpt-image-1.5`, `gpt-image-1-mini`, `chatgpt-image-latest`; `gpt-image-1` was shut down on 23 Oct 2026) are not supported. Google's Search grounding is never used.
 
 - **Automated 12-hour validation**: `.run()`, `.ask()` and `.stream()` check `<home>/catalog/meta.json`. Within 12 hours it reads from disk with no network delay. After that the expired catalog is served immediately and refreshed from `https://models.dev/api.json` in the background (8 s timeout). Only a cold start, with nothing loaded yet, waits for the download. A failed refresh pauses automatic refreshes for 10 minutes.
 - **Git & Package Safety**: The cache lives in the single Agent Accelerator home (`<home>/catalog/`, `.agent-accel/` by default and gitignored), never inside the package or scattered in the project.
@@ -1477,6 +1512,11 @@ bun run examples/15-durable-agent.ts
 bun run examples/16-definition-history.ts
 # offline (scripted model, no key, no cost): the same scheduled action run with changed instructions;
 # each run file names the definition it started with, even a failed run, and the old definition file is kept
+
+bun run examples/17-image-generation.ts [--live <image model>]
+# offline by default (scripted providers, no key, no cost): make and save a picture, the one-error-lists-everything
+# validation, a dropped control with one warning, image.edit (Google chains, other models get a reference),
+# and a text agent with imageTool; --live <model> makes a real picture and edits it (costs money)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
@@ -1560,7 +1600,7 @@ src/
 ├── streaming/  # event stream, SSE parser
 ├── types/      # agent, core, message, model, response, tool
 └── utils/      # base64, cache, env, headers, media, serialization, session, thought-signature, retry, errors
-examples/        # demos 01-16 (no 10; see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
+examples/        # demos 01-17 (no 10; see Examples), plus files/, prompts/, research-agent.ts, _shared.ts
 test/            # unit + mocked-provider tests mirroring src/
 ```
 

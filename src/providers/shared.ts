@@ -490,3 +490,15 @@ export function resolveProviderBaseUrl(
 ): string {
   return (options?.baseUrl || baseUrlSetting(provider) || defaultBaseUrl).replace(/\/+$/, "");
 }
+
+/** The OpenRouter provider-routing keys taken from the `openrouter` setting (`order`, `only`, `ignore`, `allow_fallbacks`, `require_parameters`, `zdr`, `data_collection`, `sort`); the text and the image adapters both read them. */
+export const OPENROUTER_ROUTING_KEYS = [
+  "order",
+  "only",
+  "ignore",
+  "allow_fallbacks",
+  "require_parameters",
+  "zdr",
+  "data_collection",
+  "sort",
+] as const;

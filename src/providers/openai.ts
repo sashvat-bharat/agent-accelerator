@@ -51,6 +51,8 @@ import { normalizeMediaInput } from "../utils/media.ts";
 import { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOnResponses } from "../utils/errors.ts";
 import { ConfigError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
+import { openaiGenerateImage } from "./openai-image.ts";
+import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import {
   parseArguments,
   normalizeThinkingParts,
@@ -781,6 +783,15 @@ export class OpenAIResponsesProvider implements Provider {
     const retryAfterMs = parseRetryAfterMs(headers);
     if (retryAfterMs !== undefined) (err as Record<string, unknown>)["retryAfterMs"] = retryAfterMs;
     throw toConciseProviderError(err, "openai", modelId);
+  }
+
+  // Makes pictures with a gpt-image model (the Image API, see openai-image.ts); in: generateImage, out: the pictures and usage.
+  generateImage(
+    modelId: string,
+    request: ProviderImageRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderImageResult> {
+    return openaiGenerateImage(cleanModelId(modelId), request, options);
   }
 
   // Non-streaming turn as one retried JSON request; in: runAgentLoop, out: ProviderGenerateResult.

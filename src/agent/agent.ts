@@ -662,8 +662,27 @@ export class Agent {
   usageReport(): UsageReport {
     return buildUsageReport(
       { id: this.sessionId, name: this.name, model: modelName(this.modelStringOrSpec), totals: this.usageTotals },
-      [...this.workers.usageNodes(), ...this.fixedWorkerNodes()]
+      [...this.workers.usageNodes(), ...this.fixedWorkerNodes(), ...this.imageToolNodes()]
     );
+  }
+
+  // The picture spending of this agent's `imageTool`s as usage nodes (status "fixed"); in: this.tools, out: usageReport.
+  private imageToolNodes(): UsageNode[] {
+    const nodes: UsageNode[] = [];
+    for (const [key, def] of Object.entries(this.tools)) {
+      if (!def.imageSpend) continue;
+      const name = def.name || key;
+      nodes.push({
+        id: name,
+        name,
+        role: "image",
+        model: def.imageSpend.model,
+        status: "fixed",
+        totals: def.imageSpend.totals,
+        workers: [],
+      });
+    }
+    return nodes;
   }
 
   // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is merged into them); in: the constructor config, out: usageReport.

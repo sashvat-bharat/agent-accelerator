@@ -70,6 +70,26 @@ export function addTurn(totals: UsageTotals, usage: TokenUsage, priced: PricedCo
   totals.costMicroUSD.total += b.totalMicroUSD;
 }
 
+/** Adds one image call (an `imageTool` picture request): its tokens, and its cost when known (`cost.inputCost` set means the table priced it, else the provider reported it); an unknown cost is counted as unpriced, never $0. */
+export function addImageCall(totals: UsageTotals, usage: TokenUsage): void {
+  const input = count(usage.inputTokens);
+  totals.turns += 1;
+  totals.inputTokens += input;
+  totals.outputTokens += count(usage.outputTokens);
+  totals.thinkingTokens += Math.min(count(usage.thinkingTokens), count(usage.outputTokens));
+  const total = usage.cost?.totalCost;
+  if (total === undefined) {
+    totals.turnsBy.unpriced += 1;
+    return;
+  }
+  const totalMicro = Math.round(total * 1_000_000);
+  const inputMicro = Math.min(Math.round((usage.cost?.inputCost ?? 0) * 1_000_000), totalMicro);
+  totals.turnsBy[usage.cost?.inputCost !== undefined ? "catalog" : "provider"] += 1;
+  totals.costMicroUSD.input += inputMicro;
+  totals.costMicroUSD.output += totalMicro - inputMicro;
+  totals.costMicroUSD.total += totalMicro;
+}
+
 /** Adds `other` into `into` (workers into a total). */
 export function mergeUsage(into: UsageTotals, other: UsageTotals): void {
   for (const k of [

@@ -38,13 +38,14 @@ console.log(res.usage);
 | Let the model call my functions, stream the answer, redirect a busy agent | [Tools and streaming](guides/tools-and-streaming.md) |
 | Split work across helper agents, or run work later on a schedule | [Multi-agent and scheduling](guides/multi-agent.md) |
 | Save/resume chats, send images and PDFs, track cost, manage the model catalog | [Data and media](guides/data-and-media.md) |
+| Make pictures with Google, OpenAI or OpenRouter image models; edit them; let an agent make them | [Generating images](guides/images.md) |
 | Set limits, budgets, retries; handle errors; observe; keep things safe | [Safety and operations](guides/safety-and-ops.md) |
 | Read or replace the prompts the SDK sends (tool refusals, worker headers, tool manuals) | [Prompts](guides/prompts.md) |
 
 ## Pages
 
 - [Getting started](getting-started.md): install, keys, first agent, core ideas.
-- Guides: [Agents and models](guides/agents-and-models.md) · [Tools and streaming](guides/tools-and-streaming.md) · [Multi-agent and scheduling](guides/multi-agent.md) · [Data and media](guides/data-and-media.md) · [Safety and operations](guides/safety-and-ops.md)
+- Guides: [Agents and models](guides/agents-and-models.md) · [Generating images](guides/images.md) · [Tools and streaming](guides/tools-and-streaming.md) · [Multi-agent and scheduling](guides/multi-agent.md) · [Data and media](guides/data-and-media.md) · [Safety and operations](guides/safety-and-ops.md)
 - [Reference](reference.md): every config key, run option, response field, event, error and environment variable.
 - [Scheduled action files](scheduled-action-files.md): the stable on-disk format of scheduled actions (`<id>/task.json`, `<id>/delivery.json`, run files), how to read them and the changelog.
 - [For AI agents](for-ai-agents.md): decision table, hard rules, what does not exist, error-to-fix lookup.

@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { UsageTotals } from "../session/usage.ts";
 
 /** Live-event emitter handed to tools that stream progress (additive). */
 export type ToolEmitFn = (event: { type: string; [k: string]: unknown }) => void;
@@ -64,6 +65,8 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
   maxConcurrency?: number | string;
   /** Function executed after validation; its result is made JSON-safe for model context. */
   execute: ToolExecuteFn<TInput, TOutput>;
+  /** Set by `imageTool` only: what its pictures cost, which the owning Agent lists in `usageReport()`. Internal. */
+  imageSpend?: { model: string; totals: UsageTotals };
   // Policies the executor enforces (all optional).
   /**
    * Canonical alias for `maxTries`. When both are set, `maxTries` wins.

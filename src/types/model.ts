@@ -3,6 +3,7 @@ import type { ProviderContext, ProviderSteps } from "./message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "./tool.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import type { Prompts } from "../prompts/prompts.ts";
+import type { ProviderImageRequest, ProviderImageResult } from "./image.ts";
 
 // ---------------------------------------------------------------------------
 // Provider identity — battle-tested: matches models.dev provider keys
@@ -253,4 +254,10 @@ export interface Provider {
   ): AssistantMessageEventStream;
   /** True when this call may legitimately run far past the request timeouts (e.g. Google long decode); the loop then leaves timing to the adapter's own per-request timeouts. */
   isLongRunning?(model: string | ModelSpec, options?: ProviderRequestOptions): boolean;
+  /** Makes pictures (one request, `request.count` of them at most). Only the adapters of providers with supported image models implement it; the request is already checked against the model's table entry. */
+  generateImage?(
+    modelId: string,
+    request: ProviderImageRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderImageResult>;
 }
