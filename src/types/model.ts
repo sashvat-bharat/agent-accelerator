@@ -4,6 +4,7 @@ import type { StandardToolDeclaration, ToolCallRecord } from "./tool.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import type { Prompts } from "../prompts/prompts.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "./image.ts";
+import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "./embedding.ts";
 
 // ---------------------------------------------------------------------------
 // Provider identity — battle-tested: matches models.dev provider keys
@@ -260,4 +261,10 @@ export interface Provider {
     request: ProviderImageRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderImageResult>;
+  /** Makes one vector per item of `request.items` (in order). Only the adapters of providers with supported embedding models implement it; the request is already checked against the model's table entry and holds no more items than the model takes in one request. */
+  embed?(
+    modelId: string,
+    request: ProviderEmbeddingRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderEmbeddingResult>;
 }

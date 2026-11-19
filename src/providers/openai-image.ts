@@ -56,8 +56,8 @@ function mapUsage(raw: ImagesResponse["usage"]): TokenUsage {
   return usage;
 }
 
-// Throws a concise provider error for a non-2xx reply: status, OpenAI's code and type, Retry-After, a key hint on 401 and the categories of a moderation block; in: generateImage, out: nothing or a thrown error.
-function throwIfError(
+/** Throws a concise provider error for a non-2xx OpenAI reply: status, OpenAI's code and type, Retry-After, a key hint on 401 and the categories of a moderation block; in: the OpenAI image and embedding calls, out: nothing or a thrown error. */
+export function throwOpenAIHttpError(
   status: number,
   url: string,
   bodyText: string,
@@ -144,7 +144,7 @@ export async function openaiGenerateImage(
       cleanup();
     }
     const responseHeaders = headersToRecord(res.headers);
-    throwIfError(res.status, url, text, modelId, responseHeaders);
+    throwOpenAIHttpError(res.status, url, text, modelId, responseHeaders);
     let parsed: ImagesResponse;
     try {
       parsed = JSON.parse(text) as ImagesResponse;

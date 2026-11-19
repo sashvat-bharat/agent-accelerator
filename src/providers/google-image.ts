@@ -89,8 +89,8 @@ function mapUsage(raw: InteractionReply["usage"]): TokenUsage {
   return usage;
 }
 
-// Throws a concise provider error for a non-2xx reply: status, Google's code, Retry-After and a key hint on 401; in: generateImage, out: nothing or a thrown error.
-function throwIfError(
+/** Throws a concise provider error for a non-2xx Google reply: status, Google's code, Retry-After and a key hint on 401; in: the Google image and embedding calls, out: nothing or a thrown error. */
+export function throwGoogleHttpError(
   status: number,
   url: string,
   bodyText: string,
@@ -173,7 +173,7 @@ export async function googleGenerateImage(
       cleanup();
     }
     const responseHeaders = headersToRecord(res.headers);
-    throwIfError(res.status, url, text, modelId, responseHeaders);
+    throwGoogleHttpError(res.status, url, text, modelId, responseHeaders);
     let reply: InteractionReply;
     try {
       reply = JSON.parse(text) as InteractionReply;

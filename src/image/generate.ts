@@ -12,8 +12,8 @@ import { withProviderSlot } from "../agent/governor.ts";
 import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
 import { normalizeMediaInput, type NormalizedMedia } from "../utils/media.ts";
 import { applyCaptureRaw } from "../utils/raw-capture.ts";
-import { BudgetExceededError, ConfigError, ProviderError, TimeoutError, ValidationError } from "../types/errors.ts";
-import type { ProviderRequestOptions } from "../types/model.ts";
+import { BudgetExceededError, ConfigError, ProviderError, ValidationError } from "../types/errors.ts";
+import { abortError, addUsage, bounded, providerOptionsFrom } from "../utils/provider-call.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ImageEditOptions, ImageOptions, ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { estimateImageCostUsd, resolveImageRequest } from "./request.ts";
@@ -22,53 +22,6 @@ import { GeneratedImage, ImageResult, attachOrigin, originOf } from "./result.ts
 
 /** Default time one provider request may take (image models can think for a while). */
 const DEFAULT_TIMEOUT_MS = 300_000;
-
-// An AbortError carrying the signal's reason message; in: the abort paths below, out: the error to throw.
-function abortError(signal: AbortSignal): Error {
-  const reason = (signal as { reason?: unknown }).reason;
-  return Object.assign(new Error(reason instanceof Error ? reason.message : "Image generation aborted"), {
-    name: "AbortError",
-  });
-}
-
-// Runs `task`, rejecting with a TimeoutError after `ms` or an AbortError as soon as `signal` aborts, even when the adapter ignores its signal; in: each provider request, out: the task's result.
-function bounded<T>(task: () => Promise<T>, ms: number, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortError(signal));
-  return new Promise<T>((resolve, reject) => {
-    const timer =
-      Number.isFinite(ms) && ms > 0
-        ? setTimeout(() => reject(new TimeoutError(`[Agent Accelerator] Image request timed out after ${ms}ms.`)), ms)
-        : undefined;
-    const onAbort = (): void => reject(abortError(signal));
-    signal.addEventListener("abort", onAbort, { once: true });
-    task()
-      .then(resolve, reject)
-      .finally(() => {
-        if (timer) clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-      });
-  });
-}
-
-// Adds one usage into a running total: tokens always; the cost parts only through `sumCosts`, so an unpriced call keeps the total cost unknown; in: generateImage after the requests, out: the total.
-function addUsage(total: TokenUsage, u: TokenUsage): void {
-  total.inputTokens += u.inputTokens || 0;
-  total.outputTokens += u.outputTokens || 0;
-  total.totalTokens += u.totalTokens || 0;
-  for (const k of ["cachedTokens", "cacheReadTokens", "cacheWriteTokens", "thinkingTokens"] as const)
-    if (u[k] !== undefined) total[k] = (total[k] ?? 0) + (u[k] ?? 0);
-  for (const [group, parts] of [
-    ["inputDetails", ["audioTokens", "videoTokens", "imageTokens", "textTokens"]],
-    ["outputDetails", ["audioTokens", "imageTokens", "textTokens"]],
-  ] as const) {
-    for (const part of parts) {
-      const v = (u[group] as Record<string, number | undefined> | undefined)?.[part];
-      if (v === undefined) continue;
-      const into = ((total[group] as Record<string, number> | undefined) ??= {});
-      into[part] = (into[part] ?? 0) + v;
-    }
-  }
-}
 
 // Reads every reference image: a picture the SDK made goes in as its bytes, anything else through the media normalizer (local paths must be inside `fileAccess.roots` when set); in: generateImage, out: the normalized media.
 async function readReferences(opts: ImageOptions): Promise<NormalizedMedia[]> {
@@ -140,24 +93,12 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
 
   const references = await readReferences(effective);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const retry = opts.retry ?? {};
-  const providerOptions: ProviderRequestOptions = {
-    ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
-    ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}),
-    ...(opts.headers ? { headers: opts.headers } : {}),
-    ...(opts.env ? { env: opts.env } : {}),
-    ...(opts.fetch ? { fetch: opts.fetch } : {}),
-    ...(retry.maxRetries !== undefined ? { maxRetries: retry.maxRetries } : {}),
-    ...(retry.maxDelayMs !== undefined ? { maxRetryDelayMs: retry.maxDelayMs } : {}),
-    ...(retry.baseDelayMs !== undefined ? { retryBaseDelayMs: retry.baseDelayMs } : {}),
-    ...(retry.budgetMs !== undefined ? { retryBudgetMs: retry.budgetMs } : {}),
-    ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
-  };
+  const providerOptions = providerOptionsFrom(opts, timeoutMs);
 
   // One shared controller: the caller's signal plus "a sibling request failed", so a failure stops the rest from billing.
   const stop = new AbortController();
   const signal = opts.signal ? AbortSignal.any([opts.signal, stop.signal]) : stop.signal;
-  if (signal.aborted) throw abortError(signal);
+  if (signal.aborted) throw abortError(signal, "Image generation aborted");
 
   // How many pictures each request asks for: the model's per-request maximum, the last one gets the rest.
   const per = def.imagesPerRequest.max;
@@ -181,7 +122,10 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
       ...(request.thinking ? { thinking: request.thinking } : {}),
     };
     const res = await withProviderSlot(def.provider, signal, () =>
-      bounded(() => provider.generateImage!(def.id, body, { ...providerOptions, signal }), timeoutMs, signal)
+      bounded(() => provider.generateImage!(def.id, body, { ...providerOptions, signal }), timeoutMs, signal, {
+        timeout: "Image request",
+        aborted: "Image generation aborted",
+      })
     );
     // The provider's own cost wins; else the table prices the reported tokens; else it stays unknown (and counts as 0 for the budget).
     if (res.usage.cost?.totalCost === undefined) {

@@ -44,6 +44,8 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
 import { openRouterSetting } from "../config/settings.ts";
 import { openrouterGenerateImage } from "./openrouter-image.ts";
+import { openrouterEmbed } from "./openrouter-embedding.ts";
+import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
@@ -578,6 +580,15 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderImageResult> {
     return openrouterGenerateImage(cleanModelId(modelId), request, options);
+  }
+
+  // Makes one vector per item with an embedding model through OpenRouter's Embeddings API (see openrouter-embedding.ts); in: generateEmbedding, out: the vectors and usage.
+  embed(
+    modelId: string,
+    request: ProviderEmbeddingRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderEmbeddingResult> {
+    return openrouterEmbed(cleanModelId(modelId), request, options);
   }
 
   // Builds the Chat request (messages, tools, tool_choice, reasoning, tier, cache_control, generation controls, response_format, session_id); in: streamInto, out: the body.

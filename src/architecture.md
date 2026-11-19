@@ -12,6 +12,7 @@ The whole SDK. `index.ts` is the only public entry (`main`/`module`/`types`); ev
 | `agent/`            | `Agent`, the model-to-tools loop, workers, delegation.                                                                                                                      |
 | `providers/`        | One adapter per wire (Google, OpenAI, Anthropic, OpenRouter, OpenAI-compatible), the registry, shared helpers.                                                              |
 | `image/`            | `generateImage`: the per-model request check, the call, `ImageResult` / `GeneratedImage`.                                                                                   |
+| `embedding/`        | `generateEmbedding`: the request check, the call split into requests, pricing, `EmbeddingResult`, `cosineSimilarity`.                                                       |
 | `models/`           | The model catalog (a small per-provider extract of models.dev) and its cache.                                                                                               |
 | `tools/`            | `tool()`, schemas, the executor.                                                                                                                                            |
 | `streaming/`        | The event stream and the SSE parser.                                                                                                                                        |

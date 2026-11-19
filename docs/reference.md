@@ -124,6 +124,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 | `worker.invalid` | A saved `worker.json` is damaged and that worker is skipped |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
 | `config.file_invalid`, `config.file_restored`, `config.file_ignored_key`, `config.saved_model_ignored` | `<home>/configs.json` was not valid or had another version (`data.reason`), was restored from its backup, had an entry that is unknown, invalid or hidden (`data.key`, `data.reason`), or names a saved model that left the program's list |
+| `embedding_models_refresh_failed`, `embedding_models_cache_write_failed` | OpenRouter's embedding model list could not be refreshed (the saved copy is used) or could not be saved (it is kept in memory) |
 | `concurrency.queued` | A provider call had to wait for a free slot (`provider`, `waiting`, `active`, `paused`); only with the `concurrency` setting |
 | `concurrency.paused` | A provider answered 429 with a `Retry-After`: no new calls to it for `ms` (`provider`, `ms`, `waiting`) |
 | `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle; payloads in [Scheduled action files](scheduled-action-files.md#events) |
@@ -131,6 +132,10 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 ## Image generation
 
 `generateImage(options)` returns an `ImageResult`; `listImageModels(provider?)` and `getImageModel(model)` describe the supported image models; `image.edit(prompt, options?)` changes a picture; `imageTool(options)` is a tool that lets a text agent make pictures. Options, result fields and errors: [Generating images](guides/images.md).
+
+## Embeddings
+
+`generateEmbedding(options)` returns an `EmbeddingResult` (`vectors`, `vector`, `dimensions`, `usage`, `model`, `provider`, `requests`, `raw`); `listEmbeddingModels(provider?)` and `getEmbeddingModel(model)` describe the known embedding models; `refreshOpenRouterEmbeddingModels()` reads OpenRouter's model list now; `cosineSimilarity(a, b)` compares two vectors; `EMBEDDING_TASKS` lists the values of `task`. Options, models, checks and errors: [Generating embeddings](guides/embeddings.md).
 
 ## Errors
 
