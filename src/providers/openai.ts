@@ -52,6 +52,8 @@ import { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOn
 import { ConfigError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { openaiGenerateImage } from "./openai-image.ts";
+import { openaiEmbed } from "./openai-embedding.ts";
+import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import {
   parseArguments,
@@ -792,6 +794,15 @@ export class OpenAIResponsesProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderImageResult> {
     return openaiGenerateImage(cleanModelId(modelId), request, options);
+  }
+
+  // Makes one vector per text with an OpenAI embedding model (the Embeddings API, see openai-embedding.ts); in: generateEmbedding, out: the vectors and usage.
+  embed(
+    modelId: string,
+    request: ProviderEmbeddingRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderEmbeddingResult> {
+    return openaiEmbed(cleanModelId(modelId), request, options);
   }
 
   // Non-streaming turn as one retried JSON request; in: runAgentLoop, out: ProviderGenerateResult.
