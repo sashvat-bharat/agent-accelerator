@@ -82,7 +82,7 @@ A list longer than the model takes in one request (OpenAI: 2048; Google and Open
 | `requests` | Provider requests made |
 | `raw` | The wire audit (bodies redacted unless `captureRaw: true`) |
 
-`usage.cost` is the provider's reported cost when it sends one (OpenRouter), else the reported tokens priced from the table in integer micro-USD (so a tiny call rounds up to a whole micro-dollar). A reply with no usage, or media tokens with no per-kind split, leaves the cost **unknown (`undefined`), never $0**.
+`usage.cost` is the provider's reported cost when it sends one (OpenRouter), else the reported tokens priced from the table in integer micro-USD (so a tiny call rounds up to a whole micro-dollar). A reply with no usage, or media tokens with no per-kind split, leaves the cost **unknown (`undefined`), never $0**. `gemini-embedding-001` reports no usage at all, so its cost is always unknown; `gemini-embedding-2` reports tokens per kind (an image counts 258 tokens), so its cost is exact.
 
 ## Errors
 

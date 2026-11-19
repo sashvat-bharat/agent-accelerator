@@ -70,6 +70,8 @@ import {
 } from "./shared.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { googleGenerateImage } from "./google-image.ts";
+import { googleEmbed } from "./google-embedding.ts";
+import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
@@ -1097,6 +1099,15 @@ export class GoogleInteractionsProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderImageResult> {
     return googleGenerateImage(cleanModelId(modelId), request, options);
+  }
+
+  // Makes one vector per item with a Gemini embedding model (see google-embedding.ts); in: generateEmbedding, out: the vectors and usage.
+  embed(
+    modelId: string,
+    request: ProviderEmbeddingRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderEmbeddingResult> {
+    return googleEmbed(cleanModelId(modelId), request, options);
   }
 
   /** Poll delays (ms) for background interactions: before the first poll, then between polls. */

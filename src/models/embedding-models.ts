@@ -87,8 +87,16 @@ const GOOGLE: readonly EmbeddingModelInfo[] = [
       "Google's first multimodal embedding model: text, images, audio, video and PDF share one vector space, over 100 languages.",
     released: "2026-04",
     inputs: ["text", "image", "audio", "video", "pdf"],
-    // The 8,192 tokens are shared across every kind of input; the rest are per request (docs: embeddings, "Supported modalities and limits").
-    limits: { inputTokens: 8192, images: 6, audioSeconds: 180, videoSeconds: 120, pdfFiles: 1, pdfPages: 6 },
+    // The 8,192 tokens are shared across every kind of input; the rest are per request (docs: embeddings, "Supported modalities and limits"). At most 100 requests fit in one batch (the API says so).
+    limits: {
+      inputTokens: 8192,
+      maxInputs: 100,
+      images: 6,
+      audioSeconds: 180,
+      videoSeconds: 120,
+      pdfFiles: 1,
+      pdfPages: 6,
+    },
     dimensions: GOOGLE_DIMENSIONS,
     task: "prefix",
     combinesInputs: true,
@@ -110,7 +118,7 @@ const GOOGLE: readonly EmbeddingModelInfo[] = [
     description: "Google's text-only embedding model.",
     released: "2025-06",
     inputs: ["text"],
-    limits: { inputTokens: 2048 },
+    limits: { inputTokens: 2048, maxInputs: 100 },
     dimensions: GOOGLE_DIMENSIONS,
     task: "taskType",
     renormalizeShortened: true,

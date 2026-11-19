@@ -12,6 +12,7 @@
 import type { CacheOption, ServiceTier, ThinkingLevel } from "./types/core.ts";
 import type { StructuredOutputSpec } from "./types/model.ts";
 import type { Message } from "./types/message.ts";
+import type { EmbeddingTask } from "./types/embedding.ts";
 import { zodToJsonSchema } from "./tools/schema.ts";
 import { ValidationError } from "./types/errors.ts";
 import { TRUNCATED_ARGS_KEY } from "./types/tool.ts";
@@ -901,4 +902,45 @@ export function mapOutputToAnthropic(
 ): { format: { type: "json_schema"; schema: Record<string, unknown> } } | undefined {
   if (!spec) return undefined;
   return { format: { type: "json_schema", schema: anthropicSchema(spec.schema) } };
+}
+
+// ---------------------------------------------------------------------------
+// Embedding task mappers (pure: all HTTP and wire parsing live in providers/google-embedding.ts and friends)
+// ---------------------------------------------------------------------------
+
+const GOOGLE_TASK_TYPES: Record<EmbeddingTask, string> = {
+  search_query: "RETRIEVAL_QUERY",
+  search_document: "RETRIEVAL_DOCUMENT",
+  question_answering: "QUESTION_ANSWERING",
+  fact_checking: "FACT_VERIFICATION",
+  code_retrieval: "CODE_RETRIEVAL_QUERY",
+  classification: "CLASSIFICATION",
+  clustering: "CLUSTERING",
+  similarity: "SEMANTIC_SIMILARITY",
+};
+
+/** The `taskType` value of Google `gemini-embedding-001` for a canonical embedding task. */
+export function mapEmbeddingTaskToGoogleTaskType(task: EmbeddingTask): string {
+  return GOOGLE_TASK_TYPES[task];
+}
+
+const GOOGLE_QUERY_PREFIXES: Record<Exclude<EmbeddingTask, "search_document">, string> = {
+  search_query: "search result",
+  question_answering: "question answering",
+  fact_checking: "fact checking",
+  code_retrieval: "code retrieval",
+  classification: "classification",
+  clustering: "clustering",
+  similarity: "sentence similarity",
+};
+
+/**
+ * Google `gemini-embedding-2` has no task field: the task is written in front of the text (docs: embeddings, "Task types with
+ * Embeddings 2"). A query-side task is `task: <name> | query: <text>`, a document is `title: <title or none> | text: <text>`; no task
+ * leaves the text as it is. Only text-only items are prefixed (the docs advise against prefixing the text of a multimodal input).
+ */
+export function googleEmbeddingText(task: EmbeddingTask | undefined, title: string | undefined, text: string): string {
+  if (!task) return text;
+  if (task === "search_document") return `title: ${title ?? "none"} | text: ${text}`;
+  return `task: ${GOOGLE_QUERY_PREFIXES[task]} | query: ${text}`;
 }
