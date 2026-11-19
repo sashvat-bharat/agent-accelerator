@@ -100,3 +100,5 @@ A list longer than the model takes in one request (OpenAI: 2048; Google and Open
 - No vector storage or search: use a vector database or compare with `cosineSimilarity`.
 - The providers' Batch APIs (cheaper, slower) are not used.
 - `gemini-embedding-2` combines a whole list into one vector when sent together; the SDK sends each item on its own so a list always gives one vector each. To combine on purpose, use `{ parts }`.
+
+A runnable walkthrough is in [`examples/18-embeddings.ts`](../../examples/18-embeddings.ts): offline by default (scripted providers, no key), `--live <model>` for a real call.

@@ -1532,6 +1532,11 @@ bun run examples/17-image-generation.ts [--live <image model>]
 # offline by default (scripted providers, no key, no cost): make and save a picture, the one-error-lists-everything
 # validation, a dropped control with one warning, image.edit (Google chains, other models get a reference),
 # and a text agent with imageTool; --live <model> makes a real picture and edits it (costs money)
+
+bun run examples/18-embeddings.ts [--live <embedding model>]
+# offline by default (scripted providers, no key, no cost; its own demo home): search by meaning with cosineSimilarity,
+# one vector per item, the one-error-lists-everything validation, a dropped task with one warning, the same code on
+# Google, OpenAI and OpenRouter; --live <model> makes real vectors (costs money, except OpenRouter's free models)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),
