@@ -944,3 +944,19 @@ export function googleEmbeddingText(task: EmbeddingTask | undefined, title: stri
   if (task === "search_document") return `title: ${title ?? "none"} | text: ${text}`;
   return `task: ${GOOGLE_QUERY_PREFIXES[task]} | query: ${text}`;
 }
+
+const OPENROUTER_INPUT_TYPES: Record<EmbeddingTask, { inputType?: string; note?: string }> = {
+  search_query: { inputType: "search_query" },
+  search_document: { inputType: "search_document" },
+  classification: { inputType: "classification" },
+  clustering: { inputType: "clustering" },
+  question_answering: { inputType: "search_query", note: "question_answering is sent as the query side of search" },
+  fact_checking: { inputType: "search_query", note: "fact_checking is sent as the query side of search" },
+  code_retrieval: { inputType: "search_query", note: "code_retrieval is sent as the query side of search" },
+  similarity: { note: "OpenRouter's input_type has no similarity value" },
+};
+
+/** The OpenRouter `input_type` for a canonical embedding task (`inputType` unset = nothing to send), with a `note` when the match is approximate or missing, for one `provider_warning`. */
+export function mapEmbeddingTaskToOpenRouterInputType(task: EmbeddingTask): { inputType?: string; note?: string } {
+  return OPENROUTER_INPUT_TYPES[task];
+}

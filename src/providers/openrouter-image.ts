@@ -50,13 +50,14 @@ function mapUsage(raw: ImagesReply["usage"]): TokenUsage {
   return usage;
 }
 
-// Throws a concise provider error for a non-2xx reply: status, OpenRouter's code, Retry-After, a key hint on 401 and a credits hint on 402; in: generateImage, out: nothing or a thrown error.
-function throwIfError(
+/** Throws a concise provider error for a non-2xx OpenRouter reply: status, OpenRouter's code, Retry-After, a key hint on 401 and a credits hint on 402 (`what` names what was being made); in: the OpenRouter image and embedding calls, out: nothing or a thrown error. */
+export function throwOpenRouterHttpError(
   status: number,
   url: string,
   bodyText: string,
   modelId: string,
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  what = "image"
 ): void {
   if (status >= 200 && status < 300) return;
   const { message, code, errorType, raw } = readErrorPayload(bodyText);
@@ -64,7 +65,7 @@ function throwIfError(
     status === 401
       ? " Check OPENROUTER_API_KEY (no quotes/spaces, correct provider) and that the key is loaded (bun --env-file=.env.local)."
       : status === 402
-        ? " OpenRouter says the account has too little credit for this image."
+        ? ` OpenRouter says the account has too little credit for this ${what}.`
         : "";
   const full = `${message}${hint}`;
   const err: Record<string, unknown> & Error = new Error(full) as Record<string, unknown> & Error;
@@ -132,7 +133,7 @@ export async function openrouterGenerateImage(
       cleanup();
     }
     const responseHeaders = headersToRecord(res.headers);
-    throwIfError(res.status, url, text, modelId, responseHeaders);
+    throwOpenRouterHttpError(res.status, url, text, modelId, responseHeaders);
     let reply: ImagesReply;
     try {
       reply = JSON.parse(text) as ImagesReply;
