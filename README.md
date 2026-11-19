@@ -1214,6 +1214,21 @@ const night = await result.image.edit("Make it night"); // continues from the pi
 Every option is checked against what that model supports: a ratio, size tier, quality, format, thinking level or reference-image count it does not take is one `ValidationError` listing every problem, and a control the model does not have is dropped with a single `provider_warning`. `listImageModels()` shows what each model accepts and what it costs. Full guide: [Generating images](docs/guides/images.md).
 
 ---
+## Embeddings
+
+`generateEmbedding` turns text (and, on the models that read them, images, audio, video and PDF) into vectors for search, grouping and memory. Google (`gemini-embedding-2`, `gemini-embedding-001`), OpenAI (`text-embedding-3-small`, `-3-large`, `ada-002`) and every embedding model OpenRouter lists. A list in gives one vector per item out, in order, on every model:
+
+```ts
+import { generateEmbedding, cosineSimilarity } from "agent-accelerator";
+
+const docs = await generateEmbedding({ model: "openai/text-embedding-3-small", input: ["Cats purr.", "Rust has a borrow checker."] });
+const q = await generateEmbedding({ model: "openai/text-embedding-3-small", input: "Which animal purrs?", task: "search_query" });
+docs.vectors.map((v) => cosineSimilarity(q.vector, v)); // the first number is the highest
+```
+
+Options are checked per model (vector length, input kinds, limits), one `task` option works on every model, and the cost is the provider's report or the table's price, never a made-up $0. `listEmbeddingModels()` shows what each model reads and costs; OpenRouter's models are read from its public list and cached in `<home>/catalog/`. The SDK makes vectors; it does not store or search them. Full guide: [Generating embeddings](docs/guides/embeddings.md).
+
+---
 
 ## Model Catalog & Dynamic 12-Hour TTL Sync
 

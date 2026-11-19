@@ -113,6 +113,28 @@ export type {
 } from "./types/image.ts";
 export type { ImageModelInfo, ImageTokenPrices, ImageSizeRules } from "./models/image-models.ts";
 export type { CatalogProvider } from "./models/catalog-shards.ts";
+export { listEmbeddingModels, getEmbeddingModel } from "./models/embedding-models.ts";
+export type {
+  EmbeddingModelInfo,
+  EmbeddingPrices,
+  EmbeddingInputKind,
+  EmbeddingTaskStyle,
+} from "./models/embedding-models.ts";
+export { refreshOpenRouterEmbeddingModels } from "./models/openrouter-embeddings.ts";
+export type { RefreshOpenRouterEmbeddingsOptions } from "./models/openrouter-embeddings.ts";
+export { generateEmbedding } from "./embedding/generate.ts";
+export { cosineSimilarity } from "./embedding/similarity.ts";
+export { EmbeddingResult } from "./embedding/result.ts";
+export { EMBEDDING_TASKS } from "./types/embedding.ts";
+export type {
+  EmbeddingOptions,
+  EmbeddingItem,
+  EmbeddingPart,
+  EmbeddingTask,
+  EmbeddingPartData,
+  ProviderEmbeddingRequest,
+  ProviderEmbeddingResult,
+} from "./types/embedding.ts";
 export { resolveEffectiveThinking } from "./agent/options.ts";
 export { withRetries, isTransientError } from "./utils/retry.ts";
 export { toConciseProviderError, assertModalitiesSupported } from "./utils/errors.ts";
