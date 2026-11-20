@@ -7,7 +7,7 @@ import { TimeoutError, ValidationError } from "../types/errors.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { RetryPolicyConfig } from "../types/agent.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
-import type { AudioPart, FilePart, ImagePart, TextPart, VideoPart } from "../types/message.ts";
+import type { AudioPart, FilePart, ImagePart, MediaResolution, TextPart, VideoPart } from "../types/message.ts";
 import { normalizeMediaInput, type NormalizedMedia } from "./media.ts";
 import { assertPathAllowed, isLocalPathInput } from "./safe-io.ts";
 
@@ -98,7 +98,7 @@ export type InputPart = TextPart | ImagePart | AudioPart | VideoPart | FilePart;
 /** One part after it was read: text, or media already loaded as base64 and a type. */
 export type InputPartData =
   | { kind: "text"; text: string }
-  | { kind: "image" | "audio" | "video" | "pdf"; media: NormalizedMedia };
+  | { kind: "image" | "audio" | "video" | "pdf"; media: NormalizedMedia; resolution?: MediaResolution };
 
 /** Reads the media of one part (local paths must be inside `fileAccess.roots` when set) and checks it is the kind the part says; in: the one-call functions, out: the part's data. */
 export async function readInputPart(part: InputPart, fileAccess?: { roots?: string[] }): Promise<InputPartData> {
@@ -112,5 +112,6 @@ export async function readInputPart(part: InputPart, fileAccess?: { roots?: stri
     throw new ValidationError(
       `[Agent Accelerator] An input given as ${part.type} has the type "${media.mimeType}"${kind === "pdf" ? ", which is not a PDF" : ""}.`
     );
-  return { kind, media };
+  const resolution = part.type === "image" || part.type === "video" ? part.resolution : undefined;
+  return { kind, media, ...(resolution ? { resolution } : {}) };
 }

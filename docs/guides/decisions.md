@@ -59,7 +59,7 @@ An answer can also be `{ type: "refusal" }`: the model declined that question (t
 | `{ type: "json", json: { order: { id: 8821 } } }` | data, written as compact text (refer to its fields by key path in your instructions) |
 | `{ type: "image", image: "photo.png" }` (also `audio`, `video`, `file` for a PDF) | a picture, sound, video or PDF: a path, URL, data URL, base64 string or bytes |
 
-Only the models that read media accept it: an input kind the model does not read fails before the network with a message that lists what it does read. Local paths must be inside `fileAccess.roots` when you set it. Pass the real file type: the providers reject generic types.
+Only the models that read media accept it: an input kind the model does not read fails before the network with a message that lists what it does read. Local paths must be inside `fileAccess.roots` when you set it. Pass the real file type: the providers reject generic types. An image or video part can carry a `resolution` (`low`, `medium`, `high`, `ultra_high`) that sets how much detail the model spends on it (and its token cost); Google honours it.
 
 ## Models
 
