@@ -5,6 +5,7 @@ import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import type { Prompts } from "../prompts/prompts.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "./image.ts";
 import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "./embedding.ts";
+import type { ProviderDecisionRequest, ProviderDecisionResult } from "./decision.ts";
 
 // ---------------------------------------------------------------------------
 // Provider identity — battle-tested: matches models.dev provider keys
@@ -267,4 +268,10 @@ export interface Provider {
     request: ProviderEmbeddingRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderEmbeddingResult>;
+  /** Answers the typed questions of `request` about its input (one answer per question). Only the adapters of providers with supported decision models implement it; the request is already checked against the model's table entry and holds no more questions than the model takes. */
+  decide?(
+    modelId: string,
+    request: ProviderDecisionRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderDecisionResult>;
 }

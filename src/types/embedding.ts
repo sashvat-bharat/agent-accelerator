@@ -1,9 +1,7 @@
 import type { TokenUsage } from "./core.ts";
-import type { AudioPart, FilePart, ImagePart, TextPart, VideoPart } from "./message.ts";
 import type { ProviderId, ProviderRawData } from "./model.ts";
-import type { NormalizedMedia } from "../utils/media.ts";
 import type { CaptureRawMode } from "../utils/raw-capture.ts";
-import type { ConnectionOptions } from "../utils/provider-call.ts";
+import type { ConnectionOptions, InputPart, InputPartData } from "../utils/provider-call.ts";
 
 /** What a vector is for. The SDK turns it into whatever the model needs (a request field, words in front of the text, or nothing). */
 export const EMBEDDING_TASKS = [
@@ -21,7 +19,7 @@ export const EMBEDDING_TASKS = [
 export type EmbeddingTask = (typeof EMBEDDING_TASKS)[number];
 
 /** One piece of input: text, or a picture, sound, video or PDF (`file`) on the models that read them. */
-export type EmbeddingPart = TextPart | ImagePart | AudioPart | VideoPart | FilePart;
+export type EmbeddingPart = InputPart;
 
 /** One thing to embed: a string, one part, or `{ parts }` to embed several parts as ONE combined vector (a caption and its picture). */
 export type EmbeddingItem = string | EmbeddingPart | { parts: EmbeddingPart[] };
@@ -51,9 +49,7 @@ export interface EmbeddingOptions extends ConnectionOptions {
 }
 
 /** One part of an item after it was read: text, or media already loaded as base64 and a type. */
-export type EmbeddingPartData =
-  | { kind: "text"; text: string }
-  | { kind: "image" | "audio" | "video" | "pdf"; media: NormalizedMedia };
+export type EmbeddingPartData = InputPartData;
 
 /** What an adapter receives: the request already checked. One entry of `items` makes ONE vector (several parts are combined). */
 export interface ProviderEmbeddingRequest {

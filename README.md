@@ -1229,6 +1229,28 @@ docs.vectors.map((v) => cosineSimilarity(q.vector, v)); // the first number is t
 Options are checked per model (vector length, input kinds, limits), one `task` option works on every model, and the cost is the provider's report or the table's price, never a made-up $0. `listEmbeddingModels()` shows what each model reads and costs; OpenRouter's models are read from its public list and cached in `<home>/catalog/`. The SDK makes vectors; it does not store or search them. Full guide: [Generating embeddings](docs/guides/embeddings.md).
 
 ---
+## Decisions
+
+`generateDecision` asks typed questions about an input and returns calibrated probabilities instead of text: a yes/no (`noul`), one option out of several (`choice`) or a rating (`score`). Google (`gemini-decision-1`), OpenAI (`gpt-6-luna`) and every decision model OpenRouter lists. The question and answer shapes are the providers' own, and one call asks any number of questions about the same input (the input is paid for once):
+
+```ts
+import { generateDecision } from "agent-accelerator";
+
+const r = await generateDecision({
+  model: "google/gemini-decision-1",
+  input: "I was charged twice for my order.",
+  questions: {
+    dept: { type: "choice", instructions: "Which department?", criteria: { billing: "Payments and refunds.", other: "" } },
+    urgent: { type: "noul", instructions: "Is this urgent?" },
+  },
+});
+const dept = r.answers.dept;
+if (dept.type === "choice" && dept.confidence > 0.8) route(dept.choice);
+```
+
+Requests are checked per model (input kinds it reads, question and option counts, names), the cost is the provider's report or the table's price (never a made-up $0), and `listDecisionModels()` shows what each model reads and costs. Text, images, audio, video and PDF are accepted on the models that read them. Full guide: [Asking decision models](docs/guides/decisions.md).
+
+---
 
 ## Model Catalog & Dynamic 12-Hour TTL Sync
 
@@ -1537,6 +1559,11 @@ bun run examples/18-embeddings.ts [--live <embedding model>]
 # offline by default (scripted providers, no key, no cost; its own demo home): search by meaning with cosineSimilarity,
 # one vector per item, the one-error-lists-everything validation, a dropped task with one warning, the same code on
 # Google, OpenAI and OpenRouter; --live <model> makes real vectors (costs money, except OpenRouter's free models)
+
+bun run examples/19-decisions.ts [--live <decision model>]
+# offline by default (scripted providers, no key, no cost; its own demo home): three typed questions in one call and routing
+# on confidence, typed answers, the one-error-lists-everything validation, the same code on Google, OpenAI and OpenRouter,
+# a declined question as a refusal, reported or priced cost; --live <model> asks a real model (costs money, except OpenRouter's free ones)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),

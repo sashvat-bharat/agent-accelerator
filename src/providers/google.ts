@@ -71,6 +71,8 @@ import {
 import { telemetryBus } from "../telemetry.ts";
 import { googleGenerateImage } from "./google-image.ts";
 import { googleEmbed } from "./google-embedding.ts";
+import { googleDecide } from "./google-decision.ts";
+import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
 import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
@@ -1108,6 +1110,15 @@ export class GoogleInteractionsProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderEmbeddingResult> {
     return googleEmbed(cleanModelId(modelId), request, options);
+  }
+
+  // Answers the typed questions of a decision request with Gemini Decision 1 (see google-decision.ts); in: generateDecision, out: the answers and usage.
+  decide(
+    modelId: string,
+    request: ProviderDecisionRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderDecisionResult> {
+    return googleDecide(cleanModelId(modelId), request, options);
   }
 
   /** Poll delays (ms) for background interactions: before the first poll, then between polls. */

@@ -11,15 +11,12 @@ import { assertModelAllowed } from "../config/models.ts";
 import { getProvider } from "../providers/registry.ts";
 import { emitProviderWarning } from "../providers.ts";
 import { withProviderSlot } from "../agent/governor.ts";
-import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
-import { normalizeMediaInput } from "../utils/media.ts";
 import { applyCaptureRaw } from "../utils/raw-capture.ts";
-import { abortError, addUsage, bounded, providerOptionsFrom } from "../utils/provider-call.ts";
+import { abortError, addUsage, bounded, providerOptionsFrom, readInputPart } from "../utils/provider-call.ts";
 import { BudgetExceededError, ConfigError, ProviderError, ValidationError } from "../types/errors.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type {
   EmbeddingOptions,
-  EmbeddingPart,
   EmbeddingPartData,
   ProviderEmbeddingRequest,
   ProviderEmbeddingResult,
@@ -35,21 +32,6 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_CHUNK = 100;
 /** Requests in flight at once for one call (each also waits for the concurrency limit, when one is set). */
 const PARALLEL_REQUESTS = 4;
-
-// Reads the media of one part (local paths must be inside `fileAccess.roots` when set) and checks it is the kind the part says; in: generateEmbedding, out: the part's data.
-async function readPart(part: EmbeddingPart, opts: EmbeddingOptions): Promise<EmbeddingPartData> {
-  if (part.type === "text") return { kind: "text", text: part.text };
-  const value = (part as unknown as Record<string, string | Uint8Array | ArrayBuffer>)[part.type]!;
-  if (opts.fileAccess?.roots && isLocalPathInput(value)) await assertPathAllowed(value, opts.fileAccess.roots);
-  const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType);
-  const kind = part.type === "file" ? "pdf" : part.type;
-  const ok = kind === "pdf" ? media.mimeType === "application/pdf" : media.mimeType.startsWith(`${kind}/`);
-  if (!ok)
-    throw new ValidationError(
-      `[Agent Accelerator] An input given as ${part.type} has the type "${media.mimeType}"${kind === "pdf" ? ", which is not a PDF" : ""}.`
-    );
-  return { kind, media };
-}
 
 // Scales a vector to length 1 (a zero vector stays as it is); in: generateEmbedding for the models whose shortened vectors are not normalized, out: a new vector.
 function unit(v: number[]): number[] {
@@ -119,7 +101,7 @@ export async function generateEmbedding(opts: EmbeddingOptions): Promise<Embeddi
     throw new ValidationError("[Agent Accelerator] budget.maxCostUsd must be a number greater than 0.");
 
   const items: EmbeddingPartData[][] = [];
-  for (const parts of request.items) items.push(await Promise.all(parts.map((p) => readPart(p, opts))));
+  for (const parts of request.items) items.push(await Promise.all(parts.map((p) => readInputPart(p, opts.fileAccess))));
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const providerOptions = providerOptionsFrom(opts, timeoutMs);
