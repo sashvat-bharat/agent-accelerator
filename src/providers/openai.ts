@@ -53,6 +53,8 @@ import { ConfigError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { openaiGenerateImage } from "./openai-image.ts";
 import { openaiEmbed } from "./openai-embedding.ts";
+import { openaiDecide } from "./openai-decision.ts";
+import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
 import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import {
@@ -803,6 +805,15 @@ export class OpenAIResponsesProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderEmbeddingResult> {
     return openaiEmbed(cleanModelId(modelId), request, options);
+  }
+
+  // Answers the typed questions of a decision request with an OpenAI decision model (see openai-decision.ts); in: generateDecision, out: the answers and usage.
+  decide(
+    modelId: string,
+    request: ProviderDecisionRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderDecisionResult> {
+    return openaiDecide(cleanModelId(modelId), request, options);
   }
 
   // Non-streaming turn as one retried JSON request; in: runAgentLoop, out: ProviderGenerateResult.

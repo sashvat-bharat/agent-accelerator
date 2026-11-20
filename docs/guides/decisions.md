@@ -59,7 +59,7 @@ An answer can also be `{ type: "refusal" }`: the model declined that question (t
 | `{ type: "json", json: { order: { id: 8821 } } }` | data, written as compact text (refer to its fields by key path in your instructions) |
 | `{ type: "image", image: "photo.png" }` (also `audio`, `video`, `file` for a PDF) | a picture, sound, video or PDF: a path, URL, data URL, base64 string or bytes |
 
-Only the models that read media accept it: an input kind the model does not read fails before the network with a message that lists what it does read. Local paths must be inside `fileAccess.roots` when you set it. Pass the real file type: the providers reject generic types. An image or video part can carry a `resolution` (`low`, `medium`, `high`, `ultra_high`) that sets how much detail the model spends on it (and its token cost); Google honours it.
+Only the models that read media accept it: an input kind the model does not read fails before the network with a message that lists what it does read. Local paths must be inside `fileAccess.roots` when you set it. Pass the real file type: the providers reject generic types. An image or video part can carry a `resolution` (`low`, `medium`, `high`, `ultra_high`) that sets how much detail the model spends on it (and its token cost): Google sends it as `resolution`, OpenAI as the image `detail` (`low`, `medium` becomes `auto`, `high`, `ultra_high` becomes `original`); video parts keep it only where the model has such a control.
 
 ## Models
 
@@ -73,7 +73,7 @@ Only the models that read media accept it: an input kind the model does not read
 
 Google and OpenAI are checked by hand against the providers' pages. **OpenRouter serves dozens of decision models that change often, so the SDK reads OpenRouter's own list** (`GET /api/v1/models?output_modalities=decisions`, which needs your OpenRouter key) the first time you use one, saves it in `<home>/catalog/openrouter-decisions.json` and refreshes it every 12 hours. A failed refresh keeps the old copy and is not retried for 10 minutes; `catalog_refresh: "off"` never downloads (the saved copy is used). `listDecisionModels("openrouter")` is empty until the list was read once; `await refreshOpenRouterDecisionModels()` reads it on demand. OpenRouter also lists free models (`...:free`); their price is a known $0. OpenRouter's decisions endpoint is in alpha ("the shape may change"), so a change on their side can break a call before it breaks this SDK's tests.
 
-The same questions work on every model; the SDK writes each provider's own request. Models you can use through OpenRouter keep OpenRouter's limits (a media kind the model does not read is a 400 there, and the SDK says so first).
+The same questions work on every model; the SDK writes each provider's own request. OpenAI's wire differs, so the SDK translates: a `noul` becomes a `predicate`, which has no criteria field, so your `true` and `false` descriptions are written under its instructions ("Yes means: ... No means: ..."); a `choice` becomes `choices` with an optional description; a `score` becomes `levels` labelled by their number. OpenAI answers come back as an array in question order, and the SDK matches them to your question names (an answer that names another question is treated as missing). Models you can use through OpenRouter keep OpenRouter's limits (a media kind the model does not read is a 400 there, and the SDK says so first).
 
 ## Options
 
