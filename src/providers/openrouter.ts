@@ -45,6 +45,8 @@ import { AgentResponse } from "../types/response.ts";
 import { openRouterSetting } from "../config/settings.ts";
 import { openrouterGenerateImage } from "./openrouter-image.ts";
 import { openrouterEmbed } from "./openrouter-embedding.ts";
+import { openrouterDecide } from "./openrouter-decision.ts";
+import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
 import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
@@ -589,6 +591,15 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderEmbeddingResult> {
     return openrouterEmbed(cleanModelId(modelId), request, options);
+  }
+
+  // Answers the typed questions of a decision request with a decision model through OpenRouter's decisions endpoint (see openrouter-decision.ts); in: generateDecision, out: the answers and usage.
+  decide(
+    modelId: string,
+    request: ProviderDecisionRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderDecisionResult> {
+    return openrouterDecide(cleanModelId(modelId), request, options);
   }
 
   // Builds the Chat request (messages, tools, tool_choice, reasoning, tier, cache_control, generation controls, response_format, session_id); in: streamInto, out: the body.
