@@ -20,7 +20,7 @@ All HTTP and wire parsing. Canonical mappers (thinking, cache, tool choice, stru
 
 ## Contract (`Provider`, in `../types/model.ts`)
 
-`generate(model, context, options)` returns a `ProviderGenerateResult`; `stream(...)` returns an `AssistantMessageEventStream` that ends with an `AgentResponse`; optional `isLongRunning()` tells the loop to skip its whole-call timeouts; optional `generateImage(modelId, request, options)` makes pictures for the providers with supported image models (the request is already checked by `image/request.ts`); optional `embed(modelId, request, options)` makes one vector per item for the providers with supported embedding models (the request is already checked by `embedding/request.ts` and holds no more items than the model takes in one request).
+`generate(model, context, options)` returns a `ProviderGenerateResult`; `stream(...)` returns an `AssistantMessageEventStream` that ends with an `AgentResponse`; optional `isLongRunning()` tells the loop to skip its whole-call timeouts; optional `generateImage(modelId, request, options)` makes pictures for the providers with supported image models (the request is already checked by `image/request.ts`); optional `embed(modelId, request, options)` makes one vector per item for the providers with supported embedding models (the request is already checked by `embedding/request.ts` and holds no more items than the model takes in one request); optional `decide(modelId, request, options)` answers the typed questions of a decision request with one answer per question (the request is already checked by `decision/request.ts`).
 
 ## Invariants
 

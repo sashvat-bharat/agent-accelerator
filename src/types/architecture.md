@@ -2,18 +2,19 @@
 
 Shared contracts. Types only, plus a few tiny helpers that belong to a type.
 
-| File           | What it defines                                                                                                                                                                               |
-| :------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agent.ts`     | `AgentConfig`, `AgentRunOptions`, `DynamicSubagentsConfig`, `Budget`, `EditableAgentConfig`, run/turn event shapes.                                                                           |
-| `core.ts`      | `ThinkingLevel`, `CacheOption` (+ `CACHE_OPTIONS`), `ServiceTier`, `TokenUsage`.                                                                                                              |
-| `message.ts`   | `Message` and the content parts (text, image, audio, video, file, tool call/result, thinking), `ProviderSteps`.                                                                               |
-| `model.ts`     | `ModelSpec`, `Provider`, `ProviderRequestOptions`, `ProviderGenerateResult`, structured-output spec.                                                                                          |
-| `response.ts`  | `AgentResponse`, `FinishReason` + `normalizeFinishReason`, `StreamEvent`, worker metadata.                                                                                                    |
-| `tool.ts`      | `ToolDefinition`, `ToolExecutionContext` (`log`, `stop`, `emit`), call/result records, the truncated-arguments marker.                                                                        |
-| `image.ts`     | `ImageOptions`, `ImageInput`, `ProviderImageRequest` / `ProviderImageResult` (what an adapter receives and returns), `ImageResultData`.                                                       |
-| `embedding.ts` | `EmbeddingOptions`, `EmbeddingItem`/`EmbeddingPart`, `EMBEDDING_TASKS`, `ProviderEmbeddingRequest` / `ProviderEmbeddingResult` (what an adapter receives and returns), `EmbeddingResultData`. |
-| `scheduler.ts` | Scheduled-action input, record and delivery types.                                                                                                                                            |
-| `errors.ts`    | The typed error family (`AgentAccelError` and subclasses), `isAbortError`.                                                                                                                    |
+| File           | What it defines                                                                                                                                                                                   |
+| :------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `agent.ts`     | `AgentConfig`, `AgentRunOptions`, `DynamicSubagentsConfig`, `Budget`, `EditableAgentConfig`, run/turn event shapes.                                                                               |
+| `core.ts`      | `ThinkingLevel`, `CacheOption` (+ `CACHE_OPTIONS`), `ServiceTier`, `TokenUsage`.                                                                                                                  |
+| `message.ts`   | `Message` and the content parts (text, image, audio, video, file, tool call/result, thinking), `ProviderSteps`.                                                                                   |
+| `model.ts`     | `ModelSpec`, `Provider`, `ProviderRequestOptions`, `ProviderGenerateResult`, structured-output spec.                                                                                              |
+| `response.ts`  | `AgentResponse`, `FinishReason` + `normalizeFinishReason`, `StreamEvent`, worker metadata.                                                                                                        |
+| `tool.ts`      | `ToolDefinition`, `ToolExecutionContext` (`log`, `stop`, `emit`), call/result records, the truncated-arguments marker.                                                                            |
+| `image.ts`     | `ImageOptions`, `ImageInput`, `ProviderImageRequest` / `ProviderImageResult` (what an adapter receives and returns), `ImageResultData`.                                                           |
+| `embedding.ts` | `EmbeddingOptions`, `EmbeddingItem`/`EmbeddingPart`, `EMBEDDING_TASKS`, `ProviderEmbeddingRequest` / `ProviderEmbeddingResult` (what an adapter receives and returns), `EmbeddingResultData`.     |
+| `decision.ts`  | `DecisionOptions`, the question types (`noul`, `choice`, `score`) and answers, `ProviderDecisionRequest` / `ProviderDecisionResult` (what an adapter receives and returns), `DecisionResultData`. |
+| `scheduler.ts` | Scheduled-action input, record and delivery types.                                                                                                                                                |
+| `errors.ts`    | The typed error family (`AgentAccelError` and subclasses), `isAbortError`.                                                                                                                        |
 
 ## Invariants
 

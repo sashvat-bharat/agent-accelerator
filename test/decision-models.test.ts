@@ -102,7 +102,7 @@ describe("the curated decision models", () => {
     const o = getDecisionModel("openai/gpt-6-luna")!;
     expect(o.inputs).toEqual(["text", "image"]);
     expect(o.limits).toEqual({ questions: 400, options: 255, levels: 10 });
-    expect(o.prices).toEqual({ input: 0.1, cacheRead: 0.01 }); // output is not charged; the cache-write rate is not stated: left out
+    expect(o.prices).toEqual({ input: 0.1, cacheRead: 0.01, longContext: { aboveTokens: 272_000, multiplier: 2 } }); // output is not charged; the cache-write rate is not stated: left out
   });
 
   it("are found by provider/id, by the gemini/ alias and by a bare id when only one provider has it", () => {

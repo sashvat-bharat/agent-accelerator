@@ -135,6 +135,34 @@ export type {
   ProviderEmbeddingRequest,
   ProviderEmbeddingResult,
 } from "./types/embedding.ts";
+export { listDecisionModels, getDecisionModel } from "./models/decision-models.ts";
+export type { DecisionModelInfo, DecisionPrices, DecisionInputKind } from "./models/decision-models.ts";
+export { refreshOpenRouterDecisionModels } from "./models/openrouter-decisions.ts";
+export type { RefreshOpenRouterDecisionsOptions } from "./models/openrouter-decisions.ts";
+export { generateDecision } from "./decision/generate.ts";
+export { DecisionResult } from "./decision/result.ts";
+export { DECISION_QUESTION_TYPES } from "./types/decision.ts";
+export type {
+  DecisionOptions,
+  DecisionInput,
+  DecisionPart,
+  DecisionJsonPart,
+  DecisionInstructions,
+  DecisionQuestion,
+  DecisionQuestionType,
+  NoulQuestion,
+  ChoiceQuestion,
+  ScoreQuestion,
+  DecisionAnswer,
+  NoulAnswer,
+  ChoiceAnswer,
+  ScoreAnswer,
+  RefusalAnswer,
+  ResolvedDecisionQuestion,
+  ProviderDecisionRequest,
+  ProviderDecisionAnswer,
+  ProviderDecisionResult,
+} from "./types/decision.ts";
 export { resolveEffectiveThinking } from "./agent/options.ts";
 export { withRetries, isTransientError } from "./utils/retry.ts";
 export { toConciseProviderError, assertModalitiesSupported } from "./utils/errors.ts";

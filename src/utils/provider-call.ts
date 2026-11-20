@@ -3,10 +3,13 @@
  * an abort error that carries the signal's reason, a timeout-and-abort bound around one provider request, and the sum of
  * several usages.
  */
-import { TimeoutError } from "../types/errors.ts";
+import { TimeoutError, ValidationError } from "../types/errors.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { RetryPolicyConfig } from "../types/agent.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
+import type { AudioPart, FilePart, ImagePart, TextPart, VideoPart } from "../types/message.ts";
+import { normalizeMediaInput, type NormalizedMedia } from "./media.ts";
+import { assertPathAllowed, isLocalPathInput } from "./safe-io.ts";
 
 /** An `AbortError` carrying the signal's reason message (`what` names the call when there is none); in: the abort paths of the one-call functions, out: the error to throw. */
 export function abortError(signal: AbortSignal, what = "Request aborted"): Error {
@@ -87,4 +90,27 @@ export function providerOptionsFrom(opts: ConnectionOptions, timeoutMs: number):
     ...(retry.budgetMs !== undefined ? { retryBudgetMs: retry.budgetMs } : {}),
     ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
   };
+}
+
+/** One piece of input: text, or a picture, sound, video or PDF (`file`). */
+export type InputPart = TextPart | ImagePart | AudioPart | VideoPart | FilePart;
+
+/** One part after it was read: text, or media already loaded as base64 and a type. */
+export type InputPartData =
+  | { kind: "text"; text: string }
+  | { kind: "image" | "audio" | "video" | "pdf"; media: NormalizedMedia };
+
+/** Reads the media of one part (local paths must be inside `fileAccess.roots` when set) and checks it is the kind the part says; in: the one-call functions, out: the part's data. */
+export async function readInputPart(part: InputPart, fileAccess?: { roots?: string[] }): Promise<InputPartData> {
+  if (part.type === "text") return { kind: "text", text: part.text };
+  const value = (part as unknown as Record<string, string | Uint8Array | ArrayBuffer>)[part.type]!;
+  if (fileAccess?.roots && isLocalPathInput(value)) await assertPathAllowed(value, fileAccess.roots);
+  const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType);
+  const kind = part.type === "file" ? "pdf" : part.type;
+  const ok = kind === "pdf" ? media.mimeType === "application/pdf" : media.mimeType.startsWith(`${kind}/`);
+  if (!ok)
+    throw new ValidationError(
+      `[Agent Accelerator] An input given as ${part.type} has the type "${media.mimeType}"${kind === "pdf" ? ", which is not a PDF" : ""}.`
+    );
+  return { kind, media };
 }

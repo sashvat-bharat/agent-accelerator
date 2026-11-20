@@ -19,6 +19,8 @@ export interface DecisionPrices {
   cacheRead?: number;
   /** Writing input to the provider's cache. */
   cacheWrite?: number;
+  /** A request whose input is longer than `aboveTokens` costs `multiplier` times these rates (OpenAI: over 272,000 tokens, twice). */
+  longContext?: { aboveTokens: number; multiplier: number };
 }
 
 /** One supported decision model and everything it can and cannot do. */
@@ -71,7 +73,7 @@ const OPENAI: readonly DecisionModelInfo[] = [
       "OpenAI's model for the Decisions API: predicate, choice and score questions about text and images, answered with probabilities.",
     inputs: ["text", "image"],
     limits: { questions: 400, options: 255, levels: 10 },
-    prices: { input: 0.1, cacheRead: 0.01 },
+    prices: { input: 0.1, cacheRead: 0.01, longContext: { aboveTokens: 272_000, multiplier: 2 } },
   },
 ];
 
