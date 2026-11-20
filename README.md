@@ -1559,6 +1559,11 @@ bun run examples/18-embeddings.ts [--live <embedding model>]
 # offline by default (scripted providers, no key, no cost; its own demo home): search by meaning with cosineSimilarity,
 # one vector per item, the one-error-lists-everything validation, a dropped task with one warning, the same code on
 # Google, OpenAI and OpenRouter; --live <model> makes real vectors (costs money, except OpenRouter's free models)
+
+bun run examples/19-decisions.ts [--live <decision model>]
+# offline by default (scripted providers, no key, no cost; its own demo home): three typed questions in one call and routing
+# on confidence, typed answers, the one-error-lists-everything validation, the same code on Google, OpenAI and OpenRouter,
+# a declined question as a refusal, reported or priced cost; --live <model> asks a real model (costs money, except OpenRouter's free ones)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),

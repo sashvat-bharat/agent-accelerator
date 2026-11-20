@@ -112,6 +112,8 @@ Every answer is checked before you get it (right type, probabilities from 0 to 1
 | `ProviderError` | The provider failed, or sent back an unusable answer |
 | `TimeoutError`, `AbortError` | A request took longer than `timeoutMs`; `signal` aborted |
 
+A runnable walkthrough is in [`examples/19-decisions.ts`](../../examples/19-decisions.ts): offline by default (scripted providers, no key), `--live <model>` for a real call.
+
 ## Not included
 
 - OpenRouter's `box` question (a bounding box on an image, Jev models only) is not supported; it may be added if other providers adopt it.
