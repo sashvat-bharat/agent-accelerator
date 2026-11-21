@@ -61,6 +61,8 @@ export interface VideoModelInfo {
   frames: readonly VideoFrameRole[];
   /** The model can write audio with the video. Unset = not stated. */
   audio?: boolean;
+  /** The model always writes audio and has no switch for it (Google Omni): `audio: false` is dropped with a warning. */
+  audioAlways?: boolean;
   /** The model takes a `seed`. Unset = not stated. */
   seed?: boolean;
   /** Reference pictures and clips (guidance without fixing frames). `"unknown"` = the provider does not state it. */
@@ -103,6 +105,7 @@ const GOOGLE: readonly VideoModelInfo[] = [
     aspectRatios: ["16:9", "9:16"],
     frames: ["first_frame", "last_frame"],
     audio: true,
+    audioAlways: true,
     seed: true,
     references: {
       images: { max: 6 },

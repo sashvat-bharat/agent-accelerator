@@ -1214,6 +1214,25 @@ const night = await result.image.edit("Make it night"); // continues from the pi
 Every option is checked against what that model supports: a ratio, size tier, quality, format, thinking level or reference-image count it does not take is one `ValidationError` listing every problem, and a control the model does not have is dropped with a single `provider_warning`. `listImageModels()` shows what each model accepts and what it costs. Full guide: [Generating images](docs/guides/images.md).
 
 ---
+## Video generation
+
+`generateVideo` makes a clip with a supported video model: Google `gemini-omni-1.2-flash` and every video model OpenRouter lists. One stateless function, like `generateImage`:
+
+```ts
+import { generateVideo } from "agent-accelerator";
+
+const result = await generateVideo({
+  model: "google/gemini-omni-1.2-flash",
+  prompt: "A marble rolling fast on a chain reaction style track.",
+  duration: 6,
+  onProgress: (p) => console.log(p.status),
+});
+await result.video.save("marble.mp4");
+```
+
+Every option is checked against the model before anything is sent: lengths, tiers, ratios, first and last frames, reference pictures and clips (the length of an MP4 or MOV reference clip is read from its header and checked against the model's limit). Controls a model does not have are dropped with a warning; pictures are never silently dropped. A timeout or abort leaves the provider's job running, so the error carries its `jobId`. OpenRouter's models are read from its public list and cached in `<home>/catalog/`. Full guide: [Generating videos](docs/guides/videos.md).
+
+---
 ## Embeddings
 
 `generateEmbedding` turns text (and, on the models that read them, images, audio, video and PDF) into vectors for search, grouping and memory. Google (`gemini-embedding-2`, `gemini-embedding-001`), OpenAI (`text-embedding-3-small`, `-3-large`, `ada-002`) and every embedding model OpenRouter lists. A list in gives one vector per item out, in order, on every model:
