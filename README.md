@@ -1583,6 +1583,11 @@ bun run examples/19-decisions.ts [--live <decision model>]
 # offline by default (scripted providers, no key, no cost; its own demo home): three typed questions in one call and routing
 # on confidence, typed answers, the one-error-lists-everything validation, the same code on Google, OpenAI and OpenRouter,
 # a declined question as a refusal, reported or priced cost; --live <model> asks a real model (costs money, except OpenRouter's free ones)
+
+bun run examples/20-video.ts [--live <video model>]
+# offline by default (scripted providers, no key, no cost; its own demo home): make and save a clip, the one-error-lists-everything
+# validation (a too-long reference clip is caught from its MP4 header), video.edit, an OpenRouter job with progress, a timeout that
+# carries the job id and resumeVideo, reported or priced cost; --live <model> makes a real clip with the shortest length and lowest tier (costs money)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),

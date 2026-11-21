@@ -104,3 +104,5 @@ try {
 - A cost over `budget.maxCostUsd` after the video was made throws a `BudgetExceededError` with the finished clip on `error.partial.video`: it was paid for.
 
 Errors: `ConfigError` (unknown model, missing key), `ModelNotAllowedError`, `ValidationError`, `SecurityPolicyError` (a local path outside `fileAccess.roots`), `BudgetExceededError`, `TimeoutError`, `ProviderError`, `AbortError`.
+
+A runnable walkthrough is in [`examples/20-video.ts`](../../examples/20-video.ts): offline by default (scripted providers, no key, no cost), `--live <model>` makes a real clip with the shortest length and lowest tier the model lists (this costs money).
