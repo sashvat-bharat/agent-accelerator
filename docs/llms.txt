@@ -9,6 +9,7 @@
 - [Multi-agent and scheduling](guides/multi-agent.md): fixed and dynamic sub-agents, tracking, scheduled actions (DD:HH:MM)
 - [Data and media](guides/data-and-media.md): persistence/resume, images/audio/video/files, usage and cost, model catalog
 - [Generating images](guides/images.md): `generateImage`, the supported image models (`listImageModels`), options checked per model, results, `image.edit`, `imageTool`, errors
+- [Generating videos](guides/videos.md): `generateVideo`, the known video models (`listVideoModels`: Google `gemini-omni-1.2-flash` and OpenRouter's cached list), options checked per model (length, tier, ratio, frames, reference pictures and clips with MP4 length limits), polling and `onProgress`, `jobId` on timeouts, `video.edit` (Google interaction / OpenRouter `previous_job_id`), `resumeVideo`, `VideoResult`, errors
 - [Asking decision models](guides/decisions.md): `generateDecision`, typed yes/no (`noul`), `choice` and `score` questions in the providers' own shapes, probabilities and `confidence`, the known decision models (`listDecisionModels`), checks per model, OpenRouter's cached model list, errors
 - [Generating embeddings](guides/embeddings.md): `generateEmbedding`, the known embedding models (`listEmbeddingModels`), one `task` option for every model, options checked per model, `cosineSimilarity`, OpenRouter's cached model list, errors
 - [Safety and operations](guides/safety-and-ops.md): limits, budget, retry, onFailure, errors, telemetry, security, known limitations

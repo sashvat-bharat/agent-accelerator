@@ -53,7 +53,7 @@ export function addUsage(total: TokenUsage, u: TokenUsage): void {
     if (u[k] !== undefined) total[k] = (total[k] ?? 0) + (u[k] ?? 0);
   for (const [group, parts] of [
     ["inputDetails", ["audioTokens", "videoTokens", "imageTokens", "textTokens"]],
-    ["outputDetails", ["audioTokens", "imageTokens", "textTokens"]],
+    ["outputDetails", ["audioTokens", "imageTokens", "videoTokens", "textTokens"]],
   ] as const) {
     for (const part of parts) {
       const v = (u[group] as Record<string, number | undefined> | undefined)?.[part];

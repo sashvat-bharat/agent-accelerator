@@ -70,11 +70,13 @@ import {
 } from "./shared.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { googleGenerateImage } from "./google-image.ts";
+import { googleGenerateVideo } from "./google-video.ts";
 import { googleEmbed } from "./google-embedding.ts";
 import { googleDecide } from "./google-decision.ts";
 import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
 import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
+import type { ProviderVideoRequest, ProviderVideoResult } from "../types/video.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
@@ -1101,6 +1103,15 @@ export class GoogleInteractionsProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderImageResult> {
     return googleGenerateImage(cleanModelId(modelId), request, options);
+  }
+
+  // Makes one video with Gemini Omni (see google-video.ts); in: generateVideo, out: the video, words and usage.
+  generateVideo(
+    modelId: string,
+    request: ProviderVideoRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderVideoResult> {
+    return googleGenerateVideo(cleanModelId(modelId), request, options);
   }
 
   // Makes one vector per item with a Gemini embedding model (see google-embedding.ts); in: generateEmbedding, out: the vectors and usage.

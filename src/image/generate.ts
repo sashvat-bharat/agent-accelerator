@@ -15,7 +15,13 @@ import { applyCaptureRaw } from "../utils/raw-capture.ts";
 import { BudgetExceededError, ConfigError, ProviderError, ValidationError } from "../types/errors.ts";
 import { abortError, addUsage, bounded, providerOptionsFrom } from "../utils/provider-call.ts";
 import type { TokenUsage } from "../types/core.ts";
-import type { ImageEditOptions, ImageOptions, ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
+import type {
+  ImageEditOptions,
+  ImageInput,
+  ImageOptions,
+  ProviderImageRequest,
+  ProviderImageResult,
+} from "../types/image.ts";
 import { estimateImageCostUsd, resolveImageRequest } from "./request.ts";
 import { priceImageUsage, sumCosts } from "./pricing.ts";
 import { GeneratedImage, ImageResult, attachOrigin, originOf } from "./result.ts";
@@ -23,22 +29,23 @@ import { GeneratedImage, ImageResult, attachOrigin, originOf } from "./result.ts
 /** Default time one provider request may take (image models can think for a while). */
 const DEFAULT_TIMEOUT_MS = 300_000;
 
-// Reads every reference image: a picture the SDK made goes in as its bytes, anything else through the media normalizer (local paths must be inside `fileAccess.roots` when set); in: generateImage, out: the normalized media.
+// Reads one picture: one the SDK made goes in as its bytes, anything else through the media normalizer (a local path must be inside `fileAccess.roots` when set); in: generateImage and generateVideo, out: the normalized media.
+export async function readImageInput(input: ImageInput, fileAccess?: { roots?: string[] }): Promise<NormalizedMedia> {
+  if (input instanceof GeneratedImage)
+    return { mimeType: input.mimeType, base64Data: input.base64, dataUrl: input.dataUrl };
+  if (fileAccess?.roots && isLocalPathInput(input)) await assertPathAllowed(input, fileAccess.roots);
+  const media = await normalizeMediaInput(input);
+  if (!media.mimeType.startsWith("image/"))
+    throw new ValidationError(
+      `[Agent Accelerator] A reference image has the type "${media.mimeType}", which is not an image.`
+    );
+  return media;
+}
+
+// Reads every reference image; in: generateImage, out: the normalized media.
 async function readReferences(opts: ImageOptions): Promise<NormalizedMedia[]> {
   const out: NormalizedMedia[] = [];
-  for (const input of opts.images ?? []) {
-    if (input instanceof GeneratedImage) {
-      out.push({ mimeType: input.mimeType, base64Data: input.base64, dataUrl: input.dataUrl });
-      continue;
-    }
-    if (opts.fileAccess?.roots && isLocalPathInput(input)) await assertPathAllowed(input, opts.fileAccess.roots);
-    const media = await normalizeMediaInput(input);
-    if (!media.mimeType.startsWith("image/"))
-      throw new ValidationError(
-        `[Agent Accelerator] A reference image has the type "${media.mimeType}", which is not an image.`
-      );
-    out.push(media);
-  }
+  for (const input of opts.images ?? []) out.push(await readImageInput(input, opts.fileAccess));
   return out;
 }
 

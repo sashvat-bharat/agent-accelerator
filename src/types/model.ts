@@ -6,6 +6,7 @@ import type { Prompts } from "../prompts/prompts.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "./image.ts";
 import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "./embedding.ts";
 import type { ProviderDecisionRequest, ProviderDecisionResult } from "./decision.ts";
+import type { ProviderVideoRequest, ProviderVideoResult, ProviderVideoResumeRequest } from "./video.ts";
 
 // ---------------------------------------------------------------------------
 // Provider identity — battle-tested: matches models.dev provider keys
@@ -274,4 +275,16 @@ export interface Provider {
     request: ProviderDecisionRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderDecisionResult>;
+  /** Makes one video (a single request: for a provider that works in jobs, the adapter submits, polls until the job ends within `request.deadlineMs`, and downloads it). Only the adapters of providers with supported video models implement it; the request is already checked against the model's table entry. */
+  generateVideo?(
+    modelId: string,
+    request: ProviderVideoRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderVideoResult>;
+  /** Waits for a video job that already exists (one the caller's earlier call left running) and downloads it. Only providers that work in jobs implement it. */
+  resumeVideo?(
+    modelId: string,
+    request: ProviderVideoResumeRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderVideoResult>;
 }

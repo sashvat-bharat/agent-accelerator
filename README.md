@@ -1214,6 +1214,25 @@ const night = await result.image.edit("Make it night"); // continues from the pi
 Every option is checked against what that model supports: a ratio, size tier, quality, format, thinking level or reference-image count it does not take is one `ValidationError` listing every problem, and a control the model does not have is dropped with a single `provider_warning`. `listImageModels()` shows what each model accepts and what it costs. Full guide: [Generating images](docs/guides/images.md).
 
 ---
+## Video generation
+
+`generateVideo` makes a clip with a supported video model: Google `gemini-omni-1.2-flash` and every video model OpenRouter lists. One stateless function, like `generateImage`:
+
+```ts
+import { generateVideo } from "agent-accelerator";
+
+const result = await generateVideo({
+  model: "google/gemini-omni-1.2-flash",
+  prompt: "A marble rolling fast on a chain reaction style track.",
+  duration: 6,
+  onProgress: (p) => console.log(p.status),
+});
+await result.video.save("marble.mp4");
+```
+
+Every option is checked against the model before anything is sent: lengths, tiers, ratios, first and last frames, reference pictures and clips (the length of an MP4 or MOV reference clip is read from its header and checked against the model's limit). Controls a model does not have are dropped with a warning; pictures are never silently dropped. A timeout or abort leaves the provider's job running, so the error carries its `jobId` (`resumeVideo({ model, jobId })` waits for it). `result.video.edit("Make it night")` changes a clip on the model that made it. OpenRouter's models are read from its public list and cached in `<home>/catalog/`. Full guide: [Generating videos](docs/guides/videos.md).
+
+---
 ## Embeddings
 
 `generateEmbedding` turns text (and, on the models that read them, images, audio, video and PDF) into vectors for search, grouping and memory. Google (`gemini-embedding-2`, `gemini-embedding-001`), OpenAI (`text-embedding-3-small`, `-3-large`, `ada-002`) and every embedding model OpenRouter lists. A list in gives one vector per item out, in order, on every model:
@@ -1564,6 +1583,11 @@ bun run examples/19-decisions.ts [--live <decision model>]
 # offline by default (scripted providers, no key, no cost; its own demo home): three typed questions in one call and routing
 # on confidence, typed answers, the one-error-lists-everything validation, the same code on Google, OpenAI and OpenRouter,
 # a declined question as a refusal, reported or priced cost; --live <model> asks a real model (costs money, except OpenRouter's free ones)
+
+bun run examples/20-video.ts [--live <video model>]
+# offline by default (scripted providers, no key, no cost; its own demo home): make and save a clip, the one-error-lists-everything
+# validation (a too-long reference clip is caught from its MP4 header), video.edit, an OpenRouter job with progress, a timeout that
+# carries the job id and resumeVideo, reported or priced cost; --live <model> makes a real clip with the shortest length and lowest tier (costs money)
 ```
 
 Every example ends its `run()` with `.catch(fail)` (`examples/_shared.ts`),

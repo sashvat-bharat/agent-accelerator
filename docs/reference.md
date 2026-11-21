@@ -134,6 +134,10 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `cod
 
 `generateImage(options)` returns an `ImageResult`; `listImageModels(provider?)` and `getImageModel(model)` describe the supported image models; `image.edit(prompt, options?)` changes a picture; `imageTool(options)` is a tool that lets a text agent make pictures. Options, result fields and errors: [Generating images](guides/images.md).
 
+## Video generation
+
+`generateVideo(options)` returns a `VideoResult` (`video`, `text`, `usage`, `model`, `provider`, `finishReason`, `responseId`, `jobId`, `raw`, `durationMs`); `result.video` is a `GeneratedVideo` (`bytes`, `mimeType`, `base64`, `dataUrl`, `extension`, `durationSeconds`, `save(file)`, `toPart()`); `listVideoModels(provider?)` and `getVideoModel(model)` describe the known video models; `refreshOpenRouterVideoModels()` reads OpenRouter's model list now; `video.edit(prompt, options?)` changes a clip on the model that made it; `resumeVideo({ model, jobId })` waits for an OpenRouter job a timeout or abort left running. A timeout or abort leaves the provider's job running: the error carries `jobId`. Options, models, checks and errors: [Generating videos](guides/videos.md).
+
 ## Embeddings
 
 `generateEmbedding(options)` returns an `EmbeddingResult` (`vectors`, `vector`, `dimensions`, `usage`, `model`, `provider`, `requests`, `raw`); `listEmbeddingModels(provider?)` and `getEmbeddingModel(model)` describe the known embedding models; `refreshOpenRouterEmbeddingModels()` reads OpenRouter's model list now; `cosineSimilarity(a, b)` compares two vectors; `EMBEDDING_TASKS` lists the values of `task`. Options, models, checks and errors: [Generating embeddings](guides/embeddings.md).

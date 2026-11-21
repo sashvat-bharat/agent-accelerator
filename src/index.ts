@@ -163,6 +163,28 @@ export type {
   ProviderDecisionAnswer,
   ProviderDecisionResult,
 } from "./types/decision.ts";
+export { listVideoModels, getVideoModel } from "./models/video-models.ts";
+export type {
+  VideoModelInfo,
+  VideoTokenPrices,
+  VideoClipReferences,
+  VideoFrameRole,
+} from "./models/video-models.ts";
+export { refreshOpenRouterVideoModels } from "./models/openrouter-videos.ts";
+export type { RefreshOpenRouterVideosOptions } from "./models/openrouter-videos.ts";
+export { generateVideo } from "./video/generate.ts";
+export { resumeVideo } from "./video/resume.ts";
+export { VideoResult, GeneratedVideo } from "./video/result.ts";
+export type {
+  VideoOptions,
+  VideoInput,
+  VideoProgress,
+  ProviderVideoRequest,
+  ProviderVideoResult,
+  ProviderVideoResumeRequest,
+  VideoEditOptions,
+  ResumeVideoOptions,
+} from "./types/video.ts";
 export { resolveEffectiveThinking } from "./agent/options.ts";
 export { withRetries, isTransientError } from "./utils/retry.ts";
 export { toConciseProviderError, assertModalitiesSupported } from "./utils/errors.ts";
