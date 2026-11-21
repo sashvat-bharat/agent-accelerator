@@ -1,0 +1,273 @@
+/**
+ * OpenRouter video generation (`POST {baseUrl}/videos`, then `GET {baseUrl}/videos/{id}` until the job ends, then the file). A video
+ * is a job here: the submit answers 202 with a job id at once, the job runs for seconds to minutes (statuses `pending`,
+ * `in_progress`, then `completed`, `failed`, `cancelled` or `expired`), and the finished job lists the file(s). The request arrives
+ * already checked against the model's list entry (`video/request.ts`); this file maps it to the wire (`duration` with `-1` for "the
+ * provider chooses", `resolution`, `aspect_ratio`, `size`, `frame_images` with a `frame_type` per picture, `input_references` for
+ * reference pictures and clips, `generate_audio`, `seed`), adds the developer's provider routing and `user` from the `openrouter`
+ * setting, polls with the shared `pollJob` (deadline, abort, `onProgress`, the job id on every error) and downloads the first file with
+ * the key (the key is sent to OpenRouter's own host only). OpenRouter reports the job's USD `cost`, which is the price. A job that
+ * is still running when the call ends is NOT cancelled (OpenRouter has no cancel): the error carries `jobId`.
+ * Mock-verified only: written from OpenRouter's video guide and API reference, no paid key was used.
+ */
+import type { ProviderRequestOptions } from "../types/model.ts";
+import type { ProviderVideoRequest, ProviderVideoResult } from "../types/video.ts";
+import type { TokenUsage } from "../types/core.ts";
+import { openRouterSetting } from "../config/settings.ts";
+import { sniffMimeType } from "../utils/media.ts";
+import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
+import { toConciseProviderError } from "../utils/errors.ts";
+import { withRetries } from "../utils/retry.ts";
+import { ConfigError, TimeoutError, isAbortError } from "../types/errors.ts";
+import { pollJob } from "../video/poll.ts";
+import {
+  OPENROUTER_ROUTING_KEYS,
+  combinedSignal,
+  headersToRecord,
+  redactedHeaders,
+  resolveProviderApiKey,
+  resolveProviderBaseUrl,
+  retryOptionsFrom,
+  timeoutFor,
+} from "./shared.ts";
+import { throwOpenRouterHttpError } from "./openrouter-image.ts";
+
+const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
+/** The wait for a job when the call sets no deadline. */
+const NO_DEADLINE_MS = 24 * 60 * 60 * 1000;
+
+interface JobReply {
+  id?: string;
+  status?: string;
+  status_detail?: string;
+  progress?: number;
+  urls?: string[];
+  unsigned_urls?: string[];
+  usage?: { cost?: number; is_byok?: boolean };
+  error?: string;
+}
+
+// The job's USD cost as usage (the tokens of a video job are not reported); in: the finished job, out: TokenUsage.
+function mapUsage(raw: JobReply["usage"]): TokenUsage {
+  const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  if (typeof raw?.cost === "number" && raw.cost >= 0) usage.cost = { totalCost: raw.cost };
+  return usage;
+}
+
+// One picture as the `image_url` object OpenRouter takes; in: buildOpenRouterVideoBody, out: the object.
+const imageUrl = (dataUrl: string) => ({ type: "image_url", image_url: { url: dataUrl } });
+
+/** The `POST /videos` body for one request, without routing (exported for the tests). */
+export function buildOpenRouterVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
+  const frames = [
+    ...(request.firstFrame ? [{ ...imageUrl(request.firstFrame.dataUrl), frame_type: "first_frame" }] : []),
+    ...(request.lastFrame ? [{ ...imageUrl(request.lastFrame.dataUrl), frame_type: "last_frame" }] : []),
+  ];
+  const references = [
+    ...request.referenceImages.map((i) => imageUrl(i.dataUrl)),
+    ...request.referenceVideos.map((c) => ({ type: "video_url", video_url: { url: c.media.dataUrl } })),
+  ];
+  return {
+    model: modelId,
+    ...(request.prompt ? { prompt: request.prompt } : {}),
+    ...(request.durationAuto
+      ? { duration: -1 }
+      : request.durationSeconds !== undefined
+        ? { duration: request.durationSeconds }
+        : {}),
+    ...(request.resolution ? { resolution: request.resolution } : {}),
+    ...(request.aspectRatio ? { aspect_ratio: request.aspectRatio } : {}),
+    ...(request.size ? { size: request.size } : {}),
+    ...(frames.length > 0 ? { frame_images: frames } : {}),
+    ...(references.length > 0 ? { input_references: references } : {}),
+    ...(request.audio !== undefined ? { generate_audio: request.audio } : {}),
+    ...(request.seed !== undefined ? { seed: request.seed } : {}),
+  };
+}
+
+/** Makes one video with an OpenRouter video model: submits the job, polls it to the end and downloads the file. */
+export async function openrouterGenerateVideo(
+  modelId: string,
+  request: ProviderVideoRequest,
+  options?: ProviderRequestOptions
+): Promise<ProviderVideoResult> {
+  const started = Date.now();
+  const apiKey = resolveProviderApiKey("openrouter", options);
+  if (!apiKey)
+    throw new ConfigError("[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey.");
+  const baseUrl = resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options);
+  const url = `${baseUrl}/videos`;
+
+  // Provider routing and `user` come from the developer's `openrouter` setting, exactly as for chat.
+  const setting = openRouterSetting();
+  const routing: Record<string, unknown> = {};
+  for (const key of OPENROUTER_ROUTING_KEYS) if (setting[key] !== undefined) routing[key] = setting[key];
+  const body: Record<string, unknown> = {
+    ...buildOpenRouterVideoBody(modelId, request),
+    ...(Object.keys(routing).length > 0 ? { provider: routing } : {}),
+    ...(typeof setting["user"] === "string" ? { user: setting["user"] } : {}),
+  };
+  const headers = buildSessionHeaders("openrouter", options?.headers, undefined);
+  setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
+  if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
+  const rawRequest = {
+    url,
+    method: "POST",
+    headers: redactedHeaders({ ...headers, Authorization: "[REDACTED]" }),
+    body,
+  };
+  const doFetch = options?.fetch ?? fetch;
+  const timeoutMs = timeoutFor(options);
+  const retry = { ...retryOptionsFrom(options), signal: options?.signal, label: { providerId: "openrouter", modelId } };
+
+  // One HTTP call under the request timeout (a timer that fires is a TimeoutError, the caller's abort stays an AbortError); in: submit, poll and download, out: the reply.
+  const call = async (target: string, init: RequestInit, what: string): Promise<Response> => {
+    const { signal, cleanup } = combinedSignal(options?.signal, timeoutMs);
+    try {
+      return await doFetch(target, { ...init, signal });
+    } catch (err) {
+      if (isAbortError(err) && !options?.signal?.aborted && timeoutMs !== undefined)
+        throw new TimeoutError(`[Agent Accelerator] ${what} timed out after ${timeoutMs} ms.`);
+      throw err;
+    } finally {
+      cleanup();
+    }
+  };
+  // A JSON reply, or a thrown concise error for a non-2xx status or a body that is not JSON; in: submit and poll, out: the parsed reply.
+  const jsonCall = async (
+    target: string,
+    init: RequestInit,
+    what: string
+  ): Promise<{ reply: JobReply; res: Response }> => {
+    const res = await call(target, init, what);
+    const text = await res.text();
+    throwOpenRouterHttpError(res.status, target, text, modelId, headersToRecord(res.headers), "video");
+    try {
+      return { reply: JSON.parse(text) as JobReply, res };
+    } catch {
+      throw toConciseProviderError(
+        Object.assign(new Error("Invalid JSON response from OpenRouter Videos API"), {
+          statusCode: res.status,
+          responseBody: text.slice(0, 500),
+          url: target,
+        }),
+        "openrouter",
+        modelId
+      );
+    }
+  };
+
+  const submitted = await withRetries(
+    () => jsonCall(url, { method: "POST", headers, body: JSON.stringify(body) }, "The OpenRouter video request"),
+    retry
+  );
+  const jobId = submitted.reply.id;
+  if (!jobId)
+    throw toConciseProviderError(
+      new Error("OpenRouter accepted the video request but sent no job id"),
+      "openrouter",
+      modelId
+    );
+
+  // Ask how far the job is until it ends; a poll that fails for a transient reason is retried, any other end of the job is an error.
+  const getHeaders = { ...headers };
+  delete getHeaders["Content-Type"];
+  const jobUrl = `${baseUrl}/videos/${encodeURIComponent(jobId)}`;
+  let last = submitted;
+  const deadlineMs = Number.isFinite(request.deadlineMs)
+    ? Math.max(0, request.deadlineMs - (Date.now() - started))
+    : NO_DEADLINE_MS;
+  const done = await pollJob<JobReply>({
+    jobId,
+    what: "OpenRouter video job",
+    intervalMs: request.pollIntervalMs,
+    deadlineMs,
+    signal: options?.signal ?? new AbortController().signal,
+    ...(request.onProgress ? { onProgress: request.onProgress } : {}),
+    poll: async () => {
+      last = await withRetries(
+        () => jsonCall(jobUrl, { method: "GET", headers: getHeaders }, "The OpenRouter video status check"),
+        retry
+      );
+      const job = last.reply;
+      const status = job.status ?? "pending";
+      if (status === "completed") return { done: true, value: job };
+      if (status === "failed" || status === "cancelled" || status === "expired")
+        throw toConciseProviderError(
+          new Error(
+            `OpenRouter video job ${status}${job.error ? `: ${job.error}` : job.status_detail ? `: ${job.status_detail}` : ""}`
+          ),
+          "openrouter",
+          modelId
+        );
+      return { done: false, status, ...(typeof job.progress === "number" ? { progress: job.progress } : {}) };
+    },
+  });
+
+  // The file: the key-protected link (the key goes only to OpenRouter's own host), else the signed link, which needs no key.
+  const origin = new URL(baseUrl).origin;
+  const fileTarget = done.unsigned_urls?.[0]
+    ? { url: new URL(done.unsigned_urls[0], origin).toString(), signed: false }
+    : done.urls?.[0]
+      ? { url: done.urls[0], signed: true }
+      : undefined;
+  if (!fileTarget)
+    throw Object.assign(
+      toConciseProviderError(new Error("OpenRouter finished the video job but listed no file"), "openrouter", modelId),
+      { jobId }
+    );
+  const sendKey = !fileTarget.signed && new URL(fileTarget.url).origin === origin;
+  const fileHeaders = sendKey ? getHeaders : redactedNone(getHeaders);
+  const file = await withRetries(async () => {
+    const res = await call(fileTarget.url, { method: "GET", headers: fileHeaders }, "The OpenRouter video download");
+    if (res.status < 200 || res.status >= 300)
+      throwOpenRouterHttpError(
+        res.status,
+        fileTarget.url,
+        await res.text(),
+        modelId,
+        headersToRecord(res.headers),
+        "video"
+      );
+    return { bytes: new Uint8Array(await res.arrayBuffer()), type: res.headers.get("content-type") };
+  }, retry).catch((err: unknown) => {
+    throw withJob(err, jobId);
+  });
+  const mimeType =
+    file.type && file.type.startsWith("video/")
+      ? file.type.split(";")[0]!.trim()
+      : (sniffMimeType(file.bytes) ?? "video/mp4");
+
+  return {
+    video: { bytes: file.bytes, mimeType },
+    usage: mapUsage(done.usage),
+    ...(file.bytes.byteLength > 0 ? { finishReason: "stop" } : {}),
+    jobId,
+    model: modelId,
+    provider: "openrouter",
+    raw: {
+      request: rawRequest,
+      response: {
+        status: last.res.status,
+        statusText: last.res.statusText,
+        headers: headersToRecord(last.res.headers),
+        body: last.reply,
+      },
+    },
+    durationMs: Date.now() - started,
+  };
+}
+
+// The headers without any credential, for a download from a host that is not OpenRouter's; in: the file step, out: a copy.
+function redactedNone(h: Record<string, string>): Record<string, string> {
+  const out = { ...h };
+  for (const k of Object.keys(out)) if (k.toLowerCase() === "authorization") delete out[k];
+  return out;
+}
+
+// Puts the job id on an error (not enumerable) so a failed download can be found at the provider; in: the download step, out: the same error.
+function withJob(err: unknown, jobId: string): unknown {
+  if (err && typeof err === "object" && (err as { jobId?: unknown }).jobId === undefined)
+    Object.defineProperty(err, "jobId", { value: jobId, enumerable: false, configurable: true, writable: true });
+  return err;
+}
