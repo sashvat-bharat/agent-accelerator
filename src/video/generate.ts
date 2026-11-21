@@ -15,7 +15,7 @@ import { normalizeMediaInput } from "../utils/media.ts";
 import { mp4DurationSeconds } from "../utils/mp4.ts";
 import { base64ToBytes } from "../utils/base64.ts";
 import { applyCaptureRaw } from "../utils/raw-capture.ts";
-import { abortError, bounded, providerOptionsFrom } from "../utils/provider-call.ts";
+import { abortError, providerOptionsFrom } from "../utils/provider-call.ts";
 import { BudgetExceededError, ConfigError, ProviderError, ValidationError } from "../types/errors.ts";
 import { readImageInput } from "../image/generate.ts";
 import type { ProviderVideoRequest, ReadClip, VideoInput, VideoOptions } from "../types/video.ts";
@@ -29,6 +29,27 @@ const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_POLL_MS = 10_000;
 /** A clip may be this much longer than the limit before it counts as over it (an encoder rounds a "3 second" clip up a little). */
 const SECONDS_TOLERANCE = 0.25;
+
+/** How long an adapter has to end by itself after an abort before the call is cut off. */
+const ABORT_GRACE_MS = 250;
+
+// Runs the adapter; once the signal aborts it waits ABORT_GRACE_MS for the adapter's own error (which holds the job id), then rejects with an AbortError; in: generateVideo, out: the adapter's result.
+function withAbortGrace<T>(task: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal, "Video generation aborted"));
+  return new Promise<T>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      timer = setTimeout(() => reject(abortError(signal, "Video generation aborted")), ABORT_GRACE_MS);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    task()
+      .then(resolve, reject)
+      .finally(() => {
+        if (timer) clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+      });
+  });
+}
 
 // Reads one clip: a video the SDK made goes in as its bytes, anything else through the media normalizer (a local path must be inside `fileAccess.roots` when set); its length is read from the file when it is an MP4 or MOV; in: generateVideo, out: the media and its seconds.
 async function readClip(input: VideoInput, fileAccess?: { roots?: string[] }): Promise<ReadClip> {
@@ -147,12 +168,9 @@ export async function generateVideo(opts: VideoOptions): Promise<VideoResult> {
     ...(request.seed !== undefined ? { seed: request.seed } : {}),
   };
   const started = Date.now();
-  // The deadline is enforced by the adapter (it knows the job id); the race here only adds the abort, even when an adapter ignores its signal.
+  // The deadline is enforced by the adapter (it knows the job id). An abort goes to the adapter first so its error can carry the job id; only an adapter that ignores its signal is cut off, after a short grace.
   const res = await withProviderSlot(def.provider, signal, () =>
-    bounded(() => provider.generateVideo!(def.id, body, { ...providerOptions, signal }), 0, signal, {
-      timeout: "Video request",
-      aborted: "Video generation aborted",
-    })
+    withAbortGrace(() => provider.generateVideo!(def.id, body, { ...providerOptions, signal }), signal)
   );
   if (!res.video?.bytes || res.video.bytes.byteLength === 0) {
     const why = (res.text || res.finishReason)?.replace(/[.\s]+$/, "");

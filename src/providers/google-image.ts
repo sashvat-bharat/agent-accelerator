@@ -30,7 +30,7 @@ import {
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** Image types Google reads as input (and the common spelling it is not given as). */
-const INPUT_MIME = [
+export const GOOGLE_IMAGE_INPUT_MIME = [
   "image/png",
   "image/jpeg",
   "image/webp",
@@ -40,7 +40,7 @@ const INPUT_MIME = [
   "image/bmp",
   "image/tiff",
 ];
-const MIME_ALIASES: Record<string, string> = { "image/jpg": "image/jpeg" };
+export const GOOGLE_IMAGE_MIME_ALIASES: Record<string, string> = { "image/jpg": "image/jpeg" };
 const FORMAT_MIME: Record<string, string> = { png: "image/png", jpeg: "image/jpeg" };
 
 type Modality = { modality?: string; tokens?: number };
@@ -134,10 +134,10 @@ export async function googleGenerateImage(
 
   const input: Array<Record<string, string>> = [{ type: "text", text: request.prompt }];
   for (const image of request.images) {
-    const mime = MIME_ALIASES[image.mimeType] ?? image.mimeType;
-    if (!INPUT_MIME.includes(mime))
+    const mime = GOOGLE_IMAGE_MIME_ALIASES[image.mimeType] ?? image.mimeType;
+    if (!GOOGLE_IMAGE_INPUT_MIME.includes(mime))
       throw new ValidationError(
-        `[Agent Accelerator] Google does not accept the reference image type "${image.mimeType}" (supported: ${INPUT_MIME.join(", ")}). Convert the picture first.`
+        `[Agent Accelerator] Google does not accept the reference image type "${image.mimeType}" (supported: ${GOOGLE_IMAGE_INPUT_MIME.join(", ")}). Convert the picture first.`
       );
     input.push({ type: "image", data: image.base64Data, mime_type: mime });
   }
