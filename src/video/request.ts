@@ -78,7 +78,8 @@ export function resolveVideoRequest(
     else if (!def.durations.includes(d as number))
       problems.push(`duration: ${d} s is not available on ${def.model}. It makes: ${list(def.durations)} seconds.`);
     else durationSeconds = d as number;
-  } else if (def.defaultDuration !== undefined) durationSeconds = def.defaultDuration;
+  } else if (def.defaultDuration !== undefined && opts.continueFrom === undefined)
+    durationSeconds = def.defaultDuration; // an edit keeps the clip's own length unless asked
 
   // Tier, ratio and exact size.
   let resolution = opts.resolution;
@@ -111,6 +112,18 @@ export function resolveVideoRequest(
     else if (!def.sizes.includes(size))
       problems.push(`size: "${size}" is not available on ${def.model}. It makes: ${list(def.sizes)}.`);
   }
+
+  // A continued clip has its pictures already: new ones cannot be added.
+  if (
+    opts.continueFrom !== undefined &&
+    (hasFirstFrame ||
+      hasLastFrame ||
+      (opts.referenceImages?.length ?? 0) > 0 ||
+      (opts.referenceVideos?.length ?? 0) > 0)
+  )
+    problems.push(
+      "continueFrom: an edit changes the clip with the prompt only; firstFrame, lastFrame, referenceImages and referenceVideos cannot be added to it."
+    );
 
   // Pictures that fix a frame.
   if (hasFirstFrame && !def.frames.includes("first_frame"))

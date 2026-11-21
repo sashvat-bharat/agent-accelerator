@@ -48,9 +48,39 @@ Only `model` is required, and `prompt` unless you give a `firstFrame`.
 | `signal`, `timeoutMs`, `pollIntervalMs`, `retry` | Abort; the whole call including polling (default 600 000 ms, `0` or `Infinity` turns it off); how often a job is polled (default 10 000 ms); retries of transient failures. |
 | `budget` | `{ maxCostUsd }`: Google is estimated from the table before anything is sent; any call is checked again against the reported cost. An unknown price counts as 0, never a guess. |
 | `fileAccess` | `{ roots }`: local pictures and clips must be inside these folders. |
+| `continueFrom` | A clip an earlier call made, to change it (see [Editing a clip](#editing-a-clip)). `video.edit(prompt)` sets it for you. |
 | `apiKey`, `baseUrl`, `headers`, `env`, `fetch`, `captureRaw` | As everywhere in the SDK. |
 
 Values outside a model's list (a length, tier, ratio, size, too many pictures or clips, a clip that is too long) are one `ValidationError` that lists every problem; controls the model does not have at all are dropped with a single `provider_warning`.
+
+## Editing a clip
+
+`result.video.edit(prompt, options?)` changes a clip with a follow-up prompt, on the model that made it and with the same connection settings (key, endpoint, headers, `fetch`, retry, timeout, poll interval). Google continues the stored interaction; OpenRouter continues the job (`previous_job_id`). Each edit returns a new `VideoResult` whose clip can be edited again.
+
+```ts
+const first = await generateVideo({ model: "google/gemini-omni-1.2-flash", prompt: "A violinist on a stage", duration: 6 });
+const second = await first.video.edit("Make the violin invisible.");
+await second.video.save("edited.mp4");
+```
+
+An edit takes the prompt only: pictures and clips cannot be added to it, and a length, tier or ratio is sent only when you ask again (the edit otherwise keeps the clip's own length). A clip can only be edited by the model that made it, and only when it came from `generateVideo` (or `resumeVideo`): anything else is a `ValidationError`. Google keeps the interaction for later edits only while it is stored (the SDK never turns storing off), and Google's own retention limits apply.
+
+## Resuming a job
+
+A timeout or an abort does not cancel a job at the provider. For OpenRouter the error carries `jobId`, and `resumeVideo` asks for that job again, polls it to the end and downloads the file, without submitting (or paying for) a new one:
+
+```ts
+try {
+  await generateVideo({ model: "openrouter/google/veo-3.1", prompt: "A marble", duration: 8, timeoutMs: 120_000 });
+} catch (err) {
+  if (err instanceof TimeoutError && err.jobId) {
+    const result = await resumeVideo({ model: "openrouter/google/veo-3.1", jobId: err.jobId });
+    await result.video.save("marble.mp4");
+  }
+}
+```
+
+`resumeVideo` takes `model`, `jobId`, the connection options, `signal`, `timeoutMs`, `pollIntervalMs`, `onProgress`, `budget` and `captureRaw`. Google answers in one request, so it has no job to resume (a `ConfigError`).
 
 ## The result
 

@@ -14,14 +14,14 @@ import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { mp4DurationSeconds } from "../utils/mp4.ts";
 import { base64ToBytes } from "../utils/base64.ts";
-import { applyCaptureRaw } from "../utils/raw-capture.ts";
 import { abortError, providerOptionsFrom } from "../utils/provider-call.ts";
-import { BudgetExceededError, ConfigError, ProviderError, ValidationError } from "../types/errors.ts";
+import { BudgetExceededError, ConfigError, ValidationError } from "../types/errors.ts";
 import { readImageInput } from "../image/generate.ts";
 import type { ProviderVideoRequest, ReadClip, VideoInput, VideoOptions } from "../types/video.ts";
-import { estimateVideoCostUsd, priceVideoUsage } from "./pricing.ts";
+import { estimateVideoCostUsd } from "./pricing.ts";
 import { resolveVideoRequest } from "./request.ts";
-import { GeneratedVideo, VideoResult } from "./result.ts";
+import { finishVideo, inheritFrom } from "./finish.ts";
+import { GeneratedVideo, type VideoResult, videoOriginOf } from "./result.ts";
 
 /** Default time the whole call may take, polling included (a clip takes seconds to minutes). */
 const DEFAULT_TIMEOUT_MS = 600_000;
@@ -89,6 +89,26 @@ export async function generateVideo(opts: VideoOptions): Promise<VideoResult> {
   const def = getVideoModel(modelText);
   if (!def) throw new ConfigError(`[Agent Accelerator] ${unsupportedVideoModelReason(modelText) ?? "No model given."}`);
   assertModelAllowed(def.provider, def.id);
+  // Continuing a clip: only on the model that made it, from the provider's own id of that call.
+  let previousId: string | undefined;
+  if (opts.continueFrom !== undefined) {
+    if (!(opts.continueFrom instanceof GeneratedVideo))
+      throw new ValidationError("[Agent Accelerator] continueFrom must be a clip from generateVideo.");
+    const origin = videoOriginOf(opts.continueFrom);
+    if (!origin)
+      throw new ValidationError(
+        "[Agent Accelerator] This clip was not made by generateVideo, so there is nothing to continue from."
+      );
+    if (origin.model !== def.model)
+      throw new ValidationError(
+        `[Agent Accelerator] A clip can only be edited by the model that made it (${origin.model}); this call asked for ${def.model}.`
+      );
+    if (!origin.chainId)
+      throw new ValidationError(
+        `[Agent Accelerator] ${def.model} did not return an id for this clip, so it cannot be continued.`
+      );
+    previousId = origin.chainId;
+  }
   const { request, warnings } = resolveVideoRequest(opts, def);
   for (const w of warnings)
     emitProviderWarning({
@@ -155,6 +175,7 @@ export async function generateVideo(opts: VideoOptions): Promise<VideoResult> {
     referenceVideos,
     deadlineMs,
     pollIntervalMs: pollMs,
+    ...(previousId ? { previousId } : {}),
     ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
     ...(request.prompt ? { prompt: request.prompt } : {}),
     ...(request.durationSeconds !== undefined ? { durationSeconds: request.durationSeconds } : {}),
@@ -172,37 +193,5 @@ export async function generateVideo(opts: VideoOptions): Promise<VideoResult> {
   const res = await withProviderSlot(def.provider, signal, () =>
     withAbortGrace(() => provider.generateVideo!(def.id, body, { ...providerOptions, signal }), signal)
   );
-  if (!res.video?.bytes || res.video.bytes.byteLength === 0) {
-    const why = (res.text || res.finishReason)?.replace(/[.\s]+$/, "");
-    throw new ProviderError(`[${def.model}] returned no video${why ? `: ${why}` : ""}.`, {
-      provider: def.provider,
-      model: def.id,
-      retryable: false,
-    });
-  }
-  // The provider's own cost wins; else the table prices the reported tokens; else it stays unknown (and counts as 0 for the budget).
-  let usage = res.usage;
-  if (usage.cost?.totalCost === undefined) {
-    const cost = priceVideoUsage(def, usage);
-    if (cost) usage = { ...usage, cost };
-  }
-  const video = new GeneratedVideo(res.video.bytes, res.video.mimeType || "video/mp4");
-  const spent = usage.cost?.totalCost ?? 0;
-  if (maxCost !== undefined && spent > maxCost)
-    throw Object.assign(
-      new BudgetExceededError(`[Agent Accelerator] Cost $${spent.toFixed(4)} is above budget.maxCostUsd $${maxCost}.`),
-      { partial: { video, usage }, ...(res.jobId ? { jobId: res.jobId } : {}) }
-    );
-  return new VideoResult({
-    video,
-    ...(res.text ? { text: res.text } : {}),
-    usage,
-    model: def.id,
-    provider: def.provider,
-    ...(res.finishReason ? { finishReason: res.finishReason } : {}),
-    ...(res.responseId ? { responseId: res.responseId } : {}),
-    ...(res.jobId ? { jobId: res.jobId } : {}),
-    raw: applyCaptureRaw(res.raw, opts.captureRaw) ?? res.raw,
-    durationMs: Date.now() - started,
-  });
+  return finishVideo({ def, res, maxCost, captureRaw: opts.captureRaw, inherit: inheritFrom(opts), started });
 }

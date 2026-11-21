@@ -173,6 +173,7 @@ export type {
 export { refreshOpenRouterVideoModels } from "./models/openrouter-videos.ts";
 export type { RefreshOpenRouterVideosOptions } from "./models/openrouter-videos.ts";
 export { generateVideo } from "./video/generate.ts";
+export { resumeVideo } from "./video/resume.ts";
 export { VideoResult, GeneratedVideo } from "./video/result.ts";
 export type {
   VideoOptions,
@@ -180,6 +181,9 @@ export type {
   VideoProgress,
   ProviderVideoRequest,
   ProviderVideoResult,
+  ProviderVideoResumeRequest,
+  VideoEditOptions,
+  ResumeVideoOptions,
 } from "./types/video.ts";
 export { resolveEffectiveThinking } from "./agent/options.ts";
 export { withRetries, isTransientError } from "./utils/retry.ts";

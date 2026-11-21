@@ -44,8 +44,8 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
 import { openRouterSetting } from "../config/settings.ts";
 import { openrouterGenerateImage } from "./openrouter-image.ts";
-import { openrouterGenerateVideo } from "./openrouter-video.ts";
-import type { ProviderVideoRequest, ProviderVideoResult } from "../types/video.ts";
+import { openrouterGenerateVideo, openrouterResumeVideo } from "./openrouter-video.ts";
+import type { ProviderVideoRequest, ProviderVideoResult, ProviderVideoResumeRequest } from "../types/video.ts";
 import { openrouterEmbed } from "./openrouter-embedding.ts";
 import { openrouterDecide } from "./openrouter-decision.ts";
 import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
@@ -593,6 +593,15 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     options?: ProviderRequestOptions
   ): Promise<ProviderVideoResult> {
     return openrouterGenerateVideo(cleanModelId(modelId), request, options);
+  }
+
+  // Waits for a video job that already exists (see openrouter-video.ts); in: resumeVideo, out: the video and its cost.
+  resumeVideo(
+    modelId: string,
+    request: ProviderVideoResumeRequest,
+    options?: ProviderRequestOptions
+  ): Promise<ProviderVideoResult> {
+    return openrouterResumeVideo(cleanModelId(modelId), request, options);
   }
 
   // Makes one vector per item with an embedding model through OpenRouter's Embeddings API (see openrouter-embedding.ts); in: generateEmbedding, out: the vectors and usage.

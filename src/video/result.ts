@@ -7,7 +7,8 @@ import { bytesToBase64 } from "../utils/base64.ts";
 import { writeFileDurable } from "../utils/durable.ts";
 import { mp4DurationSeconds } from "../utils/mp4.ts";
 import type { VideoPart } from "../types/message.ts";
-import type { VideoResultData } from "../types/video.ts";
+import type { VideoEditOptions, VideoOptions, VideoResultData } from "../types/video.ts";
+import { ConfigError } from "../types/errors.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { ProviderId, ProviderRawData } from "../types/model.ts";
 
@@ -17,6 +18,30 @@ const EXTENSION: Record<string, string> = {
   "video/webm": ".webm",
   "video/mpeg": ".mpeg",
 };
+
+/** What a clip remembers about the call that made it, so `edit()` can go on from it. Kept out of the object (never in JSON or logs). */
+interface Origin {
+  /** `provider/model` of the call. */
+  model: string;
+  /** The provider's own id of the call (Google: the interaction; OpenRouter: the job). A later edit on the same model continues from it. */
+  chainId?: string;
+  /** The connection settings an edit reuses; shape options, the signal and the budget are not carried over. */
+  inherit: Pick<
+    VideoOptions,
+    "apiKey" | "baseUrl" | "headers" | "env" | "fetch" | "retry" | "timeoutMs" | "pollIntervalMs" | "captureRaw"
+  >;
+}
+const origins = new WeakMap<GeneratedVideo, Origin>();
+
+/** Records where a clip came from (used by `generateVideo` and `resumeVideo`). Internal. */
+export function attachVideoOrigin(video: GeneratedVideo, origin: Origin): void {
+  origins.set(video, origin);
+}
+
+/** What a clip remembers about its call, if it was made by `generateVideo`. Internal. */
+export function videoOriginOf(video: GeneratedVideo): Origin | undefined {
+  return origins.get(video);
+}
 
 /** One generated clip. */
 export class GeneratedVideo {
@@ -58,6 +83,23 @@ export class GeneratedVideo {
   /** The clip as a video part, to send it to an agent: `agent.run([{ type: "text", text: "..." }, video.toPart()])`. */
   toPart(): VideoPart {
     return { type: "video", video: this.bytes, mimeType: this.mimeType };
+  }
+
+  /**
+   * Changes this clip: `await video.edit("Make it night")`. Runs `generateVideo` with `continueFrom: this`, the model and the
+   * connection settings (key, endpoint, headers, fetch, retry, timeout) of the call that made it, and your options on top. Nothing
+   * else carries over (ask again for a length or tier if you want them). Works on the model that made the clip: Google continues
+   * the stored interaction, OpenRouter continues the job.
+   */
+  async edit(prompt: string, options: VideoEditOptions = {}): Promise<VideoResult> {
+    const origin = videoOriginOf(this);
+    const model = options.model ?? origin?.model;
+    if (!model)
+      throw new ConfigError(
+        "[Agent Accelerator] edit() needs a model: this clip was not made by generateVideo, so pass { model }."
+      );
+    const { generateVideo } = await import("./generate.ts");
+    return generateVideo({ ...origin?.inherit, ...options, model, prompt, continueFrom: this });
   }
 
   /** A short description (never the bytes) so `JSON.stringify` and logs stay small. */

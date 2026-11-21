@@ -1230,7 +1230,7 @@ const result = await generateVideo({
 await result.video.save("marble.mp4");
 ```
 
-Every option is checked against the model before anything is sent: lengths, tiers, ratios, first and last frames, reference pictures and clips (the length of an MP4 or MOV reference clip is read from its header and checked against the model's limit). Controls a model does not have are dropped with a warning; pictures are never silently dropped. A timeout or abort leaves the provider's job running, so the error carries its `jobId`. OpenRouter's models are read from its public list and cached in `<home>/catalog/`. Full guide: [Generating videos](docs/guides/videos.md).
+Every option is checked against the model before anything is sent: lengths, tiers, ratios, first and last frames, reference pictures and clips (the length of an MP4 or MOV reference clip is read from its header and checked against the model's limit). Controls a model does not have are dropped with a warning; pictures are never silently dropped. A timeout or abort leaves the provider's job running, so the error carries its `jobId` (`resumeVideo({ model, jobId })` waits for it). `result.video.edit("Make it night")` changes a clip on the model that made it. OpenRouter's models are read from its public list and cached in `<home>/catalog/`. Full guide: [Generating videos](docs/guides/videos.md).
 
 ---
 ## Embeddings

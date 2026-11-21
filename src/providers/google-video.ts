@@ -162,6 +162,7 @@ export function buildGoogleVideoBody(modelId: string, request: ProviderVideoRequ
       : undefined;
   return {
     model: modelId,
+    ...(request.previousId ? { previous_interaction_id: request.previousId } : {}),
     input: blocks.length === 1 && blocks[0]!["type"] === "text" ? blocks[0]!["text"] : blocks,
     response_format: responseFormat,
     background: false,

@@ -59,6 +59,40 @@ export interface VideoOptions extends ConnectionOptions {
   fileAccess?: { roots?: string[] };
   /** What `VideoResult.raw` keeps of the wire exchange (same policy as `AgentConfig.captureRaw`). */
   captureRaw?: CaptureRawMode;
+  /**
+   * Continue from a clip an earlier call made: `prompt` says what to change. Works on the same model that made the clip (Google
+   * continues the stored interaction, OpenRouter continues the job with `previous_job_id`); pictures and clips cannot be added.
+   * `video.edit(prompt)` does this with the model and connection settings of the call that made the clip.
+   */
+  continueFrom?: GeneratedVideo;
+}
+
+/** What `GeneratedVideo.edit` takes: any option of `generateVideo` except the prompt, with the model defaulting to the clip's own. */
+export type VideoEditOptions = Omit<VideoOptions, "model" | "prompt" | "continueFrom"> & { model?: string };
+
+/** What `resumeVideo` takes: the job to wait for, and the settings of the wait. */
+export interface ResumeVideoOptions extends ConnectionOptions {
+  /** `provider/model` of the video model that was asked (an OpenRouter model; see `listVideoModels`). */
+  model: string;
+  /** The job id a `TimeoutError`, `AbortError` or `jobId` field gave you. */
+  jobId: string;
+  signal?: AbortSignal;
+  /** The wait, in ms. Default 600 000; `0` or `Infinity` turns it off. */
+  timeoutMs?: number;
+  /** How often the job is asked how far it is, in ms. Default 10 000. */
+  pollIntervalMs?: number;
+  onProgress?: (progress: VideoProgress) => void;
+  /** A cost cap: the finished job's reported cost may not pass it. */
+  budget?: { maxCostUsd?: number };
+  captureRaw?: CaptureRawMode;
+}
+
+/** What an adapter receives to wait for a job that already exists. */
+export interface ProviderVideoResumeRequest {
+  jobId: string;
+  deadlineMs: number;
+  pollIntervalMs: number;
+  onProgress?: (progress: VideoProgress) => void;
 }
 
 /** One reference clip after it was read: its bytes as media and its length when the file says it. */
@@ -83,6 +117,8 @@ export interface ProviderVideoRequest {
   referenceVideos: ReadClip[];
   audio?: boolean;
   seed?: number;
+  /** Continue a clip: the provider's own id of the call that made it (Google: the interaction; OpenRouter: the job). */
+  previousId?: string;
   /** The call's deadline in ms for a provider that works in jobs (`Infinity` = none). */
   deadlineMs: number;
   /** How often to ask a job how far it is, in ms. */
