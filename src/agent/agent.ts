@@ -1,5 +1,6 @@
 import type {
   AgentConfig,
+  AgentHooks,
   EditableAgentConfig,
   AgentRunOptions,
   MidSessionConfig,
@@ -59,6 +60,7 @@ import { listTrackedSubAgents, mergeSubagentTraces, trackSubAgent } from "./agen
 import { RunControl, isPiped, type QueuedPrompt } from "./run-control.ts";
 import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
 import { mergeCap } from "./defaults.ts";
+import { resolveHooks } from "./hooks.ts";
 import { applyEditable, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
@@ -214,6 +216,8 @@ export class Agent {
   readonly captureRaw?: false | "redacted" | true;
   /** Constructor config, kept so {@link Agent.fork} can build isolated copies. */
   private readonly forkConfig: AgentConfig;
+  /** The hooks of this agent (`AgentConfig.hooks`), checked at construction; workers inherit them. */
+  readonly hooks?: AgentHooks;
   /** Opt-in per-run budget (tokens / cost / duration / sub-agent count), enforced by the loop. */
   readonly budget?: Budget;
   /** Live counters behind {@link Agent.budget}; reset at the start of every run. */
@@ -501,14 +505,7 @@ export class Agent {
     this.forkConfig = { ...config };
     this.captureRaw = config.captureRaw;
     this.budget = config.budget ? { ...config.budget } : undefined;
-    if (config.hooks !== undefined) {
-      // Declared for forward compatibility only: say so instead of silently ignoring.
-      telemetryBus.emitWarning(
-        "config.unsupported_option",
-        "[Agent Accelerator] AgentConfig.hooks is accepted for forward compatibility but is not implemented yet; it has no effect. Attach to telemetryBus.onEvent for observability.",
-        { option: "hooks" }
-      );
-    }
+    this.hooks = resolveHooks(config.hooks);
     if (config.telemetry?.persist) persistTelemetry(this.home);
     this.googleTier = config.googleTier === "paid" || config.googleTier === "free" ? config.googleTier : undefined;
     this.callDefaults = {
@@ -1095,6 +1092,7 @@ export class Agent {
     return {
       limits: { ...this.runLimits },
       ...(this.forkConfig.prompts ? { prompts: { ...this.forkConfig.prompts } } : {}),
+      ...(this.hooks ? { hooks: this.hooks } : {}), // a worker is never less constrained than its parent: an approval gate holds for it too
       ...(d.retry ? { retry: d.retry } : {}),
       ...(d.env ? { env: d.env } : {}),
       ...(d.fetch ? { fetch: d.fetch } : {}),
@@ -1258,6 +1256,7 @@ export class Agent {
         // Loop enforces these (plus local timeout races).
         limits: { ...this.runLimits },
         prompts: this.prompts,
+        ...(this.hooks ? { hooks: this.hooks } : {}),
         ...(this.output !== undefined ? { output: this.output } : {}),
       };
 
@@ -1354,6 +1353,7 @@ export class Agent {
       // Loop enforces these (plus local timeout races).
       limits: { ...this.runLimits },
       prompts: this.prompts,
+      ...(this.hooks ? { hooks: this.hooks } : {}),
       ...(this.output !== undefined ? { output: this.output } : {}),
     };
 

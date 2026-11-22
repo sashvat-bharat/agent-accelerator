@@ -1,5 +1,6 @@
 import type { ModelSpec } from "./model.ts";
-import type { ToolDefinition } from "./tool.ts";
+import type { ToolDefinition, ToolResultRecord } from "./tool.ts";
+import type { ContentPart, Message } from "./message.ts";
 import type { ThinkingLevel, CacheOption, ServiceTier } from "./core.ts";
 import type { ModelProviderInstance } from "../providers/registry.ts";
 import type { Agent } from "../agent/agent.ts";
@@ -53,6 +54,49 @@ export type StructuredOutputOption =
       schema: z.ZodType | Record<string, unknown>;
       strict?: boolean;
     };
+
+/** What a hook is told about the run it runs in. */
+export interface HookContext {
+  agentName?: string;
+  sessionId?: string;
+  /** Aborts when the run is interrupted; a hook that waits (an approval prompt) should honour it. */
+  signal?: AbortSignal;
+  /** 1-based model turn of the run (set by `beforeRequest` and `onYield`). */
+  turn?: number;
+}
+
+/** What `beforeTool` answers: nothing to let the call run, `{ block }` to refuse it (the reason is the call's error result), or `{ arguments }` to run it with other arguments (still validated against the tool's schema). */
+export type BeforeToolDecision = void | undefined | { block: string } | { arguments: Record<string, unknown> };
+
+/** What `afterTool` answers: nothing to keep the result, or the new `result` and/or `isError`. */
+export type AfterToolDecision = void | undefined | { result?: unknown; isError?: boolean };
+
+/** What `beforeRequest` answers: nothing to send as is, or the `messages` and/or `systemPrompt` to send instead (the saved history is not changed). */
+export type BeforeRequestDecision = void | undefined | { messages?: Message[]; systemPrompt?: string };
+
+/** What `onYield` answers: nothing to end the run, or `{ continue }`, a user message that keeps the run going (same budget and turn limit). */
+export type OnYieldDecision = void | undefined | { continue: string | ContentPart[] };
+
+/**
+ * Hooks of one Agent (`AgentConfig.hooks`). Each may be async. `beforeTool` fails closed: a hook that throws blocks the call.
+ * `afterTool` failing keeps the original result (and warns on the bus); `beforeRequest` or `onYield` throwing fails the run.
+ */
+export interface AgentHooks {
+  beforeTool?: (
+    call: { id: string; name: string; arguments: Record<string, unknown> },
+    ctx: HookContext
+  ) => BeforeToolDecision | Promise<BeforeToolDecision>;
+  afterTool?: (
+    call: { id: string; name: string; arguments: Record<string, unknown> },
+    result: ToolResultRecord,
+    ctx: HookContext
+  ) => AfterToolDecision | Promise<AfterToolDecision>;
+  beforeRequest?: (messages: Message[], ctx: HookContext) => BeforeRequestDecision | Promise<BeforeRequestDecision>;
+  onYield?: (
+    turn: { text: string; thinking?: string; turns: number },
+    ctx: HookContext
+  ) => OnYieldDecision | Promise<OnYieldDecision>;
+}
 
 /** Configuration used to construct an {@link Agent}. */
 export interface AgentConfig {
@@ -179,8 +223,12 @@ export interface AgentConfig {
   fetch?: typeof fetch;
   /** Provider/env overrides forwarded to key resolution. */
   env?: Record<string, string>;
-  /** Not implemented yet (accepted for forward compatibility; passing it emits a `config.unsupported_option` warning). */
-  hooks?: unknown;
+  /**
+   * Functions that run at four points of a run: `beforeTool` (block a call or change its arguments: approval gates),
+   * `afterTool` (change a result: redaction), `beforeRequest` (reshape what is sent to the model, history is untouched) and
+   * `onYield` (continue after a final answer). Workers inherit them. See {@link AgentHooks}.
+   */
+  hooks?: AgentHooks;
   /**
    * Telemetry options. `persist: true` appends every `telemetryBus` event (except full reasoning text). An event
    * that belongs to a persisted session (`data.sessionId`: tool events, resume and retry events) goes to

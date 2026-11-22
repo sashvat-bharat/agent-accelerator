@@ -457,6 +457,10 @@ The agent loop answers the 3rd consecutive identical call (same name and argumen
 After a crash, a tool call that had no saved result is run again on resume only when its tool is `replay: "safe"` or `idempotent: true`. Any other tool is NOT run again (it may already have done its work, like sending an email): the model gets an "interrupted, may have partly run" result (the `toolInterrupted` prompt, plus a `tool.call_interrupted` event) and decides whether to repeat it.
 
 
+### Hooks: step in at four points
+
+`hooks: { beforeTool, afterTool, beforeRequest, onYield }` (all optional, may be async): `beforeTool(call, ctx)` returns `{ block: reason }` to refuse a call (the model reads `Blocked: reason`) or `{ arguments }` to run it with other arguments (a throwing hook blocks: it fails closed); `afterTool(call, result, ctx)` returns `{ result, isError }` to change a result before the model and the saved record see it; `beforeRequest(messages, ctx)` returns `{ messages, systemPrompt }` to change what is sent this turn (the saved history is untouched); `onYield({ text, thinking, turns }, ctx)` returns `{ continue: "message" }` to keep the same run going after a final answer (bounded by `maxTurns` and budgets). `ctx` is `{ agentName, sessionId, signal, turn }`. Workers inherit the hooks. Details and an example: [tools guide](docs/guides/tools-and-streaming.md#hooks).
+
 ### Asking permission: `ctx.stop`
 
 The SDK has no approval modes; you write the check inside `execute` (your own function that asks your user) and call `ctx.stop(reason)` when the answer is no:

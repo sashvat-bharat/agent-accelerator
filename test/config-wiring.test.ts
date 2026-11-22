@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { Agent, tool, telemetryBus, clearInteractionChains, TimeoutError } from "../src/index.ts";
+import { Agent, tool, clearInteractionChains, TimeoutError } from "../src/index.ts";
 import { clearSessionRouting } from "../src/providers.ts";
 import { z } from "zod";
 
@@ -336,15 +336,11 @@ describe("budgets, limits and worker inheritance are enforced", () => {
     expect(inherited.limits).toMatchObject({ maxToolCallsPerRun: 3, maxTotalTokens: 1000 });
   });
 
-  it("the hooks placeholder warns instead of being silently ignored", () => {
-    const codes: string[] = [];
-    const off = telemetryBus.onEvent((e) => e.code === "config.unsupported_option" && codes.push(String((e.data as { option?: string } | undefined)?.option)));
-    try {
-      new Agent({ model: GOOGLE_MODEL, apiKey: "k", hooks: {} });
-      expect(codes).toEqual(["hooks"]);
-    } finally {
-      off();
-    }
+  it("workers inherit the hooks, so an approval gate cannot be bypassed by delegating", () => {
+    const beforeTool = () => ({ block: "no" });
+    const parent = new Agent({ model: GOOGLE_MODEL, apiKey: "k", hooks: { beforeTool } });
+    expect(parent.inheritableConfig().hooks?.beforeTool).toBe(beforeTool);
+    expect(new Agent({ model: GOOGLE_MODEL, apiKey: "k" }).inheritableConfig().hooks).toBeUndefined();
   });
 });
 

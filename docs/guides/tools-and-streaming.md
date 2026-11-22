@@ -163,6 +163,38 @@ agent.tools["subagents"] = {
 };
 ```
 
+## Hooks
+
+`hooks` lets your own code step in at four points of a run. Each hook is optional and may be `async`; every one gets `ctx` = `{ agentName, sessionId, signal, turn }` (`signal` aborts when the run is interrupted, so an approval prompt should honour it).
+
+```ts
+const agent = new Agent({
+  model: "google/gemini-3.5-flash-lite",
+  tools: { pay_invoice },
+  hooks: {
+    // Approve, refuse or change a tool call BEFORE it runs.
+    beforeTool: async (call, ctx) => {
+      if (call.name === "pay_invoice" && !(await askUser(`Pay ${JSON.stringify(call.arguments)}?`)))
+        return { block: "the user declined the payment" }; // the model reads "Blocked: ..." as an error result
+      // return { arguments: { ...call.arguments, currency: "USD" } } to run it with other arguments (still checked against the tool's schema)
+    },
+    // Change a result AFTER the tool ran (before the model and the saved record see it).
+    afterTool: (call, result) => ({ result: String(result.result).replace(/sk-\w+/g, "[redacted]") }),
+    // Reshape what is SENT to the model this turn; the saved history is not touched.
+    beforeRequest: (messages) => ({ messages: messages.slice(-20) }),
+    // The model gave a final answer: return { continue: "..." } to keep going in the same run.
+    onYield: ({ text }) => (text.includes("TODO") ? { continue: "Finish the TODOs." } : undefined),
+  },
+});
+```
+
+- `beforeTool` **fails closed**: if the hook throws, the call is blocked (the error is the reason). It runs before a concurrency slot is taken, so a slow approval holds none. Blocked calls emit `tool.call_blocked` with `reason: "hook_blocked"`.
+- `afterTool` gets a copy of the result and may return `{ result, isError }`. If it throws, the original result is kept and a `hook.error` warning goes to the bus.
+- `beforeRequest` gets a copy of the message list; return `{ messages, systemPrompt }` to send something else. Keep tool calls and their results together, and keep the start of the list stable if you want prompt-cache hits.
+- `onYield` continues in the **same** run: same `maxTurns`, budget and `AgentResponse`. Without a limit a hook that always continues never ends, so set `maxTurns` or a budget. A `beforeRequest` or `onYield` that throws fails the run.
+- Workers (fixed, `subagents`, scheduled) **inherit** the hooks, so an approval gate cannot be bypassed by delegating; `ctx.agentName` tells them apart.
+- Unknown hook names or non-function values are a `ConfigError`.
+
 ## For AI agents
 
 - Define: `tool({ description, input: z.object({...}), execute })`; register: `tools: { name: def }` (record key becomes the name).
