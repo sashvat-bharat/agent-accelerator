@@ -237,7 +237,7 @@ describe("ctx.stop and persistence", () => {
     const bHangs = tool({ description: "b", input: z.object({}), execute: () => (bRuns++, never()) });
     mk({ a, b: bHangs }, [() => calls("a", "b")], { persist: { dir: root }, resume: "explicit" }).agent.run("go"); // dies with b in flight
     await settle(60);
-    const bAgain = tool({ description: "b", input: z.object({}), execute: async () => (bRuns++, "B finished") });
+    const bAgain = tool({ description: "b", input: z.object({}), replay: "safe", execute: async () => (bRuns++, "B finished") });
     let modelCalls = 0;
     const { agent } = mk({ a, b: bAgain }, [() => (modelCalls++, text("no"))], { persist: { dir: root }, resume: "explicit" });
     const res = await agent.resume();

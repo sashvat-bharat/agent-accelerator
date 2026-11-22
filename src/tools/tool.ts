@@ -107,6 +107,11 @@ export interface CreateToolOptions<TInput = any, TOutput = any> {
    */
   repeatable?: boolean;
   /**
+   * After a crash, `"safe"` lets a call that was cut off before its result was saved be run again on resume. Without it
+   * (and without `idempotent: true`) the call is not run again: the model gets an "interrupted" result instead.
+   */
+  replay?: "safe";
+  /**
    * Maximum characters of a string tool result kept for model context.
    * Longer strings are truncated with a `[Truncated: ...]` marker.
    * `0`/omitted uses the executor default (20000).
@@ -168,6 +173,7 @@ export function tool<TInput = any, TOutput = any>(
     execute: options.execute,
     ...(options.idempotent !== undefined ? { idempotent: options.idempotent } : {}),
     ...(options.repeatable !== undefined ? { repeatable: options.repeatable } : {}),
+    ...(options.replay !== undefined ? { replay: options.replay } : {}),
     ...(options.maxResultChars !== undefined ? { maxResultChars: options.maxResultChars } : {}),
     ...(options.redactError !== undefined ? { redactError: options.redactError } : {}),
     ...(options.redactError === undefined && options.redact !== undefined ? { redactError: options.redact } : {}),

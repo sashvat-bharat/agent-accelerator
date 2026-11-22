@@ -26,6 +26,7 @@ import {
   executeToolCalls,
   findToolDefinition,
   isRepeatableTool,
+  isReplaySafe,
   makeRepeatBlockedResult,
   shouldBlockRepeat,
   toolCallFingerprint,
@@ -863,7 +864,33 @@ async function finishInterruptedTools(
   const none = { calls: [], results: [], subagents: [] };
   if (open.length === 0 || !config.resume) return none;
   const stored = config.resume.stored;
-  const toRun = open.filter((c) => !stored.has(c.id));
+  // A call with no saved result may already have done its work before the crash: only replay-safe tools run again, every other call is answered as interrupted (the model decides whether to repeat it).
+  const unfinished = open.filter((c) => !stored.has(c.id));
+  const toRun = unfinished.filter((c) => isReplaySafe(findToolDefinition(config.tools, c.name)));
+  const skipped = new Map<string, ToolResultRecord>();
+  for (const call of unfinished) {
+    if (toRun.includes(call)) continue;
+    traceToolEvent(
+      "call_interrupted",
+      "warn",
+      call,
+      { agentName: config.agentName, sessionId: config.runOptions?.sessionId || config.options?.sessionId },
+      { reason: "resume_not_replay_safe" }
+    );
+    const result: ToolResultRecord = {
+      id: call.id,
+      name: call.name,
+      result: fillPrompt((config.prompts ?? DEFAULT_PROMPTS).toolInterrupted, { tool: call.name, id: call.id }),
+      isError: true,
+      durationMs: 1,
+    };
+    skipped.set(call.id, result);
+    try {
+      config.onToolResult?.(result);
+    } catch {
+      // why: persistence of the note is best-effort
+    }
+  }
   const executed = toRun.length
     ? await executeToolCalls({
         tools: config.tools,
@@ -877,7 +904,7 @@ async function finishInterruptedTools(
         prompts: config.prompts,
       })
     : [];
-  const ran = new Map(executed.map((r) => [r.id, r]));
+  const ran = new Map([...skipped, ...executed.map((r): [string, ToolResultRecord] => [r.id, r])]);
   const subagents: SubAgentExecutionMetadata[] = [];
   const results = open.map((call) => {
     const { sanitized, metas } = sanitizeToolResult(ran.get(call.id) ?? stored.get(call.id)!);

@@ -97,7 +97,7 @@ describe("resume after a cut-off run", () => {
     let hangB = true;
     const tools = {
       tool_a: tool({ description: "a", input: z.object({}), execute: async () => `A:${++runs.a}` }),
-      tool_b: tool({ description: "b", input: z.object({}), execute: async () => (runs.b++, hangB ? never() : `B:${runs.b}`) }),
+      tool_b: tool({ description: "b", input: z.object({}), replay: "safe", execute: async () => (runs.b++, hangB ? never() : `B:${runs.b}`) }),
     };
     mk(root, async () => callsReply(["tool_a", "tool_b"]), { tools, resume: "explicit" }).run("do both"); // tool_b hangs forever
     await settle(60);
@@ -112,6 +112,34 @@ describe("resume after a cut-off run", () => {
     const results = seen[0].messages.filter((m: any) => m.role === "tool").map((m: any) => m.content);
     expect(results).toEqual(["A:1", "B:2"]); // A's saved result, B's fresh one, in call order
     expect(res!.toolResults.map((r) => r.name)).toEqual(["tool_a", "tool_b"]);
+  });
+
+  it("a cut-off call of a tool that is not replay-safe is NOT run again: the model gets an interrupted result", async () => {
+    const root = tmp();
+    const runs = { mail: 0, read: 0, safe: 0 };
+    const mkTools = (hang: boolean) => ({
+      send_mail: tool({ description: "m", input: z.object({}), execute: async () => (runs.mail++, hang ? never() : "sent") }),
+      read_file: tool({ description: "r", input: z.object({}), idempotent: true, execute: async () => (runs.read++, hang ? never() : "file") }),
+      lookup: tool({ description: "l", input: z.object({}), replay: "safe", execute: async () => (runs.safe++, hang ? never() : "found") }),
+    });
+    mk(root, async () => callsReply(["send_mail", "read_file", "lookup"]), { tools: mkTools(true), resume: "explicit" }).run("go");
+    await settle(60);
+    expect(runs).toEqual({ mail: 1, read: 1, safe: 1 });
+    const seen: any[] = [];
+    const events: string[] = [];
+    const off = telemetryBus.onEvent((e) => e.code === "tool.call_interrupted" && events.push(String((e.data as any).toolName)));
+    const agent = mk(root, async (body) => (seen.push(body), textReply("ok")), { tools: mkTools(false), resume: "explicit" });
+    const res = await agent.resume();
+    off();
+    expect(res!.text).toBe("ok");
+    expect(runs).toEqual({ mail: 1, read: 2, safe: 2 }); // the mail was not sent a second time
+    const results = seen[0].messages.filter((m: any) => m.role === "tool").map((m: any) => m.content);
+    expect(results[0]).toMatch(/send_mail.*interrupted/);
+    expect(results.slice(1)).toEqual(["file", "found"]);
+    expect(res!.toolResults[0]!.isError).toBe(true);
+    expect(events).toEqual(["send_mail"]);
+    // the note is saved: a second restart does not decide again
+    expect(agent.toolRecords.map((t) => t.name).sort()).toEqual(["lookup", "read_file", "send_mail"]);
   });
 
   it("automatic mode resumes at construction, a run() right after queues behind it, and waiting prompts follow in order", async () => {
@@ -239,7 +267,7 @@ describe("a real kill -9", () => {
       fetch: (async (_u: string, init: RequestInit) => (bodies.push(JSON.parse(String(init.body))), textReply("finished"))) as unknown as typeof fetch,
       tools: {
         tool_a: tool({ description: "a", input: z.object({}), execute: async () => (fs.appendFileSync(path.join(work, "a"), "x"), "A-again") }),
-        tool_b: tool({ description: "b", input: z.object({}), execute: async () => (fs.appendFileSync(path.join(work, "b"), "x"), "B-result") }),
+        tool_b: tool({ description: "b", input: z.object({}), replay: "safe", execute: async () => (fs.appendFileSync(path.join(work, "b"), "x"), "B-result") }),
       },
     });
     expect(agent.interrupted()).toHaveLength(1);

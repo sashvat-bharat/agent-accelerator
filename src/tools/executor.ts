@@ -220,6 +220,11 @@ export function isRepeatableTool(toolDef: ToolDefinition): boolean {
   return toolDef.idempotent === true;
 }
 
+/** Whether a tool may be run again after a crash cut its call off (`replay: "safe"` or `idempotent: true`). */
+export function isReplaySafe(toolDef: ToolDefinition | undefined): boolean {
+  return !!toolDef && (toolDef.replay === "safe" || toolDef.idempotent === true);
+}
+
 /**
  * Repeat-guard helper for the agent loop (which owns consecutive-turn state).
  * Tracks per-fingerprint occurrence counts in `countMap`: a first sighting

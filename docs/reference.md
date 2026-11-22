@@ -95,9 +95,9 @@ Every event has `type` and `schemaVersion`.
 
 ## Tool definition
 
-`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`, `redact`, `execute`. (`retry`, `tags` and `output` were removed in 0.7.0: they were stored and never used.) `__brand` is internal; never set it.
+`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay`, `maxResultChars`, `redactError`, `redact`, `execute`. (`retry`, `tags` and `output` were removed in 0.7.0: they were stored and never used.) `__brand` is internal; never set it.
 
-The executor enforces `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars` and `redactError`/`redact`; `strict` goes to the provider. Every tool option does something.
+The executor enforces `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay` (read by crash resume), `maxResultChars` and `redactError`/`redact`; `strict` goes to the provider. Every tool option does something.
 
 `execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `stop(reason)` (ends the run after this batch with `finishReason: "stopped"`; the reason is the call's result; throws, never retried), `log(message, data?)` (writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the Agent persists to a folder, else a no-op). A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
 

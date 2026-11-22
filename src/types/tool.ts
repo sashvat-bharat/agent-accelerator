@@ -85,6 +85,12 @@ export interface ToolDefinition<TInput = any, TOutput = any> {
    */
   repeatable?: boolean;
   /**
+   * After a crash, whether this tool may be run AGAIN when its call was cut off before a result was saved. `"safe"` means
+   * running it twice does no harm (or the tool guards against it itself); `idempotent: true` counts as safe too. Any other
+   * tool is NOT run again: the model gets an "interrupted, may have partly run" result and decides what to do.
+   */
+  replay?: "safe";
+  /**
    * Maximum characters of a string tool result kept for model context.
    * Longer strings are truncated with a `[Truncated: ...]` marker.
    * `0`/omitted uses the executor default (20000).

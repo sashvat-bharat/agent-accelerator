@@ -29,7 +29,7 @@ const res = await agent.run("Where is order A-1001?");
 console.log(res.text, res.toolCalls.length);
 ```
 
-`tool()` options (all in [Reference](../reference.md)): `name`, `description`, `input` (Zod or JSON Schema), `parameters`, `strict`, `timeoutMs`, `maxTries` / `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError` / `redact`, `execute`. The executor **enforces** `input`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`. `strict` is passed to providers. Every option above does something (`retry`, `tags` and `output` were removed in 0.7.0). `execute` also receives a context with `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `log` and `stop` (see *Asking permission* below).
+`tool()` options (all in [Reference](../reference.md)): `name`, `description`, `input` (Zod or JSON Schema), `parameters`, `strict`, `timeoutMs`, `maxTries` / `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay`, `maxResultChars`, `redactError` / `redact`, `execute`. The executor **enforces** `input`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`. `strict` is passed to providers. Every option above does something (`retry`, `tags` and `output` were removed in 0.7.0). `execute` also receives a context with `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `log` and `stop` (see *Asking permission* below).
 
 How a call is executed, in order:
 1. **Name**: matched exactly, then case/format-insensitively; a near miss returns "Did you mean …?" to the model.
@@ -60,6 +60,7 @@ Text parts become the call's result (what every provider sees). Media (bytes, a 
 
 **Recommendations**
 - ✅ Write descriptions like instructions to a colleague; `.describe()` every field.
+- ✅ After a crash, only `idempotent: true` or `replay: "safe"` tools are run again when their call was cut off; any other tool gets an "interrupted, may have partly run" result and the model decides. Mark a tool `replay: "safe"` only if running it twice is harmless (or it guards against it with an id).
 - ✅ Mark read-only tools `idempotent`; leave side-effecting tools at one attempt and make them idempotent with an id.
 - ✅ Always pass `ctx.signal` to `fetch`/DB calls. ❌ Don't return huge payloads; return what the model needs.
 - 💡 Built-in tools: `subagents`, `scheduled_actions`, `get_datetime`.
