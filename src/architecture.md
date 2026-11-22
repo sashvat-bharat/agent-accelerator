@@ -10,6 +10,7 @@ The whole SDK. `index.ts` is the only public entry (`main`/`module`/`types`); ev
 | `update-models.ts`  | CLI behind `bun run update-models` (refreshes the model catalog cache).                                                                                                     |
 | `providers.ts`      | Provider-agnostic mappers (thinking, cache, tool choice, structured output, generation params). No HTTP.                                                                    |
 | `agent/`            | `Agent`, the model-to-tools loop, workers, delegation.                                                                                                                      |
+| `testing/`          | `fauxProvider`: a scripted `fetch` (OpenAI-compatible wire) so tests can run an Agent through the real adapter with no network.                                             |
 | `providers/`        | One adapter per wire (Google, OpenAI, Anthropic, OpenRouter, OpenAI-compatible), the registry, shared helpers.                                                              |
 | `image/`            | `generateImage`: the per-model request check, the call, `ImageResult` / `GeneratedImage`.                                                                                   |
 | `video/`            | `generateVideo`: the request check, the call (polling for job-based providers), clip-length checks, pricing, `VideoResult`, `GeneratedVideo`.                               |

@@ -29,7 +29,7 @@ const res = await agent.run("Where is order A-1001?");
 console.log(res.text, res.toolCalls.length);
 ```
 
-`tool()` options (all in [Reference](../reference.md)): `name`, `description`, `input` (Zod or JSON Schema), `parameters`, `strict`, `timeoutMs`, `maxTries` / `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError` / `redact`, `execute`. The executor **enforces** `input`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`. `strict` is passed to providers. Every option above does something (`retry`, `tags` and `output` were removed in 0.7.0). `execute` also receives a context with `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `log` and `stop` (see *Asking permission* below).
+`tool()` options (all in [Reference](../reference.md)): `name`, `description`, `input` (Zod or JSON Schema), `parameters`, `strict`, `timeoutMs`, `maxTries` / `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay`, `maxResultChars`, `redactError` / `redact`, `execute`. The executor **enforces** `input`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`. `strict` is passed to providers. Every option above does something (`retry`, `tags` and `output` were removed in 0.7.0). `execute` also receives a context with `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `log` and `stop` (see *Asking permission* below).
 
 How a call is executed, in order:
 1. **Name**: matched exactly, then case/format-insensitively; a near miss returns "Did you mean …?" to the model.
@@ -60,6 +60,7 @@ Text parts become the call's result (what every provider sees). Media (bytes, a 
 
 **Recommendations**
 - ✅ Write descriptions like instructions to a colleague; `.describe()` every field.
+- ✅ After a crash, only `idempotent: true` or `replay: "safe"` tools are run again when their call was cut off; any other tool gets an "interrupted, may have partly run" result and the model decides. Mark a tool `replay: "safe"` only if running it twice is harmless (or it guards against it with an id).
 - ✅ Mark read-only tools `idempotent`; leave side-effecting tools at one attempt and make them idempotent with an id.
 - ✅ Always pass `ctx.signal` to `fetch`/DB calls. ❌ Don't return huge payloads; return what the model needs.
 - 💡 Built-in tools: `subagents`, `scheduled_actions`, `get_datetime`.
@@ -118,6 +119,8 @@ console.log((await next).text); // its own run and response
 | `clearQueue()` | Rejects all queued follow-ups. |
 | `stream(prompt, { enqueue: "steer" \| "queue" \| "interrupt" })` | Streaming variants (`run(prompt, { enqueue })` takes the same values). |
 
+**Safe retries: `requestId`.** Pass `{ requestId: "<your id>" }` to `run`, `queue`, `steer` or `ask`. If the same id arrives again (a webhook delivered twice, a timer that fired twice), you get the FIRST submission's result back and nothing runs again. The Agent remembers the last 1000 ids while it lives; a call that failed or was aborted is forgotten, so retrying it with the same id runs it again. If the same id comes with a different prompt, the first result is still returned and an `agent.request_id_reused` warning goes to the bus (`agent.duplicate_request` is emitted for every repeat). `stream()` refuses `requestId`. After a process restart the memory is empty: use `resume()` for a cut-off run.
+
 `midSession: { mode \| whenBusy: "steer" \| "queue" \| "auto" }` can enforce one policy (the other verb then throws). `isBusy`, `pendingCount`, `steerPendingCount` expose state. A steer that arrives after the run ended becomes a queued follow-up (placed at the FRONT of the queue, in arrival order, since it was typed before anything queued later), and its promise resolves with *that* run's response. With `persist: { dir }` the prompts still waiting (steers not yet injected, queued follow-ups, with their `additionalContext`) are saved with the session, so a crash does not lose a message the user already typed.
 
 ### What an interrupt really stops
@@ -161,6 +164,38 @@ agent.tools["subagents"] = {
   execute: async (input, ctx) => ((await getPermission("Spawn workers?")) ? inner.execute(input, ctx) : ctx.stop("not approved")),
 };
 ```
+
+## Hooks
+
+`hooks` lets your own code step in at four points of a run. Each hook is optional and may be `async`; every one gets `ctx` = `{ agentName, sessionId, signal, turn }` (`signal` aborts when the run is interrupted, so an approval prompt should honour it).
+
+```ts
+const agent = new Agent({
+  model: "google/gemini-3.5-flash-lite",
+  tools: { pay_invoice },
+  hooks: {
+    // Approve, refuse or change a tool call BEFORE it runs.
+    beforeTool: async (call, ctx) => {
+      if (call.name === "pay_invoice" && !(await askUser(`Pay ${JSON.stringify(call.arguments)}?`)))
+        return { block: "the user declined the payment" }; // the model reads "Blocked: ..." as an error result
+      // return { arguments: { ...call.arguments, currency: "USD" } } to run it with other arguments (still checked against the tool's schema)
+    },
+    // Change a result AFTER the tool ran (before the model and the saved record see it).
+    afterTool: (call, result) => ({ result: String(result.result).replace(/sk-\w+/g, "[redacted]") }),
+    // Reshape what is SENT to the model this turn; the saved history is not touched.
+    beforeRequest: (messages) => ({ messages: messages.slice(-20) }),
+    // The model gave a final answer: return { continue: "..." } to keep going in the same run.
+    onYield: ({ text }) => (text.includes("TODO") ? { continue: "Finish the TODOs." } : undefined),
+  },
+});
+```
+
+- `beforeTool` **fails closed**: if the hook throws, the call is blocked (the error is the reason). It runs before a concurrency slot is taken, so a slow approval holds none. Blocked calls emit `tool.call_blocked` with `reason: "hook_blocked"`.
+- `afterTool` gets a copy of the result and may return `{ result, isError }`. If it throws, the original result is kept and a `hook.error` warning goes to the bus.
+- `beforeRequest` gets a copy of the message list; return `{ messages, systemPrompt }` to send something else. Keep tool calls and their results together, and keep the start of the list stable if you want prompt-cache hits.
+- `onYield` continues in the **same** run: same `maxTurns`, budget and `AgentResponse`. Without a limit a hook that always continues never ends, so set `maxTurns` or a budget. A `beforeRequest` or `onYield` that throws fails the run.
+- Workers (fixed, `subagents`, scheduled) **inherit** the hooks, so an approval gate cannot be bypassed by delegating; `ctx.agentName` tells them apart.
+- Unknown hook names or non-function values are a `ConfigError`.
 
 ## For AI agents
 

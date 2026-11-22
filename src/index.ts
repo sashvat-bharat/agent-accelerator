@@ -229,6 +229,17 @@ export { AssistantMessageEventStream } from "./streaming/event-stream.ts";
 // Responses
 export { AgentResponse } from "./types/response.ts";
 
+// Testing: a scripted model (no network, no cost) for testing your own agents
+export { fauxProvider } from "./testing/faux.ts";
+export type {
+  FauxProvider,
+  FauxProviderOptions,
+  FauxReply,
+  FauxRequest,
+  FauxStep,
+  FauxToolCall,
+} from "./testing/faux.ts";
+
 // Core error taxonomy (core surface)
 export {
   AgentAccelError,
@@ -374,5 +385,5 @@ export type {
   InterruptedRun,
 } from "./types/agent.ts";
 
-// Minimalist core: harness modules (RLM/RSI, OTel, testing, CLI doctor, hooks,
+// Minimalist core: harness modules (RLM/RSI, OTel, CLI doctor,
 // context-ops, run-tree/record, session-store, legacy wire types) live in userland.

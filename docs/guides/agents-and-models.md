@@ -37,7 +37,7 @@ Useful config: `stateless: true` clears history around every run (one-shot judge
 **Recommendations**
 - ✅ Keep `instructions` and the tool set **stable** between calls; put anything that changes per turn in `additionalContext` or the user message.
 - ✅ Set a finite `maxTurns` in services (see [Safety and operations](safety-and-ops.md)).
-- ⚠️ The `hooks` config key is **not implemented**; it only emits a warning. Use `telemetryBus` instead. (`logger` and `contextManagement` were removed in 0.7.0.)
+- `hooks` lets your code step in at four points (approve or change a tool call, change a result, reshape the request, continue after an answer): see *Hooks* in the [tools guide](tools-and-streaming.md).
 - 💡 An `Agent` runs one thing at a time. A second call while busy is steered or queued (see [Tools and streaming](tools-and-streaming.md)).
 
 ## Models and providers

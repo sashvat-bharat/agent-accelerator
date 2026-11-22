@@ -139,7 +139,7 @@ An `Agent` holds:
 | `baseUrl`         | `string`                                             | Overrides the default endpoint for this agent.                                                                                                             |
 | `stateless`       | `boolean`                                            | When `true`, history is cleared before and after each `run`. Useful for one-shot evaluators. Defaults to `false`.                                          |
 | `runRetries`      | `number`                                             | A run that FAILED for a transient reason (provider down or overloaded, timeouts, a cut stream, after `retry` gave up) is tried again from where it stopped, waiting 5 s, 15 s, 45 s, then 60 s. Default `3`, `0` = off. Finished tool calls are not repeated; the response reports the failed attempts' tool calls and usage. Never for aborts, 400/401/403/404, bad config, budgets or limits. `run()` and queued runs only, not `stream()`. |
-| `resume`          | `"automatic" \| "explicit"`                         | Crash recovery (needs `persist: { dir }` + the same `sessionId`): `automatic` (default) continues a cut-off run when the Agent is constructed, `explicit` waits for `agent.resume()`. Finished tool calls are never run again. `agent.interrupted()` lists cut-off runs. |
+| `resume`          | `"automatic" \| "explicit"`                         | Crash recovery (needs `persist: { dir }` + the same `sessionId`): `automatic` (default) continues a cut-off run when the Agent is constructed, `explicit` waits for `agent.resume()`. Finished tool calls are never run again, and a call that was cut off is run again only if its tool is `idempotent: true` or `replay: "safe"` (otherwise the model gets an "interrupted" result and decides). `agent.interrupted()` lists cut-off runs. |
 | `persist`         | `{ dir?: string; file?: string }`                    | Durable sessions, saved after every step (user/assistant/tool/sub-agent). `{ dir }` keeps `sessions/<sessionId>/session.json` (snapshot) plus an append-only `journal.ndjson` (one line per step, so a long chat costs the same per step as a short one), `{ file }` a single `.session.json`, `{}` uses `<home>/sessions`. Writes are durable (fsync, `.bak` of the last good file, atomic rename) and never fail a turn. |
 | `home`            | `string`                                             | Folder for everything the SDK writes to disk (`sessions/`, `scheduled/`, `telemetry/`). Defaults to `setHome(dir)`, then `.agent-accel/` in the working directory (set in code only). An explicit `persist.dir` / `persist.file` still wins.        |
 
@@ -179,6 +179,7 @@ Use `ContentPart[]` when sending images, audio, or video alongside text.
 | `onEvent(event)`                | Called for every event: `text_delta`, `thinking_delta`, `tool_call_complete`, `tool_result`, `subagent_complete`, `subagent_delta`, `usage`, `done`, and `error`. |
 | `onTurn(turn)`                  | Called after every model/tool turn with `{ turns, text?, thinking?, toolCalls?, toolResults? }`. Drives sub-agent step logs and persistence.   |
 | `additionalContext`             | Added only to the current user turn. Keeps the system prompt stable for better caching.                                                         |
+| `requestId`                     | Idempotent submit (`run`, `queue`, `steer`, `ask`; not `stream`): the same id again returns the FIRST submission's result and runs nothing, so a retried webhook or timer does not run twice. Remembered while the Agent lives (last 1000 ids); a failed or aborted call is forgotten, so a retry runs. A string of 1 to 200 characters. |
 | `sessionId`                     | Per-run session override.                                                                                                                       |
 | `headers`                       | Per-run header merge.                                                                                                                           |
 | `signal`                        | `AbortSignal` used to cancel generation, tools, and subagents. The provider request is aborted and a stream's body is cancelled; see [what interrupting stops at the provider](docs/guides/safety-and-ops.md#what-interrupting-stops-at-the-provider). |
@@ -454,6 +455,12 @@ const agent = new Agent({
 
 The agent loop answers the 3rd consecutive identical call (same name and arguments) with a `repeat_blocked` error, so the model can reuse the prior result or change its arguments. Tools marked `repeatable: true`, or `idempotent: true` unless `repeatable` is set, are exempt.
 
+After a crash, a tool call that had no saved result is run again on resume only when its tool is `replay: "safe"` or `idempotent: true`. Any other tool is NOT run again (it may already have done its work, like sending an email): the model gets an "interrupted, may have partly run" result (the `toolInterrupted` prompt, plus a `tool.call_interrupted` event) and decides whether to repeat it.
+
+
+### Hooks: step in at four points
+
+`hooks: { beforeTool, afterTool, beforeRequest, onYield }` (all optional, may be async): `beforeTool(call, ctx)` returns `{ block: reason }` to refuse a call (the model reads `Blocked: reason`) or `{ arguments }` to run it with other arguments (a throwing hook blocks: it fails closed); `afterTool(call, result, ctx)` returns `{ result, isError }` to change a result before the model and the saved record see it; `beforeRequest(messages, ctx)` returns `{ messages, systemPrompt }` to change what is sent this turn (the saved history is untouched); `onYield({ text, thinking, turns }, ctx)` returns `{ continue: "message" }` to keep the same run going after a final answer (bounded by `maxTurns` and budgets). `ctx` is `{ agentName, sessionId, signal, turn }`. Workers inherit the hooks. Details and an example: [tools guide](docs/guides/tools-and-streaming.md#hooks).
 
 ### Asking permission: `ctx.stop`
 
@@ -1231,6 +1238,16 @@ await result.video.save("marble.mp4");
 ```
 
 Every option is checked against the model before anything is sent: lengths, tiers, ratios, first and last frames, reference pictures and clips (the length of an MP4 or MOV reference clip is read from its header and checked against the model's limit). Controls a model does not have are dropped with a warning; pictures are never silently dropped. A timeout or abort leaves the provider's job running, so the error carries its `jobId` (`resumeVideo({ model, jobId })` waits for it). `result.video.edit("Make it night")` changes a clip on the model that made it. OpenRouter's models are read from its public list and cached in `<home>/catalog/`. Full guide: [Generating videos](docs/guides/videos.md).
+
+---
+## Testing your agents
+
+`fauxProvider([...steps])` is a scripted model for tests: no network, no key, no cost. A step is a text, a reply object (`text`, `thinking`, `toolCalls`, `usage`, `cost`, `error`, `delayMs`) or a function of the request. Build the agent with `new Agent({ ...faux.config })`; it runs through the real OpenAI-compatible adapter (streaming, tool calls, usage and errors behave as in production). `faux.calls` records what the model was sent, `faux.remaining` counts unused steps, and a script that runs out fails with a clear error. Full guide: [Testing your agents](docs/guides/testing.md).
+
+```ts
+const faux = fauxProvider([{ toolCalls: [{ name: "getWeather", arguments: { city: "Paris" } }] }, "Sunny in Paris."]);
+const res = await new Agent({ ...faux.config, tools: { getWeather } }).run("Weather in Paris?");
+```
 
 ---
 ## Embeddings

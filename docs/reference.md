@@ -34,7 +34,7 @@ Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Respons
 | `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
 | `prompts` | `{ [PromptName]: string }` replaces single SDK prompts; unset entries keep `DEFAULT_PROMPTS`. Unknown name or empty text throws `ConfigError`. Workers inherit it | [Prompts](guides/prompts.md) |
 | `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text): a persisted session's events (`tool.*`, resume, retry) to `<home>/sessions/<id>/telemetry.ndjson`, everything else to `<home>/telemetry/<date>.ndjson`. Never outside the home. Off by default | [Safety](guides/safety-and-ops.md) |
-| `hooks` | **Not implemented**; emits `config.unsupported_option`. Use `telemetryBus`. (`logger` and `contextManagement` were removed in 0.7.0.) | |
+| `hooks` | `{ beforeTool, afterTool, beforeRequest, onYield }`, each optional and possibly async: `beforeTool(call, ctx)` returns `{ block: reason }` or `{ arguments }` (fails closed); `afterTool(call, result, ctx)` returns `{ result?, isError? }`; `beforeRequest(messages, ctx)` returns `{ messages?, systemPrompt? }` (history untouched); `onYield({ text, thinking, turns }, ctx)` returns `{ continue: message }`. `ctx` = `{ agentName, sessionId, signal, turn }`. Workers inherit them. Unknown names or non-functions are a `ConfigError`. | |
 
 **`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each chat worker's own per-run cap, default none), `scheduledActionBudget` (the same shape, the cap of each scheduled-action run, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).
 **`midSession`**: `mode`, `whenBusy`, `maxQueued` (20), `maxSteers` (20).
@@ -56,6 +56,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `signal` | Cancels provider, tools and sub-agents |
 | `sessionId` | Which in-memory session to use |
 | `additionalContext` | Per-turn context added to the user turn (not to `instructions`) |
+| `requestId` | Idempotent submit on `run`/`queue`/`steer`/`ask` (not `stream`): the same id again returns the first submission's result and runs nothing; kept while the Agent lives (last 1000 ids); a failed or aborted call is forgotten so a retry runs; 1 to 200 characters. Events: `agent.duplicate_request`, `agent.request_id_reused` (same id, different prompt) |
 | `enqueue` | `"steer"`, `"queue"` or `"interrupt"` when the agent is busy. `"interrupt"` works in every `midSession` mode: it aborts the active run and starts this prompt next, ahead of queued follow-ups |
 | `headers` | Extra request headers |
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
@@ -95,9 +96,9 @@ Every event has `type` and `schemaVersion`.
 
 ## Tool definition
 
-`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars`, `redactError`, `redact`, `execute`. (`retry`, `tags` and `output` were removed in 0.7.0: they were stored and never used.) `__brand` is internal; never set it.
+`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay`, `maxResultChars`, `redactError`, `redact`, `execute`. (`retry`, `tags` and `output` were removed in 0.7.0: they were stored and never used.) `__brand` is internal; never set it.
 
-The executor enforces `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `maxResultChars` and `redactError`/`redact`; `strict` goes to the provider. Every tool option does something.
+The executor enforces `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay` (read by crash resume), `maxResultChars` and `redactError`/`redact`; `strict` goes to the provider. Every tool option does something.
 
 `execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `stop(reason)` (ends the run after this batch with `finishReason: "stopped"`; the reason is the call's result; throws, never retried), `log(message, data?)` (writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the Agent persists to a folder, else a no-op). A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
 

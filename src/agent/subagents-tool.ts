@@ -34,6 +34,7 @@ export function createSubagentsTool(agent: Agent): ToolDefinition {
         : "There is no limit on open workers. Close the ones you are done with: each one keeps its whole conversation.",
       TOOLS: poolNames.length > 0 ? poolNames.join(", ") : "none (omit tools)",
     }),
+    replay: "safe", // the worker registry makes a replayed call exactly-once (call key + `meta.last`)
     input: z.object({
       command: z.enum(COMMANDS),
       id: z.string().optional().describe("The worker's full id (message, close)."),

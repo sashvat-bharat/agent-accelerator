@@ -110,8 +110,7 @@ const researcherAgent = new Agent({
   name: "deep_researcher",
   description: "Conducts deep technical and market research on complex topics.",
   instructions:
-    "You are an exhaustive research specialist. Investigate the topic thoroughly, " +
-    "providing deep technical breakthroughs, quantifiable metrics, and positive growth indicators.",
+    "You are an exhaustive research specialist. Investigate the topic thoroughly, providing deep technical breakthroughs, quantifiable metrics, and positive growth indicators.",
   model: SUB_AGENT_MODEL,
   thinking: (process.env.THINKING_LEVEL as ThinkingLevel | undefined) ?? "medium",
   cache: "implicit",
@@ -123,8 +122,7 @@ const criticAgent = new Agent({
   name: "adversarial_critic",
   description: "Critiques research findings, challenges assumptions, and identifies hidden risks.",
   instructions:
-    "You are a skeptical, rigorous devil's advocate. Stress-test research findings, " +
-    "expose hidden economic bottlenecks, unverified assumptions, regulatory barriers, and potential failure points.",
+    "You are a skeptical, rigorous devil's advocate. Stress-test research findings, expose hidden economic bottlenecks, unverified assumptions, regulatory barriers, and potential failure points.",
   model: SUB_AGENT_MODEL,
   stateless: true, // One-shot evaluation mode: does not persist history across turns
   thinking: (process.env.THINKING_LEVEL as ThinkingLevel | undefined) ?? "medium",

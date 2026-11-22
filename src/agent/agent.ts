@@ -1,5 +1,6 @@
 import type {
   AgentConfig,
+  AgentHooks,
   EditableAgentConfig,
   AgentRunOptions,
   MidSessionConfig,
@@ -59,6 +60,7 @@ import { listTrackedSubAgents, mergeSubagentTraces, trackSubAgent } from "./agen
 import { RunControl, isPiped, type QueuedPrompt } from "./run-control.ts";
 import { UsageLimit, checkUsageLimitConfig } from "./usage-limit.ts";
 import { mergeCap } from "./defaults.ts";
+import { resolveHooks } from "./hooks.ts";
 import { applyEditable, toEditableConfig } from "./config-blocks.ts";
 import { assertNoToolCollisions } from "../tools/executor.ts";
 import {
@@ -214,6 +216,8 @@ export class Agent {
   readonly captureRaw?: false | "redacted" | true;
   /** Constructor config, kept so {@link Agent.fork} can build isolated copies. */
   private readonly forkConfig: AgentConfig;
+  /** The hooks of this agent (`AgentConfig.hooks`), checked at construction; workers inherit them. */
+  readonly hooks?: AgentHooks;
   /** Opt-in per-run budget (tokens / cost / duration / sub-agent count), enforced by the loop. */
   readonly budget?: Budget;
   /** Live counters behind {@link Agent.budget}; reset at the start of every run. */
@@ -294,6 +298,8 @@ export class Agent {
   /** True for the agent that created `chat` from its own `usageLimit` (the root of the chat). */
   private ownsChat = false;
   private scheduledActions?: ScheduledActions;
+  /** Submissions by `requestId` (insertion order, oldest dropped past the cap): the first call's promise and a preview of its prompt. */
+  private readonly submissions = new Map<string, { promise: Promise<AgentResponse>; prompt: string }>();
 
   /**
    * Creates an agent and registers its model, tools, cache, and delegation settings.
@@ -501,14 +507,7 @@ export class Agent {
     this.forkConfig = { ...config };
     this.captureRaw = config.captureRaw;
     this.budget = config.budget ? { ...config.budget } : undefined;
-    if (config.hooks !== undefined) {
-      // Declared for forward compatibility only: say so instead of silently ignoring.
-      telemetryBus.emitWarning(
-        "config.unsupported_option",
-        "[Agent Accelerator] AgentConfig.hooks is accepted for forward compatibility but is not implemented yet; it has no effect. Attach to telemetryBus.onEvent for observability.",
-        { option: "hooks" }
-      );
-    }
+    this.hooks = resolveHooks(config.hooks);
     if (config.telemetry?.persist) persistTelemetry(this.home);
     this.googleTier = config.googleTier === "paid" || config.googleTier === "free" ? config.googleTier : undefined;
     this.callDefaults = {
@@ -901,6 +900,39 @@ export class Agent {
     return this.midSessionConfig.mode;
   }
 
+  // Runs `make` once per `requestId`: a repeated id returns the first call's promise (a different prompt under the same id warns on the bus); a call that fails or is aborted is forgotten so a retry can run; in: run/steer/queue with `options.requestId`, out: the shared promise.
+  private submitOnce(
+    id: unknown,
+    prompt: string | ContentPart[],
+    make: () => Promise<AgentResponse>
+  ): Promise<AgentResponse> {
+    if (typeof id !== "string" || id.length < 1 || id.length > 200)
+      throw new ValidationError("[Agent Accelerator] requestId must be a string of 1 to 200 characters.");
+    const preview = previewPrompt(prompt);
+    const hit = this.submissions.get(id);
+    if (hit) {
+      telemetryBus.emit({
+        code: "agent.duplicate_request",
+        message: `[Agent Accelerator] requestId "${id}" was already submitted: its result is returned and nothing runs again.`,
+        data: { requestId: id, sessionId: this.sessionId },
+      });
+      if (hit.prompt !== preview)
+        telemetryBus.emitWarning(
+          "agent.request_id_reused",
+          `[Agent Accelerator] requestId "${id}" came again with a different prompt; the first submission's result is returned.`,
+          { requestId: id, sessionId: this.sessionId }
+        );
+      return hit.promise;
+    }
+    const promise = make();
+    this.submissions.set(id, { promise, prompt: preview });
+    while (this.submissions.size > 1000) this.submissions.delete(this.submissions.keys().next().value as string);
+    promise.catch(() => {
+      if (this.submissions.get(id)?.promise === promise) this.submissions.delete(id);
+    });
+    return promise;
+  }
+
   // Throws synchronously on an empty content-part array so run() and stream() fail at the same moment; in: any prompt entry point, out: nothing.
   private assertPromptValid(prompt: string | ContentPart[]): void {
     if (Array.isArray(prompt) && prompt.length === 0) {
@@ -955,6 +987,8 @@ export class Agent {
         '[Agent Accelerator] steer() is disabled by midSession.mode "queue". Use queue() or set mode to "auto"/"steer".'
       );
     }
+    if (options?.requestId !== undefined)
+      return this.submitOnce(options.requestId, prompt, () => this.steer(prompt, { ...options, requestId: undefined }));
     const active = this.rc.current;
     if (!active) return this.run(prompt, options) as Promise<AgentResponse>;
     return this.rc.steerInto(active, prompt, options);
@@ -981,6 +1015,8 @@ export class Agent {
         '[Agent Accelerator] queue() is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
       );
     }
+    if (options?.requestId !== undefined)
+      return this.submitOnce(options.requestId, prompt, () => this.queue(prompt, { ...options, requestId: undefined }));
     if (!this.rc.current) return this.run(prompt, options) as Promise<AgentResponse>;
     return this.enqueueFollowUp(prompt, options);
   }
@@ -1095,6 +1131,7 @@ export class Agent {
     return {
       limits: { ...this.runLimits },
       ...(this.forkConfig.prompts ? { prompts: { ...this.forkConfig.prompts } } : {}),
+      ...(this.hooks ? { hooks: this.hooks } : {}), // a worker is never less constrained than its parent: an approval gate holds for it too
       ...(d.retry ? { retry: d.retry } : {}),
       ...(d.env ? { env: d.env } : {}),
       ...(d.fetch ? { fetch: d.fetch } : {}),
@@ -1258,6 +1295,7 @@ export class Agent {
         // Loop enforces these (plus local timeout races).
         limits: { ...this.runLimits },
         prompts: this.prompts,
+        ...(this.hooks ? { hooks: this.hooks } : {}),
         ...(this.output !== undefined ? { output: this.output } : {}),
       };
 
@@ -1354,6 +1392,7 @@ export class Agent {
       // Loop enforces these (plus local timeout races).
       limits: { ...this.runLimits },
       prompts: this.prompts,
+      ...(this.hooks ? { hooks: this.hooks } : {}),
       ...(this.output !== undefined ? { output: this.output } : {}),
     };
 
@@ -1569,6 +1608,9 @@ export class Agent {
       return s;
     }
 
+    if (options?.requestId !== undefined)
+      return this.submitOnce(options.requestId, prompt, () => this.run(prompt, { ...options, requestId: undefined }));
+
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn), or stops the active run and starts this prompt (interrupt).
     if (this.rc.current) {
       if (options?.enqueue === "interrupt") {
@@ -1657,6 +1699,10 @@ export class Agent {
   stream(prompt: string | ContentPart[], options?: AgentRunOptions): AssistantMessageEventStream {
     // Same sync validation timing as run().
     this.assertPromptValid(prompt);
+    if (options?.requestId !== undefined)
+      throw new ValidationError(
+        "[Agent Accelerator] requestId works with run(), queue(), steer() and ask(), not with stream(): a stream cannot be shared between two callers."
+      );
     // Mid-session: busy agent serializes via steer (same turn) or queue (next turn).
     if (this.rc.current) {
       const urgent = options?.enqueue === "interrupt"; // stops the active run and goes first, in every mode and whatever the queue holds

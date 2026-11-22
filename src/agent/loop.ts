@@ -7,7 +7,7 @@ import type {
 } from "../types/model.ts";
 import type { ToolDefinition, ToolCallRecord, ToolResultRecord, StandardToolDeclaration } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
-import type { AgentRunLimits, AgentRunOptions } from "../types/agent.ts";
+import type { AgentHooks, AgentRunLimits, AgentRunOptions } from "../types/agent.ts";
 import type { ContentPart } from "../types/message.ts";
 import {
   AgentResponse,
@@ -26,6 +26,7 @@ import {
   executeToolCalls,
   findToolDefinition,
   isRepeatableTool,
+  isReplaySafe,
   makeRepeatBlockedResult,
   shouldBlockRepeat,
   toolCallFingerprint,
@@ -41,6 +42,7 @@ import { previewPrompt } from "../utils/session.ts";
 import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
 import { withProviderSlot } from "./governor.ts";
+import { applyBeforeRequest, applyOnYield, hookContext } from "./hooks.ts";
 
 /** One mid-session steer request buffered while a run is active. */
 export interface SteerEntry {
@@ -110,6 +112,8 @@ export interface AgentLoopConfig {
   onSteerInjected?: (injectedPrompts: string[]) => void;
   /** The SDK prompts for this run (`AgentConfig.prompts` resolved); the shipped ones when unset. */
   prompts?: Prompts;
+  /** The agent's hooks (`AgentConfig.hooks`): `beforeTool`/`afterTool` reach the executor, `beforeRequest` and `onYield` are called here. */
+  hooks?: AgentHooks;
   /**
    * Canonical structured-output request (raw `AgentConfig.output`).
    * Normalized per turn for the provider wire; validated once at the end
@@ -737,6 +741,7 @@ async function executeToolCallsWithRepeatGuard(options: {
   previousFingerprints: Set<string>;
   repeatCounts: Map<string, number>;
   prompts?: Prompts;
+  hooks?: AgentHooks;
   agentName?: string;
   signal?: AbortSignal;
   sessionId?: string;
@@ -791,6 +796,7 @@ async function executeToolCallsWithRepeatGuard(options: {
           onResult: options.onResult,
           openToolLog: options.openToolLog,
           prompts: options.prompts,
+          hooks: options.hooks,
         })
       : [];
   const byId = new Map<string, ToolResultRecord[]>();
@@ -863,7 +869,33 @@ async function finishInterruptedTools(
   const none = { calls: [], results: [], subagents: [] };
   if (open.length === 0 || !config.resume) return none;
   const stored = config.resume.stored;
-  const toRun = open.filter((c) => !stored.has(c.id));
+  // A call with no saved result may already have done its work before the crash: only replay-safe tools run again, every other call is answered as interrupted (the model decides whether to repeat it).
+  const unfinished = open.filter((c) => !stored.has(c.id));
+  const toRun = unfinished.filter((c) => isReplaySafe(findToolDefinition(config.tools, c.name)));
+  const skipped = new Map<string, ToolResultRecord>();
+  for (const call of unfinished) {
+    if (toRun.includes(call)) continue;
+    traceToolEvent(
+      "call_interrupted",
+      "warn",
+      call,
+      { agentName: config.agentName, sessionId: config.runOptions?.sessionId || config.options?.sessionId },
+      { reason: "resume_not_replay_safe" }
+    );
+    const result: ToolResultRecord = {
+      id: call.id,
+      name: call.name,
+      result: fillPrompt((config.prompts ?? DEFAULT_PROMPTS).toolInterrupted, { tool: call.name, id: call.id }),
+      isError: true,
+      durationMs: 1,
+    };
+    skipped.set(call.id, result);
+    try {
+      config.onToolResult?.(result);
+    } catch {
+      // why: persistence of the note is best-effort
+    }
+  }
   const executed = toRun.length
     ? await executeToolCalls({
         tools: config.tools,
@@ -875,9 +907,10 @@ async function finishInterruptedTools(
         onResult: config.onToolResult,
         openToolLog: config.openToolLog,
         prompts: config.prompts,
+        hooks: config.hooks,
       })
     : [];
-  const ran = new Map(executed.map((r) => [r.id, r]));
+  const ran = new Map([...skipped, ...executed.map((r): [string, ToolResultRecord] => [r.id, r])]);
   const subagents: SubAgentExecutionMetadata[] = [];
   const results = open.map((call) => {
     const { sanitized, metas } = sanitizeToolResult(ran.get(call.id) ?? stored.get(call.id)!);
@@ -968,14 +1001,15 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       // A long-running call (e.g. Google long decode) times each HTTP request itself: no whole-call race.
       const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
       // The slot wait comes first and is not timed: the request timeout starts once the slot is held.
+      const wire = await applyBeforeRequest(config.hooks, hookContext(config, runOptions?.signal, turns), context);
       const genResult = await withProviderSlot(provider.id, runOptions?.signal, () =>
         generateWithTimeout(
           () =>
             provider.generate(
               modelId,
               {
-                systemPrompt: context.systemPrompt,
-                messages: context.messages,
+                systemPrompt: wire.systemPrompt,
+                messages: wire.messages,
               },
               providerOptions
             ),
@@ -1022,6 +1056,17 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         }
         emitProgress(config);
         if (noToolSteered.length > 0) continue;
+        // `onYield`: the hook may keep the run going with a new user message (same budget and turn limit).
+        const more = await applyOnYield(config.hooks, hookContext(config, runOptions?.signal, turns), {
+          text: genResult.text,
+          thinking: genResult.thinking,
+          turns,
+        });
+        if (more !== undefined) {
+          context.addUserMessage(more);
+          emitProgress(config);
+          continue;
+        }
         break;
       }
 
@@ -1048,6 +1093,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         onResult: config.onToolResult,
         openToolLog: config.openToolLog,
         prompts: config.prompts,
+        hooks: config.hooks,
       });
       const results = guarded.results;
       previousToolCallFingerprints = guarded.fingerprints;
@@ -1293,12 +1339,13 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
 
         const longRunning = provider.isLongRunning?.(modelId, providerOptions) === true;
         // The provider slot is held from the request until the stream ends, fails or is cancelled; first-byte and idle timers start after it is held.
+        const wire = await applyBeforeRequest(config.hooks, hookContext(config, linked.signal, turns), context);
         const turnResponse = await withProviderSlot(provider.id, linked.signal, async () => {
           const innerStream = provider.stream(
             modelId,
             {
-              systemPrompt: context.systemPrompt,
-              messages: context.messages,
+              systemPrompt: wire.systemPrompt,
+              messages: wire.messages,
             },
             providerOptions
           );
@@ -1411,6 +1458,17 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           }
           emitProgress(config);
           if (noToolSteered.length > 0) continue;
+          // `onYield`: the hook may keep the run going with a new user message (same budget and turn limit).
+          const more = await applyOnYield(config.hooks, hookContext(config, linked.signal, turns), {
+            text: turnResponse.text,
+            thinking: turnResponse.thinking,
+            turns,
+          });
+          if (more !== undefined) {
+            context.addUserMessage(more);
+            emitProgress(config);
+            continue;
+          }
           break;
         }
 
@@ -1440,6 +1498,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           onResult: config.onToolResult,
           openToolLog: config.openToolLog,
           prompts: config.prompts,
+          hooks: config.hooks,
           onSubagentEvent: (ev) => {
             try {
               outerStream.push({

@@ -2,7 +2,7 @@ import type { ToolDefinition, ToolCallRecord, ToolResultRecord, ToolExecutionCon
 import { toJsonSafe } from "../utils/serialization.ts";
 import { ConfigError } from "../types/errors.ts";
 import { isTransientError } from "../utils/errors.ts";
-import { isSubagentResult } from "./subagent-result.ts";
+import { isSubagentResult, makeSubagentResult } from "./subagent-result.ts";
 import { isToolContent, type ToolContent } from "./tool-content.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import type { ContentPart } from "../types/message.ts";
@@ -10,6 +10,7 @@ import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts
 import { isTruncatedArguments } from "../types/tool.ts";
 import { telemetryBus } from "../telemetry.ts";
 import type { ToolLogWriter } from "../session/tool-log.ts";
+import type { AgentHooks } from "../types/agent.ts";
 
 export interface ExecuteToolsOptions {
   tools: Record<string, ToolDefinition>;
@@ -20,6 +21,8 @@ export interface ExecuteToolsOptions {
   sessionId?: string;
   /** The refusal texts shown to the model (`AgentConfig.prompts`); the shipped ones when unset. */
   prompts?: Pick<Prompts, "toolTruncatedArguments" | "toolNotFound" | "toolSchemaError">;
+  /** The agent's `beforeTool` / `afterTool` hooks (see `AgentConfig.hooks`). */
+  hooks?: Pick<AgentHooks, "beforeTool" | "afterTool">;
   /** Called the moment EACH call finishes (before the whole batch does), so a caller can save a result before the next tool is done. Never throws into the run. */
   onResult?: (result: ToolResultRecord) => void;
   /** Opens the log file of one call (only when the Agent persists to a folder); the executor writes its steps into it and `ctx.log` writes through it. */
@@ -218,6 +221,11 @@ export function isRepeatableTool(toolDef: ToolDefinition): boolean {
   const explicit = toolDef.repeatable;
   if (typeof explicit === "boolean") return explicit;
   return toolDef.idempotent === true;
+}
+
+/** Whether a tool may be run again after a crash cut its call off (`replay: "safe"` or `idempotent: true`). */
+export function isReplaySafe(toolDef: ToolDefinition | undefined): boolean {
+  return !!toolDef && (toolDef.replay === "safe" || toolDef.idempotent === true);
 }
 
 /**
@@ -525,6 +533,37 @@ async function resolveToolContent(
   return { text: truncateResultString(text, charLimit), parts };
 }
 
+// Runs the `afterTool` hook on one finished call: it may replace the result and/or `isError` (a delegation envelope keeps its brand and worker metadata); a failing hook keeps the original result and warns on the bus; in: runAndReport, out: the result record that is journaled and shown to the model.
+async function applyAfterTool(
+  hook: NonNullable<AgentHooks["afterTool"]>,
+  call: ToolCallRecord,
+  result: ToolResultRecord,
+  ctx: { agentName?: string; sessionId?: string; signal?: AbortSignal }
+): Promise<ToolResultRecord> {
+  try {
+    const decision = await hook({ id: call.id, name: call.name, arguments: call.arguments }, { ...result }, ctx);
+    if (!decision || typeof decision !== "object") return result;
+    const next: ToolResultRecord = { ...result };
+    if ("result" in decision && decision.result !== undefined) {
+      next.result = isSubagentResult(result.result)
+        ? makeSubagentResult(
+            typeof decision.result === "string" ? decision.result : String(JSON.stringify(decision.result)),
+            result.result._subagentMetadata
+          )
+        : decision.result;
+    }
+    if (typeof decision.isError === "boolean") next.isError = decision.isError;
+    return next;
+  } catch (err) {
+    telemetryBus.emitWarning(
+      "hook.error",
+      `[Agent Accelerator] The afterTool hook failed for ${call.name} (${call.id}); the original result is kept: ${err instanceof Error ? err.message : String(err)}`,
+      { toolCallId: call.id, toolName: call.name, hook: "afterTool" }
+    );
+    return result;
+  }
+}
+
 /**
  * Executes one or more tool calls in parallel or sequence, handling errors safely
  */
@@ -545,6 +584,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
     onResult,
     openToolLog,
     prompts = DEFAULT_PROMPTS,
+    hooks,
   } = options;
   assertNoToolCollisions(tools);
   const globalSemaphore = new Semaphore(DEFAULT_TOOL_CONCURRENCY);
@@ -561,6 +601,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
   };
 
   const scope = { agentName, sessionId };
+  const hookCtx = { agentName, sessionId, signal };
   const runSingle = async (call: ToolCallRecord, log: ToolLogWriter | undefined): Promise<ToolResultRecord> => {
     const startTime = nowMs();
     // Every lifecycle step goes to the telemetry bus AND this call's log file.
@@ -569,6 +610,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
       log?.write({ phase, level, ...data });
     };
     log?.write({ phase: "input", name: call.name, input: toJsonSafe(call.arguments) });
+    let callArguments = call.arguments; // what the tool runs with: the model's arguments, or what `beforeTool` changed them to
     // Latest `ctx.emit({ type: "progress", ... })` snapshot: what the tool had finished before any failure.
     let progress: unknown;
     let attempts = 0;
@@ -626,6 +668,47 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
         throw new Error("Tool execution aborted");
       }
 
+      // `beforeTool`: may refuse the call or change its arguments; it fails closed (a throwing hook blocks) and runs before a concurrency slot is taken, so a slow approval holds none.
+      if (hooks?.beforeTool) {
+        let decision: Awaited<ReturnType<NonNullable<typeof hooks.beforeTool>>>;
+        try {
+          decision = await raceAbort(
+            Promise.resolve(hooks.beforeTool({ id: call.id, name: resolved.name, arguments: callArguments }, hookCtx)),
+            signal
+          );
+        } catch (hookError) {
+          if (signal?.aborted) throw hookError;
+          decision = {
+            block: `the beforeTool hook failed: ${sanitizeErrorMessage(String((hookError as Error)?.message ?? hookError))}`,
+          };
+        }
+        if (decision && "block" in decision) {
+          const reason = String(decision.block || "refused by a hook");
+          trace("call_blocked", "warn", { reason: "hook_blocked", detail: reason });
+          return {
+            id: call.id,
+            name: resolved.name,
+            result: `Blocked: ${reason}`,
+            isError: true,
+            durationMs: elapsedMs(startTime),
+          };
+        }
+        if (decision && "arguments" in decision) {
+          if (!decision.arguments || typeof decision.arguments !== "object" || Array.isArray(decision.arguments)) {
+            trace("call_blocked", "warn", { reason: "hook_blocked", detail: "invalid arguments from beforeTool" });
+            return {
+              id: call.id,
+              name: resolved.name,
+              result: "Blocked: the beforeTool hook returned arguments that are not an object.",
+              isError: true,
+              durationMs: elapsedMs(startTime),
+            };
+          }
+          callArguments = decision.arguments;
+          trace("event", "info", { event: { type: "arguments_rewritten_by_hook" } });
+        }
+      }
+
       releaseGlobal = await globalSemaphore.acquire(signal);
       releaseTool = await getToolSemaphore(resolved.name, toolDef).acquire(signal);
 
@@ -648,14 +731,14 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
       };
 
       // Validate input if Zod schema is provided
-      let parsedInput = call.arguments;
+      let parsedInput = callArguments;
       if (toolDef.input && typeof toolDef.input.safeParse === "function") {
-        const parseRes = toolDef.input.safeParse(call.arguments);
+        const parseRes = toolDef.input.safeParse(callArguments);
         if (!parseRes.success) {
           const receivedKeys =
-            call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments)
-              ? Object.keys(call.arguments as Record<string, unknown>).join(", ") || "(none)"
-              : typeof call.arguments;
+            callArguments && typeof callArguments === "object" && !Array.isArray(callArguments)
+              ? Object.keys(callArguments as Record<string, unknown>).join(", ") || "(none)"
+              : typeof callArguments;
           const expectedParams =
             toolDef.parameters && typeof toolDef.parameters === "object"
               ? JSON.stringify(toolDef.parameters).slice(0, 800)
@@ -865,6 +948,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
       log?.close();
     }
     if (log) result.logFile = log.file;
+    if (hooks?.afterTool) result = await applyAfterTool(hooks.afterTool, call, result, hookCtx);
     try {
       onResult?.(result);
     } catch {
