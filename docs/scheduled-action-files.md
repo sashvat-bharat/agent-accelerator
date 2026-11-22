@@ -220,7 +220,10 @@ if (last && hash) {
 }
 ```
 
-Any process may read. Several processes may also **write** the same home: every change to an action takes that action's short `.mutex`, so two processes never overwrite each other's update. Which process acts on an action: only the one that registered its `Agent` starts it, delivers it and recovers it (a process that does not own it leaves it alone until its delivery time has passed with no run started, then marks it `missed` with reason `no_agent`). A run's owner keeps `<id>/.heartbeat` fresh; a run whose owner died is recovered by another process that owns the Agent.
+Any process may read. Several processes may also **write** the same home, because every change to an action takes that action's short `.mutex`. Two processes never overwrite each other's update.
+
+- Only the process that registered an action's `Agent` starts it, delivers it and recovers it. A process that does not own it leaves it alone until its delivery time has passed with no run started. Then it marks the action `missed` with the reason `no_agent`.
+- A run's owner keeps `<id>/.heartbeat` fresh. A run whose owner died is recovered by another process that owns the `Agent`.
 
 ## Editing the files
 
@@ -228,7 +231,7 @@ Prefer the API (`agent.scheduled.create`, `.update`, `.delete`, or the `schedule
 
 - **Safe while the program is stopped:** `name`, `role`, `instructions`, `task`, `tools`, `timeoutMs`, `schedule.retries`, `schedule.onMissed`, and deleting a whole record (its run folder stays unless you remove it).
 - **Picked up by a running program** at the next run: the SDK re-reads and validates the file before every run. An edit made at the very moment the SDK writes the same file can be lost, so keep hand edits to a stopped program or to small, quick changes.
-- **Do not hand-edit** `state`, `current`, `nextCookAt`, `nextDeliverAt`, `lastRun` or `delivery.json`: the SDK keeps them consistent with each other and repairs them after a crash. To reschedule, use `updateScheduledAction`.
+- **Do not hand-edit** `state`, `current`, `nextCookAt`, `nextDeliverAt`, `lastRun` or `delivery.json`: the SDK keeps them consistent with each other and repairs them after a crash. To reschedule, use `agent.scheduled.update`.
 - A hand edit that breaks validation does not break anything: that record is skipped and reported (`scheduled_action.invalid`) until you fix it.
 
 ## Events
@@ -268,9 +271,3 @@ The events on `telemetryBus` (`code`, then `data`) are part of the same contract
 | 0.5.5 | The format becomes a stable contract (this page). Added: `schedule.onMissed` (record), `late` (delivery entry, optional), the spending fields of the run header (`turns`, `inputTokens`, `freshInputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outputTokens`, `thinkingTokens`, `cacheHitRate`, `costSource`, `unpricedTurns`; `tokens` is now input + output over all attempts; `costUsd` is priced per turn). Changed: `late` is `true` for a run that replaces a missed occurrence, never for an ordinary `run_now`, and is compared in whole seconds. Event `scheduled_action.killed` became `scheduled_action.deleted`. The timeout options were reduced to `workerTimeoutMs` and the action's own `timeoutMs`. |
 | 0.5.3 | Writes became durable (fsync, `.bak` copy, atomic rename); a damaged `tasks.json` / `deliveries.json` is restored from its `.bak`. One process per home folder. |
 | 0.5.0 | The folder moved from `scheduled_tasks/` to `<home>/scheduled_actions/`, under the single home folder; an old `scheduled_tasks/` folder is renamed on first use. |
-
-## For AI agents
-
-- Read each `<id>/task.json` and the run files with plain JSON and the header parser above; never write `state`, `current`, `next*`, `lastRun` or `delivery.json`.
-- To change an action, call `agent.scheduled.update` (or the `scheduled_actions` tool, `update` command), not the file.
-- A run's cost is in its header: `costUsd` is `unknown` (never 0) when no price is known; check `unpricedTurns` before treating it as exact.

@@ -1,20 +1,26 @@
 # Generating videos
 
-`generateVideo` makes a clip with a supported video model. It is one function and stateless: no `Agent` is involved. Pass a prompt, wait, save the clip.
+> Make video clips with Google or OpenRouter video models, edit them, and pick up a job that timed out.
+
+`generateVideo` is one function and stateless. No `Agent` is involved. Pass a prompt, wait, save the clip.
 
 ```ts
 import { generateVideo } from "agent-accelerator";
 
 const result = await generateVideo({
   model: "google/gemini-omni-1.2-flash",
-  prompt: "A marble rolling fast on a chain reaction style track, continuous smooth shot.",
+  prompt: "A marble rolling fast on a chain reaction track, one smooth shot.",
   duration: 6,
   aspectRatio: "16:9",
-  onProgress: (p) => console.log(p.status, p.progress), // only providers that work in jobs report progress
+  // Only providers that work in jobs report progress.
+  onProgress: (p) => console.log(p.status, p.progress),
 });
 
-await result.video.save("marble.mp4"); // folders are created, the write is atomic, a name with no extension gets the right one
-console.log(result.usage.cost, result.video.durationSeconds, result.jobId ?? result.responseId);
+// Folders are created, the write is atomic, and a name with no
+// extension gets the right one.
+await result.video.save("marble.mp4");
+console.log(result.usage.cost, result.video.durationSeconds);
+console.log(result.jobId ?? result.responseId);
 ```
 
 A video takes seconds to minutes and **costs real money** (Google's model is about $0.07 per second at 720p). Every option is checked against the model before anything is sent, so a wrong request never reaches the provider.
@@ -23,10 +29,24 @@ A video takes seconds to minutes and **costs real money** (Google's model is abo
 
 `listVideoModels(provider?)` returns every known model; `getVideoModel("google/gemini-omni-1.2-flash")` returns one. Each entry says which lengths, tiers and ratios the model makes, which pictures it takes (first frame, last frame, reference pictures, reference clips), whether it writes audio, its limits and its prices.
 
-- **Google:** one model, `google/gemini-omni-1.2-flash` (3 to 15 seconds, 360p / 720p / 1080p / 4K, 16:9 or 9:16, with audio). Its predecessor `gemini-omni-1.1-flash` is not supported: Google reroutes it to 1.2 on 3 Dec 2026, so asking for it is the plain "not a known video model" error.
-- **OpenRouter:** `openrouter/<vendor>/<model>` for every model on OpenRouter's public list (`GET https://openrouter.ai/api/v1/videos/models`, no key needed). The SDK reads it the first time you use one, saves it in `<home>/catalog/openrouter-videos.json` and refreshes it every 12 hours (a failed refresh keeps the old copy and is not retried for 10 minutes; `catalog_refresh: "off"` never downloads). Only models that make a video from a prompt are kept: the list also holds upscalers, editors and avatar makers, which are skipped. `listVideoModels("openrouter")` is empty until the list was read once; `await refreshOpenRouterVideoModels()` reads it on demand.
+### Google
 
-OpenRouter's list states lengths, tiers, ratios, exact sizes, frame roles and the audio flag, and the SDK checks against them. It does **not** state a default length, how many reference pictures a model takes, or whether it reads reference clips, and prices differ in unit per model: those stay unknown (the SDK never guesses), and OpenRouter reports the real cost of every job. A model outside a `setModels` list is refused like any other model.
+One model: `google/gemini-omni-1.2-flash`. It makes 3 to 15 seconds, at 360p, 720p, 1080p or 4K, in 16:9 or 9:16, with audio.
+
+Its predecessor `gemini-omni-1.1-flash` is not supported. Google reroutes it to 1.2 on 3 Dec 2026, so asking for it gives the plain "not a known video model" error.
+
+### OpenRouter
+
+`openrouter/<vendor>/<model>` works for every model on OpenRouter's public list (`GET https://openrouter.ai/api/v1/videos/models`, no key needed).
+
+- The SDK reads the list the first time you use one, saves it in `<home>/catalog/openrouter-videos.json` and refreshes it every 12 hours.
+- A failed refresh keeps the old copy and is not retried for 10 minutes. `catalog_refresh: "off"` never downloads.
+- Only models that make a video from a prompt are kept. The list also holds upscalers, editors and avatar makers, which are skipped.
+- `listVideoModels("openrouter")` is empty until the list was read once. `await refreshOpenRouterVideoModels()` reads it on demand.
+
+OpenRouter's list states lengths, tiers, ratios, exact sizes, frame roles and the audio flag, and the SDK checks against them. It does **not** state a default length, how many reference pictures a model takes, or whether it reads reference clips. Prices also differ in unit per model. Those things stay unknown, because the SDK never guesses, and OpenRouter reports the real cost of every job.
+
+A model outside a `setModels` list is refused like any other model.
 
 ## Options
 
@@ -55,26 +75,46 @@ Values outside a model's list (a length, tier, ratio, size, too many pictures or
 
 ## Editing a clip
 
-`result.video.edit(prompt, options?)` changes a clip with a follow-up prompt, on the model that made it and with the same connection settings (key, endpoint, headers, `fetch`, retry, timeout, poll interval). Google continues the stored interaction; OpenRouter continues the job (`previous_job_id`). Each edit returns a new `VideoResult` whose clip can be edited again.
+`result.video.edit(prompt, options?)` changes a clip with a follow-up prompt. It uses the model that made the clip and the same connection settings (key, endpoint, headers, `fetch`, retry, timeout, poll interval).
+
+- Google continues the stored interaction. OpenRouter continues the job (`previous_job_id`).
+- Each edit returns a new `VideoResult` whose clip can be edited again.
 
 ```ts
-const first = await generateVideo({ model: "google/gemini-omni-1.2-flash", prompt: "A violinist on a stage", duration: 6 });
+import { generateVideo } from "agent-accelerator";
+
+const first = await generateVideo({
+  model: "google/gemini-omni-1.2-flash",
+  prompt: "A violinist on a stage",
+  duration: 6,
+});
 const second = await first.video.edit("Make the violin invisible.");
 await second.video.save("edited.mp4");
 ```
 
-An edit takes the prompt only: pictures and clips cannot be added to it, and a length, tier or ratio is sent only when you ask again (the edit otherwise keeps the clip's own length). A clip can only be edited by the model that made it, and only when it came from `generateVideo` (or `resumeVideo`): anything else is a `ValidationError`. Google keeps the interaction for later edits only while it is stored (the SDK never turns storing off), and Google's own retention limits apply.
+An edit takes the prompt only:
+
+- Pictures and clips cannot be added to it.
+- A length, tier or ratio is sent only when you ask again. Otherwise the edit keeps the clip's own length.
+- A clip can only be edited by the model that made it, and only when it came from `generateVideo` (or `resumeVideo`). Anything else is a `ValidationError`.
+- Google keeps the interaction for later edits only while it is stored. The SDK never turns storing off, and Google's own retention limits apply.
 
 ## Resuming a job
 
 A timeout or an abort does not cancel a job at the provider. For OpenRouter the error carries `jobId`, and `resumeVideo` asks for that job again, polls it to the end and downloads the file, without submitting (or paying for) a new one:
 
 ```ts
+import { generateVideo, resumeVideo, TimeoutError } from "agent-accelerator";
+
+const model = "openrouter/google/veo-3.1";
+
 try {
-  await generateVideo({ model: "openrouter/google/veo-3.1", prompt: "A marble", duration: 8, timeoutMs: 120_000 });
+  await generateVideo({ model, prompt: "A marble", duration: 8, timeoutMs: 120_000 });
 } catch (err) {
-  if (err instanceof TimeoutError && err.jobId) {
-    const result = await resumeVideo({ model: "openrouter/google/veo-3.1", jobId: err.jobId });
+  // The error carries the provider's job id.
+  const jobId = (err as TimeoutError & { jobId?: string }).jobId;
+  if (err instanceof TimeoutError && jobId) {
+    const result = await resumeVideo({ model, jobId });
     await result.video.save("marble.mp4");
   }
 }
