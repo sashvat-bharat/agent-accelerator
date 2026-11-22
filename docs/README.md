@@ -42,13 +42,14 @@ console.log(res.usage);
 | Get probabilities for yes/no, choice and rating questions (decisions) | [Asking decision models](guides/decisions.md) |
 | Make pictures with Google, OpenAI or OpenRouter image models; edit them; let an agent make them | [Generating images](guides/images.md) |
 | Make video clips with Google or OpenRouter video models | [Generating videos](guides/videos.md) |
+| Test my own agents with a scripted model (no network, no cost) | [Testing your agents](guides/testing.md) |
 | Set limits, budgets, retries; handle errors; observe; keep things safe | [Safety and operations](guides/safety-and-ops.md) |
 | Read or replace the prompts the SDK sends (tool refusals, worker headers, tool manuals) | [Prompts](guides/prompts.md) |
 
 ## Pages
 
 - [Getting started](getting-started.md): install, keys, first agent, core ideas.
-- Guides: [Agents and models](guides/agents-and-models.md) · [Generating images](guides/images.md) · [Generating videos](guides/videos.md) · [Generating embeddings](guides/embeddings.md) · [Asking decision models](guides/decisions.md) · [Tools and streaming](guides/tools-and-streaming.md) · [Multi-agent and scheduling](guides/multi-agent.md) · [Data and media](guides/data-and-media.md) · [Safety and operations](guides/safety-and-ops.md)
+- Guides: [Agents and models](guides/agents-and-models.md) · [Generating images](guides/images.md) · [Generating videos](guides/videos.md) · [Testing your agents](guides/testing.md) · [Generating embeddings](guides/embeddings.md) · [Asking decision models](guides/decisions.md) · [Tools and streaming](guides/tools-and-streaming.md) · [Multi-agent and scheduling](guides/multi-agent.md) · [Data and media](guides/data-and-media.md) · [Safety and operations](guides/safety-and-ops.md)
 - [Reference](reference.md): every config key, run option, response field, event, error and environment variable.
 - [Scheduled action files](scheduled-action-files.md): the stable on-disk format of scheduled actions (`<id>/task.json`, `<id>/delivery.json`, run files), how to read them and the changelog.
 - [For AI agents](for-ai-agents.md): decision table, hard rules, what does not exist, error-to-fix lookup.

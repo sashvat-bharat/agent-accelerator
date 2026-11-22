@@ -1240,6 +1240,16 @@ await result.video.save("marble.mp4");
 Every option is checked against the model before anything is sent: lengths, tiers, ratios, first and last frames, reference pictures and clips (the length of an MP4 or MOV reference clip is read from its header and checked against the model's limit). Controls a model does not have are dropped with a warning; pictures are never silently dropped. A timeout or abort leaves the provider's job running, so the error carries its `jobId` (`resumeVideo({ model, jobId })` waits for it). `result.video.edit("Make it night")` changes a clip on the model that made it. OpenRouter's models are read from its public list and cached in `<home>/catalog/`. Full guide: [Generating videos](docs/guides/videos.md).
 
 ---
+## Testing your agents
+
+`fauxProvider([...steps])` is a scripted model for tests: no network, no key, no cost. A step is a text, a reply object (`text`, `thinking`, `toolCalls`, `usage`, `cost`, `error`, `delayMs`) or a function of the request. Build the agent with `new Agent({ ...faux.config })`; it runs through the real OpenAI-compatible adapter (streaming, tool calls, usage and errors behave as in production). `faux.calls` records what the model was sent, `faux.remaining` counts unused steps, and a script that runs out fails with a clear error. Full guide: [Testing your agents](docs/guides/testing.md).
+
+```ts
+const faux = fauxProvider([{ toolCalls: [{ name: "getWeather", arguments: { city: "Paris" } }] }, "Sunny in Paris."]);
+const res = await new Agent({ ...faux.config, tools: { getWeather } }).run("Weather in Paris?");
+```
+
+---
 ## Embeddings
 
 `generateEmbedding` turns text (and, on the models that read them, images, audio, video and PDF) into vectors for search, grouping and memory. Google (`gemini-embedding-2`, `gemini-embedding-001`), OpenAI (`text-embedding-3-small`, `-3-large`, `ada-002`) and every embedding model OpenRouter lists. A list in gives one vector per item out, in order, on every model:
