@@ -56,6 +56,7 @@ Precedence: explicit config > environment; per-run options > agent defaults (obj
 | `signal` | Cancels provider, tools and sub-agents |
 | `sessionId` | Which in-memory session to use |
 | `additionalContext` | Per-turn context added to the user turn (not to `instructions`) |
+| `requestId` | Idempotent submit on `run`/`queue`/`steer`/`ask` (not `stream`): the same id again returns the first submission's result and runs nothing; kept while the Agent lives (last 1000 ids); a failed or aborted call is forgotten so a retry runs; 1 to 200 characters. Events: `agent.duplicate_request`, `agent.request_id_reused` (same id, different prompt) |
 | `enqueue` | `"steer"`, `"queue"` or `"interrupt"` when the agent is busy. `"interrupt"` works in every `midSession` mode: it aborts the active run and starts this prompt next, ahead of queued follow-ups |
 | `headers` | Extra request headers |
 | `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |

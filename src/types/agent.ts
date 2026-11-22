@@ -425,6 +425,13 @@ export interface AgentRunOptions {
   enqueue?: "steer" | "queue" | "interrupt";
   /** Headers merged for this run only. */
   headers?: Record<string, string>;
+  /**
+   * Makes the submit idempotent (`run`, `queue`, `steer`, `ask`): sending the same `requestId` again returns the FIRST
+   * submission's result instead of running again, so a retried webhook or timer does not run twice. It is remembered while
+   * this Agent object lives (the last 1000 ids). A submission that fails or is aborted is forgotten, so a retry runs again. Not
+   * available on `stream()`. A string of 1 to 200 characters.
+   */
+  requestId?: string;
   /** Called for each text delta as it streams (only when stream:true). */
   onDelta?: (delta: string, event: import("./response.ts").StreamEvent) => void;
   /** Called for each thinking/reasoning delta (only when stream:true). */

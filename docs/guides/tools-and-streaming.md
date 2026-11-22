@@ -119,6 +119,8 @@ console.log((await next).text); // its own run and response
 | `clearQueue()` | Rejects all queued follow-ups. |
 | `stream(prompt, { enqueue: "steer" \| "queue" \| "interrupt" })` | Streaming variants (`run(prompt, { enqueue })` takes the same values). |
 
+**Safe retries: `requestId`.** Pass `{ requestId: "<your id>" }` to `run`, `queue`, `steer` or `ask`. If the same id arrives again (a webhook delivered twice, a timer that fired twice), you get the FIRST submission's result back and nothing runs again. The Agent remembers the last 1000 ids while it lives; a call that failed or was aborted is forgotten, so retrying it with the same id runs it again. If the same id comes with a different prompt, the first result is still returned and an `agent.request_id_reused` warning goes to the bus (`agent.duplicate_request` is emitted for every repeat). `stream()` refuses `requestId`. After a process restart the memory is empty: use `resume()` for a cut-off run.
+
 `midSession: { mode \| whenBusy: "steer" \| "queue" \| "auto" }` can enforce one policy (the other verb then throws). `isBusy`, `pendingCount`, `steerPendingCount` expose state. A steer that arrives after the run ended becomes a queued follow-up (placed at the FRONT of the queue, in arrival order, since it was typed before anything queued later), and its promise resolves with *that* run's response. With `persist: { dir }` the prompts still waiting (steers not yet injected, queued follow-ups, with their `additionalContext`) are saved with the session, so a crash does not lose a message the user already typed.
 
 ### What an interrupt really stops
