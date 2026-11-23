@@ -4,8 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, registerModel, clearCustomModels } from "../src/index.ts";
 import { createGenericModelSpec } from "../src/models/catalog.ts";
-import { loadSessionDir, priceUsage, sessionDirFor } from "../src/session/store.ts";
-import { OLDER_WORKERS_ID, addTurn, buildUsageReport, emptyUsage, foldOldNodes, mergeUsage, readUsage, usageLine, type UsageNode } from "../src/session/usage.ts";
+import { loadSessionDir, loadSessionFile, priceUsage, saveSessionDir, saveSessionFile, sessionDirFor } from "../src/session/store.ts";
+import { OLDER_WORKERS_ID, addTurn, buildUsageReport, emptyUsage, foldOldNodes, mergeUsage, readFixedUsage, readUsage, usageLine, type UsageNode } from "../src/session/usage.ts";
 import { sseFrame } from "./helpers.ts";
 
 const roots: string[] = [];
@@ -365,6 +365,147 @@ describe("workers started below a fixed worker", () => {
     const small = [nodeOf("only", 1)];
     foldOldNodes(small, 3);
     expect(small.map((n) => n.id)).toEqual(["only"]);
+  });
+});
+
+// A fixed worker called "researcher" that starts one worker per call, under a lead; `extra` goes to the lead (persist, sessionId), `fixedName` renames the fixed worker.
+const fixedHandler: Handler = (body) => {
+  if (body.model === "w") return reply("worker done", body);
+  if (body.model === "f") return hasTool(body) ? reply("fixed done", body) : callTool("subagents", { command: "spawn", name: "inner", task: "go" }, body);
+  return hasTool(body) ? reply("all done", body) : callTool("researcher", { task: "go" }, body);
+};
+const leadWithFixed = (handler: Handler, extra: Record<string, unknown> = {}, fixedName = "researcher"): Agent => {
+  const fixed = new Agent({ ...wire, name: fixedName, model: "groq/f", fetch: fetchOf(handler), dynamicSubagents: { model: "groq/w" } });
+  return new Agent({ ...wire, model: "groq/p", subagents: [fixed], fetch: fetchOf(handler), ...extra });
+};
+
+describe("fixed workers across a restart", () => {
+  it("come back from the folder, written to the journal once and not again on the lead's next turn", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const root = tmp();
+    const before = leadWithFixed(fixedHandler, { sessionId: "lead", persist: { dir: root } });
+    const res = await before.run("go");
+    const live = before.usageReport();
+    expect(live.total.turns).toBe(5);
+
+    const journal = fs.readFileSync(path.join(sessionDirFor(root, "lead"), "journal.ndjson"), "utf8");
+    expect(journal.match(/"t":"fixed"/g)?.length).toBe(1);
+
+    const after = leadWithFixed(fixedHandler, { sessionId: "lead", persist: { dir: root } }); // a new process: nothing is in memory
+    after.importSession(loadSessionDir(sessionDirFor(root, "lead"))!.session);
+    const restored = after.usageReport();
+    expect(restored.total.turns).toBe(5);
+    expect(restored.total.tokens.total).toBe(res.usage.totalTokens);
+    expect(restored.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
+    expect(restored.workers).toEqual(live.workers);
+  });
+
+  it("come back from a single file too", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const file = path.join(tmp(), "lead.json");
+    const before = leadWithFixed(fixedHandler, { sessionId: "lead", persist: { file } });
+    await before.run("go");
+    const after = leadWithFixed(fixedHandler);
+    after.importSession(loadSessionFile(file)!);
+    expect(after.usageReport().workers).toEqual(before.usageReport().workers);
+    expect(after.usageReport().total.turns).toBe(5);
+  });
+
+  it("survive a reset and a later snapshot of the folder", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const root = tmp();
+    let plain = false;
+    const handler: Handler = (body) => (plain && body.model === "p" ? reply("plain answer", body) : fixedHandler(body));
+    const before = leadWithFixed(handler, { sessionId: "lead", persist: { dir: root } });
+    await before.run("go");
+    before.reset(); // the conversation is gone, the spending is not
+    plain = true;
+    await before.run("hello"); // a shorter history: the journal starts a new snapshot
+    expect(before.usageReport().total.turns).toBe(6);
+
+    const after = leadWithFixed(fixedHandler);
+    after.importSession(loadSessionDir(sessionDirFor(root, "lead"))!.session);
+    expect(after.usageReport().total.turns).toBe(6);
+    expect(after.usageReport().workers[0]).toMatchObject({ id: "researcher", turns: 2 });
+    expect(after.usageReport().workers[0]!.workers).toHaveLength(1);
+
+    const copy = tmp(); // and saveSessionDir (which copies the agent too) keeps it
+    saveSessionDir(copy, before);
+    const again = leadWithFixed(fixedHandler);
+    again.importSession(loadSessionDir(sessionDirFor(copy, "lead"))!.session);
+    expect(again.usageReport().total.turns).toBe(6);
+  });
+
+  it("are replaced, not added, when the same session is imported twice", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const before = leadWithFixed(fixedHandler);
+    await before.run("go");
+    const saved = before.exportSession();
+    const after = leadWithFixed(fixedHandler);
+    after.importSession(saved);
+    after.importSession(saved);
+    expect(after.usageReport().total.turns).toBe(5);
+    expect(after.usageReport().workers[0]!.workers).toHaveLength(1);
+  });
+
+  it("keep their spending when the fixed worker was renamed, and give it back when the name returns", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const before = leadWithFixed(fixedHandler);
+    await before.run("go");
+    const saved = before.exportSession();
+
+    const renamed = leadWithFixed(fixedHandler, {}, "analyst");
+    renamed.importSession(saved);
+    const report = renamed.usageReport();
+    expect(report.total.turns).toBe(5); // nothing lost
+    expect(report.workers.map((w) => [w.id, w.turns]).sort()).toEqual([["analyst", 0], ["researcher", 2]]);
+
+    const next = leadWithFixed(fixedHandler, {}, "analyst");
+    next.importSession(renamed.exportSession()); // the kept spending is saved again
+    expect(next.usageReport().total.turns).toBe(5);
+    const original = leadWithFixed(fixedHandler);
+    original.importSession(renamed.exportSession());
+    expect(original.usageReport().workers).toEqual(before.usageReport().workers); // the name matches again
+  });
+
+  it("a hand-edited file is read defensively", () => {
+    const file = path.join(tmp(), "edited.json");
+    const agent = leadWithFixed((body) => reply("x", body));
+    saveSessionFile(file, agent, null);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    raw.fixedUsage = [{ id: 3 }, { id: "ok", totals: "bad", workers: "bad" }, "junk"];
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(loadSessionFile(file)!.fixedUsage).toEqual([{ id: "ok", name: "ok", model: "", status: "closed", totals: emptyUsage(), workers: [] }]);
+  });
+
+  it("readFixedUsage drops wrong shapes, cuts long text and caps depth and size", () => {
+    expect(readFixedUsage(undefined)).toEqual([]);
+    expect(readFixedUsage("text")).toEqual([]);
+    expect(readFixedUsage([null, 5, "a", {}, { id: "" }, { id: 7 }])).toEqual([]);
+
+    const [node] = readFixedUsage([{ id: "a".repeat(500), status: "weird", totals: { turns: -3, inputTokens: "x" }, workers: [{ id: "b", status: "open" }, "junk"] }]);
+    expect(node!.id).toHaveLength(200);
+    expect(node!.status).toBe("closed");
+    expect(node!.totals.turns).toBe(0);
+    expect(node!.workers.map((w) => [w.id, w.status])).toEqual([["b", "open"]]);
+
+    let deep: Record<string, unknown> = { id: "leaf" };
+    for (let i = 0; i < 20; i++) deep = { id: `n${i}`, workers: [deep] };
+    let levels = 0;
+    for (let cur: UsageNode | undefined = readFixedUsage([deep])[0]; cur; cur = cur.workers[0]) levels++;
+    expect(levels).toBe(9); // the root and 8 levels below it
+
+    expect(readFixedUsage(Array.from({ length: 25_000 }, (_, i) => ({ id: `n${i}` }))).length).toBe(20_000);
   });
 });
 

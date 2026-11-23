@@ -29,7 +29,7 @@ Use one `sessionId` per conversation. A session folder holds `session.json` (the
 
 | `persist` | What it writes |
 |---|---|
-| `{ dir }` | `<dir>/<sessionId>/session.json` and `journal.ndjson`, plus `media/` files. The snapshot includes the agent's own spending as `usage`. The journal gets one appended line per step and is folded into the snapshot after 500 lines or 4 MB, or when the history changes another way. |
+| `{ dir }` | `<dir>/<sessionId>/session.json` and `journal.ndjson`, plus `media/` files. The snapshot includes the agent's own spending as `usage`, and the spending of its fixed workers as `fixedUsage`. The journal gets one appended line per step and is folded into the snapshot after 500 lines or 4 MB, or when the history changes another way. |
 | `{ file }` | One JSON file, rewritten at each step. Media is inlined as data URLs. No journal. |
 | `{}` | The same as `{ dir }`, with `dir` set to `<home>/sessions`. |
 
@@ -89,6 +89,7 @@ An agent that saves a session takes a lock, `<session folder>/.lock`, with the p
 - Prompts still waiting in the steer inbox or the queue are saved in `pending`, in the journal only. Media in them becomes a file under `media/`. `loadSessionDir(dir).session.pending` shows what was waiting when the process stopped.
 - Each tool call writes `tool-logs/<n>-<tool>.ndjson` next to the session. The session itself keeps only a `logFile` reference on the result. See [Tools](tools.md).
 - Sub-agent traces are saved too.
+- The spending of fixed workers (`subagents: [...]`) and of the workers their copies started is saved as `fixedUsage`. The journal gets a line for it only when it changes. A fixed worker that started 1,000 workers adds about 350 KB to that line.
 - Google turns keep their raw output steps, so a resumed session replays them exactly, with thought signatures and the cache prefix intact.
 
 Saves are durable: a temp file, `fsync` of the file and the folder, the last good version kept as `session.json.bak`, and an atomic rename. A crash or power cut never leaves a half-written file. A damaged `session.json` loads from its `.bak`.

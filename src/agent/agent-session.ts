@@ -123,7 +123,7 @@ export function importSessionInto(agent: Agent, data?: PersistedAgentSession | n
     agent.runMarks.length,
     ...(data.runs ?? []).filter((r) => r.i < agent.context.messages.length)
   );
-  agent.restoreUsage(data.usage);
+  agent.restoreUsage(data.usage, data.fixedUsage);
   if (data.systemPrompt) {
     agent.context.systemPrompt = data.systemPrompt;
   } else {

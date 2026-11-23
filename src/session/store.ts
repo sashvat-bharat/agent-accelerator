@@ -35,7 +35,7 @@ import type { SubAgentStep } from "../types/response.ts";
 import { SecurityPolicyError, SessionLoadError, ValidationError } from "../types/errors.ts";
 import { createSessionId } from "../utils/session.ts";
 import { writeFileDurable, readWithBackup } from "../utils/durable.ts";
-import type { UsageTotals } from "./usage.ts";
+import { readFixedUsage, type UsageNode, type UsageTotals } from "./usage.ts";
 
 /** Cumulative per-session token + cost totals (JSON-safe). */
 export interface SessionTotals {
@@ -125,6 +125,8 @@ export interface PersistedAgentSession {
   runs?: SessionRunMark[];
   /** What this agent spent on its own model calls (see `usage.ts`); the journal keeps it current with `usage` records. */
   usage?: UsageTotals;
+  /** What this agent's fixed workers (`subagents: [...]`) spent through their per-call copies, and the workers those copies started, as a usage tree; the journal keeps it current with `fixed` records. */
+  fixedUsage?: UsageNode[];
   /** Read from the journal only (never in `session.json`): prompts that were still waiting. */
   pending?: SessionPending;
   /** Read from the journal only: results of tool calls finished in the current run (used to resume without repeating them). */
@@ -349,6 +351,8 @@ export interface SessionAgentLike {
   toolRecords?: SessionToolRecord[];
   /** What this agent spent on its own model calls. */
   usageTotals?: UsageTotals;
+  /** What its fixed workers' per-call copies spent (empty when it has none); called by the snapshot and the journal. */
+  fixedUsage?: () => UsageNode[];
   context: { systemPrompt?: string; messages: Message[] };
 }
 
@@ -477,6 +481,7 @@ export function buildSessionData(
   const parentSessionId = typeof agent.parentSessionId === "string" ? agent.parentSessionId : undefined;
   const subagents = snapshotSubagents(agent.subagentTraces);
   const messages = inlineBinaryMedia(stripRedundantRawArguments(agent.context.messages));
+  const fixedUsage = readFixedUsage(agent.fixedUsage?.() ?? []); // a validated deep copy: the live nodes keep changing
   // Field order is the on-disk layout contract: identity → config →
   // systemPrompt → totals → messages → lineage/traces. `instructions` is
   // intentionally never written: `systemPrompt` already embeds it (plus the
@@ -498,6 +503,7 @@ export function buildSessionData(
     ...(agent.usageTotals && agent.usageTotals.turns > 0
       ? { usage: JSON.parse(JSON.stringify(agent.usageTotals)) as UsageTotals }
       : {}),
+    ...(fixedUsage.length > 0 ? { fixedUsage } : {}),
   };
 }
 
@@ -692,6 +698,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       ...(typeof obj.epoch === "string" ? { epoch: obj.epoch } : {}),
       ...(Array.isArray(obj.runs) ? { runs: obj.runs as SessionRunMark[] } : {}),
       ...(obj.usage && typeof obj.usage === "object" ? { usage: obj.usage as UsageTotals } : {}),
+      ...(Array.isArray(obj.fixedUsage) ? { fixedUsage: readFixedUsage(obj.fixedUsage) } : {}),
     };
   } catch {
     return null;
@@ -1114,6 +1121,10 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
       ];
     } else if (rec.t === "usage" && rec.u && typeof rec.u === "object") {
       session.usage = rec.u as UsageTotals; // latest record wins
+    } else if (rec.t === "fixed" && "u" in rec) {
+      const nodes = readFixedUsage(rec.u); // latest record wins; `null` (or nothing usable) clears it
+      if (nodes.length > 0) session.fixedUsage = nodes;
+      else delete session.fixedUsage;
     } else if (rec.t === "pending" && rec.p && typeof rec.p === "object") {
       const p = rec.p as SessionPending; // latest record wins
       if (Array.isArray(p.steer) && Array.isArray(p.queue)) {

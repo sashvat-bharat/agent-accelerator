@@ -83,6 +83,7 @@ import {
   foldOldNodes,
   mergeUsage,
   modelName,
+  readFixedUsage,
   readUsage,
   type UsageNode,
   type UsageReport,
@@ -300,6 +301,12 @@ export class Agent {
   private workerRegistry?: WorkerRegistry;
   /** The workers that the per-call copies of this agent (as a fixed worker) started, as usage nodes; kept so `usageReport()` lists them. */
   private readonly copiedWorkers: UsageNode[] = [];
+  /** What the per-call copies of this agent (as a fixed worker) spent; kept apart from its own calls, so a restored session never doubles them. */
+  private readonly copiedUsage: UsageTotals = emptyUsage();
+  /** Saved fixed-worker spending whose worker is no longer in `subagents` (renamed or removed); kept so the total stays exact. */
+  private readonly orphanFixed: UsageNode[] = [];
+  /** The spending of this agent's fixed workers as a usage tree, for the snapshot and the journal; an own property so a `{ ...agent }` copy keeps it. @internal */
+  readonly fixedUsage: () => UsageNode[] = () => this.fixedUsageNodes();
   /** The chat-wide spending cap this agent counts into and checks against: its own (`usageLimit`) or the root's, handed down to workers. @internal */
   chat?: UsageLimit;
   /** True for the agent that created `chat` from its own `usageLimit` (the root of the chat). */
@@ -626,7 +633,7 @@ export class Agent {
     if (!(session.runs ?? []).some((r) => !r.end) && waiting.length === 0) return false;
     this.context.messages = session.messages;
     this.runMarks.splice(0, this.runMarks.length, ...(session.runs ?? []));
-    this.restoreUsage(session.usage);
+    this.restoreUsage(session.usage, session.fixedUsage);
     const open = new Set(unfinishedToolCalls(this.context.messages).map((c) => c.id));
     this.toolRecords.splice(0, this.toolRecords.length, ...(session.tools ?? []).filter((t) => open.has(t.id)));
     for (const w of waiting) {
@@ -641,9 +648,11 @@ export class Agent {
     return true;
   }
 
-  // Puts saved spending totals back after a restart or import (zeros when the file has none); in: a loaded session's `usage`, out: this.usageTotals.
-  restoreUsage(saved: unknown): void {
+  // Puts saved spending back after a restart or import (zeros when the file has none): this agent's own totals and what its fixed workers spent; in: a loaded session's `usage` and `fixedUsage`, out: this.usageTotals and the fixed workers' copied spending.
+  restoreUsage(saved: unknown, fixed?: unknown): void {
     Object.assign(this.usageTotals, readUsage(saved));
+    this.clearFixed();
+    this.placeFixed(readFixedUsage(fixed));
     if (this.ownsChat) this.chat?.restart(); // a restored session changes the starting point of the chat total
   }
 
@@ -654,9 +663,9 @@ export class Agent {
     this.chat?.add((usage.inputTokens || 0) + (usage.outputTokens || 0), priced?.breakdown.totalMicroUSD ?? 0);
   }
 
-  /** Adds another agent's spending to this one (a fixed worker's per-call copy into its template). @internal */
+  /** Adds the spending of one per-call copy of this agent (as a fixed worker) to what its copies spent. @internal */
   absorbUsage(other: UsageTotals): void {
-    mergeUsage(this.usageTotals, other);
+    mergeUsage(this.copiedUsage, other);
   }
 
   /** Keeps the workers a fixed worker's per-call copy started as usage nodes under this template (the oldest past 1,000 fold into one node). @internal */
@@ -708,22 +717,72 @@ export class Agent {
     return nodes;
   }
 
-  // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is merged into them, and the workers those copies started hang below them); in: the constructor config, out: workerNodes.
+  // The `subagents: [...]` workers with the name each is listed under; in: the constructor config, out: fixedWorkerNodes, fixedUsageNodes and placeFixed.
+  private fixedEntries(): Array<{ name: string; worker: Agent }> {
+    return (this.forkConfig.subagents ?? []).map((entry) =>
+      "agent" in entry ? { name: entry.name, worker: entry.agent } : { name: entry.name, worker: entry }
+    );
+  }
+
+  // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is added to them, and the workers those copies started hang below them), plus saved ones that no longer exist; in: the constructor config, out: workerNodes.
   private fixedWorkerNodes(): UsageNode[] {
+    const nodes: UsageNode[] = this.fixedEntries().map(({ name, worker }) => {
+      const totals = emptyUsage();
+      mergeUsage(totals, worker.usageTotals);
+      mergeUsage(totals, worker.copiedUsage);
+      return {
+        id: name,
+        name,
+        model: modelName(worker.modelStringOrSpec),
+        status: "fixed",
+        totals,
+        workers: worker.workerNodes(),
+      };
+    });
+    return [...nodes, ...this.orphanFixed];
+  }
+
+  // What the copies of this agent's fixed workers spent, as the tree the session saves (a worker with nothing to save is left out); in: `fixedUsage`, out: the snapshot and the `fixed` journal record.
+  private fixedUsageNodes(): UsageNode[] {
     const nodes: UsageNode[] = [];
-    for (const entry of this.forkConfig.subagents ?? []) {
-      const worker = "agent" in entry ? entry.agent : entry;
-      const name = "agent" in entry ? entry.name : worker.name;
+    for (const { name, worker } of this.fixedEntries()) {
+      const below = [...worker.copiedWorkers, ...worker.fixedUsageNodes()];
+      if (worker.copiedUsage.turns === 0 && below.length === 0) continue;
       nodes.push({
         id: name,
         name,
         model: modelName(worker.modelStringOrSpec),
         status: "fixed",
-        totals: worker.usageTotals,
-        workers: worker.workerNodes(),
+        totals: worker.copiedUsage,
+        workers: below,
       });
     }
-    return nodes;
+    return [...nodes, ...this.orphanFixed];
+  }
+
+  // Forgets what the copies of this agent's fixed workers spent, all the way down; in: restoreUsage, out: empty copied spending.
+  private clearFixed(): void {
+    this.orphanFixed.length = 0;
+    for (const { worker } of this.fixedEntries()) {
+      Object.assign(worker.copiedUsage, emptyUsage());
+      worker.copiedWorkers.length = 0;
+      worker.clearFixed();
+    }
+  }
+
+  // Puts a saved fixed-worker tree back: each node goes to the fixed worker of the same name, and one with no such worker is kept as it is; in: restoreUsage, out: copied spending and workers.
+  private placeFixed(nodes: UsageNode[]): void {
+    const entries = this.fixedEntries();
+    for (const node of nodes) {
+      const found = entries.find((e) => e.name === node.id);
+      if (!found) {
+        this.orphanFixed.push(node);
+        continue;
+      }
+      Object.assign(found.worker.copiedUsage, node.totals);
+      found.worker.copiedWorkers.push(...node.workers.filter((w) => w.status !== "fixed"));
+      found.worker.placeFixed(node.workers.filter((w) => w.status === "fixed"));
+    }
   }
 
   // Says on the telemetry bus that resuming (or a prompt that was waiting) failed; in: a rejected resume, out: telemetryBus.

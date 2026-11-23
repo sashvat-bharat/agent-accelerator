@@ -242,6 +242,43 @@ function sumTree(into: UsageTotals, nodes: UsageNode[]): void {
   }
 }
 
+// The most nodes and the deepest nesting a saved worker tree may have; a hand-edited file past them is cut, never trusted.
+const MAX_SAVED_NODES = 20_000;
+const MAX_SAVED_DEPTH = 8;
+
+/** Reads a saved worker tree back defensively (wrong shapes dropped, strings cut, size and depth capped); in: a loaded session's `fixedUsage`, out: clean usage nodes. */
+export function readFixedUsage(saved: unknown): UsageNode[] {
+  let left = MAX_SAVED_NODES;
+  // A short string, else the fallback; in: read, out: a safe id, name, role or model.
+  const text = (v: unknown, fallback: string): string => (typeof v === "string" ? v.slice(0, 200) : fallback);
+  // One level of nodes; in: an unknown list and its depth, out: the nodes that have an id.
+  const read = (list: unknown, depth: number): UsageNode[] => {
+    if (!Array.isArray(list) || depth > MAX_SAVED_DEPTH) return [];
+    const out: UsageNode[] = [];
+    for (const raw of list) {
+      if (left <= 0) break;
+      if (!raw || typeof raw !== "object") continue;
+      left--;
+      const n = raw as Record<string, unknown>;
+      const id = text(n["id"], "");
+      if (!id) continue;
+      const status: UsageNode["status"] = n["status"] === "open" || n["status"] === "fixed" ? n["status"] : "closed";
+      const role = text(n["role"], "");
+      out.push({
+        id,
+        name: text(n["name"], id),
+        ...(role ? { role } : {}),
+        model: text(n["model"], ""),
+        status,
+        totals: readUsage(n["totals"]),
+        workers: read(n["workers"], depth + 1),
+      });
+    }
+    return out;
+  };
+  return read(saved, 0);
+}
+
 /** The id of the one node that stands for workers folded away to keep memory bounded. */
 export const OLDER_WORKERS_ID: string = "older-workers";
 
