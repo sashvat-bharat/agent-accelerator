@@ -10,4 +10,4 @@ bun run docs:build          # builds to website/.vitepress/dist; fails on any br
 
 - `.vitepress/config.ts`: title, sidebar, search and the link rules.
 - `.vitepress/theme/style.css`: the whole look (colors, fonts, code blocks, tables).
-- A new page needs one line in the sidebar of `config.ts`.
+- A new page needs one line in the sidebar of `config.ts` and one line in `docs/llms.txt`. `bun run docs:check` (also part of `bun test`) fails when a page is missing from either, when a link or anchor is broken, when a code example does not compile, or when a telemetry code is not in the reference.

@@ -191,7 +191,7 @@ Each has `toolCallId`, `toolName`, `agentName` and `sessionId`. Failures add the
 |---|---|
 | `concurrency.queued` | A provider call waited for a free slot (`provider`, `waiting`, `active`, `paused`). Only with the `concurrency` setting. |
 | `concurrency.paused` | A provider answered 429 with a `Retry-After`. No new calls to it for `ms`. |
-| `scheduled_action.created`, `updated`, `started`, `ready`, `failed`, `delivered`, `missed`, `skipped`, `deleted`, `invalid`, `store_corrupt`, `error` | The life of a scheduled action. Payloads are in [Scheduled action files](scheduled-action-files.md#events). |
+| `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | The life of a scheduled action. Payloads are in [Scheduled action files](scheduled-action-files.md#events). |
 
 ## Errors
 

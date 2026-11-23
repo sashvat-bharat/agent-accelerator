@@ -44,3 +44,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 # docs site (website/)
 website/.vitepress/cache
+# docs checks (test/docs.test.ts)
+.snippets-check/

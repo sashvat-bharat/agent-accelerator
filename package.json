@@ -48,7 +48,8 @@
     "fetch-latest-provider-docs": "bun references/documentations/fetch-latest.ts",
     "bench": "bun bench/memory.ts",
     "docs:dev": "bun run --cwd website dev",
-    "docs:build": "bun run --cwd website build"
+    "docs:build": "bun run --cwd website build",
+    "docs:check": "bun test test/docs.test.ts"
   },
   "peerDependencies": {
     "zod": "^4.4.3"
