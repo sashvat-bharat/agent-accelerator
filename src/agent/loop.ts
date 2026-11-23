@@ -43,6 +43,7 @@ import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
 import { withProviderSlot } from "./governor.ts";
 import { applyBeforeRequest, applyOnYield, hookContext } from "./hooks.ts";
+import { resolveNetworkTimeouts } from "./options.ts";
 
 /** One mid-session steer request buffered while a run is active. */
 export interface SteerEntry {
@@ -380,11 +381,7 @@ function resolveLoopLimits(
   const deadlineMs = num(raw.deadlineMs) ?? Infinity;
   const maxToolCallsPerRun = num(raw.maxToolCallsPerRun) ?? Infinity;
   const maxTotalTokens = num(raw.maxTotalTokens) ?? Infinity;
-  // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
-  const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
-  const requestTimeoutMs = timeout(raw.requestTimeoutMs) ?? 300_000;
-  const firstByteTimeoutMs = timeout(raw.firstByteTimeoutMs) ?? 120_000;
-  const streamIdleTimeoutMs = timeout(raw.streamIdleTimeoutMs) ?? 300_000;
+  const { requestTimeoutMs, firstByteTimeoutMs, streamIdleTimeoutMs } = resolveNetworkTimeouts(raw);
   return {
     maxTurns,
     deadlineMs,

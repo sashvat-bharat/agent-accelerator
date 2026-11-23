@@ -6,6 +6,10 @@ import { noop } from "../src/utils/noop.ts";
 import { mediaKeyOf, mediaValueOf, makeMediaPart, MEDIA_KEYS } from "../src/utils/media-part.ts";
 import { markRetryable } from "../src/utils/errors.ts";
 import { resetModels } from "../src/config/models.ts";
+import { abortError, abortErrorFor, isAbortError } from "../src/types/errors.ts";
+import { modalityTokens } from "../src/providers/shared.ts";
+import { pricePerMillion } from "../src/models/openrouter-list.ts";
+import { resolveNetworkTimeouts } from "../src/agent/options.ts";
 
 describe("beforeFirst", () => {
   it("cuts at the first separator, and keeps all of the text when there is none", () => {
@@ -112,5 +116,68 @@ describe("an Agent that leaves out `model`", () => {
 
   it("has no `Agent.fromEnv`: leaving out `model` does the same", () => {
     expect("fromEnv" in Agent).toBe(false);
+  });
+});
+
+describe("abortError and abortErrorFor", () => {
+  it("make the error that isAbortError recognizes, with the message", () => {
+    const err = abortError("Stream aborted");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("AbortError");
+    expect(err.message).toBe("Stream aborted");
+    expect(isAbortError(err)).toBe(true);
+    expect(isAbortError(new Error("Stream aborted"))).toBe(false);
+  });
+
+  it("take the signal's reason message when it is an error, else the fallback", () => {
+    const withError = new AbortController();
+    withError.abort(new Error("the user pressed stop"));
+    expect(abortErrorFor(withError.signal, "fallback").message).toBe("the user pressed stop");
+    const withText = new AbortController();
+    withText.abort("plain text");
+    const err = abortErrorFor(withText.signal, "Video generation aborted");
+    expect(err.message).toBe("Video generation aborted");
+    expect(isAbortError(err)).toBe(true);
+  });
+});
+
+describe("modalityTokens", () => {
+  it("adds up the entries of one modality, ignoring case, and says undefined when the list has none", () => {
+    const list = [
+      { modality: "TEXT", tokens: 10 },
+      { modality: "text", tokens: 5 },
+      { modality: "image", tokens: 100 },
+      { modality: "image" }, // no count: adds 0
+    ];
+    expect(modalityTokens(list, "text")).toBe(15);
+    expect(modalityTokens(list, "IMAGE")).toBe(100);
+    expect(modalityTokens(list, "audio")).toBeUndefined();
+    expect(modalityTokens(undefined, "text")).toBeUndefined();
+    expect(modalityTokens([], "text")).toBeUndefined();
+  });
+});
+
+describe("pricePerMillion", () => {
+  it("turns a per-token price into USD per 1M tokens, and refuses what is not a price", () => {
+    expect(pricePerMillion("0.00000008")).toBe(0.08);
+    expect(pricePerMillion(0.000003)).toBe(3);
+    expect(pricePerMillion("0")).toBe(0);
+    for (const bad of ["abc", -1, "-0.5", null, undefined, {}, NaN, Infinity]) expect(pricePerMillion(bad)).toBeUndefined();
+  });
+});
+
+describe("resolveNetworkTimeouts", () => {
+  it("gives the defaults, keeps your numbers, and lets 0 or Infinity turn a timeout off", () => {
+    expect(resolveNetworkTimeouts(undefined)).toEqual({ requestTimeoutMs: 300_000, firstByteTimeoutMs: 120_000, streamIdleTimeoutMs: 300_000 });
+    expect(resolveNetworkTimeouts({ requestTimeoutMs: 5_000, firstByteTimeoutMs: 0, streamIdleTimeoutMs: Infinity })).toEqual({
+      requestTimeoutMs: 5_000,
+      firstByteTimeoutMs: 0,
+      streamIdleTimeoutMs: Infinity,
+    });
+  });
+
+  it("falls back to the default for anything that is not a number", () => {
+    const out = resolveNetworkTimeouts({ requestTimeoutMs: "fast", firstByteTimeoutMs: NaN, streamIdleTimeoutMs: null });
+    expect(out).toEqual({ requestTimeoutMs: 300_000, firstByteTimeoutMs: 120_000, streamIdleTimeoutMs: 300_000 });
   });
 });

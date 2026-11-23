@@ -15,7 +15,7 @@ Shared contracts. Types only, plus a few tiny helpers that belong to a type.
 | `video.ts`     | `VideoOptions`, `VideoInput`, `VideoProgress`, `ProviderVideoRequest` / `ProviderVideoResult` (what an adapter receives and returns), `VideoResultData`, `continueFrom`, `VideoEditOptions`, `ResumeVideoOptions`, `ProviderVideoResumeRequest`. |
 | `decision.ts`  | `DecisionOptions`, the question types (`noul`, `choice`, `score`) and answers, `ProviderDecisionRequest` / `ProviderDecisionResult` (what an adapter receives and returns), `DecisionResultData`.                                                |
 | `scheduler.ts` | Scheduled-action input, record and delivery types.                                                                                                                                                                                               |
-| `errors.ts`    | The typed error family (`AgentAccelError` and subclasses), `isAbortError`.                                                                                                                                                                       |
+| `errors.ts`    | The typed error family (`AgentAccelError` and subclasses), `isAbortError`, `abortError` and `abortErrorFor` (the one way to build an `AbortError`).                                                                                              |
 
 ## Invariants
 

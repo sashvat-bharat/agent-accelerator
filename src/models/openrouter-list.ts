@@ -212,3 +212,9 @@ export function createOpenRouterList<T>(spec: OpenRouterListSpec<T>): OpenRouter
 
   return { read, refresh, ensure, reset };
 }
+
+/** A price string such as "0.00000008" per token as USD per 1M tokens, or undefined when it is not a number. */
+export function pricePerMillion(v: unknown): number | undefined {
+  const n = typeof v === "string" || typeof v === "number" ? Number(v) : NaN;
+  return Number.isFinite(n) && n >= 0 ? Number((n * 1_000_000).toFixed(6)) : undefined;
+}

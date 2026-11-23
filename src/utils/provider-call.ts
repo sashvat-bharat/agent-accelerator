@@ -3,7 +3,7 @@
  * an abort error that carries the signal's reason, a timeout-and-abort bound around one provider request, and the sum of
  * several usages.
  */
-import { TimeoutError, ValidationError } from "../types/errors.ts";
+import { TimeoutError, ValidationError, abortErrorFor } from "../types/errors.ts";
 import { mediaValueOf } from "./media-part.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { RetryPolicyConfig } from "../types/agent.ts";
@@ -12,12 +12,6 @@ import type { AudioPart, FilePart, ImagePart, MediaResolution, TextPart, VideoPa
 import { normalizeMediaInput, type NormalizedMedia } from "./media.ts";
 import { assertPathAllowed, isLocalPathInput } from "./safe-io.ts";
 
-/** An `AbortError` carrying the signal's reason message (`what` names the call when there is none); in: the abort paths of the one-call functions, out: the error to throw. */
-export function abortError(signal: AbortSignal, what = "Request aborted"): Error {
-  const reason = (signal as { reason?: unknown }).reason;
-  return Object.assign(new Error(reason instanceof Error ? reason.message : what), { name: "AbortError" });
-}
-
 /** Runs `task`, rejecting with a `TimeoutError` after `ms` or an `AbortError` as soon as `signal` aborts, even when the adapter ignores its signal; in: each provider request, out: the task's result. */
 export function bounded<T>(
   task: () => Promise<T>,
@@ -25,7 +19,7 @@ export function bounded<T>(
   signal: AbortSignal,
   names: { timeout: string; aborted: string }
 ): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortError(signal, names.aborted));
+  if (signal.aborted) return Promise.reject(abortErrorFor(signal, names.aborted));
   return new Promise<T>((resolve, reject) => {
     const timer =
       Number.isFinite(ms) && ms > 0
@@ -34,7 +28,7 @@ export function bounded<T>(
             ms
           )
         : undefined;
-    const onAbort = (): void => reject(abortError(signal, names.aborted));
+    const onAbort = (): void => reject(abortErrorFor(signal, names.aborted));
     signal.addEventListener("abort", onAbort, { once: true });
     task()
       .then(resolve, reject)

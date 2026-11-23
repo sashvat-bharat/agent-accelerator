@@ -7,6 +7,7 @@
 import { readRetryAfterMs } from "../utils/retry.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { getSetting } from "../config/settings.ts";
+import { abortErrorFor } from "../types/errors.ts";
 
 /** What the governor limits; every key is optional and unset means unlimited. */
 export interface GovernorLimits {
@@ -27,17 +28,6 @@ interface Waiter {
 // A limit as a usable number (whole, >= 1), else Infinity; in: the Governor constructor, out: its limits.
 function limitOf(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : Infinity;
-}
-
-// The error a waiter gets when its signal aborts while it queues; in: acquire, out: a rejection the loops treat as an abort.
-function abortError(signal: AbortSignal): Error {
-  const reason = (signal as { reason?: unknown }).reason;
-  return Object.assign(
-    reason instanceof Error ? new Error(reason.message) : new Error("Aborted while waiting for a provider slot"),
-    {
-      name: "AbortError",
-    }
-  );
 }
 
 /** The clock the governor reads; tests pass a fake one. `later` schedules `fn` after `ms` and returns its canceller. */
@@ -171,14 +161,14 @@ export class Governor {
 
   /** Waits in line for a slot of `provider` (at once when there is room) and resolves with its release; rejects with an `AbortError` when `signal` aborts first. */
   acquire(provider: string, signal?: AbortSignal): Promise<() => void> {
-    if (signal?.aborted) return Promise.reject(abortError(signal));
+    if (signal?.aborted) return Promise.reject(abortErrorFor(signal, "Aborted while waiting for a provider slot"));
     if (this.fits(provider)) return Promise.resolve(this.take(provider));
     return new Promise((resolve, reject) => {
       const waiter: Waiter = { provider, grant: resolve, fail: reject, signal };
       waiter.onAbort = () => {
         const i = this.queue.indexOf(waiter);
         if (i >= 0) this.queue.splice(i, 1);
-        if (signal) reject(abortError(signal)); // the listener exists only when there is a signal
+        if (signal) reject(abortErrorFor(signal, "Aborted while waiting for a provider slot")); // the listener exists only when there is a signal
         this.pump(); // a removed waiter may have been the one holding the line
       };
       signal?.addEventListener("abort", waiter.onAbort, { once: true });

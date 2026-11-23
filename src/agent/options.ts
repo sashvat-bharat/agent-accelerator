@@ -35,8 +35,6 @@ export interface AgentRunLimits {
 export function resolveAgentLimits(config: { limits?: object }): AgentRunLimits {
   const raw: Record<string, unknown> = { ...config.limits };
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-  // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
-  const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
   const maxTurns = num(raw.maxTurns);
   const deadlineMs = num(raw.deadlineMs);
   const maxToolCallsPerRun = num(raw.maxToolCallsPerRun);
@@ -46,9 +44,22 @@ export function resolveAgentLimits(config: { limits?: object }): AgentRunLimits 
     ...(deadlineMs !== undefined ? { deadlineMs } : {}),
     ...(maxToolCallsPerRun !== undefined ? { maxToolCallsPerRun: Math.max(1, Math.floor(maxToolCallsPerRun)) } : {}),
     ...(maxTotalTokens !== undefined ? { maxTotalTokens: Math.max(1, Math.floor(maxTotalTokens)) } : {}),
-    requestTimeoutMs: timeout(raw.requestTimeoutMs) ?? 300_000,
-    firstByteTimeoutMs: timeout(raw.firstByteTimeoutMs) ?? 120_000,
-    streamIdleTimeoutMs: timeout(raw.streamIdleTimeoutMs) ?? 300_000,
+    ...resolveNetworkTimeouts(raw),
+  };
+}
+
+/** The three network timeouts of a `limits` object in ms (300 s for a call, 120 s to the first byte, 300 s of silence on a stream): `0` or `Infinity` turns one off, and anything that is not a number gets the default. */
+export function resolveNetworkTimeouts(limits: Record<string, unknown> | undefined): {
+  requestTimeoutMs: number;
+  firstByteTimeoutMs: number;
+  streamIdleTimeoutMs: number;
+} {
+  // One timeout value: a number (not NaN) is kept, anything else is unset so the default applies; in: the three reads below, out: ms or undefined.
+  const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
+  return {
+    requestTimeoutMs: timeout(limits?.["requestTimeoutMs"]) ?? 300_000,
+    firstByteTimeoutMs: timeout(limits?.["firstByteTimeoutMs"]) ?? 120_000,
+    streamIdleTimeoutMs: timeout(limits?.["streamIdleTimeoutMs"]) ?? 300_000,
   };
 }
 

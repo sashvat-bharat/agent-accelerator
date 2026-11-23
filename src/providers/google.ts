@@ -47,7 +47,7 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { normalizeMediaInput, inferMimeType } from "../utils/media.ts";
-import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
+import { ConfigError, ValidationError, isAbortError, abortError } from "../types/errors.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { stripSchemaForGoogle } from "../tools/schema.ts";
 import { toConciseProviderError, assertModalitiesSupported, markRetryable } from "../utils/errors.ts";
@@ -1536,7 +1536,7 @@ export class GoogleInteractionsProvider implements Provider {
                 } catch {
                   // why: cancelling or releasing something that is already closed is harmless.
                 }
-                throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+                throw abortError("Stream aborted");
               }
               let chunk: { done: boolean; value?: Uint8Array };
               try {
@@ -1570,7 +1570,7 @@ export class GoogleInteractionsProvider implements Provider {
         }
 
         if (linked.signal.aborted || eventStream.isCancelled() || aborted) {
-          throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+          throw abortError("Stream aborted");
         }
 
         const toolCalls: ToolCallRecord[] = [];
@@ -1643,7 +1643,7 @@ export class GoogleInteractionsProvider implements Provider {
           linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
         if (isAbort) {
           cancelBackground();
-          eventStream.fail(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
+          eventStream.fail(abortError("Stream aborted"));
         } else if (evictSessionId && usedChain && isNotFoundChainError(raw)) {
           // Reactive self-heal, fail-clean variant (Rule 2): the `start`
           // event is already delivered, so a transparent in-stream retry

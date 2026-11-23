@@ -27,6 +27,7 @@ import { pollJob } from "../video/poll.ts";
 import {
   combinedSignal,
   headersToRecord,
+  modalityTokens,
   redactedHeaders,
   resolveProviderApiKey,
   resolveProviderBaseUrl,
@@ -78,12 +79,6 @@ interface InteractionReply {
   };
 }
 
-// Tokens of one modality in a by-modality list, or undefined when the list does not mention it; in: mapUsage, out: a count.
-function tokensOf(list: Modality[] | undefined, modality: string): number | undefined {
-  const hits = (list ?? []).filter((m) => m.modality?.toLowerCase() === modality);
-  return hits.length > 0 ? hits.reduce((n, m) => n + (m.tokens ?? 0), 0) : undefined;
-}
-
 // Usage as TokenUsage: thinking tokens are billed as output (folded into it) and, with the per-modality split, priced as text; the video tokens are kept apart for the video price; in: a reply, out: TokenUsage.
 function mapUsage(raw: InteractionReply["usage"]): TokenUsage {
   const input = raw?.total_input_tokens ?? 0;
@@ -95,9 +90,9 @@ function mapUsage(raw: InteractionReply["usage"]): TokenUsage {
     totalTokens: raw?.total_tokens ?? input + output,
   };
   if (thought > 0) usage.thinkingTokens = thought;
-  const video = tokensOf(raw?.output_tokens_by_modality, "video");
+  const video = modalityTokens(raw?.output_tokens_by_modality, "video");
   if (video !== undefined) {
-    const text = (tokensOf(raw?.output_tokens_by_modality, "text") ?? 0) + thought;
+    const text = (modalityTokens(raw?.output_tokens_by_modality, "text") ?? 0) + thought;
     usage.outputDetails = { videoTokens: video, textTokens: text };
   }
   return usage;

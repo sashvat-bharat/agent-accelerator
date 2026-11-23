@@ -4,7 +4,12 @@
  * OpenRouter has dozens of embedding models that change often, so the SDK keeps no hand-written table for them: the list
  * carries each model's inputs, length limit and prices, which is all the request checks need.
  */
-import { createOpenRouterList, type OpenRouterList, type RefreshOpenRouterListOptions } from "./openrouter-list.ts";
+import {
+  createOpenRouterList,
+  type OpenRouterList,
+  type RefreshOpenRouterListOptions,
+  pricePerMillion,
+} from "./openrouter-list.ts";
 import { isRecord } from "../utils/guards.ts";
 import type { EmbeddingInputKind, EmbeddingModelInfo, EmbeddingPrices } from "./embedding-models.ts";
 
@@ -12,12 +17,6 @@ const DEFAULT_URL = "https://openrouter.ai/api/v1/embeddings/models";
 
 /** Options of a refresh. */
 export type RefreshOpenRouterEmbeddingsOptions = RefreshOpenRouterListOptions;
-
-// A price string such as "0.00000008" per token as USD per 1M tokens, or undefined when it is not a number; in: toModel, out: a price.
-function perMillion(v: unknown): number | undefined {
-  const n = typeof v === "string" || typeof v === "number" ? Number(v) : NaN;
-  return Number.isFinite(n) && n >= 0 ? Number((n * 1_000_000).toFixed(6)) : undefined;
-}
 
 // One entry of OpenRouter's list as our model info, or undefined for an entry that is not usable (no id, expired, or not an embedding model); in: parseList, out: the entry.
 function toModel(raw: unknown, now: number): EmbeddingModelInfo | undefined {
@@ -38,9 +37,9 @@ function toModel(raw: unknown, now: number): EmbeddingModelInfo | undefined {
   if (inputs.length === 0) return undefined;
   const id = raw["id"];
   const pricing = isRecord(raw["pricing"]) ? raw["pricing"] : {};
-  const text = perMillion(pricing["prompt"]);
-  const image = perMillion(pricing["image"] ?? pricing["image_token"]);
-  const audio = perMillion(pricing["audio"]);
+  const text = pricePerMillion(pricing["prompt"]);
+  const image = pricePerMillion(pricing["image"] ?? pricing["image_token"]);
+  const audio = pricePerMillion(pricing["audio"]);
   const prices: EmbeddingPrices | undefined =
     text === undefined
       ? undefined

@@ -108,7 +108,7 @@ import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalo
 import { buildSessionData, type PersistedAgentSession, type SessionTotals } from "../session/store.ts";
 import { SessionTelemetry } from "../session/store.ts";
 
-import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
+import { ConfigError, ValidationError, isAbortError, abortError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (fallback when
@@ -949,7 +949,7 @@ export class Agent {
   clearQueue(): number {
     const n = this.rc.queue.length;
     if (n === 0) return 0;
-    const err = Object.assign(new Error("Queue cleared"), { name: "AbortError" });
+    const err = abortError("Queue cleared");
     const pending = this.rc.queue.splice(0);
     for (const entry of pending) {
       try {
@@ -1911,9 +1911,9 @@ export class Agent {
           const idx = this.rc.queue.indexOf(queuedEntry);
           if (idx >= 0) {
             this.rc.queue.splice(idx, 1);
-            queuedEntry.reject(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
+            queuedEntry.reject(abortError("Stream aborted"));
             try {
-              deferred.fail(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
+              deferred.fail(abortError("Stream aborted"));
             } catch {
               // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
             }

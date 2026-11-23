@@ -17,6 +17,7 @@ import { redactHeadersCentral } from "../utils/cache.ts";
 import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { abortError } from "../types/errors.ts";
 
 /** Parses a JSON tool-argument string; non-objects degrade to the truncated-arguments marker. */
 export function parseArguments(raw: string | undefined): Record<string, unknown> {
@@ -443,7 +444,7 @@ export async function readSseData(
   const parser = new SSEParser();
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  const abort = (): Error => Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+  const abort = (): Error => abortError("Stream aborted");
   linked.signal.addEventListener("abort", () => void reader.cancel().catch(noop), { once: true }); // an aborted body is already errored: its cancel() rejects, and nobody else listens
   while (true) {
     if (linked.signal.aborted || eventStream.isCancelled()) {
@@ -492,7 +493,7 @@ export function failStream(eventStream: AssistantMessageEventStream, linked: Abo
   const raw = err instanceof Error ? err : new Error(String(err));
   const isAbort =
     linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
-  eventStream.fail(isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw);
+  eventStream.fail(isAbort ? abortError("Stream aborted") : raw);
 }
 
 /** A tool result as the text of a tool message or function_call_output; in: each adapter's history builder, out: a string. */
@@ -535,3 +536,13 @@ export const OPENROUTER_ROUTING_KEYS = [
   "data_collection",
   "sort",
 ] as const;
+
+/** The tokens of one modality in a by-modality list (names compare in lower case), or undefined when the list does not mention it. */
+export function modalityTokens(
+  list: ReadonlyArray<{ modality?: string; tokens?: number }> | undefined,
+  modality: string
+): number | undefined {
+  const want = modality.toLowerCase();
+  const hits = (list ?? []).filter((m) => m.modality?.toLowerCase() === want);
+  return hits.length > 0 ? hits.reduce((n, m) => n + (m.tokens ?? 0), 0) : undefined;
+}

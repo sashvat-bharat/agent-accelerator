@@ -8,7 +8,7 @@ import { noop } from "../utils/noop.ts";
 import type { ContentPart } from "../types/message.ts";
 import type { AgentResponse, StreamEvent } from "../types/response.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
-import { ValidationError } from "../types/errors.ts";
+import { ValidationError, abortError } from "../types/errors.ts";
 import type { SteerEntry } from "./loop.ts";
 
 /** The run that is active right now. */
@@ -246,9 +246,7 @@ export class RunControl {
         for (const entry of leftover) {
           try {
             if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
-              entry.settle?.reject(
-                Object.assign(new Error("Steer aborted before it could run"), { name: "AbortError" })
-              );
+              entry.settle?.reject(abortError("Steer aborted before it could run"));
               continue;
             }
           } catch {

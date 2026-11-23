@@ -20,6 +20,7 @@ import { ConfigError, ValidationError } from "../types/errors.ts";
 import {
   combinedSignal,
   headersToRecord,
+  modalityTokens,
   parseRetryAfterMs,
   readErrorPayload,
   redactedHeaders,
@@ -63,12 +64,6 @@ interface InteractionReply {
   };
 }
 
-// Tokens of one modality in a by-modality list, or undefined when the list does not mention it; in: mapUsage, out: a count.
-function tokensOf(list: Modality[] | undefined, modality: string): number | undefined {
-  const hits = (list ?? []).filter((m) => m.modality === modality);
-  return hits.length > 0 ? hits.reduce((n, m) => n + (m.tokens ?? 0), 0) : undefined;
-}
-
 // Usage as TokenUsage: thinking tokens are billed as output (folded into it, like the chat adapter) and the image/text split is kept for the image pricing; in: a reply, out: TokenUsage.
 function mapUsage(raw: InteractionReply["usage"]): TokenUsage {
   const input = raw?.total_input_tokens ?? 0;
@@ -80,13 +75,16 @@ function mapUsage(raw: InteractionReply["usage"]): TokenUsage {
     totalTokens: raw?.total_tokens ?? input + output,
   };
   if (thought > 0) usage.thinkingTokens = thought;
-  const inImage = tokensOf(raw?.input_tokens_by_modality, "image");
-  const inText = tokensOf(raw?.input_tokens_by_modality, "text");
+  const inImage = modalityTokens(raw?.input_tokens_by_modality, "image");
+  const inText = modalityTokens(raw?.input_tokens_by_modality, "text");
   if (inImage !== undefined || inText !== undefined)
     usage.inputDetails = { imageTokens: inImage ?? 0, textTokens: inText ?? 0 };
-  const outImage = tokensOf(raw?.output_tokens_by_modality, "image");
+  const outImage = modalityTokens(raw?.output_tokens_by_modality, "image");
   if (outImage !== undefined)
-    usage.outputDetails = { imageTokens: outImage, textTokens: tokensOf(raw?.output_tokens_by_modality, "text") ?? 0 };
+    usage.outputDetails = {
+      imageTokens: outImage,
+      textTokens: modalityTokens(raw?.output_tokens_by_modality, "text") ?? 0,
+    };
   return usage;
 }
 

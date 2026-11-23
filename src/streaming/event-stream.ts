@@ -1,7 +1,7 @@
 import type { StreamEvent, AgentResponse } from "../types/response.ts";
 import { noop } from "../utils/noop.ts";
 import { telemetryBus } from "../telemetry.ts";
-import { ValidationError } from "../types/errors.ts";
+import { ValidationError, abortError } from "../types/errors.ts";
 
 /** Listener invoked for a matching stream event type or `*`. */
 export type StreamEventListener = (event: StreamEvent) => void;
@@ -274,8 +274,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     }
     this.cancelHandlers.clear();
     const err = reason instanceof Error ? reason : null;
-    const abortErr: Error =
-      err && err.name === "AbortError" ? err : Object.assign(new Error("Stream aborted"), { name: "AbortError" });
+    const abortErr: Error = err && err.name === "AbortError" ? err : abortError("Stream aborted");
     this.fail(abortErr);
   }
 

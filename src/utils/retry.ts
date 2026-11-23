@@ -1,5 +1,5 @@
 import { toConciseProviderError, isTransientError } from "./errors.ts";
-import { isAbortError } from "../types/errors.ts";
+import { isAbortError, abortError } from "../types/errors.ts";
 
 export { isAbortError, isTransientError };
 
@@ -57,7 +57,7 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const onAbort = () => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      reject(Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
+      reject(abortError("Operation aborted"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) onAbort();

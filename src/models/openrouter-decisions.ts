@@ -4,7 +4,12 @@
  * refresh rules). OpenRouter serves dozens of decision models that change often, so the SDK keeps no hand-written table for
  * them: each list entry carries the input kinds the model reads, its context length and its price per token.
  */
-import { createOpenRouterList, type OpenRouterList, type RefreshOpenRouterListOptions } from "./openrouter-list.ts";
+import {
+  createOpenRouterList,
+  type OpenRouterList,
+  type RefreshOpenRouterListOptions,
+  pricePerMillion,
+} from "./openrouter-list.ts";
 import { isRecord } from "../utils/guards.ts";
 import type { DecisionInputKind, DecisionModelInfo, DecisionPrices } from "./decision-models.ts";
 
@@ -14,12 +19,6 @@ const DECISIONS_ROUTE = "/api/alpha/decisions";
 
 /** Options of a refresh. */
 export type RefreshOpenRouterDecisionsOptions = RefreshOpenRouterListOptions;
-
-// A price string such as "0.000000042" per token as USD per 1M tokens, or undefined when it is not a number; in: toModel, out: a price.
-function perMillion(v: unknown): number | undefined {
-  const n = typeof v === "string" || typeof v === "number" ? Number(v) : NaN;
-  return Number.isFinite(n) && n >= 0 ? Number((n * 1_000_000).toFixed(6)) : undefined;
-}
 
 // One entry of OpenRouter's list as our model info, or undefined for an entry that is not usable (no id, expired, or a model that does not take decisions requests); in: parseList, out: the entry.
 function toModel(raw: unknown, now: number): DecisionModelInfo | undefined {
@@ -42,9 +41,9 @@ function toModel(raw: unknown, now: number): DecisionModelInfo | undefined {
   if (inputs.length === 0) return undefined;
   const id = raw["id"];
   const pricing = isRecord(raw["pricing"]) ? raw["pricing"] : {};
-  const input = perMillion(pricing["prompt"]);
-  const cacheRead = perMillion(pricing["input_cache_read"]);
-  const cacheWrite = perMillion(pricing["input_cache_write"]);
+  const input = pricePerMillion(pricing["prompt"]);
+  const cacheRead = pricePerMillion(pricing["input_cache_read"]);
+  const cacheWrite = pricePerMillion(pricing["input_cache_write"]);
   const prices: DecisionPrices | undefined =
     input === undefined
       ? undefined

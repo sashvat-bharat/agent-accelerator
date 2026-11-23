@@ -54,7 +54,7 @@ import type { ProviderImageRequest, ProviderImageResult } from "../types/image.t
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { toConciseProviderError, assertModalitiesSupported, markRetryable } from "../utils/errors.ts";
-import { ConfigError, isAbortError } from "../types/errors.ts";
+import { ConfigError, isAbortError, abortError } from "../types/errors.ts";
 import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
 import {
   newToolCallId,
@@ -809,7 +809,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       // A stream reports its own generic abort; the caller's reason (`interrupt(new Error("..."))`) is what the run should carry.
       const reason = options?.signal?.reason;
       if (options?.signal?.aborted && reason instanceof Error && isAbortError(err)) {
-        throw Object.assign(new Error(reason.message), { name: "AbortError" });
+        throw abortError(reason.message);
       }
       throw err;
     } finally {

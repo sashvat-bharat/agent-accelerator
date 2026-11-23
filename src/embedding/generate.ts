@@ -12,8 +12,8 @@ import { getProvider } from "../providers/registry.ts";
 import { emitProviderWarning } from "../providers.ts";
 import { withProviderSlot } from "../agent/governor.ts";
 import { applyCaptureRaw } from "../utils/raw-capture.ts";
-import { abortError, addUsage, bounded, providerOptionsFrom, readInputPart } from "../utils/provider-call.ts";
-import { BudgetExceededError, ConfigError, ProviderError, ValidationError } from "../types/errors.ts";
+import { addUsage, bounded, providerOptionsFrom, readInputPart } from "../utils/provider-call.ts";
+import { BudgetExceededError, ConfigError, ProviderError, ValidationError, abortErrorFor } from "../types/errors.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type {
   EmbeddingOptions,
@@ -108,7 +108,7 @@ export async function generateEmbedding(opts: EmbeddingOptions): Promise<Embeddi
   // One shared controller: the caller's signal plus "a sibling request failed", so a failure stops the rest from billing.
   const stop = new AbortController();
   const signal = opts.signal ? AbortSignal.any([opts.signal, stop.signal]) : stop.signal;
-  if (signal.aborted) throw abortError(signal, "Embedding aborted");
+  if (signal.aborted) throw abortErrorFor(signal, "Embedding aborted");
 
   // The list is cut into the requests the model takes; the last one gets the rest.
   const size = def.limits.maxInputs ?? DEFAULT_CHUNK;

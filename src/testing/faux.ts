@@ -4,7 +4,7 @@
  * building, streaming, tool-call parsing, usage, retries) and only the model's answers are scripted. Each call to the
  * model uses the next step of the script.
  */
-import { ConfigError } from "../types/errors.ts";
+import { ConfigError, abortError } from "../types/errors.ts";
 import { noop } from "../utils/noop.ts";
 
 /** One tool call the scripted model makes. */
@@ -99,7 +99,7 @@ function wait(ms: number, signal: AbortSignal | null | undefined): Promise<void>
   return new Promise((resolve, reject) => {
     const abort = (): void => {
       clearTimeout(timer);
-      reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+      reject(abortError("Aborted"));
     };
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", abort);

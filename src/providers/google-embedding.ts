@@ -20,6 +20,7 @@ import { googleEmbeddingText, mapEmbeddingTaskToGoogleTaskType } from "../provid
 import {
   combinedSignal,
   headersToRecord,
+  modalityTokens,
   redactedHeaders,
   resolveProviderApiKey,
   resolveProviderBaseUrl,
@@ -48,26 +49,19 @@ interface BatchReply {
   usageMetadata?: { promptTokenCount?: number; promptTokenDetails?: Array<{ modality?: string; tokenCount?: number }> };
 }
 
-// The tokens of one modality in the reply's breakdown, or undefined when it does not list it; in: mapUsage, out: a count.
-function tokensOf(
-  details: NonNullable<BatchReply["usageMetadata"]>["promptTokenDetails"],
-  modality: string
-): number | undefined {
-  const hits = (details ?? []).filter((d) => d.modality === modality);
-  return hits.length > 0 ? hits.reduce((n, d) => n + (d.tokenCount ?? 0), 0) : undefined;
-}
-
 // Usage as TokenUsage with the per-kind split the pricing reads; a reply that counts DOCUMENT tokens leaves the split out (the table has no document rate, so the cost stays unknown); in: a reply, out: TokenUsage.
 function mapUsage(raw: BatchReply["usageMetadata"]): TokenUsage {
   const input = raw?.promptTokenCount ?? 0;
   const usage: TokenUsage = { inputTokens: input, outputTokens: 0, totalTokens: input };
-  const d = raw?.promptTokenDetails;
-  if (!d || tokensOf(d, "DOCUMENT") !== undefined) return usage;
+  const details = raw?.promptTokenDetails;
+  if (!details) return usage;
+  const d = details.map((x) => ({ modality: x.modality, tokens: x.tokenCount }));
+  if (modalityTokens(d, "DOCUMENT") !== undefined) return usage;
   const parts = {
-    textTokens: tokensOf(d, "TEXT"),
-    imageTokens: tokensOf(d, "IMAGE"),
-    audioTokens: tokensOf(d, "AUDIO"),
-    videoTokens: tokensOf(d, "VIDEO"),
+    textTokens: modalityTokens(d, "TEXT"),
+    imageTokens: modalityTokens(d, "IMAGE"),
+    audioTokens: modalityTokens(d, "AUDIO"),
+    videoTokens: modalityTokens(d, "VIDEO"),
   };
   const kept = Object.fromEntries(Object.entries(parts).filter(([, v]) => v !== undefined));
   if (Object.keys(kept).length > 0) usage.inputDetails = kept;
