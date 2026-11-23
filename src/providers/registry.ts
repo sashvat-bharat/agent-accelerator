@@ -132,7 +132,7 @@ export function getProvider(id: ProviderId | string): Provider {
 }
 
 /** Provider/model pair returned by resolveModel. */
-export interface ResolvedModel {
+interface ResolvedModel {
   provider: Provider;
   modelId: string;
   modelSpec?: ModelSpec;

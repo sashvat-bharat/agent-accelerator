@@ -9,7 +9,7 @@ export const MEDIA_KEYS = ["image", "audio", "video", "file"] as const;
 /** One of {@link MEDIA_KEYS}. */
 export type MediaKey = (typeof MEDIA_KEYS)[number];
 /** A part that carries media. */
-export type MediaPart = ImagePart | AudioPart | VideoPart | FilePart;
+type MediaPart = ImagePart | AudioPart | VideoPart | FilePart;
 
 /** The media key of a part, or undefined when it is not a media part. Safe for untrusted data (a saved session): it reads only `type`. */
 export function mediaKeyOf(part: unknown): MediaKey | undefined {

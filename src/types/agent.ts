@@ -66,16 +66,16 @@ export interface HookContext {
 }
 
 /** What `beforeTool` answers: nothing to let the call run, `{ block }` to refuse it (the reason is the call's error result), or `{ arguments }` to run it with other arguments (still validated against the tool's schema). */
-export type BeforeToolDecision = void | undefined | { block: string } | { arguments: Record<string, unknown> };
+type BeforeToolDecision = void | undefined | { block: string } | { arguments: Record<string, unknown> };
 
 /** What `afterTool` answers: nothing to keep the result, or the new `result` and/or `isError`. */
-export type AfterToolDecision = void | undefined | { result?: unknown; isError?: boolean };
+type AfterToolDecision = void | undefined | { result?: unknown; isError?: boolean };
 
 /** What `beforeRequest` answers: nothing to send as is, or the `messages` and/or `systemPrompt` to send instead (the saved history is not changed). */
-export type BeforeRequestDecision = void | undefined | { messages?: Message[]; systemPrompt?: string };
+type BeforeRequestDecision = void | undefined | { messages?: Message[]; systemPrompt?: string };
 
 /** What `onYield` answers: nothing to end the run, or `{ continue }`, a user message that keeps the run going (same budget and turn limit). */
-export type OnYieldDecision = void | undefined | { continue: string | ContentPart[] };
+type OnYieldDecision = void | undefined | { continue: string | ContentPart[] };
 
 /**
  * Hooks of one Agent (`AgentConfig.hooks`). Each may be async. `beforeTool` fails closed: a hook that throws blocks the call.

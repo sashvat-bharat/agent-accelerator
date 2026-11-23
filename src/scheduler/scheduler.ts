@@ -78,7 +78,7 @@ const DEAD_SWEEP_EVERY_MS = 15_000;
 const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 /** Optional `{ home }` accepted by every public function except `createScheduledAction` (the agent knows its home). */
-export interface HomeOptions {
+interface HomeOptions {
   home?: string;
 }
 

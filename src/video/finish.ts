@@ -10,7 +10,7 @@ import { priceVideoUsage } from "./pricing.ts";
 import { GeneratedVideo, VideoResult, attachVideoOrigin } from "./result.ts";
 
 /** The connection settings of a call that an edit of its clip reuses. */
-export type VideoInherit = NonNullable<Parameters<typeof attachVideoOrigin>[1]>["inherit"];
+type VideoInherit = NonNullable<Parameters<typeof attachVideoOrigin>[1]>["inherit"];
 
 // The connection settings of `opts` that an edit should reuse; in: generateVideo and resumeVideo, out: the origin's `inherit`.
 export function inheritFrom(

@@ -57,7 +57,7 @@ export interface SteerEntry {
   settle?: { resolve: (res: AgentResponse) => void; reject: (err: unknown) => void; deferredToQueue?: boolean };
 }
 
-export interface AgentLoopConfig {
+interface AgentLoopConfig {
   agentName?: string;
   provider: Provider;
   modelId: string;
@@ -354,7 +354,7 @@ export function ensureToolPairing(context: AgentContext, prompts: Prompts = DEFA
 // Abort + limits helpers.
 // ---------------------------------------------------------------------------
 
-export interface LoopLimits {
+interface LoopLimits {
   maxTurns?: number;
   deadlineMs?: number;
   maxToolCallsPerRun?: number;
@@ -1718,7 +1718,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
  * finishReason instead of fabricating an answer from reasoning. Opt in with
  * the run option `thinkingAsAnswerFallback: true`.
  */
-export function shouldPromoteThinkingToAnswer(runOptions?: AgentRunOptions): boolean {
+function shouldPromoteThinkingToAnswer(runOptions?: AgentRunOptions): boolean {
   return runOptions?.thinkingAsAnswerFallback === true;
 }
 
@@ -1729,7 +1729,7 @@ export function shouldPromoteThinkingToAnswer(runOptions?: AgentRunOptions): boo
  * Otherwise delegates to `normalizeFinishReason` (unknown vendor strings map
  * to `"error"` with the original in `rawFinishReason`).
  */
-export function canonicalFinishReason(
+function canonicalFinishReason(
   providerReason: unknown,
   truncated: boolean
 ): { finishReason?: FinishReason; rawFinishReason?: string } {

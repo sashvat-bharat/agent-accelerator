@@ -102,7 +102,7 @@ export interface ModelCapabilities {
 // ---------------------------------------------------------------------------
 // Pricing — normalized per-1M
 // ---------------------------------------------------------------------------
-export interface ModelPricing {
+interface ModelPricing {
   inputPerMillion?: number;
   outputPerMillion?: number;
   cacheReadPerMillion?: number;

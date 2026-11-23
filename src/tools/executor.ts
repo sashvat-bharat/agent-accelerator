@@ -94,10 +94,10 @@ class ToolStopSignal extends Error {
 }
 
 /** Default cap for string tool results kept for model context. */
-export const DEFAULT_MAX_RESULT_CHARS = 20000;
+const DEFAULT_MAX_RESULT_CHARS = 20000;
 
 /** Identical-call repeats blocked once the per-fingerprint count reaches this. */
-export const REPEAT_BLOCK_THRESHOLD = 3;
+const REPEAT_BLOCK_THRESHOLD = 3;
 
 /**
  * True when a tool call carries only the `{ __truncated_raw: string }` marker
@@ -146,7 +146,7 @@ function redactUrlCredentials(message: string): string {
  * (`scheme://...@` → `scheme://[redacted]@`) and absolute file paths
  * (`/home/...`, `/Users/...`, `C:\...` → `[redacted-path]`).
  */
-export function sanitizeErrorMessage(message: string): string {
+function sanitizeErrorMessage(message: string): string {
   let out = redactUrlCredentials(message);
   out = out.replace(/\/home\/[^\s"'`:;,)]*/g, "[redacted-path]");
   out = out.replace(/\/Users\/[^\s"'`:;,)]*/g, "[redacted-path]");

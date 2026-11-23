@@ -11,7 +11,7 @@ import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 import { resolveModelUnchecked } from "../providers/registry.ts";
 
 /** Minimal live-trace shape shared by fixed + dynamic workers (structural subset of `SubAgentTrace`). */
-export interface LiveWorkerTrace {
+interface LiveWorkerTrace {
   trackingId: string;
   name: string;
   sessionId: string;
@@ -30,7 +30,7 @@ export interface LiveWorkerTrace {
 // ---------------------------------------------------------------------------
 
 /** Sanitizes a worker name into an XML tag (`UPPER-KEBAB`, 64 chars). */
-export function sanitizeXmlTag(raw: string): string {
+function sanitizeXmlTag(raw: string): string {
   let s = raw.toUpperCase().replace(/[^A-Z0-9.-]/g, "-");
   if (!/^[A-Z]/.test(s)) s = `AGENT-${s}`;
   s = s
@@ -98,7 +98,7 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
  * `dynamicSubagents.model ?? subagentModel ?? the saved or default worker model`.
  * Unwraps `ModelProviderInstance` / `ModelSpec` the same way.
  */
-export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | ModelSpec | undefined {
+function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | ModelSpec | undefined {
   const dynModelRaw = dynModelRawInput as { model?: unknown; id?: unknown; provider?: unknown } | string | undefined;
   let dynModel: string | ModelSpec | undefined;
   if (dynModelRaw && typeof dynModelRaw === "object" && "model" in (dynModelRaw as Record<string, unknown>)) {
@@ -201,7 +201,7 @@ function providerOf(modelStr: string | unknown | undefined): string | undefined 
  * Resolves worker credentials: reuses parent `apiKey`/`baseUrl` ONLY when the
  * worker provider matches the parent provider (otherwise env resolves).
  */
-export function resolveWorkerCredentials(
+function resolveWorkerCredentials(
   parentAgent: { modelStringOrSpec?: unknown; apiKey?: string; baseUrl?: string },
   chosenModel: unknown
 ): { apiKeyToUse: string | undefined; baseUrlToUse: string | undefined; attemptedProvider: string | undefined } {
@@ -300,7 +300,7 @@ export function buildDynamicWorkerConfig(
 // ---------------------------------------------------------------------------
 
 /** Turn summary fed into the live worker trace (mirrors `AgentRunOptions.onTurn`). */
-export interface LiveWorkerTurn {
+interface LiveWorkerTurn {
   turns: number;
   text?: string;
   thinking?: string;
@@ -309,7 +309,7 @@ export interface LiveWorkerTurn {
 }
 
 /** Deltas forwarded to the parent stream via `onSubagentEvent`. */
-export interface LiveWorkerEvent {
+interface LiveWorkerEvent {
   trackingId: string;
   delta?: string;
   thinkingDelta?: string;
@@ -318,7 +318,7 @@ export interface LiveWorkerEvent {
 }
 
 /** Hooks owned by the trace store (`delegation.ts`); worker core stays pure. */
-export interface LiveWorkerHooks {
+interface LiveWorkerHooks {
   trim?: (trace: LiveWorkerTrace) => void;
   touch?: (trackingId: string) => void;
   notify?: (trackingId: string) => void;

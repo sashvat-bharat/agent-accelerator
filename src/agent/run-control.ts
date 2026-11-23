@@ -12,7 +12,7 @@ import { ValidationError } from "../types/errors.ts";
 import type { SteerEntry } from "./loop.ts";
 
 /** The run that is active right now. */
-export interface ActiveRun {
+interface ActiveRun {
   steerInbox: SteerEntry[];
   outerStream?: AssistantMessageEventStream;
   runPromise?: Promise<AgentResponse>;
@@ -32,7 +32,7 @@ export interface QueuedPrompt {
 }
 
 /** What the run control needs from its Agent. */
-export interface RunHost {
+interface RunHost {
   persistNow(): void;
   run(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse>;
   startNonStreamingRun(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse>;

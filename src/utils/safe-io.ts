@@ -5,7 +5,7 @@ import { mediaKeyOf } from "./media-part.ts";
 import { SecurityPolicyError } from "../types/errors.ts";
 
 /** Default cap for one remote media download (bytes). */
-export const MAX_REMOTE_FETCH_BYTES = 200_000_000;
+const MAX_REMOTE_FETCH_BYTES = 200_000_000;
 
 /**
  * True when a media string would be read from the local filesystem
@@ -218,7 +218,7 @@ async function readCapped(res: Response, maxBytes: number, url: string): Promise
 }
 
 /** Result of {@link fetchRemoteBytes}; `bytes` is empty when `ok` is false. */
-export interface RemoteBytes {
+interface RemoteBytes {
   ok: boolean;
   status: number;
   statusText: string;

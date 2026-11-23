@@ -18,10 +18,10 @@ import { telemetryBus } from "../telemetry.ts";
 import { ConfigError } from "../types/errors.ts";
 
 /** The file format version this release writes and reads. */
-export const CONFIGS_VERSION = 1;
+const CONFIGS_VERSION = 1;
 
 /** What the file holds, before the program's rules are applied. */
-export interface UserFile {
+interface UserFile {
   model?: string;
   sub_agent_model?: string;
   /** Raw setting values by key; unknown keys are kept here so the file is rewritten without losing them. */

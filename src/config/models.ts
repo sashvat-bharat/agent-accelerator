@@ -184,7 +184,7 @@ export function allowedIds(provider: string): ReadonlySet<string> | undefined {
 }
 
 /** True when `provider/id` may be used: always without a list, else only if it is listed. */
-export function isModelAllowed(provider: string, id: string): boolean {
+function isModelAllowed(provider: string, id: string): boolean {
   return !current || (allowedIds(provider)?.has(id) ?? false);
 }
 

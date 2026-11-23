@@ -26,7 +26,7 @@ import { durationMs, runFileName } from "./time.ts";
 /** Lowercase kebab-case. */
 export const TASK_ID_PATTERN: RegExp = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** 48-char slug + `-` + 6 random chars. */
-export const MAX_TASK_ID_LENGTH = 55;
+const MAX_TASK_ID_LENGTH = 55;
 
 /** A saved run waiting for its delivery time (one entry of an action's `delivery.json`). */
 export interface PendingDelivery {
@@ -97,7 +97,7 @@ const mutexFile = (dir: string): string => path.join(dir, ".mutex");
 const heartbeatFile = (dir: string): string => path.join(dir, ".heartbeat");
 
 /** Who is running an action and how long ago they last said so. */
-export interface Heartbeat {
+interface Heartbeat {
   pid: number;
   host: string;
   /** Identifies the scheduler instance inside that process. */
@@ -567,7 +567,7 @@ export function validateDelivery(raw: unknown): string | undefined {
 // ---------------------------------------------------------------------------
 
 /** The parts of an action a run is built from, and their fingerprint. */
-export interface Definition {
+interface Definition {
   /** First 12 hex characters of the SHA-256 of the fields below. */
   hash: string;
   /** The content of `<id>/definitions/<hash>.json`. */

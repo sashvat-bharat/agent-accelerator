@@ -10,7 +10,7 @@ import type { SubAgentExecutionMetadata } from "../types/response.ts";
 const SUBAGENT_RESULT_BRAND: unique symbol = Symbol("agent-accelerator.subagent-result") as never;
 
 /** Branded envelope returned by delegation tools. */
-export interface SubagentResult {
+interface SubagentResult {
   xml: string;
   _subagentMetadata: SubAgentExecutionMetadata[];
   toString(): string;

@@ -21,7 +21,7 @@ const MAX_LIST_BYTES = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 /** What makes one list different from another. */
-export interface OpenRouterListSpec<T> {
+interface OpenRouterListSpec<T> {
   /** File name inside the catalog folder, e.g. `openrouter-embeddings.json`. */
   file: string;
   /** Where the list is downloaded from. */

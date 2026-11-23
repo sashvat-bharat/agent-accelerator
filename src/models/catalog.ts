@@ -344,7 +344,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
 }
 
 /** Thinking capabilities and allowed levels for a catalog model. */
-export interface ModelThinkingInfo {
+interface ModelThinkingInfo {
   supportsThinking: boolean;
   reasoningOptions?: ReasoningOption[];
   allowedLevels: string[];

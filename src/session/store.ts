@@ -171,7 +171,7 @@ function specFor(modelStr: string): ReturnType<typeof getModelFromCatalog> {
   }
 }
 
-/** Context window for telemetry display, 1M when the model is unknown (`getSessionContextWindowOrUndefined` says when it is unknown). */
+/** Context window for telemetry display, 1M when the model is unknown. */
 export function getSessionContextWindow(modelStr: string): number {
   try {
     const spec = specFor(modelStr);
@@ -764,7 +764,7 @@ function sessionFromPayload(raw: string, file: string, limits?: SessionLimits): 
 export const writeFileAtomic: typeof writeFileDurable = writeFileDurable;
 
 /** Session id grammar: no traversal, no slashes, no hidden files. */
-export function assertValidSessionId(sessionId: string): void {
+function assertValidSessionId(sessionId: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sessionId)) {
     throw new ValidationError(
       `[Agent Accelerator] Invalid sessionId "${sessionId}": must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`
@@ -951,7 +951,7 @@ export function extractMediaToDir(messages: Message[], sessionDir: string): { me
 }
 
 /** Removes the media files this module wrote in earlier saves (`image-001.png` and so on) that the current snapshot no longer uses. Call it only after `session.json` was replaced. Never removes anything else. */
-export function removeOrphanMedia(sessionDir: string, keep: readonly string[]): void {
+function removeOrphanMedia(sessionDir: string, keep: readonly string[]): void {
   const mediaDir = path.resolve(sessionDir, "media");
   const kept = new Set(keep.map((k) => path.basename(k)));
   let names: string[];
@@ -1225,9 +1225,9 @@ export function findLatestSessionDir(rootDir: string): string | null {
 // ---------------------------------------------------------------------------
 
 /** Default max messages accepted when loading a session snapshot (override via `SessionLimits`). */
-export const MAX_SESSION_MESSAGES = 50_000;
+const MAX_SESSION_MESSAGES = 50_000;
 /** Default max raw JSON size accepted when loading a session snapshot (override via `SessionLimits`). */
-export const MAX_SESSION_JSON_BYTES: number = 100 * 1024 * 1024;
+const MAX_SESSION_JSON_BYTES: number = 100 * 1024 * 1024;
 
 // A SessionLoadError with the SDK prefix; in: validateSessionData, out: the error.
 function sessionLoadError(message: string): SessionLoadError {
@@ -1272,21 +1272,6 @@ export function validateSessionData(data: unknown): PersistedAgentSession {
 // ---------------------------------------------------------------------------
 // Context-window lookup without the legacy 1M fallback.
 // ---------------------------------------------------------------------------
-
-/**
- * Returns the catalog context window for a model, or `undefined` when unknown.
- * Prefer this over `getSessionContextWindow` for new code.
- */
-export function getSessionContextWindowOrUndefined(modelStr: string): number | undefined {
-  try {
-    const spec = specFor(modelStr);
-    if (spec?.limit?.context) return spec.limit.context;
-    if (spec?.contextWindow) return spec.contextWindow;
-  } catch {
-    // why: catalog lookup is best-effort — unknown models yield undefined.
-  }
-  return undefined;
-}
 
 // ---------------------------------------------------------------------------
 // Telemetry bus lives in `../telemetry.ts` (dependency-free, so low-level
@@ -1364,7 +1349,7 @@ export function assertUsageInvariants(usage: TokenUsage): void {
 export type CostSource = "provider" | "catalog" | "unknown";
 
 /** Integer micro-USD breakdown behind a priced cost. */
-export interface CostBreakdown {
+interface CostBreakdown {
   inputMicroUSD: number;
   outputMicroUSD: number;
   cacheReadMicroUSD: number;

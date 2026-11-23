@@ -162,7 +162,7 @@ export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): 
 }
 
 /** Maps the public `toolChoice` option onto the provider wire-neutral form. */
-export function normalizeToolChoiceOption(choice: ToolChoiceOption | undefined): ProviderRequestOptions["toolChoice"] {
+function normalizeToolChoiceOption(choice: ToolChoiceOption | undefined): ProviderRequestOptions["toolChoice"] {
   if (!choice) return undefined;
   if (typeof choice === "string") return choice;
   if (choice.tool) return { type: "function", function: { name: choice.tool } };

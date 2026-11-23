@@ -326,7 +326,7 @@ export interface WorkerRunResult {
 }
 
 /** Live handle of one worker run: its trace plus the hooks that feed it and the closers that finalize it. */
-export interface WorkerTraceHandle {
+interface WorkerTraceHandle {
   trackingId: string;
   /** `NAME-{trackingId}`, the id shown in metadata and accepted by `agent.track`. */
   displayId: string;

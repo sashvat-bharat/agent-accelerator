@@ -106,7 +106,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Image MIME types Google accepts inline. */
-export const GOOGLE_IMAGE_MIME = [
+const GOOGLE_IMAGE_MIME = [
   "image/png",
   "image/jpeg",
   "image/webp",
@@ -117,7 +117,7 @@ export const GOOGLE_IMAGE_MIME = [
   "image/tiff",
 ] as const;
 /** Audio MIME types Google accepts inline (audio is never fetched by URL). */
-export const GOOGLE_AUDIO_MIME = [
+const GOOGLE_AUDIO_MIME = [
   "audio/wav",
   "audio/mp3",
   "audio/aiff",
@@ -133,7 +133,7 @@ export const GOOGLE_AUDIO_MIME = [
   "audio/webm",
 ] as const;
 /** Video MIME types Google accepts inline. */
-export const GOOGLE_VIDEO_MIME = [
+const GOOGLE_VIDEO_MIME = [
   "video/mp4",
   "video/mpeg",
   "video/mpg",
@@ -145,9 +145,9 @@ export const GOOGLE_VIDEO_MIME = [
   "video/3gpp",
 ] as const;
 /** Document MIME types Google accepts (the only two). */
-export const GOOGLE_DOCUMENT_MIME = ["application/pdf", "text/csv"] as const;
+const GOOGLE_DOCUMENT_MIME = ["application/pdf", "text/csv"] as const;
 /** MIME types Google fetches itself from a public `https://` URL. */
-export const GOOGLE_URL_MIME = [
+const GOOGLE_URL_MIME = [
   "text/html",
   "text/css",
   "text/plain",
@@ -172,7 +172,7 @@ export const GOOGLE_URL_MIME = [
   "video/3gpp",
 ] as const;
 /** Common MIME spellings mapped to Google's inline names. */
-export const GOOGLE_INLINE_MIME_ALIASES: Readonly<Record<string, string>> = {
+const GOOGLE_INLINE_MIME_ALIASES: Readonly<Record<string, string>> = {
   "video/quicktime": "video/mov",
   "audio/x-wav": "audio/wav",
   "audio/wave": "audio/wav",
@@ -181,18 +181,16 @@ export const GOOGLE_INLINE_MIME_ALIASES: Readonly<Record<string, string>> = {
 // Documented size limits (file-input-methods.md). `assertGoogleInlineSizes` below checks them, but it is NOT called yet:
 // the owner is not sure how Files API uploads should be handled, so oversized inputs still get Google's own error for now.
 /** Max inline payload per request (bytes). */
-export const GOOGLE_MAX_INLINE_REQUEST_BYTES: number = 100 * 1024 * 1024;
+const GOOGLE_MAX_INLINE_REQUEST_BYTES: number = 100 * 1024 * 1024;
 /** Max inline PDF size (bytes). */
-export const GOOGLE_MAX_INLINE_PDF_BYTES: number = 50 * 1024 * 1024;
-/** Max size of one file Google fetches by URL (bytes). */
-export const GOOGLE_MAX_URL_FILE_BYTES: number = 15 * 1024 * 1024;
+const GOOGLE_MAX_INLINE_PDF_BYTES: number = 50 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Long decode (`docs/long-decode.md`, `docs/background-execution.md`)
 // ---------------------------------------------------------------------------
 
 /** Output tokens one non-background request may produce; above it Gemini 4 runs as a background interaction (long decode). */
-export const GOOGLE_MAX_SYNC_OUTPUT_TOKENS = 65_536;
+const GOOGLE_MAX_SYNC_OUTPUT_TOKENS = 65_536;
 // A background stream pauses between ~5K-token chunks; only this much silence counts as a dropped connection (docs: 15-20 min).
 const BACKGROUND_STREAM_STALL_MS = 15 * 60_000;
 // Reconnects in a row that bring no new event before a background stream gives up.

@@ -130,7 +130,7 @@ function decodedBytes(b64: string): number {
 }
 
 /** The Interactions request body for one video request (exported for the tests). */
-export function buildGoogleVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
+function buildGoogleVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
   const media = [request.firstFrame, request.lastFrame, ...request.referenceImages].filter(
     (m): m is NormalizedMedia => !!m
   );

@@ -12,7 +12,7 @@ import type { EmbeddingInputKind, EmbeddingModelInfo } from "../models/embedding
 import { EMBEDDING_TASKS, type EmbeddingOptions, type EmbeddingPart, type EmbeddingTask } from "../types/embedding.ts";
 
 /** A control the model does not have: reported once on the bus by the caller, then dropped. */
-export interface EmbeddingWarning {
+interface EmbeddingWarning {
   capability: string;
   requested: string;
   reason: string;
@@ -20,7 +20,7 @@ export interface EmbeddingWarning {
 }
 
 /** The request after the checks: every item is a list of parts (one vector each), the values are final. */
-export interface ResolvedEmbeddingRequest {
+interface ResolvedEmbeddingRequest {
   def: EmbeddingModelInfo;
   items: EmbeddingPart[][];
   dimensions?: number;

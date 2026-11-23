@@ -60,7 +60,7 @@ function mapUsage(raw: JobReply["usage"]): TokenUsage {
 const imageUrl = (dataUrl: string) => ({ type: "image_url", image_url: { url: dataUrl } });
 
 /** The `POST /videos` body for one request, without routing (exported for the tests). */
-export function buildOpenRouterVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
+function buildOpenRouterVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
   const frames = [
     ...(request.firstFrame ? [{ ...imageUrl(request.firstFrame.dataUrl), frame_type: "first_frame" }] : []),
     ...(request.lastFrame ? [{ ...imageUrl(request.lastFrame.dataUrl), frame_type: "last_frame" }] : []),

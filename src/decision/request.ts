@@ -19,7 +19,7 @@ import {
 import type { InputPart } from "../utils/provider-call.ts";
 
 /** The request after the checks: the input is a list of text and media parts (JSON is text), the questions are final. */
-export interface ResolvedDecisionRequest {
+interface ResolvedDecisionRequest {
   def: DecisionModelInfo;
   input: InputPart[];
   questions: Record<string, ResolvedDecisionQuestion>;

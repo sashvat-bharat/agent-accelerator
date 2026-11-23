@@ -20,9 +20,6 @@ import { TRUNCATED_ARGS_KEY } from "./types/tool.ts";
 import { telemetryBus } from "./telemetry.ts";
 import { DEFAULT_PROMPTS, fillPrompt } from "./prompts/prompts.ts";
 
-/** Classification of a canonical capability on a given provider. */
-export type ProviderCapabilityStatus = "NATIVE" | "TRANSLATED" | "AUTOMATIC" | "EMULATED" | "UNSUPPORTED";
-
 /**
  * Single warning mechanism for provider capability differences.
  *
@@ -276,7 +273,7 @@ function warnValidatedToolChoice(provider: string): void {
 }
 
 /** OpenRouter Chat Completions `tool_choice` wire values. */
-export type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 
 /**
  * Maps canonical toolChoice onto Chat Completions `tool_choice`.
@@ -327,7 +324,7 @@ export function mapServiceTierToOpenAI(tier: ServiceTier | undefined): "flex" | 
 }
 
 /** OpenAI Responses `tool_choice` wire values (most-important subset). */
-export type OpenAIToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
+type OpenAIToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
 
 /**
  * Maps canonical toolChoice onto OpenAI Responses `tool_choice`.
@@ -348,7 +345,7 @@ export function mapToolChoiceToOpenAI(
 }
 
 /** Normalized tool-choice mode shared by provider adapters. */
-export type CanonicalToolChoiceMode = "auto" | "any" | "none" | "validated";
+type CanonicalToolChoiceMode = "auto" | "any" | "none" | "validated";
 
 /**
  * Normalizes canonical toolChoice into a provider-neutral mode + optional
@@ -429,7 +426,7 @@ export function selectRawArguments(startText: string, deltaText: string): string
 // ---------------------------------------------------------------------------
 
 /** Canonical generation controls as carried on `ProviderRequestOptions`. */
-export interface GenerationParams {
+interface GenerationParams {
   maxOutputTokens?: number;
 }
 
@@ -547,7 +544,7 @@ export function normalizeStructuredOutput(output: unknown): StructuredOutputSpec
  * present (bare Zod schema or `{ schema: Zod }`). Used by the loop for
  * post-parse validation; `undefined` means JSON-parse only.
  */
-export function extractOutputValidator(
+function extractOutputValidator(
   output: unknown
 ): { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } } | undefined {
   if (!output) return undefined;
@@ -652,7 +649,7 @@ export function mapOutputToGoogle(
 }
 
 /** Chat Completions `response_format` wire shape (OpenRouter + compat). */
-export type ChatCompletionsResponseFormat = {
+type ChatCompletionsResponseFormat = {
   type: "json_schema";
   json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string };
 };
@@ -697,7 +694,7 @@ export function mapOutputToCompatChat(
  *
  * @example `augmentSystemPromptWithStructuredOutput(sys, spec)`
  */
-export function buildStructuredOutputInstruction(
+function buildStructuredOutputInstruction(
   spec: StructuredOutputSpec,
   template: string = DEFAULT_PROMPTS.structuredOutput
 ): string {
@@ -726,10 +723,10 @@ export function augmentSystemPromptWithStructuredOutput(
 // ---------------------------------------------------------------------------
 
 /** Anthropic `thinking` request value: adaptive (with visible summaries) or one of the "off" shapes some models accept. */
-export type AnthropicThinking = { type: "adaptive"; display: "summarized" } | { type: "disabled" | "between_tools" };
+type AnthropicThinking = { type: "adaptive"; display: "summarized" } | { type: "disabled" | "between_tools" };
 
 /** Anthropic `output_config.effort` values. */
-export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
+type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
  * Maps a canonical ThinkingLevel onto Anthropic 5.x thinking. Thinking is adaptive and on by default, so a level only sets
@@ -786,7 +783,7 @@ export function mapServiceTierToAnthropic(tier: ServiceTier | undefined): "auto"
 }
 
 /** Anthropic `tool_choice` wire values (`auto` is the server default and is never sent). */
-export type AnthropicToolChoice = { type: "none" } | { type: "any" } | { type: "tool"; name: string };
+type AnthropicToolChoice = { type: "none" } | { type: "any" } | { type: "tool"; name: string };
 
 /**
  * Maps canonical toolChoice onto Anthropic `tool_choice`. `required` is `any` and a pinned function is `tool`; models that reject forced

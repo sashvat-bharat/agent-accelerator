@@ -11,10 +11,10 @@ import type { ImageFormat, ImageOptions, ImageResolution } from "../types/image.
 import type { ThinkingLevel } from "../types/core.ts";
 
 /** Most pictures one call may ask for (the OpenAI per-request maximum; Google models are called several times). */
-export const MAX_IMAGES = 10;
+const MAX_IMAGES = 10;
 
 /** A control the model does not have: reported once on the bus by the caller, then dropped. */
-export interface ImageWarning {
+interface ImageWarning {
   capability: string;
   requested: string;
   reason: string;
@@ -22,7 +22,7 @@ export interface ImageWarning {
 }
 
 /** The request after the checks: values are final, the size is computed, `count` is how many pictures are wanted in total. */
-export interface ResolvedImageRequest {
+interface ResolvedImageRequest {
   def: ImageModelInfo;
   prompt: string;
   aspectRatio?: string;

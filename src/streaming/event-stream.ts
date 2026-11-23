@@ -7,7 +7,7 @@ import { ValidationError } from "../types/errors.ts";
 export type StreamEventListener = (event: StreamEvent) => void;
 
 /** Options for AssistantMessageEventStream. */
-export interface EventStreamOptions {
+interface EventStreamOptions {
   /**
    * When false, `partialText`/`partialThinking` cumulative fields are stripped
    * from events before delivery. Default true for compat (providers attach
@@ -28,9 +28,9 @@ type Resolver = {
 };
 
 /** Default max buffered events. */
-export const MAX_BUFFERED_EVENTS = 1000;
+const MAX_BUFFERED_EVENTS = 1000;
 /** Default max approx bytes per delta event. */
-export const MAX_EVENT_BYTES = 1_048_576;
+const MAX_EVENT_BYTES = 1_048_576;
 
 // Approximate size of an event's text fields; in: push's oversize guard, out: a character count.
 function approxEventBytes(event: StreamEvent): number {

@@ -1,9 +1,6 @@
 import { clampCacheKey } from "./cache.ts";
-import type { ThinkingLevel } from "../types/core.ts";
 import type { ModelSpec } from "../types/model.ts";
-import type { ModelProviderInstance } from "../providers/registry.ts";
 import type { ContentPart } from "../types/message.ts";
-import { ConfigError } from "../types/errors.ts";
 
 /**
  * Creates a unique, provider-safe session ID for cache affinity: a bare random
@@ -109,66 +106,9 @@ export function previewPrompt(prompt: string | ContentPart[]): string {
   }
 }
 
-/** Parsed model reference returned by {@link parseModelRef}. */
-export interface ParsedModelRef {
-  provider: string;
-  modelId: string;
-  apiKey?: string;
-  baseUrl?: string;
-  thinking?: ThinkingLevel;
-}
-
-// Splits `provider/model` on the first slash (bare ids default to openrouter); in: parseModelRef, out: provider and model id.
-function splitModelString(raw: string): { provider: string; modelId: string } {
-  const trimmed = raw.trim();
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash >= trimmed.length - 1) {
-    return { provider: "openrouter", modelId: trimmed };
-  }
-  return {
-    provider: trimmed.slice(0, slash).toLowerCase(),
-    modelId: trimmed.slice(slash + 1),
-  };
-}
-
-// Type guard for a `{ model: string }` helper result; in: parseModelRef, out: a boolean.
-function isModelProviderInstance(v: unknown): v is ModelProviderInstance {
-  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
-  const r = v as Record<string, unknown>;
-  return typeof r["model"] === "string" && (r["model"] as string).length > 0;
-}
-
 // Type guard for a catalog spec (`provider` and `id` strings); in: parseModelRef, out: a boolean.
 export function isModelSpec(v: unknown): v is ModelSpec {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   const r = v as Record<string, unknown>;
   return typeof r["provider"] === "string" && typeof r["id"] === "string";
-}
-
-/**
- * Single model-ref parser. Table-driven, no env sniffing:
- * - string `"provider/model"` → split on first `/`; bare ids default to `openrouter`.
- * - `ModelProviderInstance` (`{ model, apiKey?, baseUrl?, thinkingLevel? }`) → parse `model`, passthrough creds.
- * - `ModelSpec` (`{ provider, id }`) → direct mapping.
- *
- * @example `parseModelRef("google/gemini-3.5-flash-lite")`
- */
-export function parseModelRef(input: string | ModelSpec | ModelProviderInstance): ParsedModelRef {
-  if (typeof input === "string") {
-    if (!input.trim()) throw new ConfigError("parseModelRef: model string must be non-empty.");
-    const { provider, modelId } = splitModelString(input);
-    return { provider, modelId };
-  }
-  if (isModelProviderInstance(input)) {
-    const { provider, modelId } = splitModelString(input.model);
-    const out: ParsedModelRef = { provider, modelId };
-    if (input.apiKey !== undefined) out.apiKey = input.apiKey;
-    if (input.baseUrl !== undefined) out.baseUrl = input.baseUrl;
-    if (input.thinkingLevel !== undefined) out.thinking = input.thinkingLevel;
-    return out;
-  }
-  if (isModelSpec(input)) {
-    return { provider: String(input.provider), modelId: String(input.id) };
-  }
-  throw new ConfigError("parseModelRef: expected string | ModelSpec | ModelProviderInstance.");
 }

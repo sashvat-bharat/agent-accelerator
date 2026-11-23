@@ -41,7 +41,7 @@ function abortError(signal: AbortSignal): Error {
 }
 
 /** The clock the governor reads; tests pass a fake one. `later` schedules `fn` after `ms` and returns its canceller. */
-export interface GovernorClock {
+interface GovernorClock {
   now(): number;
   later(fn: () => void, ms: number): () => void;
 }
@@ -56,7 +56,7 @@ const realClock: GovernorClock = {
 };
 
 /** Longest a provider is paused for one rate-limit answer (the same 60 s cap as the retry layer). */
-export const MAX_PAUSE_MS = 60_000;
+const MAX_PAUSE_MS = 60_000;
 
 /** FIFO limiter: grants slots in arrival order, per provider and overall. */
 export class Governor {

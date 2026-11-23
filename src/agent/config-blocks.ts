@@ -10,7 +10,7 @@ import { normalizeToolMap } from "./worker.ts";
 const EDITABLE_FIELDS = ["model", "instructions", "tools"] as const;
 
 // The model as a plain `provider/id` string (a string stays as written, a ModelSpec becomes `provider/id`); in: Agent.modelStringOrSpec or a base `model`, out: toConfig, applyEditable.
-export function modelKey(model: unknown): string | undefined {
+function modelKey(model: unknown): string | undefined {
   if (typeof model === "string") return model.trim() || undefined;
   const m = model as { model?: unknown; id?: unknown; provider?: unknown } | null | undefined;
   if (m && typeof m.model === "string") return m.model.trim() || undefined;
