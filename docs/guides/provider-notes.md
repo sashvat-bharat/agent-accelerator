@@ -11,7 +11,7 @@ The adapter uses the Interactions API (`POST {baseUrl}/interactions`, streaming 
 - **History** is chained on Google's side with `previous_interaction_id`. If the conversation switches to another provider or model, or the chain has expired, the SDK sends the full history again. Each assistant turn keeps Google's raw output steps, so a resent history is identical to what Google produced, thought signatures included. That keeps the reasoning and the cache prefix intact.
 - **Thinking** is sent as `thinking_level` (`minimal`, `low`, `medium` or `high`). `xhigh` and `max` become `high`, `none` and `dynamic` are left out. Reasoning summaries are switched on whenever thinking is on.
 - **Caching** is implicit only. Another `cache` value warns and falls back.
-- **Tool schemas** are converted to the OpenAPI 3.0 subset that Google accepts. `stripSchemaForGoogle(schema)` is the function that does it.
+- **Tool schemas** are converted to the OpenAPI 3.0 subset that Google accepts.
 - **Long answers on Gemini 4.** Google allows 65,536 output tokens per request. A `gemini-4*` model with a higher `maxOutputTokens` runs as a background interaction, with no extra option. `run()` polls (after 2 seconds, then every 5 seconds). `stream()` reconnects with `last_event_id` after a dropped connection, and 15 minutes of silence counts as dropped. Cancelling cancels the interaction on Google's side, so billing stops. `limits.requestTimeoutMs` times each HTTP request, not the whole run. Any other Google model above 65,536 fails with a `ConfigError` before the network.
 
 ## OpenAI

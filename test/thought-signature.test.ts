@@ -1,5 +1,5 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { OpenAICompatibleChatProvider } from "../src/index.ts";
+import { OpenAICompatibleChatProvider } from "../src/providers/openai-compat.ts";
 
 const SIG =
   "EvUCCvICARFNMg/41s9sgoOmB9q2scThMsvdj+j55/83oQo2aw0YIMW+KwweMjRQ4viuSnMRjn7UxfkV91wU9oA32nw6IpYTcmRu9ljJtXhMGbYgXMMHzJli+u60aU8Sj4l9RYliVxDtvuwqd31sK7RHoQv795ttw7Q/0D//Xa4Gf+rdazyYkOGURQFhaPaUqpZJv+vhWk4KChczMVkIxJ+uQ99ajHxoTygW07rZx2gTxhrZZX8aVcNJ7021Cvv1d90T8nGVw+Pwuh0Z9tRVEqoydaOiEEwrTbon250akXj6ze6NYQa86dhEvVPFmGpssyQzHQ33GnDdoqJTMCtVdvpxChiON0IhR2gYHgZcVTGNYWvxhD0wEVDG2myf+NxeADJwnHSB7Kz3zMWuZidIPktS+qkC34OCbki30QIh6wYJ2eMi/AkIBzQGUO8p5G2Fbi5/DTj8Ur62OoYP2Tb6UUz1NgqRDSz2xEcS46w8z9wqLr39BL+sxA==";

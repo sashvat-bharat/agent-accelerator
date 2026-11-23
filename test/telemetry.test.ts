@@ -2,7 +2,8 @@ import { describe, it, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { telemetryBus, AssistantMessageEventStream, GoogleInteractionsProvider, clearInteractionChains } from "../src/index.ts";
+import { telemetryBus, AssistantMessageEventStream } from "../src/index.ts";
+import { GoogleInteractionsProvider, clearInteractionChains } from "../src/providers/google.ts";
 import { emitProviderWarning, clearEmittedWarnings, clearSessionRouting } from "../src/providers.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;

@@ -1,15 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import {
-  resolveModel,
-  getProvider,
-  ModelProvider,
-  getModelFromCatalog,
-  getModelThinkingInfo,
-  GOOGLE_MODELS,
-  ANTHROPIC_MODELS,
-  OPENAI_MODELS,
-  OPENROUTER_MODELS,
-} from "../src/index.ts";
+import { resolveModel, getProvider, ModelProvider, getModelFromCatalog, getModelThinkingInfo } from "../src/index.ts";
+import { GOOGLE_MODELS, ANTHROPIC_MODELS, OPENAI_MODELS, OPENROUTER_MODELS } from "../src/models/catalog.ts";
 import { computeSessionTurnCost } from "../src/session/store.ts";
 
 describe("Model Resolution & Providers", () => {

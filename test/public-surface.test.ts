@@ -38,9 +38,66 @@ const INTERNAL: Record<string, string[]> = {
     "SessionAgentLike",
     "SessionPayloadStatus",
   ],
+  "provider adapters, their tables and aliases (use Agent, getProvider and ensureCustomProvider)": [
+    "GoogleInteractionsProvider",
+    "OpenAIResponsesProvider",
+    "AnthropicMessagesProvider",
+    "OpenRouterChatCompletionsProvider",
+    "OpenAICompatibleChatProvider",
+    "GOOGLE_MODELS",
+    "OPENAI_MODELS",
+    "ANTHROPIC_MODELS",
+    "OPENROUTER_MODELS",
+    "createOpenAICompatibleProvider",
+    "createCustomProvider",
+    "CustomProvider",
+    "CustomProviderOptions",
+  ],
+  "schema and tool-name helpers (tool() does this for you)": [
+    "zodToJsonSchema",
+    "cleanJsonSchema",
+    "toStandardToolDeclarations",
+    "StandardToolDeclaration",
+    "stripSchemaForGoogle",
+    "assertValidToolName",
+    "TOOL_NAME_PATTERN",
+  ],
+  "Google signature, cache and thinking helpers (the SDK keeps this state itself)": [
+    "isValidThoughtSignature",
+    "retainThoughtSignature",
+    "extractGoogleThoughtSignature",
+    "clearInteractionChains",
+    "clampCacheKey",
+    "resolveEffectiveThinking",
+    "CACHE_OPTIONS",
+  ],
+  "error, header and lineage helpers": [
+    "toConciseProviderError",
+    "assertModalitiesSupported",
+    "getAttribution",
+    "buildSessionHeaders",
+    "createTrackingId",
+    "createChildSessionId",
+    "createFixedChildSessionId",
+    "isSessionDescendant",
+  ],
+  "catalog internals (getCatalogStatus and the catalog settings cover them)": [
+    "getCacheDir",
+    "getCacheFilePath",
+    "getCatalogTTL",
+    "isValidCatalogPayload",
+    "DEFAULT_CATALOG_TTL_MS",
+    "CATALOG_PROVIDERS",
+  ],
+  "chat display helpers (copies live in examples/_shared.ts)": [
+    "formatSessionBanner",
+    "formatSessionTokens",
+    "formatSessionCost",
+    "getSessionContextWindow",
+  ],
 };
 // The most names the barrel may export (values and types). Lower it whenever names are removed.
-const MAX_NAMES = 315;
+const MAX_NAMES = 270;
 
 describe("the public surface", () => {
   it("reads the barrel (the check itself works)", () => {

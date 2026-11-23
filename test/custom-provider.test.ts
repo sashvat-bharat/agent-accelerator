@@ -1,12 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import {
-  resolveModel,
-  getProvider,
-  ModelProvider,
-  ensureCustomProvider,
-  OpenAICompatibleChatProvider,
-  setConfigs,
-} from "../src/index.ts";
+import { resolveModel, getProvider, ModelProvider, ensureCustomProvider, setConfigs } from "../src/index.ts";
+import { OpenAICompatibleChatProvider } from "../src/providers/openai-compat.ts";
 
 // The base URL of a custom endpoint is a setting (`base_urls`), not an env var.
 const urls = (u: Record<string, string>) => setConfigs({ values: { catalog_refresh: "off", base_urls: u }, editable: [] });

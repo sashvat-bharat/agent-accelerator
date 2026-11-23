@@ -39,6 +39,16 @@ These were internal helpers that happened to be exported. They are still in the 
 | `extractMediaToDir`, `resolveMediaPaths` | `saveSessionDir` and `loadSessionDir` move the media for you. | 0.9.0 |
 | `computeSessionTurnCost` | `agent.usageReport()`, or `res.usage.cost` for one run. | 0.9.0 |
 | `writeFileAtomic` | Nothing. It was the SDK's own crash-safe writer: write a temp file, then rename it. | 0.9.0 |
+| The provider classes `GoogleInteractionsProvider`, `OpenAIResponsesProvider`, `AnthropicMessagesProvider`, `OpenRouterChatCompletionsProvider`, `OpenAICompatibleChatProvider`, the tables `GOOGLE_MODELS`, `OPENAI_MODELS`, `ANTHROPIC_MODELS`, `OPENROUTER_MODELS`, and `createOpenAICompatibleProvider`, `createCustomProvider`, `CustomProvider`, `CustomProviderOptions` | Use an `Agent`. `getProvider(id)` and `ensureCustomProvider(prefix, { baseUrl })` still give you a provider. | 0.9.0 |
+| `zodToJsonSchema`, `cleanJsonSchema`, `toStandardToolDeclarations`, `StandardToolDeclaration`, `stripSchemaForGoogle`, `assertValidToolName`, `TOOL_NAME_PATTERN` | `tool({ input })` converts and checks the schema and the name for you. | 0.9.0 |
+| `isValidThoughtSignature`, `retainThoughtSignature`, `extractGoogleThoughtSignature`, `clearInteractionChains` | Nothing. The SDK keeps thought signatures and Google chains itself. | 0.9.0 |
+| `clampCacheKey`, `resolveEffectiveThinking`, `CACHE_OPTIONS` | Nothing. Set `cache` and `thinking` on the agent or on a run. | 0.9.0 |
+| `toConciseProviderError`, `assertModalitiesSupported` | Nothing. Errors already reach you as one-line typed errors, and unsupported input fails before the network. | 0.9.0 |
+| `getAttribution` | Keep the values you gave to `setAttribution`. | 0.9.0 |
+| `buildSessionHeaders` | Nothing. Agents send their session headers themselves. | 0.9.0 |
+| `createTrackingId`, `createChildSessionId`, `createFixedChildSessionId`, `isSessionDescendant` | The `trackingId`, `sessionId` and `parentSessionId` in a worker's result metadata. | 0.9.0 |
+| `getCacheDir`, `getCacheFilePath`, `getCatalogTTL`, `isValidCatalogPayload`, `DEFAULT_CATALOG_TTL_MS`, `CATALOG_PROVIDERS` | `getCatalogStatus()` (cache path, age and TTL) and the `catalog_cache_dir` setting. | 0.9.0 |
+| `formatSessionBanner`, `formatSessionTokens`, `formatSessionCost`, `getSessionContextWindow` | Copy the small helpers from `examples/_shared.ts`. `SessionTelemetry.formatBar()` stays. | 0.9.0 |
 
 ## Providers and models
 

@@ -195,35 +195,13 @@ Look a model up with `getModelFromCatalog`, and add your own with `registerModel
 | Function | Does |
 |---|---|
 | `createSessionId(prefix?)` | A random session id (`<prefix>-<uuid>` with a prefix), at most 64 characters. |
-| `createTrackingId()` | A random 32-character id for one worker run. |
-| `createChildSessionId(parentId, tag)`, `createFixedChildSessionId(parentId, name)` | A child session id of at most 64 characters that carries a hash of its parent. |
-| `isSessionDescendant(child, parent)` | `true` when `child` was made from `parent`. |
-| `buildSessionHeaders(provider, customHeaders?, explicitSessionId?)` | The session-affinity headers for a provider. Agents call it for you. |
 | `withRetries(fn, options?)` | Runs `fn` again after a transient failure. Defaults: 2 retries, a 5 second delay cap, a 30 second retry budget. A `Retry-After` header is honored inside that budget. An abort is never retried. Options: `maxRetries`, `maxRetryDelayMs`, `retryBudgetMs`, `baseDelayMs`, `signal`, `label`. |
 | `isTransientError(error)` | `true` for the failures `withRetries` retries. |
 | `normalizeMediaInput(input, mimeType?)` | Resolves a media input to `{ mimeType, base64Data, dataUrl }`. |
 | `inferMimeType(path, fallback?)`, `sniffMimeType(bytes)` | The MIME type from a file name, or from the first bytes. |
-| `assertModalitiesSupported(context, providerId, modelId)` | Throws a one-line error before the network when a part is not supported by a catalog model. |
 | `ensureCustomProvider(prefix, options?)`, `getProvider(id)`, `normalizeProviderPrefix(prefix)` | Create or fetch the provider for a prefix. See [Provider notes](guides/provider-notes.md#openai-compatible-services). |
 
 Two retry layers exist. `retry` repeats one failed provider call (seconds). `runRetries` repeats a whole failed run from where it stopped (minutes, with `agent.run_retry` on the bus). See [Limits and retries](guides/limits-and-retries.md).
-
-## Low-level exports
-
-These are exported for advanced use. Most programs never need them, and some may be removed before 1.0.
-
-| Export | Does |
-|---|---|
-| `GoogleInteractionsProvider`, `OpenAIResponsesProvider`, `AnthropicMessagesProvider`, `OpenRouterChatCompletionsProvider`, `OpenAICompatibleChatProvider` | The adapter classes behind `getProvider`. Their `generate` returns a `ProviderGenerateResult`. |
-| `GOOGLE_MODELS`, `OPENAI_MODELS`, `ANTHROPIC_MODELS`, `OPENROUTER_MODELS` | The model list each adapter starts with. |
-| `createOpenAICompatibleProvider(prefix, options?)`, `createCustomProvider`, `CustomProvider` | Make an OpenAI-compatible adapter without registering it. `ensureCustomProvider` caches one per prefix. Options are `CustomProviderOptions`: `name`, `baseUrl`, `apiKey`, `defaultBaseUrl`. |
-| `zodToJsonSchema(schema)`, `cleanJsonSchema(schema)`, `toStandardToolDeclarations(tools)`, `stripSchemaForGoogle(schema)` | Tool-schema helpers: convert a Zod schema, remove `$schema`, `$defs` and `$ref`, turn tools into `{ name, description, parameters }`, and cut a schema to what Google accepts. |
-| `isValidThoughtSignature(sig)`, `retainThoughtSignature(existing, incoming)`, `extractGoogleThoughtSignature(obj)`, `clearInteractionChains(sessionId?)` | Google thought-signature and chain helpers. |
-| `clampCacheKey(key)` | Shortens an affinity key to the 64 characters providers accept. |
-| `resolveEffectiveThinking(base, overrideLevel?)` | Turns a per-run level into a `ThinkingConfig` without changing the agent's config. |
-| `getCacheDir()`, `getCacheFilePath(provider)` | Where the catalog cache and one provider's file live. |
-| `formatSessionBanner(saved, telemetry, filePath)` | A startup line for a saved session, for chat programs. |
-| `toConciseProviderError(error, providerId, modelId)` | Turns a raw failure into the one-line typed error. |
 
 ## Telemetry codes
 

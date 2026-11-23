@@ -56,7 +56,8 @@ describe("public barrel", () => {
       "getSubAgentTraceForSessions", "listSubAgentTraceIds", "listSubAgentTraceIdsForSessions", "subscribeToSubAgent",
       "subscribeToSubAgentForSessions", "isStreamingLoop", "MAX_SUBAGENT_TRACES",
     ]) expect(barrel[name]).toBeUndefined();
-    for (const name of ["Agent", "GoogleInteractionsProvider", "OpenAIResponsesProvider", "OpenRouterChatCompletionsProvider", "OpenAICompatibleChatProvider", "AssistantMessageEventStream"]) {
+    // The provider adapter classes are internal since 0.9.0 (see test/public-surface.test.ts).
+    for (const name of ["Agent", "AssistantMessageEventStream"]) {
       expect(barrel[name]).toBeDefined();
     }
   });

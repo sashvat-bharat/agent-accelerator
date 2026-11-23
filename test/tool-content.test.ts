@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
-import { Agent, tool, toolContent, telemetryBus, clearInteractionChains, loadSessionDir } from "../src/index.ts";
+import { Agent, tool, toolContent, telemetryBus, loadSessionDir } from "../src/index.ts";
+import { clearInteractionChains } from "../src/providers/google.ts";
 import { executeToolCalls } from "../src/tools/executor.ts";
 import { clearSessionRouting, clearEmittedWarnings } from "../src/providers.ts";
 

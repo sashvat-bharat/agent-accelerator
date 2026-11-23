@@ -2,16 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  Agent,
-  ConfigError,
-  ModelNotAllowedError,
-  getCacheFilePath,
-  getModelFromCatalog,
-  getModelsForProvider,
-  resolveModel,
-  setModels,
-} from "../src/index.ts";
+import { Agent, ConfigError, ModelNotAllowedError, getModelFromCatalog, getModelsForProvider, resolveModel, setModels } from "../src/index.ts";
+import { getCacheFilePath } from "../src/models/catalog.ts";
 import { resetModels } from "../src/config/models.ts";
 import { getScheduler, resetSchedulers } from "../src/scheduler/scheduler.ts";
 import { readDeliveries, readRun } from "../src/scheduler/store.ts";

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { Agent, tool, fauxProvider, assertValidToolName, ConfigError } from "../src/index.ts";
+import { Agent, tool, fauxProvider, ConfigError } from "../src/index.ts";
+import { assertValidToolName } from "../src/tools/tool.ts";
 
 const echo = tool({ description: "echo", input: z.object({}), execute: async () => "ECHO-RAN" });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { buildSessionHeaders } from "../src/index.ts";
+import { buildSessionHeaders } from "../src/utils/headers.ts";
 import { setAttribution, getAttribution } from "../src/utils/headers.ts";
 
 describe("Caching & Session Affinity", () => {
@@ -46,7 +46,7 @@ describe("Caching & Session Affinity", () => {
   });
 
   it("should send session affinity headers on native custom requests", async () => {
-    const { OpenAICompatibleChatProvider } = await import("../src/index.ts");
+    const { OpenAICompatibleChatProvider } = await import("../src/providers/openai-compat.ts");
     const provider = new OpenAICompatibleChatProvider("groq", {
       baseUrl: "https://api.groq.com/openai/v1",
     });

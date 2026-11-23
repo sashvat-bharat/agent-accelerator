@@ -968,7 +968,8 @@ describe("GoogleInteractionsProvider generation floor & failure handling (mocked
 
 describe("model switch mid-session", () => {
   it("reseeds from full history, chains again afterwards, and raises no false history-shrink anomaly", async () => {
-    const { Agent, telemetryBus, clearInteractionChains } = await import("../src/index.ts");
+    const { Agent, telemetryBus } = await import("../src/index.ts");
+    const { clearInteractionChains } = await import("../src/providers/google.ts");
     clearInteractionChains();
     const bodies: any[] = [];
     const usages = [

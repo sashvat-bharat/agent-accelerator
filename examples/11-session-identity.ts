@@ -18,8 +18,8 @@
  * Needs: a provider key (see .env.example); the models come from examples/models.json.
  */
 
-import { Agent, sessionDirFor, loadSessionDir, isSessionDescendant, formatSessionCost } from "agent-accelerator";
-import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
+import { Agent, sessionDirFor, loadSessionDir } from "agent-accelerator";
+import { fail, MODEL, SUB_AGENT_MODEL, formatCost } from "./_shared";
 
 // Colors: white is reserved for model answer text only. Thinking is grey,
 // everything else uses vibrant colors so streams are easy to tell apart.
@@ -160,7 +160,7 @@ for (const s of res.subagents) {
       s.usage.totalTokens +
       " cost=" +
       GREEN +
-      formatSessionCost(s.usage?.cost?.totalCost ?? 0) +
+      formatCost(s.usage?.cost?.totalCost ?? 0) +
       RESET
   );
   console.log("  session: " + (s.sessionId ?? "(none)") + " TrackingID: " + (s.trackingId ?? "(none)"));
@@ -172,7 +172,7 @@ for (const s of res.subagents) {
 console.log(CYAN + "\n--- lineage (real worker sessions) ---" + RESET);
 for (const s of res.subagents) {
   const realChild = s.sessionId ?? "(none)";
-  const descendant = realChild !== "(none)" && isSessionDescendant(realChild, agent.sessionId);
+  const descendant = realChild !== "(none)" && s.parentSessionId === agent.sessionId;
   console.log(CYAN + "- " + s.name + RESET);
   console.log("  session:    " + realChild + " (" + realChild.length + " chars)");
   console.log("  TrackingID: " + (s.trackingId ?? "(none)"));
@@ -183,7 +183,7 @@ console.log(
     "parent session total usage: " +
     res.usage.totalTokens +
     " tokens, cost " +
-    formatSessionCost(res.usage?.cost?.totalCost ?? 0) +
+    formatCost(res.usage?.cost?.totalCost ?? 0) +
     RESET
 );
 

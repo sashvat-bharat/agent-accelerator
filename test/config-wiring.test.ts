@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { Agent, tool, clearInteractionChains, TimeoutError } from "../src/index.ts";
+import { Agent, tool, TimeoutError } from "../src/index.ts";
+import { clearInteractionChains } from "../src/providers/google.ts";
 import { clearSessionRouting } from "../src/providers.ts";
 import { z } from "zod";
 
