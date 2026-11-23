@@ -68,11 +68,43 @@ The report is `{ agent, workers, total }`. Each line has:
 | `cost` | `source`, `totalUsd`, `parts` and `unpricedTurns`. |
 
 - `agent` is the agent's own calls. `workers` is a tree. Each worker has a `status` of `open`, `closed` or `fixed` and its own `workers`. `total` is everything.
-- Each agent records only the calls it made itself, priced per turn, and saves them with its session. The report works after a restart, and nothing is counted twice. `total` matches the tokens in the responses.
+- A fixed worker (`subagents: [...]`) lists the workers it started below it, however many calls it handled. Only the newest 1,000 of them are listed one by one. The older ones are added up into one line called `older-workers`, so the total stays exact.
+- Each agent records only the calls it made itself, priced per turn. Nothing is counted twice, and `total` matches the tokens in the responses of the same run.
+- The agent's own calls and its workers from `agent.workers` are saved with the session, so they come back after a restart (load the session with `importSession`). **Fixed workers keep their spending in memory only.** After a restart they start again at zero.
 - An unknown price shows as `totalUsd: null`, never 0. When `unpricedTurns` is above 0, the total is a lower bound. `source` says where the cost came from: `provider`, `catalog` or `mixed`.
-- Not included: one-shot scheduled-action workers (their exact spending is in the header of each run file) and workers started inside a fixed worker's per-call copy.
+- Not included: one-shot scheduled-action workers. Their exact spending is in the header of each run file.
 
 Never add up `AgentResponse.usage` of several runs to get a total. A parent's response already contains its workers. Use `usageReport()`.
+
+## One total per conversation
+
+An `Agent` keeps one spending total for everything it does, so give each conversation its own `Agent`. Its report is then that conversation's total, with every worker listed below it. One `Agent` that serves several `sessionId`s adds all of them into one total.
+
+```ts
+import { Agent } from "agent-accelerator";
+
+const conversations = new Map<string, Agent>(); // in a real service, drop idle ones
+
+function agentFor(userId: string): Agent {
+  let agent = conversations.get(userId);
+  if (!agent) {
+    agent = new Agent({
+      model: "google/gemini-3.5-flash-lite",
+      sessionId: `chat-${userId}`,
+      persist: { dir: "sessions" },
+      dynamicSubagents: { model: "google/gemini-3.5-flash-lite" },
+    });
+    conversations.set(userId, agent);
+  }
+  return agent;
+}
+
+const agent = agentFor("alice");
+await agent.run("Research this for me.");
+const report = agent.usageReport();
+console.log(report.total.cost.totalUsd); // this conversation, every worker included
+for (const w of report.workers) console.log(w.id, w.status, w.turns, w.cost.totalUsd);
+```
 
 ## Tips
 

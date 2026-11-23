@@ -6,7 +6,7 @@ Saving a conversation, its spending and its tool logs.
 | :------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `store.ts`    | Snapshot format (`session.json`, one line per field and per turn), load validation, `SessionTelemetry`, media extraction, journal replay (`replayJournal`), and `priceUsage` (the one cost model, integer micro-USD). |
 | `journal.ts`  | `SessionJournal`: after each step appends one fsynced line to `journal.ndjson`; writes a fresh snapshot (new `epoch`) when history changed any other way or the journal passed 500 lines / 4 MB.                      |
-| `usage.ts`    | Pure spending accounting: `UsageTotals`, `usageLine`, `buildUsageReport`. No Agent import.                                                                                                                            |
+| `usage.ts`    | Pure spending accounting: `UsageTotals`, `usageLine`, `buildUsageReport`, `foldOldNodes` (adds the oldest worker nodes into one so a long list stays bounded). No Agent import.                                       |
 | `tool-log.ts` | `ToolLogs`: one fsynced NDJSON file per tool call under `<session>/tool-logs/`.                                                                                                                                       |
 
 ## Invariants

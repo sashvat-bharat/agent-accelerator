@@ -242,6 +242,18 @@ function sumTree(into: UsageTotals, nodes: UsageNode[]): void {
   }
 }
 
+/** The id of the one node that stands for workers folded away to keep memory bounded. */
+export const OLDER_WORKERS_ID: string = "older-workers";
+
+/** Keeps `nodes` to at most `keep` entries: the oldest, with everything below them, are added up into one `older-workers` node, so the total never changes. */
+export function foldOldNodes(nodes: UsageNode[], keep: number): void {
+  if (nodes.length <= keep) return;
+  const old = nodes.splice(0, nodes.length - keep + 1); // the folded node takes one of the `keep` places
+  const totals = emptyUsage();
+  sumTree(totals, old);
+  nodes.unshift({ id: OLDER_WORKERS_ID, name: "older workers", model: "", status: "closed", totals, workers: [] });
+}
+
 // One node as a report line, children included; in: a usage node, out: UsageReport.workers.
 function nodeLine(n: UsageNode): WorkerUsage {
   return {

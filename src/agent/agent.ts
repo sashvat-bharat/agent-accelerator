@@ -80,6 +80,7 @@ import {
   addTurn,
   buildUsageReport,
   emptyUsage,
+  foldOldNodes,
   mergeUsage,
   modelName,
   readUsage,
@@ -117,6 +118,8 @@ import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 const mergeDisposers = new WeakMap<AbortController, () => void>();
 
 /** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
+// How many workers started by the copies of one fixed worker are listed one by one in `usageReport()`; the oldest past this fold into one line (totals stay exact).
+const MAX_COPIED_WORKER_NODES = 1000;
 export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
 
 /** Thrown when dynamic sub-agent spawning is enabled without an explicit model. */
@@ -295,6 +298,8 @@ export class Agent {
   /** The resume in flight, so a second `resume()` returns the same promise. */
   private resuming?: Promise<AgentResponse | undefined>;
   private workerRegistry?: WorkerRegistry;
+  /** The workers that the per-call copies of this agent (as a fixed worker) started, as usage nodes; kept so `usageReport()` lists them. */
+  private readonly copiedWorkers: UsageNode[] = [];
   /** The chat-wide spending cap this agent counts into and checks against: its own (`usageLimit`) or the root's, handed down to workers. @internal */
   chat?: UsageLimit;
   /** True for the agent that created `chat` from its own `usageLimit` (the root of the chat). */
@@ -654,17 +659,34 @@ export class Agent {
     mergeUsage(this.usageTotals, other);
   }
 
+  /** Keeps the workers a fixed worker's per-call copy started as usage nodes under this template (the oldest past 1,000 fold into one node). @internal */
+  absorbWorkers(nodes: UsageNode[]): void {
+    this.copiedWorkers.push(...nodes);
+    foldOldNodes(this.copiedWorkers, MAX_COPIED_WORKER_NODES);
+  }
+
+  /** The usage nodes of the workers this agent started (none, without creating the registry, when it never started one). @internal */
+  startedWorkerNodes(): UsageNode[] {
+    return this.workerRegistry?.usageNodes() ?? [];
+  }
+
   /**
    * What this agent and every worker below it spent: per agent and per worker (tokens, cache hits, thinking, exact
    * cost per turn) plus a whole-session total, with nothing counted twice. `agent` is this agent's own model calls;
-   * workers (open, closed, nested, and rebuilt from disk after a restart) and fixed `subagents` workers are listed
-   * below it. Spending of one-shot scheduled-action workers is in their run files, not here.
+   * workers (open, closed, nested, and rebuilt from disk after a restart) and fixed `subagents` workers (with the
+   * workers their copies started) are listed below it. Spending of one-shot scheduled-action workers is in their run
+   * files, not here.
    */
   usageReport(): UsageReport {
     return buildUsageReport(
       { id: this.sessionId, name: this.name, model: modelName(this.modelStringOrSpec), totals: this.usageTotals },
-      [...this.workers.usageNodes(), ...this.fixedWorkerNodes(), ...this.imageToolNodes()]
+      [...this.workerNodes(), ...this.imageToolNodes()]
     );
+  }
+
+  // Everything below this agent as usage nodes: the workers it started, its fixed workers (each with what lies below it) and the workers its fixed workers' copies started; in: usageReport and fixedWorkerNodes, out: UsageNode[].
+  private workerNodes(): UsageNode[] {
+    return [...this.workers.usageNodes(), ...this.fixedWorkerNodes(), ...this.copiedWorkers];
   }
 
   // The picture spending of this agent's `imageTool`s as usage nodes (status "fixed"); in: this.tools, out: usageReport.
@@ -686,7 +708,7 @@ export class Agent {
     return nodes;
   }
 
-  // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is merged into them); in: the constructor config, out: usageReport.
+  // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is merged into them, and the workers those copies started hang below them); in: the constructor config, out: workerNodes.
   private fixedWorkerNodes(): UsageNode[] {
     const nodes: UsageNode[] = [];
     for (const entry of this.forkConfig.subagents ?? []) {
@@ -698,7 +720,7 @@ export class Agent {
         model: modelName(worker.modelStringOrSpec),
         status: "fixed",
         totals: worker.usageTotals,
-        workers: [],
+        workers: worker.workerNodes(),
       });
     }
     return nodes;

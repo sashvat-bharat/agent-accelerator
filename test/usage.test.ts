@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Agent, registerModel, clearCustomModels } from "../src/index.ts";
 import { createGenericModelSpec } from "../src/models/catalog.ts";
 import { loadSessionDir, priceUsage, sessionDirFor } from "../src/session/store.ts";
-import { addTurn, buildUsageReport, emptyUsage, mergeUsage, readUsage, usageLine } from "../src/session/usage.ts";
+import { OLDER_WORKERS_ID, addTurn, buildUsageReport, emptyUsage, foldOldNodes, mergeUsage, readUsage, usageLine, type UsageNode } from "../src/session/usage.ts";
 import { sseFrame } from "./helpers.ts";
 
 const roots: string[] = [];
@@ -239,6 +239,132 @@ describe("agent.usageReport()", () => {
     expect([report.agent.turns, report.workers[0]!.turns]).toEqual([2, 1]);
     expect(report.total.tokens.total).toBe(res.usage.totalTokens);
     expect(report.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
+  });
+});
+
+// One model reply that makes several tool calls at once (parallel calls of one turn).
+const callTools = (calls: Array<{ name: string; args: Record<string, unknown> }>, body: any, u = usage()): Response =>
+  body.stream
+    ? new Response(
+        sseFrame({ id: "r", choices: [{ delta: { tool_calls: calls.map((c, i) => ({ index: i, id: `call_${i}`, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })) } }] }) +
+          sseFrame({ id: "r", choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: u }) +
+          "data: [DONE]\n\n",
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      )
+    : new Response(
+        JSON.stringify({
+          id: "r",
+          choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: calls.map((c, i) => ({ id: `call_${i}`, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })) } }],
+          usage: u,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+const fetchOf = (handler: Handler): typeof fetch => (async (_url: string, init: RequestInit) => handler(JSON.parse(String(init.body)))) as unknown as typeof fetch;
+const wire = { apiKey: "k", baseUrl: "https://example.test/v1" };
+// A usage node with `turns` model calls of the standard size, for the folding tests.
+const nodeOf = (id: string, turns: number): UsageNode => {
+  const totals = emptyUsage();
+  const turn = { inputTokens: 1000, outputTokens: 200, totalTokens: 1200 };
+  for (let i = 0; i < turns; i++) addTurn(totals, turn, undefined);
+  return { id, name: id, model: "groq/w", status: "closed", totals, workers: [] };
+};
+
+describe("workers started below a fixed worker", () => {
+  it("lists them under that fixed worker, and the total still matches the response", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const handler: Handler = (body) => {
+      if (body.model === "w") return reply("worker done", body);
+      if (body.model === "f") return hasTool(body) ? reply("fixed done", body) : callTool("subagents", { command: "spawn", name: "inner", task: "go" }, body);
+      return hasTool(body) ? reply("all done", body) : callTool("researcher", { task: "go" }, body);
+    };
+    const fixed = new Agent({ ...wire, name: "researcher", model: "groq/f", fetch: fetchOf(handler), dynamicSubagents: { model: "groq/w" } });
+    const lead = new Agent({ ...wire, model: "groq/p", subagents: [fixed], fetch: fetchOf(handler) });
+    const res = await lead.run("go");
+
+    const report = lead.usageReport();
+    expect(report.total.turns).toBe(5); // lead 2, the fixed worker 2, the worker the fixed worker started 1
+    expect(report.total.tokens.total).toBe(res.usage.totalTokens);
+    expect(report.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
+    const line = report.workers[0]!;
+    expect([line.id, line.status, line.turns, line.workers.length]).toEqual(["researcher", "fixed", 2, 1]);
+    expect(line.workers[0]).toMatchObject({ turns: 1, model: "groq/w" });
+  });
+
+  it("keeps the workers of two parallel calls apart", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const handler: Handler = (body) => {
+      if (body.model === "w") return reply("worker done", body);
+      if (body.model === "f") return hasTool(body) ? reply("fixed done", body) : callTool("subagents", { command: "spawn", name: "inner", task: "go" }, body);
+      return hasTool(body)
+        ? reply("all done", body)
+        : callTools([{ name: "researcher", args: { task: "one" } }, { name: "researcher", args: { task: "two" } }], body);
+    };
+    const fixed = new Agent({ ...wire, name: "researcher", model: "groq/f", fetch: fetchOf(handler), dynamicSubagents: { model: "groq/w" } });
+    const lead = new Agent({ ...wire, model: "groq/p", subagents: [fixed], fetch: fetchOf(handler) });
+    const res = await lead.run("go");
+
+    const report = lead.usageReport();
+    expect(report.total.turns).toBe(2 + 2 * 2 + 2); // lead 2, two copies of 2, two workers of 1
+    expect(report.total.tokens.total).toBe(res.usage.totalTokens);
+    expect(report.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
+    expect(report.workers).toHaveLength(1);
+    expect(report.workers[0]!.turns).toBe(4);
+    expect(report.workers[0]!.workers.map((w) => w.turns)).toEqual([1, 1]);
+    expect(new Set(report.workers[0]!.workers.map((w) => w.id)).size).toBe(2);
+  });
+
+  it("goes down through fixed workers of fixed workers", async () => {
+    price("p");
+    price("a");
+    price("b");
+    price("w");
+    const handler: Handler = (body) => {
+      if (body.model === "w") return reply("worker done", body);
+      if (body.model === "b") return hasTool(body) ? reply("beta done", body) : callTool("subagents", { command: "spawn", name: "inner", task: "go" }, body);
+      if (body.model === "a") return hasTool(body) ? reply("alpha done", body) : callTool("beta", { task: "go" }, body);
+      return hasTool(body) ? reply("all done", body) : callTool("alpha", { task: "go" }, body);
+    };
+    const beta = new Agent({ ...wire, name: "beta", model: "groq/b", fetch: fetchOf(handler), dynamicSubagents: { model: "groq/w" } });
+    const alpha = new Agent({ ...wire, name: "alpha", model: "groq/a", fetch: fetchOf(handler), subagents: [beta] });
+    const lead = new Agent({ ...wire, model: "groq/p", subagents: [alpha], fetch: fetchOf(handler) });
+    const res = await lead.run("go");
+
+    const report = lead.usageReport();
+    expect(report.total.turns).toBe(7); // lead 2, alpha 2, beta 2, the worker 1
+    expect(report.total.tokens.total).toBe(res.usage.totalTokens);
+    const a = report.workers[0]!;
+    const b = a.workers[0]!;
+    expect([a.id, a.turns, b.id, b.turns, b.workers.length, b.workers[0]!.turns]).toEqual(["alpha", 2, "beta", 2, 1, 1]);
+  });
+
+  it("keeps the list bounded: the oldest fold into one line and the total never changes", () => {
+    const agent = new Agent({ ...wire, model: "groq/p", fetch: fetchOf((body) => reply("x", body)) });
+    agent.absorbWorkers(Array.from({ length: 1010 }, (_, i) => nodeOf(`w${i}`, 1)));
+    const report = agent.usageReport();
+    expect(report.workers.length).toBeLessThanOrEqual(1000);
+    expect(report.workers[0]!.id).toBe(OLDER_WORKERS_ID);
+    expect(report.workers.at(-1)!.id).toBe("w1009"); // the newest are still listed one by one
+    expect(report.total.turns).toBe(1010);
+  });
+
+  it("foldOldNodes adds up the oldest nodes (and what lies below them) and folds again on the next call", () => {
+    const parent = nodeOf("parent", 1);
+    parent.workers = [nodeOf("child", 2)];
+    const nodes = [parent, nodeOf("n1", 1), nodeOf("n2", 1), nodeOf("n3", 1), nodeOf("n4", 1)];
+    foldOldNodes(nodes, 3);
+    expect(nodes.map((n) => n.id)).toEqual([OLDER_WORKERS_ID, "n3", "n4"]);
+    expect(nodes[0]!.totals.turns).toBe(5); // parent 1 + child 2 + n1 + n2
+    nodes.push(nodeOf("n5", 1));
+    foldOldNodes(nodes, 3);
+    expect(nodes.map((n) => n.id)).toEqual([OLDER_WORKERS_ID, "n4", "n5"]);
+    expect(nodes[0]!.totals.turns).toBe(6);
+    const small = [nodeOf("only", 1)];
+    foldOldNodes(small, 3);
+    expect(small.map((n) => n.id)).toEqual(["only"]);
   });
 });
 

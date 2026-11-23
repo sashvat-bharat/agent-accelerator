@@ -704,6 +704,7 @@ export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: Us
           if (worker !== agentInstance) {
             try {
               agentInstance.absorbUsage(worker.usageTotals);
+              agentInstance.absorbWorkers(worker.startedWorkerNodes()); // and the workers the copy started: they die with it
             } catch {
               // why: bookkeeping must never fail a run; the run result is what counts.
             } // the template keeps what its copies spent
