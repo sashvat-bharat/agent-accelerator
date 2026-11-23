@@ -104,7 +104,7 @@ const get_topic_brief = tool({
   },
 });
 
-// 2. Sub-Agent 1: In-depth Technical Researcher (v0.4.0: Agent + agentToTool, SubAgent deprecated)
+// 2. Sub-Agent 1: In-depth Technical Researcher (a plain Agent, used as a fixed worker through agentToTool)
 // See agentToTool usage below; fixed workers run as isolated Sessions per call.
 const researcherAgent = new Agent({
   name: "deep_researcher",

@@ -351,7 +351,7 @@ export class Agent {
       this.chat = new UsageLimit(chatCap);
       this.ownsChat = true;
     }
-    // Unified model resolution (shared with SubAgent/workers): supports
+    // Unified model resolution (shared with workers): supports
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
     this.modelStringOrSpec = modelStringOrSpec as string | ModelSpec;

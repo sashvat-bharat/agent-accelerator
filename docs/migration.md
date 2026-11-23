@@ -14,6 +14,7 @@
 | `needsApproval` | Ask inside `execute` and refuse with `ctx.stop(reason)`, or use the `beforeTool` hook. | earlier |
 | `dynamicSubagents.timeout`, `modelMaySetTimeout` | `dynamicSubagents.workerTimeoutMs` and the action's own `timeoutMs`. | 0.5.5 |
 | Event `scheduled_action.killed` | `scheduled_action.deleted` | 0.5.5 |
+| The `SubAgent` class, `SubAgentConfig`, `agentFromEnv()`, `.asTool()` and `.toTool()` | Removed. A fixed worker is a plain `new Agent({ name, model, instructions })` in `subagents: [...]`, or `agentToTool({ name, agent })`. For `agentFromEnv()`, leave out `model`: an `Agent` without one uses the saved choice, then the list default (see [Allowed models](guides/allowed-models.md)). `Agent.fromEnv(config)` does the same, and as a last step uses the saved worker model. Name the model of every worker: the old class used the saved worker model when you named none, but a plain `Agent` looks for the saved main model first. See [Workers](guides/workers.md#fixed-workers). | 0.9.0 |
 | `hooks` (a placeholder that only warned) | A working option: `beforeTool`, `afterTool`, `beforeRequest`, `onYield`. An unknown hook name throws a `ConfigError`. | 0.8.9 |
 
 ## Names that still work
@@ -27,8 +28,6 @@ These older names are still accepted. When both are set, the winner is the one i
 | `midSession.mode` | `midSession.whenBusy` | `whenBusy` |
 
 Two tool options have two names for the same thing: `maxTries` and `maxAttempts` (`maxTries` wins), and `redactError` and `redact` (`redactError` wins).
-
-The `SubAgent` class and `agentFromEnv()` still work, but they add nothing. Use a plain `Agent` with `subagents: [...]` or `agentToTool()`.
 
 ## Providers and models
 

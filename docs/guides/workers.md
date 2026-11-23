@@ -35,7 +35,26 @@ console.log(res.text);
 console.log(res.subagents.map((s) => `${s.name}: ${s.usage.totalTokens} tokens`));
 ```
 
-Each call runs on its own copy of the worker (`fork`), so parallel calls to one worker really run in parallel. `agentToTool(agent)` and `buildAgentTools([...])` do the same thing by hand.
+Each call runs on its own copy of the worker (`fork`), so parallel calls to one worker really run in parallel.
+
+A fixed worker is a plain `Agent`: there is no separate class. To choose the tool's name or description yourself, use `agentToTool`. `buildAgentTools([...])` does the same for a list.
+
+```ts
+import { Agent, agentToTool } from "agent-accelerator";
+
+const researcher = new Agent({
+  name: "researcher",
+  model: "google/gemini-3.5-flash-lite",
+  instructions: "Return findings with sources.",
+});
+
+const lead = new Agent({
+  model: "google/gemini-3.5-flash-lite",
+  tools: {
+    research: agentToTool({ name: "research", description: "Finds sourced facts.", agent: researcher }),
+  },
+});
+```
 
 ## Workers the model starts
 

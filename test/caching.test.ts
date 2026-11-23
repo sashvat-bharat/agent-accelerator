@@ -36,9 +36,9 @@ describe("Caching & Session Affinity", () => {
     expect(headers["x-client-request-id"]).toBe(sessionId);
   });
 
-  it("leaves SubAgent cache unset (provider default) and validates the cache value", async () => {
-    const { SubAgent, Agent, ConfigError } = await import("../src/index.ts");
-    const sub = new SubAgent({ name: "analyst", instructions: "Analyze data", model: "google/gemini-3.5-flash-lite" });
+  it("leaves a worker Agent's cache unset (provider default) and validates the cache value", async () => {
+    const { Agent, ConfigError } = await import("../src/index.ts");
+    const sub = new Agent({ name: "analyst", instructions: "Analyze data", model: "google/gemini-3.5-flash-lite" });
     expect(sub.cache).toBeUndefined();
     expect(new Agent({ model: "google/gemini-3.5-flash-lite", cache: "5m" }).cache).toBe("5m");
     // The pre-0.5.1 object form is a hard break with a fix-it message.

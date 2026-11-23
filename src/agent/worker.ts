@@ -9,7 +9,6 @@ import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
 import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 import { resolveModelUnchecked } from "../providers/registry.ts";
-import { ConfigError } from "../types/errors.ts";
 
 /** Minimal live-trace shape shared by fixed + dynamic workers (structural subset of `SubAgentTrace`). */
 export interface LiveWorkerTrace {
@@ -27,7 +26,7 @@ export interface LiveWorkerTrace {
 }
 
 // ---------------------------------------------------------------------------
-// Shared identity helpers (single home for Agent / SubAgent / Dynamic workers)
+// Shared identity helpers (single home for Agent / dynamic workers)
 // ---------------------------------------------------------------------------
 
 /** Sanitizes a worker name into an XML tag (`UPPER-KEBAB`, 64 chars). */
@@ -54,7 +53,7 @@ export function sanitizeToolName(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Shared Agent / SubAgent config normalization (behavior-preserving)
+// Shared Agent / worker config normalization (behavior-preserving)
 // ---------------------------------------------------------------------------
 
 /**
@@ -123,25 +122,6 @@ export function resolveDynamicModelInput(
 ): string | ModelSpec | undefined {
   const dynModelRaw = (dynamicSubagents as { model?: unknown } | undefined)?.model ?? subagentModel;
   return resolveDynamicWorkerModel(dynModelRaw);
-}
-
-/**
- * Resolves a `SubAgent` model exactly like `SubAgent` ctor:
- * `config.model ?? saved or default worker model ?? saved or default main model`, throwing with the same message
- * when nothing resolves. Kept here so `Agent` / `SubAgent` share one chain.
- */
-export function resolveSubAgentModel(config: {
-  name?: string;
-  model?: AgentConfig["model"];
-}): NonNullable<AgentConfig["model"]> {
-  const resolvedModel = config.model ?? chosenSubAgentModel() ?? chosenModel();
-  if (!resolvedModel) {
-    throw new ConfigError(
-      `[Agent Accelerator] SubAgent '${config.name || "subagent"}' requires a model. ` +
-        `Specify 'model' in SubAgent config, or set a default with setModels() or a saved choice with setSubAgentModel().`
-    );
-  }
-  return resolvedModel as NonNullable<AgentConfig["model"]>;
 }
 
 /**

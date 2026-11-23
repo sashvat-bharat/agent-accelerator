@@ -94,7 +94,7 @@ Do not generate code for these.
 | Gemini 1.x or 2.x | Rejected. The minimum is Gemini 3. |
 | `cache` values a provider lacks | They warn and fall back. See [Reasoning and caching](guides/reasoning-and-caching.md). |
 | Two processes on one saved session | The folder is locked. The second process gets a `ConfigError`. Use a different `sessionId` per process. They can share a `home`. |
-| The `SubAgent` class, `agentFromEnv()` | Use `Agent` with `subagents`. See [Migration](migration.md). |
+| The `SubAgent` class, `agentFromEnv()`, `.asTool()`, `.toTool()` | Removed. Use `new Agent({ name, model, instructions })` in `subagents: [...]`, or `agentToTool({ name, agent })`. See [Migration](migration.md). |
 | The OpenRouter Responses transport | Gone. OpenRouter uses Chat Completions. |
 
 ## Error to fix

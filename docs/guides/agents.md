@@ -45,6 +45,7 @@ console.log(res.text);
 | `run(prompt, options?)` | One call. Resolves to an `AgentResponse`. The prompt is a string or a list of `ContentPart`. |
 | `stream(prompt, options?)` | The same run as a stream of events. See [Streaming and steering](streaming-and-steering.md). |
 | `ask(prompt, stream?)` | A shorthand for `run`. With `true` it gives you the text pieces. |
+| `Agent.fromEnv(config?)` | Like `new Agent(config)`. With no `model` it uses the saved choice, then the list default, then the saved worker model. Leaving out `model` in `new Agent(config)` does the first two. |
 | `reset()` | Clears the conversation and keeps the settings. Spending totals are kept. |
 | `session(id?)`, `disposeSession(id)`, `clearSessions()` | Separate in-memory conversations. `run(prompt, { sessionId })` keeps one history per id. |
 | `exportSession()`, `importSession()` | Take a snapshot of the conversation and restore it. See [Sessions](sessions.md). |

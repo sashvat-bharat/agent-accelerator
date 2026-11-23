@@ -636,7 +636,7 @@ export interface AgentAsToolTarget {
 /**
  * Converts one agent into a `{ task: string }` ToolDefinition.
  *
- * @example `const researchTool = researcher.asTool("research");`
+ * @example `const researchTool = agentToTool({ name: "research", agent: researcher });`
  */
 export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: UsageLimit }): ToolDefinition {
   const agentInstance = "agent" in input ? input.agent : input;
