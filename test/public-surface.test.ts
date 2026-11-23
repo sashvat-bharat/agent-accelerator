@@ -110,9 +110,35 @@ const INTERNAL: Record<string, string[]> = {
     "ProviderVideoResult",
     "ProviderVideoResumeRequest",
   ],
+  "inner pieces of types that stay (reach them with indexed access or Extract)": [
+    "PersistedSubAgentTrace",
+    "SessionRunMark",
+    "SessionRunEnd",
+    "SessionPending",
+    "SessionPendingPrompt",
+    "SessionToolRecord",
+    "NoulQuestion",
+    "ChoiceQuestion",
+    "ScoreQuestion",
+    "NoulAnswer",
+    "ChoiceAnswer",
+    "ScoreAnswer",
+    "RefusalAnswer",
+    "ResolvedDecisionQuestion",
+    "ImageTokenPrices",
+    "ImageSizeRules",
+    "VideoTokenPrices",
+    "VideoClipReferences",
+    "VideoFrameRole",
+    "EmbeddingPrices",
+    "EmbeddingInputKind",
+    "EmbeddingTaskStyle",
+    "DecisionPrices",
+    "DecisionInputKind",
+  ],
 };
 // The most names the barrel may export (values and types). Lower it whenever names are removed.
-const MAX_NAMES = 257;
+const MAX_NAMES = 233;
 
 describe("the public surface", () => {
   it("reads the barrel (the check itself works)", () => {

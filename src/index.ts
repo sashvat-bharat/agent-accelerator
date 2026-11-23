@@ -94,15 +94,10 @@ export type {
   ImageResolution,
   ImageFormat,
 } from "./types/image.ts";
-export type { ImageModelInfo, ImageTokenPrices, ImageSizeRules } from "./models/image-models.ts";
+export type { ImageModelInfo } from "./models/image-models.ts";
 export type { CatalogProvider } from "./models/catalog-shards.ts";
 export { listEmbeddingModels, getEmbeddingModel } from "./models/embedding-models.ts";
-export type {
-  EmbeddingModelInfo,
-  EmbeddingPrices,
-  EmbeddingInputKind,
-  EmbeddingTaskStyle,
-} from "./models/embedding-models.ts";
+export type { EmbeddingModelInfo } from "./models/embedding-models.ts";
 export { refreshOpenRouterEmbeddingModels } from "./models/openrouter-embeddings.ts";
 export type { RefreshOpenRouterEmbeddingsOptions } from "./models/openrouter-embeddings.ts";
 export { generateEmbedding } from "./embedding/generate.ts";
@@ -117,7 +112,7 @@ export type {
   EmbeddingPartData,
 } from "./types/embedding.ts";
 export { listDecisionModels, getDecisionModel } from "./models/decision-models.ts";
-export type { DecisionModelInfo, DecisionPrices, DecisionInputKind } from "./models/decision-models.ts";
+export type { DecisionModelInfo } from "./models/decision-models.ts";
 export { refreshOpenRouterDecisionModels } from "./models/openrouter-decisions.ts";
 export type { RefreshOpenRouterDecisionsOptions } from "./models/openrouter-decisions.ts";
 export { generateDecision } from "./decision/generate.ts";
@@ -131,23 +126,10 @@ export type {
   DecisionInstructions,
   DecisionQuestion,
   DecisionQuestionType,
-  NoulQuestion,
-  ChoiceQuestion,
-  ScoreQuestion,
   DecisionAnswer,
-  NoulAnswer,
-  ChoiceAnswer,
-  ScoreAnswer,
-  RefusalAnswer,
-  ResolvedDecisionQuestion,
 } from "./types/decision.ts";
 export { listVideoModels, getVideoModel } from "./models/video-models.ts";
-export type {
-  VideoModelInfo,
-  VideoTokenPrices,
-  VideoClipReferences,
-  VideoFrameRole,
-} from "./models/video-models.ts";
+export type { VideoModelInfo } from "./models/video-models.ts";
 export { refreshOpenRouterVideoModels } from "./models/openrouter-videos.ts";
 export type { RefreshOpenRouterVideosOptions } from "./models/openrouter-videos.ts";
 export { generateVideo } from "./video/generate.ts";
@@ -226,12 +208,6 @@ export type {
   PersistedAgentSession,
   SessionTotals,
   LoadedSessionDir,
-  PersistedSubAgentTrace,
-  SessionRunMark,
-  SessionRunEnd,
-  SessionPending,
-  SessionPendingPrompt,
-  SessionToolRecord,
 } from "./session/store.ts";
 
 // Utilities
