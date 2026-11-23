@@ -24,8 +24,6 @@ import {
 } from "./shared.ts";
 import { throwOpenAIHttpError } from "./openai-image.ts";
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
-
 interface EmbeddingsReply {
   data?: Array<{ embedding?: number[] | string; index?: number }>;
   usage?: { prompt_tokens?: number; total_tokens?: number };
@@ -63,7 +61,7 @@ export async function openaiEmbed(
       "[Agent Accelerator] Missing OpenAI API key. Set OPENAI_API_KEY (or OPENAI_BASE_API_KEY) or pass apiKey."
     );
   }
-  const url = `${resolveProviderBaseUrl("openai", DEFAULT_BASE_URL, options)}/embeddings`;
+  const url = `${resolveProviderBaseUrl("openai", options)}/embeddings`;
   const body = {
     model: modelId,
     input: texts(request, modelId),

@@ -30,7 +30,6 @@ import {
   timeoutFor,
 } from "./shared.ts";
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 const FORMAT_MIME: Record<string, string> = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" };
 
 interface ImagesReply {
@@ -93,7 +92,7 @@ export async function openrouterGenerateImage(
   const apiKey = resolveProviderApiKey("openrouter", options);
   if (!apiKey)
     throw new ConfigError("[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey.");
-  const url = `${resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options)}/images`;
+  const url = `${resolveProviderBaseUrl("openrouter", options)}/images`;
 
   // Provider routing and `user` come from the developer's `openrouter` setting, exactly as for chat.
   const setting = openRouterSetting();

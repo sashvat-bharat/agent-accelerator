@@ -32,7 +32,6 @@ import {
 } from "./shared.ts";
 import { throwOpenRouterHttpError } from "./openrouter-image.ts";
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 /** `input_audio.format` for the MIME subtypes that are spelled differently. */
 const AUDIO_FORMAT: Record<string, string> = { mpeg: "mp3", "x-wav": "wav", wave: "wav", mp4: "m4a" };
 /** `ImagePart.resolution` as OpenRouter's `image_url.detail` (auto, low, high). */
@@ -51,7 +50,7 @@ interface DecisionReply {
 
 // The alpha endpoint next to the chat API (`.../api/v1` becomes `.../api/alpha/decisions`), also for a proxy or `base_urls.openrouter`; in: openrouterDecide, out: the URL.
 function decisionsUrl(options?: ProviderRequestOptions): string {
-  return `${resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options).replace(/\/v1$/, "")}/alpha/decisions`;
+  return `${resolveProviderBaseUrl("openrouter", options).replace(/\/v1$/, "")}/alpha/decisions`;
 }
 
 // One part as OpenRouter takes it in `state`: text as a string, media as its own part shape; in: buildState, out: the item.

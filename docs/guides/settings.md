@@ -42,7 +42,7 @@ All are optional, written in snake_case. A whole object is replaced, never merge
 | `concurrency` | `{ max_requests?, per_provider?: { google: 4 } }`. Whole numbers of 1 or more. See [Limits and retries](limits-and-retries.md#limit-calls-that-run-at-once). |
 | `catalog_refresh` | `"on"` or `"off"`. Whether the model catalog refreshes itself. |
 | `catalog_cache_dir`, `models_dev_sha256` | The catalog cache folder, and a 64-character hex checksum that pins the download. |
-| `base_urls` | An http(s) address per provider or custom prefix, such as `{ openai: "https://host/v1", ollama: "http://localhost:11434/v1" }`. |
+| `base_urls` | An http(s) address per provider or custom prefix, such as `{ openai: "https://host/v1", ollama: "http://localhost:11434/v1" }`. The defaults are `https://generativelanguage.googleapis.com/v1beta` for `google`, `https://api.openai.com/v1` for `openai`, `https://api.anthropic.com/v1` for `anthropic` and `https://openrouter.ai/api/v1` for `openrouter`. A custom prefix has no default. |
 | `openrouter` | `{ order?, only?, ignore?, allow_fallbacks?, require_parameters?, zdr?, data_collection?, sort?, parallel_tool_calls?, reasoning_exclude?, user? }`. OpenRouter request options. |
 | `compat` | `{ no_stream_options?, no_session_headers? }`. Opt-outs for strict OpenAI-compatible services. |
 

@@ -29,7 +29,6 @@ import {
 } from "./shared.ts";
 import { throwGoogleHttpError } from "./google-image.ts";
 
-const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** What `gemini-embedding-2` reads, by kind (docs: embeddings, "Supported modalities and limits"). */
 const MEDIA_MIME: Record<"image" | "audio" | "video" | "pdf", readonly string[]> = {
   image: ["image/png", "image/jpeg"],
@@ -102,7 +101,7 @@ export async function googleEmbed(
       "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
     );
   const style = getEmbeddingModel(`google/${modelId}`)?.task;
-  const url = `${resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options)}/models/${modelId}:batchEmbedContents`;
+  const url = `${resolveProviderBaseUrl("google", options)}/models/${modelId}:batchEmbedContents`;
   const body = {
     requests: request.items.map((item) => ({
       model: `models/${modelId}`,

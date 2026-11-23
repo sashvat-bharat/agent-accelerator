@@ -184,15 +184,13 @@ interface ResponsesObject {
   [k: string]: unknown;
 }
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
-
 // ---------------------------------------------------------------------------
 // Request building (canonical -> Responses)
 // ---------------------------------------------------------------------------
 
 // The openai base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return resolveProviderBaseUrl("openai", DEFAULT_BASE_URL, options);
+  return resolveProviderBaseUrl("openai", options);
 }
 
 // The openai key of this request; in: each request, out: the shared resolver.

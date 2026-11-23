@@ -166,15 +166,13 @@ interface ChatUsage {
   [k: string]: unknown;
 }
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
-
 // ---------------------------------------------------------------------------
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
 
 // The openrouter base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options);
+  return resolveProviderBaseUrl("openrouter", options);
 }
 
 // The openrouter key of this request; in: each request, out: the shared resolver.

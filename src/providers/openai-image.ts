@@ -26,7 +26,6 @@ import {
   timeoutFor,
 } from "./shared.ts";
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const FORMAT_MIME: Record<string, string> = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" };
 
 interface ImagesResponse {
@@ -113,7 +112,7 @@ export async function openaiGenerateImage(
     );
   }
   const editing = request.images.length > 0;
-  const url = `${resolveProviderBaseUrl("openai", DEFAULT_BASE_URL, options)}/images/${editing ? "edits" : "generations"}`;
+  const url = `${resolveProviderBaseUrl("openai", options)}/images/${editing ? "edits" : "generations"}`;
   const body: Record<string, unknown> = {
     model: modelId,
     prompt: request.prompt,

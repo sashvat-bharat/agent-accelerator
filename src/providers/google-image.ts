@@ -30,7 +30,6 @@ import {
   timeoutFor,
 } from "./shared.ts";
 
-const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** Image types Google reads as input (and the common spelling it is not given as). */
 export const GOOGLE_IMAGE_INPUT_MIME: readonly string[] = [
   "image/png",
@@ -129,7 +128,7 @@ export async function googleGenerateImage(
     throw new ConfigError(
       "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
     );
-  const url = `${resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options)}/interactions`;
+  const url = `${resolveProviderBaseUrl("google", options)}/interactions`;
 
   const input: Array<Record<string, string>> = [{ type: "text", text: request.prompt }];
   for (const image of request.images) {

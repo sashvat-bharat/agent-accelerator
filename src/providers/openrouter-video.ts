@@ -34,7 +34,6 @@ import {
 } from "./shared.ts";
 import { throwOpenRouterHttpError } from "./openrouter-image.ts";
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 /** The wait for a job when the call sets no deadline. */
 const NO_DEADLINE_MS = 24 * 60 * 60 * 1000;
 
@@ -95,7 +94,7 @@ function connect(modelId: string, options: ProviderRequestOptions | undefined) {
   const apiKey = resolveProviderApiKey("openrouter", options);
   if (!apiKey)
     throw new ConfigError("[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey.");
-  const baseUrl = resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options);
+  const baseUrl = resolveProviderBaseUrl("openrouter", options);
   const headers = buildSessionHeaders("openrouter", options?.headers, undefined);
   setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
   if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);

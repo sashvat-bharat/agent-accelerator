@@ -93,7 +93,6 @@ import {
 // Wire constants (provider-specific numbers live here, named)
 // ---------------------------------------------------------------------------
 
-const DEFAULT_BASE_URL = "https://api.anthropic.com/v1";
 /** The API version header value (docs: api-overview, migration to 2026-10-21). Callers may override it with a `headers` entry. */
 const ANTHROPIC_VERSION = "2026-10-21";
 /** `max_tokens` is required: the catalog's output limit, capped here because large non-streaming requests risk idle-connection drops (docs: streaming-messages). */
@@ -199,7 +198,7 @@ interface MessageObject {
 
 // The anthropic base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return resolveProviderBaseUrl("anthropic", DEFAULT_BASE_URL, options);
+  return resolveProviderBaseUrl("anthropic", options);
 }
 
 // The anthropic key of this request; in: each request, out: the shared resolver.

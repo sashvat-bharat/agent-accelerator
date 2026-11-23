@@ -12,8 +12,9 @@ import {
 } from "./openrouter-list.ts";
 import { isRecord } from "../utils/guards.ts";
 import type { EmbeddingInputKind, EmbeddingModelInfo, EmbeddingPrices } from "./embedding-models.ts";
+import { DEFAULT_BASE_URLS } from "../providers/base-urls.ts";
 
-const DEFAULT_URL = "https://openrouter.ai/api/v1/embeddings/models";
+const DEFAULT_URL = `${DEFAULT_BASE_URLS.openrouter}/embeddings/models`;
 
 /** Options of a refresh. */
 export type RefreshOpenRouterEmbeddingsOptions = RefreshOpenRouterListOptions;

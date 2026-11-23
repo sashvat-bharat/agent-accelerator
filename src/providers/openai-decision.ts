@@ -35,7 +35,6 @@ import {
 } from "./shared.ts";
 import { throwOpenAIHttpError } from "./openai-image.ts";
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 /** `ImagePart.resolution` as OpenAI's `input_image.detail`. */
 const IMAGE_DETAIL: Record<MediaResolution, "low" | "auto" | "high" | "original"> = {
   low: "low",
@@ -182,7 +181,7 @@ export async function openaiDecide(
       "[Agent Accelerator] Missing OpenAI API key. Set OPENAI_API_KEY (or OPENAI_BASE_API_KEY) or pass apiKey."
     );
   }
-  const url = `${resolveProviderBaseUrl("openai", DEFAULT_BASE_URL, options)}/decisions`;
+  const url = `${resolveProviderBaseUrl("openai", options)}/decisions`;
   const names = Object.keys(request.questions);
   const body = {
     model: modelId,

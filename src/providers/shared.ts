@@ -18,6 +18,7 @@ import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { abortError } from "../types/errors.ts";
+import { DEFAULT_BASE_URLS } from "./base-urls.ts";
 
 /** Parses a JSON tool-argument string; non-objects degrade to the truncated-arguments marker. */
 export function parseArguments(raw: string | undefined): Record<string, unknown> {
@@ -516,13 +517,12 @@ export function resolveProviderApiKey(provider: string, options?: ProviderReques
   return undefined;
 }
 
-/** The base URL of a first-class provider (option, then the `base_urls` setting, then its default) without trailing slashes; in: each request, out: a URL. */
+/** The base URL of a first-class provider (option, then the `base_urls` setting, then its default in `base-urls.ts`) without trailing slashes; in: each request, out: a URL. */
 export function resolveProviderBaseUrl(
-  provider: string,
-  defaultBaseUrl: string,
+  provider: keyof typeof DEFAULT_BASE_URLS,
   options?: ProviderRequestOptions
 ): string {
-  return (options?.baseUrl || baseUrlSetting(provider) || defaultBaseUrl).replace(/\/+$/, "");
+  return (options?.baseUrl || baseUrlSetting(provider) || DEFAULT_BASE_URLS[provider]).replace(/\/+$/, "");
 }
 
 /** The OpenRouter provider-routing keys taken from the `openrouter` setting (`order`, `only`, `ignore`, `allow_fallbacks`, `require_parameters`, `zdr`, `data_collection`, `sort`); the text and the image adapters both read them. */

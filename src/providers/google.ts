@@ -325,8 +325,6 @@ interface InteractionReply {
   interaction: InteractionObject;
 }
 
-const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-
 /** Per-session interaction chaining (provider-generated ids only). */
 interface ChainEntry {
   interactionId: string;
@@ -434,7 +432,7 @@ export function clearInteractionChains(sessionId?: string): void {
 
 // The google base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options);
+  return resolveProviderBaseUrl("google", options);
 }
 
 // The google key of this request; in: each request, out: the shared resolver.

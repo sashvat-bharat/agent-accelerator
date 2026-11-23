@@ -30,7 +30,6 @@ import {
 } from "./shared.ts";
 import { throwOpenRouterHttpError } from "./openrouter-image.ts";
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 /** `MultimodalMedia.format` for the common MIME subtypes that differ from it. */
 const FORMAT_ALIASES: Record<string, string> = { mpeg: "mp3", "x-wav": "wav", wave: "wav", quicktime: "mov" };
 
@@ -94,7 +93,7 @@ export async function openrouterEmbed(
   const apiKey = resolveProviderApiKey("openrouter", options);
   if (!apiKey)
     throw new ConfigError("[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey.");
-  const url = `${resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options)}/embeddings`;
+  const url = `${resolveProviderBaseUrl("openrouter", options)}/embeddings`;
 
   // Provider routing and `user` come from the developer's `openrouter` setting, exactly as for chat and images.
   const setting = openRouterSetting();

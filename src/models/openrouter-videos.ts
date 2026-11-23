@@ -9,8 +9,9 @@
 import { createOpenRouterList, type OpenRouterList, type RefreshOpenRouterListOptions } from "./openrouter-list.ts";
 import { isRecord } from "../utils/guards.ts";
 import type { VideoModelInfo } from "./video-models.ts";
+import { DEFAULT_BASE_URLS } from "../providers/base-urls.ts";
 
-const DEFAULT_URL = "https://openrouter.ai/api/v1/videos/models";
+const DEFAULT_URL = `${DEFAULT_BASE_URLS.openrouter}/videos/models`;
 
 /** Ids OpenRouter still lists that this SDK deliberately does not know: Google's previous generation, which Google reroutes to `gemini-omni-1.2-flash` (so there is one Omni model, and an old id is simply not found). */
 const NOT_KNOWN = new Set(["google/gemini-omni-1.1-flash"]);

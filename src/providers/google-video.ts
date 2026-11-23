@@ -36,7 +36,6 @@ import {
 } from "./shared.ts";
 import { GOOGLE_IMAGE_INPUT_MIME, GOOGLE_IMAGE_MIME_ALIASES, throwGoogleHttpError } from "./google-image.ts";
 
-const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** Video types Google reads inline (the Gemini video list), and the common spelling it is not given as. */
 const VIDEO_MIME = [
   "video/mp4",
@@ -186,7 +185,7 @@ export async function googleGenerateVideo(
     throw new ConfigError(
       "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
     );
-  const baseUrl = resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options);
+  const baseUrl = resolveProviderBaseUrl("google", options);
   const url = `${baseUrl}/interactions`;
   const body = buildGoogleVideoBody(modelId, request);
   const headers: Record<string, string> = { "Content-Type": "application/json", ...options?.headers };

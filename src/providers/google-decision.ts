@@ -28,7 +28,6 @@ import {
 } from "./shared.ts";
 import { throwGoogleHttpError } from "./google-image.ts";
 
-const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** What Gemini Decision 1 reads inline, by kind (docs: decisions, "Input"). */
 const MEDIA_MIME: Record<"image" | "audio" | "video" | "pdf", readonly string[]> = {
   image: ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp", "image/tiff"],
@@ -119,7 +118,7 @@ export async function googleDecide(
     throw new ConfigError(
       "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
     );
-  const url = `${resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options)}/decisions`;
+  const url = `${resolveProviderBaseUrl("google", options)}/decisions`;
   const only = request.input.length === 1 ? request.input[0] : undefined;
   const body = {
     model: modelId,

@@ -12,8 +12,9 @@ import {
 } from "./openrouter-list.ts";
 import { isRecord } from "../utils/guards.ts";
 import type { DecisionInputKind, DecisionModelInfo, DecisionPrices } from "./decision-models.ts";
+import { DEFAULT_BASE_URLS } from "../providers/base-urls.ts";
 
-const DEFAULT_URL = "https://openrouter.ai/api/v1/models?output_modalities=decisions";
+const DEFAULT_URL = `${DEFAULT_BASE_URLS.openrouter}/models?output_modalities=decisions`;
 /** The route a model must serve to take a decisions request (some models only serve `/api/alpha/extractions`). */
 const DECISIONS_ROUTE = "/api/alpha/decisions";
 
