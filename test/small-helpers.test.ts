@@ -88,26 +88,29 @@ describe("markRetryable", () => {
   });
 });
 
-describe("Agent.fromEnv", () => {
-  it("is a real static method: an explicit model wins, else the program's default is used", () => {
+describe("an Agent that leaves out `model`", () => {
+  it("uses the program's default model, and an explicit model wins", () => {
     setModels({
       default: { model: "google/gemini-3.5-flash-lite", sub_agent_model: "google/gemini-3.5-flash-lite" },
       providers: { google: { models: ["gemini-3.5-flash-lite"] } },
     });
     try {
-      expect(typeof Agent.fromEnv).toBe("function");
-      expect(Agent.fromEnv({ instructions: "x" }).modelStringOrSpec).toBe("google/gemini-3.5-flash-lite");
-      expect(Agent.fromEnv({ model: "google/gemini-3.5-flash-lite" }).modelStringOrSpec).toBe("google/gemini-3.5-flash-lite");
+      expect(new Agent({ instructions: "x" }).modelStringOrSpec).toBe("google/gemini-3.5-flash-lite");
+      expect(new Agent({ model: "google/gemini-3.5-flash-lite" }).modelStringOrSpec).toBe("google/gemini-3.5-flash-lite");
     } finally {
       resetModels();
     }
   });
 
-  it("with no model anywhere it builds, and a run fails the same way `new Agent` does", async () => {
+  it("with no model anywhere it builds, and a run fails with a ConfigError before any request", async () => {
     resetModels();
     const guard = (async () => {
       throw new Error("no network call may happen");
     }) as unknown as typeof fetch;
-    await expect(Agent.fromEnv({ fetch: guard }).run("hi")).rejects.toThrow(ConfigError);
+    await expect(new Agent({ fetch: guard }).run("hi")).rejects.toThrow(ConfigError);
+  });
+
+  it("has no `Agent.fromEnv`: leaving out `model` does the same", () => {
+    expect("fromEnv" in Agent).toBe(false);
   });
 });

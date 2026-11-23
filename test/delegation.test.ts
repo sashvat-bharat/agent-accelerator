@@ -162,12 +162,12 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(customDef.description).toBe("Custom override");
   });
 
-  it("no longer exports the SubAgent class, SubAgentConfig or agentFromEnv", async () => {
+  it("no longer exports the SubAgent class, SubAgentConfig or agentFromEnv, and Agent has no fromEnv", async () => {
     const api = (await import("../src/index.ts")) as Record<string, unknown>;
     expect("SubAgent" in api).toBe(false);
     expect("agentFromEnv" in api).toBe(false);
     expect(typeof api["Agent"]).toBe("function");
-    expect(typeof (api["Agent"] as { fromEnv?: unknown }).fromEnv).toBe("function"); // the replacement stays
+    expect("fromEnv" in (api["Agent"] as object)).toBe(false); // and there is no `Agent.fromEnv` either
   });
 
   it("should support clean separation of tools: { get_status } and subagents: [critique, researcher]", () => {

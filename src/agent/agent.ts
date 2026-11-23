@@ -30,7 +30,6 @@ import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry, savedSpend } from "./workers.ts";
-import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 import {
   DEFAULT_MAX_DEPTH,
   isWorkerConfig,
@@ -1281,11 +1280,6 @@ export class Agent {
    */
   toConfig(): Required<EditableAgentConfig> {
     return toEditableConfig(this.modelStringOrSpec, this.instructions, this.forkConfig.tools);
-  }
-
-  /** Builds an `Agent` whose model is the saved choice (`setModel`) or the program's default (`setModels`) when the config names none. An explicit `model` always wins. */
-  static fromEnv(config?: Omit<AgentConfig, "model"> & { model?: AgentConfig["model"] }): Agent {
-    return new Agent({ ...config, model: config?.model ?? chosenModel() ?? chosenSubAgentModel() });
   }
 
   /**
