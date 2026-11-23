@@ -5,12 +5,12 @@ import {
   ModelProvider,
   getModelFromCatalog,
   getModelThinkingInfo,
-  computeSessionTurnCost,
   GOOGLE_MODELS,
   ANTHROPIC_MODELS,
   OPENAI_MODELS,
   OPENROUTER_MODELS,
 } from "../src/index.ts";
+import { computeSessionTurnCost } from "../src/session/store.ts";
 
 describe("Model Resolution & Providers", () => {
   it("should resolve Google AI Studio models", () => {

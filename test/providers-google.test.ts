@@ -1233,7 +1233,8 @@ describe("Google exact replay of recorded steps", () => {
   });
 
   it("reseeds history with the recorded steps verbatim (Agent run, restart, session round trip)", async () => {
-    const { Agent, tool, serializeSession, deserializeSession } = await import("../src/index.ts");
+    const { Agent, tool } = await import("../src/index.ts");
+    const { serializeSession, deserializeSession } = await import("../src/session/store.ts");
     const bodies: any[] = [];
     let n = 0;
     const fn = (async (_u: string, init: any) => {

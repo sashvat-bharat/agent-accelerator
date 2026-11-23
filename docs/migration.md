@@ -29,6 +29,17 @@ These older names are still accepted. When both are set, the winner is the one i
 
 Two tool options have two names for the same thing: `maxTries` and `maxAttempts` (`maxTries` wins), and `redactError` and `redact` (`redactError` wins).
 
+## Names that are no longer exported
+
+These were internal helpers that happened to be exported. They are still in the source, but they are not part of the public API.
+
+| Name | Use instead | Since |
+|---|---|---|
+| `buildSessionData`, `serializeSession`, `deserializeSession`, `inspectSessionPayload`, `SessionAgentLike`, `SessionPayloadStatus` | `agent.exportSession()` and `agent.importSession()`, or `saveSessionFile` and `loadSessionFile`. | 0.9.0 |
+| `extractMediaToDir`, `resolveMediaPaths` | `saveSessionDir` and `loadSessionDir` move the media for you. | 0.9.0 |
+| `computeSessionTurnCost` | `agent.usageReport()`, or `res.usage.cost` for one run. | 0.9.0 |
+| `writeFileAtomic` | Nothing. It was the SDK's own crash-safe writer: write a temp file, then rename it. | 0.9.0 |
+
 ## Providers and models
 
 - The OpenRouter Responses transport is gone. OpenRouter uses Chat Completions.
