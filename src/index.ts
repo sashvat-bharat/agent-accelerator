@@ -93,8 +93,6 @@ export type {
   ImageInput,
   ImageResolution,
   ImageFormat,
-  ProviderImageRequest,
-  ProviderImageResult,
 } from "./types/image.ts";
 export type { ImageModelInfo, ImageTokenPrices, ImageSizeRules } from "./models/image-models.ts";
 export type { CatalogProvider } from "./models/catalog-shards.ts";
@@ -117,8 +115,6 @@ export type {
   EmbeddingPart,
   EmbeddingTask,
   EmbeddingPartData,
-  ProviderEmbeddingRequest,
-  ProviderEmbeddingResult,
 } from "./types/embedding.ts";
 export { listDecisionModels, getDecisionModel } from "./models/decision-models.ts";
 export type { DecisionModelInfo, DecisionPrices, DecisionInputKind } from "./models/decision-models.ts";
@@ -144,9 +140,6 @@ export type {
   ScoreAnswer,
   RefusalAnswer,
   ResolvedDecisionQuestion,
-  ProviderDecisionRequest,
-  ProviderDecisionAnswer,
-  ProviderDecisionResult,
 } from "./types/decision.ts";
 export { listVideoModels, getVideoModel } from "./models/video-models.ts";
 export type {
@@ -164,9 +157,6 @@ export type {
   VideoOptions,
   VideoInput,
   VideoProgress,
-  ProviderVideoRequest,
-  ProviderVideoResult,
-  ProviderVideoResumeRequest,
   VideoEditOptions,
   ResumeVideoOptions,
 } from "./types/video.ts";
@@ -272,7 +262,6 @@ export type {
   ToolResultPart,
   ThinkingPart,
   ProviderContext,
-  ProviderSteps,
   MediaResolution,
   VideoProcessing,
 } from "./types/message.ts";
@@ -291,8 +280,6 @@ export type {
   ModelCapabilities,
   Provider,
   ProviderId,
-  ProviderRequestOptions,
-  ProviderGenerateResult,
   ProviderRawData,
   StructuredOutputSpec,
 } from "./types/model.ts";

@@ -95,9 +95,24 @@ const INTERNAL: Record<string, string[]> = {
     "formatSessionCost",
     "getSessionContextWindow",
   ],
+  "wire-level provider types (nobody can plug in their own provider)": [
+    "ProviderRequestOptions",
+    "ProviderGenerateResult",
+    "ProviderSteps",
+    "ProviderImageRequest",
+    "ProviderImageResult",
+    "ProviderEmbeddingRequest",
+    "ProviderEmbeddingResult",
+    "ProviderDecisionRequest",
+    "ProviderDecisionAnswer",
+    "ProviderDecisionResult",
+    "ProviderVideoRequest",
+    "ProviderVideoResult",
+    "ProviderVideoResumeRequest",
+  ],
 };
 // The most names the barrel may export (values and types). Lower it whenever names are removed.
-const MAX_NAMES = 270;
+const MAX_NAMES = 257;
 
 describe("the public surface", () => {
   it("reads the barrel (the check itself works)", () => {

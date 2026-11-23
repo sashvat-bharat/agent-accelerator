@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { generateImage, getImageModel, getProvider } from "../src/index.ts";
 import { priceImageUsage, sumCosts } from "../src/image/pricing.ts";
-import type { ProviderImageResult } from "../src/index.ts";
+import type { ProviderImageResult } from "../src/types/image.ts";
 
 const NB = getImageModel("google/gemini-nano-banana-2.1")!;
 const LITE = getImageModel("google/gemini-3.1-flash-lite-image")!;

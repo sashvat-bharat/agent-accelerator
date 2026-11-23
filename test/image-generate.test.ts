@@ -18,7 +18,7 @@ import {
 } from "../src/index.ts";
 import { resetModels } from "../src/config/models.ts";
 import { clearEmittedWarnings } from "../src/providers.ts";
-import type { ProviderImageRequest, ProviderImageResult } from "../src/index.ts";
+import type { ProviderImageRequest, ProviderImageResult } from "../src/types/image.ts";
 
 type Hook = (modelId: string, req: ProviderImageRequest, options: any) => Promise<ProviderImageResult>;
 const PNG = (n: number) => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, n]);

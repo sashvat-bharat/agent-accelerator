@@ -49,6 +49,8 @@ These were internal helpers that happened to be exported. They are still in the 
 | `createTrackingId`, `createChildSessionId`, `createFixedChildSessionId`, `isSessionDescendant` | The `trackingId`, `sessionId` and `parentSessionId` in a worker's result metadata. | 0.9.0 |
 | `getCacheDir`, `getCacheFilePath`, `getCatalogTTL`, `isValidCatalogPayload`, `DEFAULT_CATALOG_TTL_MS`, `CATALOG_PROVIDERS` | `getCatalogStatus()` (cache path, age and TTL) and the `catalog_cache_dir` setting. | 0.9.0 |
 | `formatSessionBanner`, `formatSessionTokens`, `formatSessionCost`, `getSessionContextWindow` | Copy the small helpers from `examples/_shared.ts`. `SessionTelemetry.formatBar()` stays. | 0.9.0 |
+| `ProviderRequestOptions`, `ProviderGenerateResult`, `ProviderSteps` | Nothing. They are what an adapter receives and returns, and you cannot plug in your own. Set options on the agent or the run, and read an `AgentResponse`. | 0.9.0 |
+| `ProviderImageRequest`, `ProviderImageResult`, `ProviderEmbeddingRequest`, `ProviderEmbeddingResult`, `ProviderDecisionRequest`, `ProviderDecisionAnswer`, `ProviderDecisionResult`, `ProviderVideoRequest`, `ProviderVideoResult`, `ProviderVideoResumeRequest` | `ImageOptions`, `EmbeddingOptions`, `DecisionOptions` and `VideoOptions` for what you pass in, and `ImageResult`, `EmbeddingResult`, `DecisionResult` and `VideoResult` for what comes back. | 0.9.0 |
 
 ## Providers and models
 
