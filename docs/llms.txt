@@ -6,6 +6,7 @@
 - [Getting started](getting-started.md): install, keys, first agent, streaming, a tool, running with no key, first-run errors
 - [How it works](how-it-works.md): a run, the conversation, providers, workers, the home folder, limits, cost, telemetry
 - [Agents](guides/agents.md): `Agent`, `run`/`ask`/`stream`, `additionalContext`, `stateless`, structured output (`output`), `toConfig`/`fromConfig`
+- [Provider notes](guides/provider-notes.md): what the adapters send to Google, OpenAI, Anthropic, OpenRouter and OpenAI-compatible services, and how they read the answer
 - [Models and providers](guides/models-and-providers.md): model strings and keys, `ModelProvider`, `resolveModel`, provider differences, the model catalog, `registerModel`
 - [Allowed models](guides/allowed-models.md): `setModels`, `listModels`, `setModel`, `setSubAgentModel`, where the list is enforced
 - [Reasoning and caching](guides/reasoning-and-caching.md): `thinking` levels, `cache` per provider, `serviceTier`, session affinity

@@ -94,10 +94,10 @@ describe("links", () => {
 });
 
 describe("code examples", () => {
-  // Every ```ts block of the docs pages, with where it came from.
+  // Every ```ts block of the docs pages and the README, with where it came from.
   function snippets(): Array<{ file: string; line: number; code: string }> {
     const out: Array<{ file: string; line: number; code: string }> = [];
-    for (const file of DOC_PAGES) {
+    for (const file of ALL_PAGES) {
       const lines = text(file).split("\n");
       for (let i = 0; i < lines.length; i++) {
         if (!/^```(ts|typescript)\s*$/.test(lines[i]!)) continue;
@@ -110,7 +110,7 @@ describe("code examples", () => {
     return out;
   }
 
-  it("every TypeScript example in the docs compiles on its own, against the real SDK", () => {
+  it("every TypeScript example in the docs and the README compiles on its own, against the real SDK", () => {
     const found = snippets();
     expect(found.length).toBeGreaterThan(40); // the extraction itself works
     const dir = path.join(root, ".snippets-check");

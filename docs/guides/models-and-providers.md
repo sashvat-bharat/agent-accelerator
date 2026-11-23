@@ -59,7 +59,7 @@ console.log((await gemini.run("hi")).provider);
 console.log((await groq.run("hi")).provider);
 ```
 
-The helpers are `ModelProvider.GoogleGenAI`, `OpenAI`, `Anthropic`, `OpenRouter` and `OpenAICompatible`. You can also pass `apiKey` and `baseUrl` straight to the `Agent`.
+The helpers are `ModelProvider.GoogleGenAI`, `OpenAI`, `Anthropic`, `OpenRouter` and `OpenAICompatible`. Each returns a `ModelProviderInstance` (`{ model, apiKey?, baseUrl?, thinkingLevel? }`) that you can pass as `model`. You can also pass `apiKey` and `baseUrl` straight to the `Agent`.
 
 To see where a string goes before you ship, call `resolveModel`. It throws if the model is not allowed.
 
@@ -87,6 +87,8 @@ An option a provider does not support is dropped, and a warning goes to the tele
 - **Long answers on Gemini 4.** A `maxOutputTokens` above 65,536 runs as a background job of up to 24 hours. `run()` waits for it, `stream()` reconnects after a dropped connection, and cancelling stops it on Google's side.
 - **OpenRouter attribution** headers are opt-in: `setAttribution({ referer, title })`.
 - **Switching providers** in the middle of a conversation works. The history does not depend on the provider.
+
+What each adapter sends and how it reads the answer is in [Provider notes](provider-notes.md).
 
 ## The model catalog
 

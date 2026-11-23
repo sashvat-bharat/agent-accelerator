@@ -69,6 +69,7 @@ export default defineConfig({
         items: [
           { text: "Agents", link: "/guides/agents" },
           { text: "Models and providers", link: "/guides/models-and-providers" },
+          { text: "Provider notes", link: "/guides/provider-notes" },
           { text: "Allowed models", link: "/guides/allowed-models" },
           { text: "Reasoning and caching", link: "/guides/reasoning-and-caching" },
           { text: "Tools", link: "/guides/tools" },

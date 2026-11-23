@@ -15,11 +15,11 @@ The exported type declarations in `src/types/` are the source of truth.
 | `model` | A model string, a `ModelSpec` or a `ModelProvider.*` value. Without it, the saved choice or the list default. | [Models and providers](guides/models-and-providers.md) |
 | `subagentModel` | Older name of `dynamicSubagents.model`. | [Migration](migration.md) |
 | `apiKey`, `baseUrl`, `headers` | Connection overrides for this agent. | [Models and providers](guides/models-and-providers.md) |
-| `tools` | A record `{ name: tool }`, or an array of tools. | [Tools](guides/tools.md) |
+| `tools` | A record `{ name: tool }`, or an array of tools (`ToolDefinition`). | [Tools](guides/tools.md) |
 | `subagents` | Fixed workers: `Agent`s, or `{ name, description, agent }`. | [Workers](guides/workers.md) |
-| `dynamicSubagents` | Workers the model starts, persistent workers, scheduled actions. Keys below. | [Workers](guides/workers.md) |
-| `thinking` | The reasoning level, or `{ level, budgetTokens }`. `thinkingLevel` is the older name. | [Reasoning and caching](guides/reasoning-and-caching.md) |
-| `cache` | `"implicit"`, `"5m"`, `"30m"`, `"1h"` or `"12h"`, where the provider supports it. | [Reasoning and caching](guides/reasoning-and-caching.md) |
+| `dynamicSubagents` | Workers the model starts, persistent workers, scheduled actions (`DynamicSubagentsConfig`). Keys below. | [Workers](guides/workers.md) |
+| `thinking` | The reasoning level, or `{ level, budgetTokens }` (`ThinkingOption`). `thinkingLevel` is the older name. | [Reasoning and caching](guides/reasoning-and-caching.md) |
+| `cache` | `"implicit"`, `"5m"`, `"30m"`, `"1h"` or `"12h"` (`CacheOption`), where the provider supports it. | [Reasoning and caching](guides/reasoning-and-caching.md) |
 | `serviceTier` | `"flex"` or `"priority"`. | [Reasoning and caching](guides/reasoning-and-caching.md) |
 | `googleTier` | How long Google keeps a conversation: `"free"` (23 h, default) or `"paid"` (54 days). | [Models and providers](guides/models-and-providers.md) |
 | `sessionId` | The session key. Must match `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` when saved to a folder. | [Sessions](guides/sessions.md) |
@@ -75,7 +75,7 @@ Precedence: explicit config beats the environment. A per-run option beats the ag
 | Key | Meaning |
 |---|---|
 | `budget` | Per run, workers included: `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`. |
-| `limits` | `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). |
+| `limits` (`AgentRunLimits`) | `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). |
 | `usageLimit` | The whole chat for its whole life, workers included: `maxCostUsd`, `maxTotalTokens`. Throws `BudgetExceededError` ("Usage limit reached"). |
 
 Everything is unlimited until you set it, except the three network timeouts. `0` or `Infinity` turns a timeout off. See [Limits and retries](guides/limits-and-retries.md).
@@ -106,9 +106,27 @@ An `AgentResponse` has: `text`, `parsed` (structured output), `thinking`, `thoug
 
 The fields of `usage` and the report from `agent.usageReport()` are in [Usage and cost](guides/usage-and-cost.md).
 
+### Worker results
+
+`AgentResponse.subagents` has one entry per worker call, and a dynamic worker's reply carries the same shape as `metadata`.
+
+| Field | Meaning |
+|---|---|
+| `name`, `role`, `task` | Who ran and what it was asked. |
+| `model`, `provider`, `durationMs`, `turns`, `usage` | How it ran and what it cost. |
+| `text`, `thinking`, `toolCalls`, `finishReason`, `responseId` | What it answered. |
+| `isError`, `error` | Set when the worker failed. |
+| `trackingId`, `sessionId`, `parentSessionId` | Identity and lineage. The tracking id is `NAME-<32 hex>`. |
+| `raw` | The wire exchange, according to `captureRaw`. |
+| `steps` | The step log, one `SubAgentStep` per entry. |
+
+A `SubAgentStep` is `{ turn, type, name?, text?, thinking?, thoughtSignature?, isError?, timestamp, partial? }`. `type` is `"assistant"`, `"tool_call"` or `"tool_result"`. `partial` is `true` while the worker is still streaming that step. `agent.track(id)` returns the steps live.
+
+`finishReason` is `"stopped"` when a tool ended the run with `ctx.stop(reason)`. It is `"max_turns"` when a finite `maxTurns` stopped the run with tool calls still pending. An `agent.max_turns_truncated` warning then names the dropped tools.
+
 ## Stream events
 
-Every event has a `type` and a `schemaVersion`.
+Every event (a `StreamEvent`) has a `type` and a `schemaVersion`.
 
 | `type` | When | Fields used |
 |---|---|---|
@@ -130,7 +148,7 @@ Every event has a `type` and a `schemaVersion`.
 
 Every option does something. The executor enforces `input` or `parameters` (`parameters` wins if both are set), `timeoutMs`, `maxTries` or `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay` (read by crash recovery), `maxResultChars` and `redactError` or `redact`. `strict` goes to the provider.
 
-`execute(args, ctx)` gets a context with:
+`execute(args, ctx)` gets a `ToolExecutionContext` with:
 
 | Field | Meaning |
 |---|---|
@@ -142,6 +160,70 @@ Every option does something. The executor enforces `input` or `parameters` (`par
 | `log(message, data?)` | Writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the agent saves to a folder. Otherwise it does nothing. |
 
 A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20,000 result characters, 8 tools at once, and the third identical call in a row is answered with `repeat_blocked`.
+
+## Messages and parts
+
+A `Message` is `{ role, content, name?, thoughtSignature?, providerSteps? }`. `role` is `"system"`, `"user"`, `"assistant"` or `"tool"`. `content` is a string or a list of parts. `providerSteps` is `{ provider, steps }`: a provider's raw output for one assistant turn, kept so a resent history is identical to what the provider produced (Google's steps, Anthropic's signed thinking blocks). Treat it as opaque.
+
+A `ProviderContext` is `{ systemPrompt?, messages, tools? }`.
+
+| Part | Fields |
+|---|---|
+| `text` (`TextPart`) | `text`, `thoughtSignature?` |
+| `thinking` (`ThinkingPart`) | `thinking`, `thoughtSignature?` |
+| `image` (`ImagePart`) | `image`, `mimeType?`, `resolution?` (`MediaResolution`) |
+| `audio` (`AudioPart`) | `audio`, `mimeType?` |
+| `video` (`VideoPart`) | `video`, `mimeType?`, `resolution?`, `processing?` (`VideoProcessing`) |
+| `file` (`FilePart`) | `file`, `mimeType?`, `filename?` |
+| `tool_call` (`ToolCallPart`) | `id`, `name`, `arguments`, `rawArguments?`, `thoughtSignature?`, `callId?` |
+| `tool_result` (`ToolResultPart`) | `id`, `name`, `result`, `isError?`, `logFile?`, `stopped?`, `parts?` |
+
+`image`, `audio`, `video` and `file` take a URL, a local path, a data URL, base64, a `Uint8Array` or an `ArrayBuffer`. See [Media input](guides/media-input.md).
+
+A tool call the model made is a `ToolCallRecord`: `{ id, name, arguments, rawArguments?, thoughtSignature?, callId? }`. `callId` is the provider's pairing id when it differs from `id`. Its result is a `ToolResultRecord`: `{ id, name, result, isError?, durationMs?, logFile?, stopped?, parts? }`. `res.toolCalls` and `res.toolResults` hold them. `durationMs` covers the attempts and the retry waits, not the time spent queued or checking the input.
+
+## Model shapes
+
+A `ModelSpec` describes one model: `id`, `provider`, `name`, `contextWindow` and `maxOutputTokens` (the same as `limit.context` and `limit.output`), `capabilities`, and optionally `description`, `family`, `api`, `limit`, `cost`, `modalities`, `reasoning`, `reasoning_options`, `tool_call`, `attachment`, `knowledge`, `release_date`, `last_updated`, `pricing`, `compat` and `raw`.
+
+`ModelCapabilities` has these optional flags: `supportsThinking`, `supportsThinkingBudget`, `supportsThinkingLevel`, `supportsImplicitCaching`, `supportsExplicitCaching`, `supportsLongCacheRetention`, `supportsParallelToolCalls`, `supportsStreaming`, `supportsStructuredOutput`, `supportsReasoningToggle`, `supportsReasoningEffort` and `modalities` (a list of `"text"`, `"image"`, `"audio"`, `"video"` and `"pdf"`).
+
+Look a model up with `getModelFromCatalog`, and add your own with `registerModel`. See [Models and providers](guides/models-and-providers.md#the-model-catalog).
+
+## Helper functions
+
+| Function | Does |
+|---|---|
+| `createSessionId(prefix?)` | A random session id (`<prefix>-<uuid>` with a prefix), at most 64 characters. |
+| `createTrackingId()` | A random 32-character id for one worker run. |
+| `createChildSessionId(parentId, tag)`, `createFixedChildSessionId(parentId, name)` | A child session id of at most 64 characters that carries a hash of its parent. |
+| `isSessionDescendant(child, parent)` | `true` when `child` was made from `parent`. |
+| `buildSessionHeaders(provider, customHeaders?, explicitSessionId?)` | The session-affinity headers for a provider. Agents call it for you. |
+| `withRetries(fn, options?)` | Runs `fn` again after a transient failure. Defaults: 2 retries, a 5 second delay cap, a 30 second retry budget. A `Retry-After` header is honored inside that budget. An abort is never retried. Options: `maxRetries`, `maxRetryDelayMs`, `retryBudgetMs`, `baseDelayMs`, `signal`, `label`. |
+| `isTransientError(error)` | `true` for the failures `withRetries` retries. |
+| `normalizeMediaInput(input, mimeType?)` | Resolves a media input to `{ mimeType, base64Data, dataUrl }`. |
+| `inferMimeType(path, fallback?)`, `sniffMimeType(bytes)` | The MIME type from a file name, or from the first bytes. |
+| `assertModalitiesSupported(context, providerId, modelId)` | Throws a one-line error before the network when a part is not supported by a catalog model. |
+| `ensureCustomProvider(prefix, options?)`, `getProvider(id)`, `normalizeProviderPrefix(prefix)` | Create or fetch the provider for a prefix. See [Provider notes](guides/provider-notes.md#openai-compatible-services). |
+
+Two retry layers exist. `retry` repeats one failed provider call (seconds). `runRetries` repeats a whole failed run from where it stopped (minutes, with `agent.run_retry` on the bus). See [Limits and retries](guides/limits-and-retries.md).
+
+## Low-level exports
+
+These are exported for advanced use. Most programs never need them, and some may be removed before 1.0.
+
+| Export | Does |
+|---|---|
+| `GoogleInteractionsProvider`, `OpenAIResponsesProvider`, `AnthropicMessagesProvider`, `OpenRouterChatCompletionsProvider`, `OpenAICompatibleChatProvider` | The adapter classes behind `getProvider`. Their `generate` returns a `ProviderGenerateResult`. |
+| `GOOGLE_MODELS`, `OPENAI_MODELS`, `ANTHROPIC_MODELS`, `OPENROUTER_MODELS` | The model list each adapter starts with. |
+| `createOpenAICompatibleProvider(prefix, options?)`, `createCustomProvider`, `CustomProvider` | Make an OpenAI-compatible adapter without registering it. `ensureCustomProvider` caches one per prefix. Options are `CustomProviderOptions`: `name`, `baseUrl`, `apiKey`, `defaultBaseUrl`. |
+| `zodToJsonSchema(schema)`, `cleanJsonSchema(schema)`, `toStandardToolDeclarations(tools)`, `stripSchemaForGoogle(schema)` | Tool-schema helpers: convert a Zod schema, remove `$schema`, `$defs` and `$ref`, turn tools into `{ name, description, parameters }`, and cut a schema to what Google accepts. |
+| `isValidThoughtSignature(sig)`, `retainThoughtSignature(existing, incoming)`, `extractGoogleThoughtSignature(obj)`, `clearInteractionChains(sessionId?)` | Google thought-signature and chain helpers. |
+| `clampCacheKey(key)` | Shortens an affinity key to the 64 characters providers accept. |
+| `resolveEffectiveThinking(base, overrideLevel?)` | Turns a per-run level into a `ThinkingConfig` without changing the agent's config. |
+| `getCacheDir()`, `getCacheFilePath(provider)` | Where the catalog cache and one provider's file live. |
+| `formatSessionBanner(saved, telemetry, filePath)` | A startup line for a saved session, for chat programs. |
+| `toConciseProviderError(error, providerId, modelId)` | Turns a raw failure into the one-line typed error. |
 
 ## Telemetry codes
 
