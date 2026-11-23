@@ -3,6 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/agent-accelerator.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/agent-accelerator)
 [![GitHub](https://img.shields.io/badge/GitHub-sashvat--bharat%2Fagent--accelerator-blue?logo=github)](https://github.com/sashvat-bharat/agent-accelerator)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docs](https://img.shields.io/badge/docs-online-black?logo=vercel)](https://agent-accelerator-sdk.vercel.app/)
 
 > **Stability notice:** Pre-1.0 and under active development. Public APIs, provider transports and configuration options may change in breaking ways between releases. Pin an exact version for production.
 
@@ -84,7 +85,7 @@ console.log(res.text);
 
 ## Read the docs
 
-The full documentation is in [`docs/`](docs/README.md). Start with [Getting started](docs/getting-started.md) and [How it works](docs/how-it-works.md).
+The full documentation is online at [agent-accelerator-sdk.vercel.app](https://agent-accelerator-sdk.vercel.app/) and in [`docs/`](docs/README.md) as plain Markdown. Start with [Getting started](docs/getting-started.md) and [How it works](docs/how-it-works.md).
 
 | I want to… | Read |
 |---|---|
