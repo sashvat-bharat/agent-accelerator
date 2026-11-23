@@ -1,5 +1,5 @@
 // Shared fixtures for the mocked-fetch tests: SSE frames, JSON and chat replies, a `fetch` stub that records request
-// bodies, a one-shot JSON `fetch` stub, and a `console.warn` capture. Tests import what they need from here.
+// bodies, a `fetch` stub that records whole calls and answers from a queue, a one-shot JSON `fetch` stub, and a `console.warn` capture. Tests import what they need from here.
 
 /** One server-sent-events frame carrying `o` as JSON. */
 export const sseFrame = (o: unknown): string => `data: ${JSON.stringify(o)}\n\n`;
@@ -55,3 +55,28 @@ export function captureWarnings(): { messages: string[]; restore: () => void } {
     },
   };
 }
+
+/** One request recorded by `recordingFetch`: its URL, method, lower-case headers and JSON body (undefined when there is none). */
+export type RecordedCall = { url: string; method: string; headers: Record<string, string>; body: any };
+
+/** A fetch that records every call and answers from a queue of handlers (the last one repeats); returns the fetch and the recorded calls. */
+export function recordingFetch(...answers: Array<(c: RecordedCall) => Response>): { fn: typeof fetch; calls: RecordedCall[] } {
+  const calls: RecordedCall[] = [];
+  const fn = (async (url: string, init: RequestInit = {}) => {
+    const call: RecordedCall = {
+      url: String(url),
+      method: init.method ?? "GET",
+      headers: Object.fromEntries(Object.entries((init.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v])),
+      body: typeof init.body === "string" ? JSON.parse(init.body) : undefined,
+    };
+    calls.push(call);
+    const answer = answers[Math.min(calls.length - 1, answers.length - 1)];
+    if (!answer) throw new Error("recordingFetch needs at least one answer");
+    return answer(call);
+  }) as unknown as typeof fetch;
+  return { fn, calls };
+}
+
+/** An answer for `recordingFetch`: `body` as JSON with this status. */
+export const jsonAnswer = (body: unknown, status = 200) => () =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });

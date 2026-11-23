@@ -53,7 +53,8 @@ import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { toConciseProviderError, assertModalitiesSupported, markRetryable } from "../utils/errors.ts";
+import { toConciseProviderError, markRetryable } from "../utils/errors.ts";
+import { assertModalitiesSupported } from "./modalities.ts";
 import { ConfigError, isAbortError, abortError } from "../types/errors.ts";
 import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
 import {
