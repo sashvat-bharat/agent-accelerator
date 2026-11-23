@@ -1,6 +1,14 @@
 # Prompts
 
-The SDK puts a few prompts of its own in front of the model: the reasoning directive, the refusals the executor sends back when a tool call is wrong, the headers of worker replies, the manuals of the `subagents` and `scheduled_actions` tools, and a few more. They live as plain `.md` files in `src/prompts/`, and `DEFAULT_PROMPTS` holds their text, so you can read exactly what the model sees. `AgentConfig.prompts` replaces single ones for one agent.
+> Read, and when you must change, the prompts the SDK sends to the model.
+
+The SDK puts a few prompts of its own in front of the model:
+- the reasoning directive,
+- the refusals the executor sends back when a tool call is wrong,
+- the headers of worker replies,
+- the manuals of the `subagents` and `scheduled_actions` tools, and a few more.
+
+They live as plain `.md` files in `src/prompts/`, and `DEFAULT_PROMPTS` holds their text, so you can read exactly what the model sees. `AgentConfig.prompts` replaces single ones for one agent.
 
 **Keeping the original prompt is recommended.** The shipped text is what the SDK is tested with. Treat it as the reference: copy a prompt, change what you must, and keep the parts that tell the model how to use a tool or recover from an error.
 
@@ -12,7 +20,8 @@ console.log(DEFAULT_PROMPTS.toolSchemaError); // read the original
 const agent = new Agent({
   model: "google/gemini-3.5-flash-lite",
   prompts: {
-    toolNotFound: "Unknown tool '{{tool}}'.{{suggestion}} Use only the tools you were given.",
+    toolNotFound:
+      "Unknown tool '{{tool}}'.{{suggestion}} Use only the tools you were given.",
   },
 });
 ```
@@ -41,10 +50,3 @@ Every prompt you leave out keeps its default. An unknown name or an empty text t
 ## Caching
 
 `reasoningDirective`, `structuredOutput` and the two tool manuals are part of the cached prompt prefix. Set them once in the config, not per run, so the prefix stays stable.
-
-## For AI agents
-
-- `prompts` is `Partial<Record<PromptName, string>>`; `DEFAULT_PROMPTS` is a frozen `Record<PromptName, string>`; `PromptName` and `PromptOverrides` are exported types.
-- Not editable by an agent through `toConfig`/`fromConfig` (only `model`, `instructions`, `tools` are).
-- The tool-result texts keep their machine-readable parts out of the prompt: `repeat_blocked` is also an `errorCode`, and the `[worker <id>]` header is only text for the model.
-- Do not rely on a prompt change for safety: it is advice to the model, not enforcement.

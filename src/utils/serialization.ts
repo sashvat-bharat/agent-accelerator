@@ -9,7 +9,7 @@ import { bytesToBase64 } from "./base64.ts";
  *
  * @example `const safe = toJsonSafe({ result, request });`
  */
-export function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
+export function toJsonSafe(value: unknown, seen: WeakSet<object> = new WeakSet<object>()): unknown {
   if (value === null || value === undefined) return value === undefined ? null : value;
   if (typeof value === "bigint") return `${value.toString()}n`;
   if (typeof value === "number" && !Number.isFinite(value)) return String(value);
@@ -28,7 +28,7 @@ export function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknow
         ...(value.stack ? { stack: value.stack } : {}),
       };
       for (const key of Object.keys(value)) {
-        error[key] = toJsonSafe((value as unknown as Record<string, unknown>)[key], seen);
+        error[key] = toJsonSafe((value as Error & Record<string, unknown>)[key], seen);
       }
       return error;
     }
@@ -66,27 +66,12 @@ export function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknow
 
     const output: Record<string, unknown> = {};
     for (const key of Object.keys(value as object)) {
-      output[key] = toJsonSafe((value as Record<string, unknown>)[key], seen);
+      output[key] = toJsonSafe((value as Error & Record<string, unknown>)[key], seen);
     }
     return output;
   } finally {
     seen.delete(value as object);
   }
-}
-
-/**
- * Escapes arbitrary text for embedding inside XML element content or
- * double-quoted attributes.
- *
- * @example `const xml = "<Document>" + escapeXml(markdown) + "</Document>";`
- */
-export function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
 }
 
 /**

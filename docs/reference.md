@@ -1,196 +1,298 @@
 # Reference
-[Docs](README.md) › Reference
 
-> Every config key, run option, response field, stream event, telemetry code, error class and environment variable. Explanations live in the [guides](README.md#pages). The exported type declarations in `src/types/` are the source of truth.
+> Every config key, run option, response field, stream event, telemetry code, error class and environment variable. The guides explain; this page lists.
 
-Contents: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Response](#response) · [Stream events](#stream-events) · [Tool definition](#tool-definition) · [Telemetry codes](#telemetry-codes) · [Errors](#errors) · [Environment variables](#environment-variables)
+On this page: [AgentConfig](#agentconfig) · [Run options](#run-options) · [Response](#response) · [Stream events](#stream-events) · [Tool definition](#tool-definition) · [Telemetry codes](#telemetry-codes) · [Errors](#errors) · [Environment variables](#environment-variables)
+
+The exported type declarations in `src/types/` are the source of truth.
 
 ## AgentConfig
 
 | Key | Meaning | Guide |
 |---|---|---|
-| `name`, `description` | Identity; `description` is shown to a parent when this agent is a sub-agent | [Multi-agent](guides/multi-agent.md) |
-| `instructions` | System prompt. Keep stable | [Agents](guides/agents-and-models.md) |
-| `model` | Model string, `ModelSpec` or `ModelProvider.*` instance. Without it, the saved choice or the list default (`setModel` / `setModels`) | [Agents](guides/agents-and-models.md) |
-| `subagentModel` | Default worker model (then the saved or default worker model) | [Multi-agent](guides/multi-agent.md) |
-| `apiKey`, `baseUrl`, `headers` | Per-agent connection overrides | [Agents](guides/agents-and-models.md) |
-| `tools` | Record `{ name: tool }` or array of tools | [Tools](guides/tools-and-streaming.md) |
-| `subagents` | Fixed sub-agents (`Agent`s or `{ name, description, agent }`) | [Multi-agent](guides/multi-agent.md) |
-| `dynamicSubagents` | The `subagents` tool, persistent workers and scheduled actions (keys below) | [Multi-agent](guides/multi-agent.md) |
-| `thinking`, `thinkingLevel` | Reasoning level (`thinking` wins; `thinkingLevel` is legacy) | [Agents](guides/agents-and-models.md) |
-| `cache`, `serviceTier`, `googleTier` | `"implicit"\|"5m"\|"30m"\|"1h"\|"12h"` cache lifetime, `flex`/`priority`, Google chain TTL (`free` 23 h, `paid` 54 d) | [Agents](guides/agents-and-models.md) |
-| `sessionId` | Default session key. Generated ids are clamped to 64 chars; one you pass must match `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` (else `ValidationError` when the session is saved to a folder) | [Data](guides/data-and-media.md) |
-| `maxTurns` | Model calls per run; `0`/omitted = unlimited | [Safety](guides/safety-and-ops.md) |
-| `stateless` | Clear history around every run | [Agents](guides/agents-and-models.md) |
-| `midSession` | `{ mode \| whenBusy: "steer" \| "queue" \| "auto", maxQueued }` | [Tools](guides/tools-and-streaming.md) |
-| `resume` | `"automatic"` (default) or `"explicit"`: whether a run a crash cut off continues when the Agent is constructed (needs `persist: { dir }` and the same `sessionId`). See `agent.resume()` / `agent.interrupted()` | [Data](guides/data-and-media.md) |
-| `persist`, `home` | Session saving (`persist: { dir?, file?, onPersistError?, allowStateless? }`: `onPersistError(error)` is called when a save fails, `allowStateless: true` also saves a `stateless` agent); base folder (`setHome(dir)` / `.agent-accel/`, set in code only). Layout: `sessions/`, `scheduled/`, `telemetry/` | [Data](guides/data-and-media.md) |
-| `toolChoice` | `"auto"`, `"none"`, `"required"`, `"validated"` (Google), `{ tool }` | [Tools](guides/tools-and-streaming.md) |
-| `maxOutputTokens` | Output-token cap for one model call | [Agents](guides/agents-and-models.md) |
-| `output` | Structured output schema (Zod, JSON Schema or `{ name, schema, ... }`) | [Agents](guides/agents-and-models.md) |
-| `retry`, `fetch`, `env` | Retry policy of one provider call, custom `fetch`, env-var overrides | [Safety](guides/safety-and-ops.md) |
-| `runRetries` | Times a whole run that failed for a transient reason is tried again from where it stopped (default 3, `0` = off) | [Safety](guides/safety-and-ops.md) |
-| `fileAccess`, `captureRaw`, `onFailure` | `{ roots }`, `"redacted"`/`true`/`false`, `"auto"`/`"rollback"`/`"keep"` | [Safety](guides/safety-and-ops.md) |
-| `budget`, `limits` | Per-run ceilings (keys below) | [Safety](guides/safety-and-ops.md) |
-| `prompts` | `{ [PromptName]: string }` replaces single SDK prompts; unset entries keep `DEFAULT_PROMPTS`. Unknown name or empty text throws `ConfigError`. Workers inherit it | [Prompts](guides/prompts.md) |
-| `telemetry: { persist: true }` | Appends every `telemetryBus` event (not reasoning text): a persisted session's events (`tool.*`, resume, retry) to `<home>/sessions/<id>/telemetry.ndjson`, everything else to `<home>/telemetry/<date>.ndjson`. Never outside the home. Off by default | [Safety](guides/safety-and-ops.md) |
-| `hooks` | `{ beforeTool, afterTool, beforeRequest, onYield }`, each optional and possibly async: `beforeTool(call, ctx)` returns `{ block: reason }` or `{ arguments }` (fails closed); `afterTool(call, result, ctx)` returns `{ result?, isError? }`; `beforeRequest(messages, ctx)` returns `{ messages?, systemPrompt? }` (history untouched); `onYield({ text, thinking, turns }, ctx)` returns `{ continue: message }`. `ctx` = `{ agentName, sessionId, signal, turn }`. Workers inherit them. Unknown names or non-functions are a `ConfigError`. | |
+| `name`, `description` | Identity. A parent sees `description` when this agent is a worker. | [Workers](guides/workers.md) |
+| `instructions` | The system prompt. Keep it stable. | [Agents](guides/agents.md) |
+| `model` | A model string, a `ModelSpec` or a `ModelProvider.*` value. Without it, the saved choice or the list default. | [Models and providers](guides/models-and-providers.md) |
+| `subagentModel` | Older name of `dynamicSubagents.model`. | [Migration](migration.md) |
+| `apiKey`, `baseUrl`, `headers` | Connection overrides for this agent. | [Models and providers](guides/models-and-providers.md) |
+| `tools` | A record `{ name: tool }`, or an array of tools (`ToolDefinition`). | [Tools](guides/tools.md) |
+| `subagents` | Fixed workers: `Agent`s, or `{ name, description, agent }`. | [Workers](guides/workers.md) |
+| `dynamicSubagents` | Workers the model starts, persistent workers, scheduled actions (`DynamicSubagentsConfig`). Keys below. | [Workers](guides/workers.md) |
+| `thinking` | The reasoning level, or `{ level, budgetTokens }` (`ThinkingOption`). `thinkingLevel` is the older name. | [Reasoning and caching](guides/reasoning-and-caching.md) |
+| `cache` | `"implicit"`, `"5m"`, `"30m"`, `"1h"` or `"12h"` (`CacheOption`), where the provider supports it. | [Reasoning and caching](guides/reasoning-and-caching.md) |
+| `serviceTier` | `"flex"` or `"priority"`. | [Reasoning and caching](guides/reasoning-and-caching.md) |
+| `googleTier` | How long Google keeps a conversation: `"free"` (23 h, default) or `"paid"` (54 days). | [Models and providers](guides/models-and-providers.md) |
+| `sessionId` | The session key. Must match `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` when saved to a folder. | [Sessions](guides/sessions.md) |
+| `maxTurns` | Model calls per run. `0` or omitted means unlimited. | [Limits and retries](guides/limits-and-retries.md) |
+| `stateless` | Clear the conversation around every run. | [Agents](guides/agents.md) |
+| `midSession` | What to do with a message while busy. Keys below. | [Streaming and steering](guides/streaming-and-steering.md) |
+| `persist` | Where to save sessions. `{ dir?, file?, onPersistError?, allowStateless? }`. | [Sessions](guides/sessions.md) |
+| `resume` | `"automatic"` (default) or `"explicit"`: whether a run that a crash cut off continues when the agent is created. | [Sessions](guides/sessions.md) |
+| `home` | The folder for everything the SDK stores. Code only. | [Sessions](guides/sessions.md) |
+| `toolChoice` | `"auto"`, `"none"`, `"required"`, `"validated"` or `{ tool }`. | [Tools](guides/tools.md) |
+| `maxOutputTokens` | A cap on the output of one model call. | [Models and providers](guides/models-and-providers.md) |
+| `output` | A schema for structured output: Zod, JSON Schema or `{ name, schema, ... }`. | [Agents](guides/agents.md) |
+| `retry` | How one provider call is retried. | [Limits and retries](guides/limits-and-retries.md) |
+| `runRetries` | How often a whole run that failed for a transient reason is tried again. Default 3, `0` is off. | [Limits and retries](guides/limits-and-retries.md) |
+| `onFailure` | `"auto"`, `"rollback"` or `"keep"`. | [Limits and retries](guides/limits-and-retries.md) |
+| `fetch`, `env` | A custom `fetch`, and per-agent environment overrides for keys. | [Models and providers](guides/models-and-providers.md) |
+| `fileAccess` | `{ roots }`. Where local files may be read. | [Security](guides/security.md) |
+| `captureRaw` | `"redacted"` (default), `true` or `false`. What `res.raw` keeps. | [Security](guides/security.md) |
+| `budget`, `limits`, `usageLimit` | Caps. Keys below. | [Limits and retries](guides/limits-and-retries.md) |
+| `prompts` | Replace single SDK prompts. An unknown name or empty text throws `ConfigError`. Workers inherit it. | [Prompts](guides/prompts.md) |
+| `telemetry` | `{ persist: true }` appends telemetry events to files. Off by default. | [Errors and telemetry](guides/errors-and-telemetry.md) |
+| `hooks` | `{ beforeTool, afterTool, beforeRequest, onYield }`. Workers inherit them. | [Tools](guides/tools.md#hooks) |
 
-**`dynamicSubagents`**: `enabled` (default true when present), `allowScheduledActions` (default false), `model`, `maxSpawn` (no limit by default; a number >= 1 caps the workers open at once), `maxDepth` (no limit by default; a whole number >= 1 caps the levels of workers below the agent), `workerBudget` (`{ maxCostUsd?, maxTotalTokens? }`, each chat worker's own per-run cap, default none), `scheduledActionBudget` (the same shape, the cap of each scheduled-action run, default none), `thinkingLevel`, `tools` (pool). Scheduled actions only: `workerTimeoutMs` (the longest a scheduled run may take, in ms; an action's own `timeoutMs` can only be shorter; no limit by default, `0` and `Infinity` mean none). The `subagents` tool and `agent.workers` have no timeouts. `timeout` and `modelMaySetTimeout` were removed (they throw a `ConfigError`).
-**`midSession`**: `mode`, `whenBusy`, `maxQueued` (20), `maxSteers` (20).
-**`usageLimit`** (the whole chat, for its whole life, workers included; survives restarts): `maxCostUsd`, `maxTotalTokens`. Reaching it throws `BudgetExceededError` ("Usage limit reached").
+Precedence: explicit config beats the environment. A per-run option beats the agent's default, and objects are merged key by key.
 
-**`budget`** (per run, includes workers): `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`.
-**`limits`**: `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). Everything except these three network timeouts is unlimited until set; `0` or `Infinity` turns a timeout off (details: [Safety and operations](guides/safety-and-ops.md#what-is-limited-by-default)). A long-running call (Google long decode, or any `Provider` whose `isLongRunning()` returns true) times each HTTP request only, never the whole call or stream.
+### `dynamicSubagents`
 
-Precedence: explicit config > environment; per-run options > agent defaults (objects merge per key).
+| Key | Meaning |
+|---|---|
+| `enabled` | Default `true` when the object is present. |
+| `allowScheduledActions` | Default `false`. Turns on scheduled actions. |
+| `model` | The worker model. |
+| `maxSpawn` | Workers open at once. No limit by default. A number of 1 or more is a cap. |
+| `maxDepth` | Levels of workers below the agent. No limit by default. A whole number of 1 or more is a cap. |
+| `workerBudget` | `{ maxCostUsd?, maxTotalTokens? }`. The cap of each chat worker's run. None by default. |
+| `scheduledActionBudget` | The same shape. The cap of each scheduled run. None by default. |
+| `thinkingLevel` | The workers' reasoning level. |
+| `tools` | The pool of tools workers may be granted. |
+| `workerTimeoutMs` | Scheduled actions only: the longest a run may take. No limit by default. `0` and `Infinity` mean none. |
+
+`timeout` and `modelMaySetTimeout` were removed and throw `ConfigError`.
+
+### `midSession`
+
+| Key | Meaning |
+|---|---|
+| `whenBusy` | `"steer"`, `"queue"` or `"auto"` (default). `mode` is the older name. |
+| `maxQueued` | Waiting follow-ups. Default 20. |
+| `maxSteers` | Waiting steers. Default 20. |
+
+### Limits and caps
+
+| Key | Meaning |
+|---|---|
+| `budget` | Per run, workers included: `maxCostUsd`, `maxTotalTokens`, `maxDurationMs`, `maxTotalSubagents`. |
+| `limits` (`AgentRunLimits`) | `maxTurns`, `deadlineMs`, `maxTotalTokens`, `maxToolCallsPerRun`, `requestTimeoutMs` (300 s), `firstByteTimeoutMs` (120 s), `streamIdleTimeoutMs` (300 s). |
+| `usageLimit` | The whole chat for its whole life, workers included: `maxCostUsd`, `maxTotalTokens`. Throws `BudgetExceededError` ("Usage limit reached"). |
+
+Everything is unlimited until you set it, except the three network timeouts. `0` or `Infinity` turns a timeout off. See [Limits and retries](guides/limits-and-retries.md).
 
 ## Run options
 
-`agent.run(prompt, opts)`, `agent.stream(prompt, opts)`, `agent.ask(prompt, stream?)`:
+Used by `agent.run(prompt, options)`, `agent.stream(prompt, options)` and `agent.ask(prompt, stream?)`.
 
 | Option | Meaning |
 |---|---|
-| `thinking`, `thinkingLevel` | Per-run reasoning level |
-| `stream` | Make `run` return a stream-capable awaitable |
-| `signal` | Cancels provider, tools and sub-agents |
-| `sessionId` | Which in-memory session to use |
-| `additionalContext` | Per-turn context added to the user turn (not to `instructions`) |
-| `requestId` | Idempotent submit on `run`/`queue`/`steer`/`ask` (not `stream`): the same id again returns the first submission's result and runs nothing; kept while the Agent lives (last 1000 ids); a failed or aborted call is forgotten so a retry runs; 1 to 200 characters. Events: `agent.duplicate_request`, `agent.request_id_reused` (same id, different prompt) |
-| `enqueue` | `"steer"`, `"queue"` or `"interrupt"` when the agent is busy. `"interrupt"` works in every `midSession` mode: it aborts the active run and starts this prompt next, ahead of queued follow-ups |
-| `headers` | Extra request headers |
-| `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks |
-| `toolChoice`, `maxOutputTokens` | Same as config |
-| `retry`, `fetch`, `env` | Same as config |
-| `thinkingAsAnswerFallback` | `true`: when a model returns only reasoning text and no answer, that text becomes the answer (default false) |
+| `thinking` | The reasoning level for this run. |
+| `stream` | Make `run` return a stream that you can also await. |
+| `signal` | Cancels the provider call, tools and workers. |
+| `sessionId` | Which in-memory session to use. |
+| `additionalContext` | Context added to this user turn. It is not added to `instructions`. |
+| `requestId` | Makes the call safe to repeat. See [Streaming and steering](guides/streaming-and-steering.md#run-a-prompt-only-once). |
+| `enqueue` | `"steer"`, `"queue"` or `"interrupt"` while the agent is busy. |
+| `headers` | Extra request headers. |
+| `onDelta`, `onThinkingDelta`, `onEvent`, `onTurn` | Callbacks. |
+| `toolChoice`, `maxOutputTokens`, `retry`, `fetch`, `env` | The same as in the config. |
+| `thinkingAsAnswerFallback` | `true` makes reasoning-only output the answer when a model sends no answer text. Default `false`. |
 
 ## Response
 
-`AgentResponse` fields: `text`, `parsed` (structured output), `thinking`, `thoughtSignature`, `toolCalls`, `toolResults`, `subagents`, `usage`, `responseId`, `model`, `provider`, `finishReason`, `rawFinishReason`, `durationMs`, `raw` (per `captureRaw`), `turns`. A failed run attaches the same shape as `err.partial`.
+An `AgentResponse` has: `text`, `parsed` (structured output), `thinking`, `thoughtSignature`, `toolCalls`, `toolResults`, `subagents`, `usage`, `responseId`, `model`, `provider`, `finishReason`, `rawFinishReason`, `durationMs`, `raw` (according to `captureRaw`) and `turns`. A failed run attaches the same shape as `err.partial`.
 
-`finishReason`: `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `stopped` (a tool called `ctx.stop`), `error` (a finish reason the SDK does not know becomes `error`; the original stays in `rawFinishReason`).
+`finishReason` is one of `stop`, `tool_calls`, `length`, `content_filter`, `refusal`, `max_turns`, `stopped` (a tool called `ctx.stop`) or `error`. A finish reason the SDK does not know becomes `error`, and the original stays in `rawFinishReason`.
 
-`usage`: `inputTokens` (includes the cache reads and writes), `outputTokens` (includes `thinkingTokens`), `totalTokens`, `cachedTokens`, `cacheReadTokens`, `cacheWriteTokens`, `thinkingTokens`, optional `inputDetails` (`audioTokens`, `videoTokens`) and `outputDetails` (`audioTokens`, `imageTokens`) when OpenRouter reports media tokens (subsets of input and output, for reading only: they never change the cost), optional `cost`. Without a provider-reported cost, `cost` is estimated per turn from the catalog: fresh input, cache reads and cache writes each at their own price (a missing cache price bills at the input rate), scaled by `serviceTier`.
+The fields of `usage` and the report from `agent.usageReport()` are in [Usage and cost](guides/usage-and-cost.md).
 
-### Usage report
+### Worker results
 
-`agent.usageReport()` returns `{ agent, workers, total }` (types `UsageReport`, `AgentUsage`, `WorkerUsage`, `UsageLine`, `CostSource`). A line: `turns`; `tokens` (`input` incl. cache reads/writes, `freshInput`, `cacheRead`, `cacheWrite`, `output` incl. `thinking`, `thinking`, `total`); `cacheHitRate` (0-1 or `null`); `cost` (`source`: `provider | catalog | mixed | unknown`, `unpricedTurns`, `totalUsd` or `null`, `parts` in USD). `agent` is the agent's own calls, `workers` is a tree (`status`: `open | closed | fixed`, nested `workers`), `total` is everything. Each agent's totals are saved in its session as `usage` and kept current by `usage` journal records.
+`AgentResponse.subagents` has one entry per worker call, and a dynamic worker's reply carries the same shape as `metadata`.
+
+| Field | Meaning |
+|---|---|
+| `name`, `role`, `task` | Who ran and what it was asked. |
+| `model`, `provider`, `durationMs`, `turns`, `usage` | How it ran and what it cost. |
+| `text`, `thinking`, `toolCalls`, `finishReason`, `responseId` | What it answered. |
+| `isError`, `error` | Set when the worker failed. |
+| `trackingId`, `sessionId`, `parentSessionId` | Identity and lineage. The tracking id is `NAME-<32 hex>`. |
+| `raw` | The wire exchange, according to `captureRaw`. |
+| `steps` | The step log, one `SubAgentStep` per entry. |
+
+A `SubAgentStep` is `{ turn, type, name?, text?, thinking?, thoughtSignature?, isError?, timestamp, partial? }`. `type` is `"assistant"`, `"tool_call"` or `"tool_result"`. `partial` is `true` while the worker is still streaming that step. `agent.track(id)` returns the steps live.
+
+`finishReason` is `"stopped"` when a tool ended the run with `ctx.stop(reason)`. It is `"max_turns"` when a finite `maxTurns` stopped the run with tool calls still pending. An `agent.max_turns_truncated` warning then names the dropped tools.
 
 ## Stream events
 
-Every event has `type` and `schemaVersion`.
+Every event (a `StreamEvent`) has a `type` and a `schemaVersion`.
 
 | `type` | When | Fields used |
 |---|---|---|
-| `start` | Request begins | `raw` |
-| `text_start`, `text_delta`, `text_end` | Answer text | `delta`, `partialText` |
-| `thinking_start`, `thinking_delta`, `thinking_end` | Reasoning | `thinkingDelta`, `partialThinking` |
-| `tool_call_start`, `tool_call_delta`, `tool_call_complete` | Model builds a tool call | `toolCall` |
-| `tool_start`, `tool_result`, `tool_end` | Your tool runs | `toolCall`, `toolResult`, `toolCalls`, `toolResults` |
-| `subagent_delta`, `subagent_complete` | A worker streams / finishes | `subagent`, `subagentTrackingId` |
-| `steer_injected` | A `steer()` was applied | `injectedPrompt` |
-| `queued` | A follow-up was queued | `queuedPrompt`, `queueLength` |
-| `usage` | Token counts | `usage` |
-| `done` | Final | `finishReason`, `rawFinishReason`, `responseId`, `usage` |
-| `error` | Failed | `error`, `partialText` |
+| `start` | The request begins. | `raw` |
+| `text_start`, `text_delta`, `text_end` | Answer text. | `delta`, `partialText` |
+| `thinking_start`, `thinking_delta`, `thinking_end` | Reasoning. | `thinkingDelta`, `partialThinking` |
+| `tool_call_start`, `tool_call_delta`, `tool_call_complete` | The model builds a tool call. | `toolCall` |
+| `tool_start`, `tool_result`, `tool_end` | Your tool runs. | `toolCall`, `toolResult`, `toolCalls`, `toolResults` |
+| `subagent_delta`, `subagent_complete` | A worker streams or finishes. | `subagent`, `subagentTrackingId` |
+| `steer_injected` | A `steer()` was applied. | `injectedPrompt` |
+| `queued` | A follow-up was queued. | `queuedPrompt`, `queueLength` |
+| `usage` | Token counts. | `usage` |
+| `done` | The end. | `finishReason`, `rawFinishReason`, `responseId`, `usage` |
+| `error` | The run failed. | `error`, `partialText` |
 
 ## Tool definition
 
-`tool({...})` keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay`, `maxResultChars`, `redactError`, `redact`, `execute`. (`retry`, `tags` and `output` were removed in 0.7.0: they were stored and never used.) `__brand` is internal; never set it.
+`tool({...})` takes these keys: `name`, `description`, `input`, `parameters`, `strict`, `timeoutMs`, `maxTries`, `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay`, `maxResultChars`, `redactError`, `redact` and `execute`. `__brand` is internal. Never set it.
 
-The executor enforces `input`/`parameters`, `timeoutMs`, `maxTries`/`maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay` (read by crash resume), `maxResultChars` and `redactError`/`redact`; `strict` goes to the provider. Every tool option does something.
+Every option does something. The executor enforces `input` or `parameters` (`parameters` wins if both are set), `timeoutMs`, `maxTries` or `maxAttempts`, `maxConcurrency`, `idempotent`, `repeatable`, `replay` (read by crash recovery), `maxResultChars` and `redactError` or `redact`. `strict` goes to the provider.
 
-`execute(args, ctx)` context: `toolCallId`, `agentName`, `signal`, `sessionId`, `onSubagentEvent`, `emit`, `stop(reason)` (ends the run after this batch with `finishReason: "stopped"`; the reason is the call's result; throws, never retried), `log(message, data?)` (writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the Agent persists to a folder, else a no-op). A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20 000 result characters, 8 concurrent tools, the 3rd identical consecutive call answered with `repeat_blocked`.
+`execute(args, ctx)` gets a `ToolExecutionContext` with:
+
+| Field | Meaning |
+|---|---|
+| `toolCallId`, `agentName`, `sessionId` | Identity of the call. |
+| `signal` | Aborts when the run is cancelled. Pass it to I/O. |
+| `emit` | Sends progress events. |
+| `onSubagentEvent` | Receives events from workers. |
+| `stop(reason)` | Ends the run after this batch with `finishReason: "stopped"`. The reason is the call's result. It throws and is never retried. |
+| `log(message, data?)` | Writes to the call's log file `tool-logs/<n>-<tool>.ndjson` when the agent saves to a folder. Otherwise it does nothing. |
+
+A result carries `logFile`. Defaults: 1 attempt (3 when `idempotent`), 20,000 result characters, 8 tools at once, and the third identical call in a row is answered with `repeat_blocked`.
+
+## Messages and parts
+
+A `Message` is `{ role, content, name?, thoughtSignature?, providerSteps? }`. `role` is `"system"`, `"user"`, `"assistant"` or `"tool"`. `content` is a string or a list of parts. `providerSteps` is `{ provider, steps }`: a provider's raw output for one assistant turn, kept so a resent history is identical to what the provider produced (Google's steps, Anthropic's signed thinking blocks). Treat it as opaque.
+
+A `ProviderContext` is `{ systemPrompt?, messages, tools? }`.
+
+| Part | Fields |
+|---|---|
+| `text` (`TextPart`) | `text`, `thoughtSignature?` |
+| `thinking` (`ThinkingPart`) | `thinking`, `thoughtSignature?` |
+| `image` (`ImagePart`) | `image`, `mimeType?`, `resolution?` (`MediaResolution`) |
+| `audio` (`AudioPart`) | `audio`, `mimeType?` |
+| `video` (`VideoPart`) | `video`, `mimeType?`, `resolution?`, `processing?` (`VideoProcessing`) |
+| `file` (`FilePart`) | `file`, `mimeType?`, `filename?` |
+| `tool_call` (`ToolCallPart`) | `id`, `name`, `arguments`, `rawArguments?`, `thoughtSignature?`, `callId?` |
+| `tool_result` (`ToolResultPart`) | `id`, `name`, `result`, `isError?`, `logFile?`, `stopped?`, `parts?` |
+
+`image`, `audio`, `video` and `file` take a URL, a local path, a data URL, base64, a `Uint8Array` or an `ArrayBuffer`. See [Media input](guides/media-input.md).
+
+A tool call the model made is a `ToolCallRecord`: `{ id, name, arguments, rawArguments?, thoughtSignature?, callId? }`. `callId` is the provider's pairing id when it differs from `id`. Its result is a `ToolResultRecord`: `{ id, name, result, isError?, durationMs?, logFile?, stopped?, parts? }`. `res.toolCalls` and `res.toolResults` hold them. `durationMs` covers the attempts and the retry waits, not the time spent queued or checking the input.
+
+## Model shapes
+
+A `ModelSpec` describes one model: `id`, `provider`, `name`, `contextWindow` and `maxOutputTokens` (the same as `limit.context` and `limit.output`), `capabilities`, and optionally `description`, `family`, `api`, `limit`, `cost`, `modalities`, `reasoning`, `reasoning_options`, `tool_call`, `attachment`, `knowledge`, `release_date`, `last_updated`, `pricing`, `compat` and `raw`.
+
+`ModelCapabilities` has these optional flags: `supportsThinking`, `supportsThinkingBudget`, `supportsThinkingLevel`, `supportsImplicitCaching`, `supportsExplicitCaching`, `supportsLongCacheRetention`, `supportsParallelToolCalls`, `supportsStreaming`, `supportsStructuredOutput`, `supportsReasoningToggle`, `supportsReasoningEffort` and `modalities` (a list of `"text"`, `"image"`, `"audio"`, `"video"` and `"pdf"`).
+
+Look a model up with `getModelFromCatalog`, and add your own with `registerModel`. See [Models and providers](guides/models-and-providers.md#the-model-catalog).
+
+## Helper functions
+
+| Function | Does |
+|---|---|
+| `createSessionId(prefix?)` | A random session id (`<prefix>-<uuid>` with a prefix), at most 64 characters. |
+| `withRetries(fn, options?)` | Runs `fn` again after a transient failure. Defaults: 2 retries, a 5 second delay cap, a 30 second retry budget. A `Retry-After` header is honored inside that budget. An abort is never retried. Options: `maxRetries`, `maxRetryDelayMs`, `retryBudgetMs`, `baseDelayMs`, `signal`, `label`. |
+| `isTransientError(error)` | `true` for the failures `withRetries` retries. |
+| `normalizeMediaInput(input, mimeType?)` | Resolves a media input to `{ mimeType, base64Data, dataUrl }`. |
+| `inferMimeType(path, fallback?)`, `sniffMimeType(bytes)` | The MIME type from a file name, or from the first bytes. |
+| `ensureCustomProvider(prefix, options?)`, `getProvider(id)`, `normalizeProviderPrefix(prefix)` | Create or fetch the provider for a prefix. See [Provider notes](guides/provider-notes.md#openai-compatible-services). |
+
+Two retry layers exist. `retry` repeats one failed provider call (seconds). `runRetries` repeats a whole failed run from where it stopped (minutes, with `agent.run_retry` on the bus). See [Limits and retries](guides/limits-and-retries.md).
 
 ## Telemetry codes
 
-Subscribe with `telemetryBus.onEvent((e) => e.code)`. Events carry `level`, `code`, `message` and `data`.
+Subscribe with `telemetryBus.onEvent((e) => e.code)`. Each event has `level`, `code`, `message` and `data`.
+
+### Configuration and providers
 
 | Code | Meaning |
 |---|---|
-| `config.unsupported_option` | A placeholder or unsupported option was given and dropped |
-| `config.thinking_budget_ignored` | `thinking.budgetTokens` is not forwarded |
-| `config.not_editable` | `Agent.fromConfig` got keys other than `model`, `instructions`, `tools`; they were ignored (`data.fields`) |
-| `provider_warning` | A provider-specific option was dropped (e.g. `thinking: "none"` on Google) |
-| `agent.max_turns_truncated` | Run stopped at `maxTurns` with tool work pending |
-| `turn.thinking` | Full reasoning text of a turn (bus only) |
-| `cache_clamp` | A provider's cached-token count was larger than its input count and was reduced to it |
-| `interaction_chain_evicted`, `interaction_chain_ttl_expired`, `interaction_history_shrink` | Google chaining: server chain dropped, expired, or input tokens fell |
-| `stream_buffer_overflow`, `stream_event_oversize` | Stream buffer limits hit |
-| `catalog_cache_write_failed` | Model catalog could not be saved |
-| `tool.call_stopped` (a tool called `ctx.stop`), `tool.call_started`, `tool.attempt_started`, `tool.progress`, `tool.attempt_failed`, `tool.retry_scheduled`, `tool.call_succeeded`, `tool.call_failed`, `tool.call_timed_out`, `tool.call_aborted`, `tool.call_blocked`, `tool.call_interrupted` | Tool call lifecycle. Each has `toolCallId`, `toolName`, `agentName`, `sessionId`; failures add the full error. A `call_started` with no ending event was in flight at a crash. Attach a sink to persist them |
-| `session.local_media_paths` | An imported session references local files without `fileAccess.roots` |
-| `agent.run_retry` | A failed run is being tried again (`attempt`, `of`, `delayMs`) |
-| `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed / resuming (or a prompt that was waiting) failed |
-| `worker.invalid` | A saved `worker.json` is damaged and that worker is skipped |
-| `session.journal_corrupt` | `journal.ndjson` is damaged before its last line; replay stopped there and kept what came before |
-| `config.file_invalid`, `config.file_restored`, `config.file_ignored_key`, `config.saved_model_ignored` | `<home>/configs.json` was not valid or had another version (`data.reason`), was restored from its backup, had an entry that is unknown, invalid or hidden (`data.key`, `data.reason`), or names a saved model that left the program's list |
-| `embedding_models_refresh_failed`, `embedding_models_cache_write_failed` | OpenRouter's embedding model list could not be refreshed (the saved copy is used) or could not be saved (it is kept in memory) |
-| `decision_models_refresh_failed`, `decision_models_cache_write_failed` | OpenRouter's decision model list could not be refreshed (the saved copy is used) or could not be saved (it is kept in memory) |
-| `concurrency.queued` | A provider call had to wait for a free slot (`provider`, `waiting`, `active`, `paused`); only with the `concurrency` setting |
-| `concurrency.paused` | A provider answered 429 with a `Retry-After`: no new calls to it for `ms` (`provider`, `ms`, `waiting`) |
-| `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | Scheduled action lifecycle; payloads in [Scheduled action files](scheduled-action-files.md#events) |
+| `config.thinking_budget_ignored` | `thinking.budgetTokens` is not forwarded. |
+| `config.not_editable` | `Agent.fromConfig` got keys other than `model`, `instructions` and `tools`. They were ignored (`data.fields`). |
+| `config.file_invalid`, `config.file_restored`, `config.file_ignored_key`, `config.saved_model_ignored` | Problems with `<home>/configs.json`: invalid or another version (`data.reason`), restored from its backup, an entry that is unknown, invalid or hidden (`data.key`, `data.reason`), or a saved model that left your list. |
+| `provider_warning` | A provider option was dropped, for example `thinking: "none"` on Google. |
+| `cache_clamp` | A provider's cached-token count was larger than its input count and was reduced to it. |
+| `interaction_chain_evicted`, `interaction_chain_ttl_expired`, `interaction_history_shrink` | Google chaining: the server chain was dropped or expired, or the input tokens fell. |
+| `stream_buffer_overflow`, `stream_event_oversize` | A stream buffer limit was hit. |
+| `catalog_cache_write_failed` | The model catalog could not be saved. |
+| `embedding_models_refresh_failed`, `embedding_models_cache_write_failed` | OpenRouter's embedding model list could not be refreshed (the saved copy is used) or saved (it stays in memory). |
+| `decision_models_refresh_failed`, `decision_models_cache_write_failed` | The same, for decision models. |
 
-## Image generation
+### Runs
 
-`generateImage(options)` returns an `ImageResult`; `listImageModels(provider?)` and `getImageModel(model)` describe the supported image models; `image.edit(prompt, options?)` changes a picture; `imageTool(options)` is a tool that lets a text agent make pictures. Options, result fields and errors: [Generating images](guides/images.md).
+| Code | Meaning |
+|---|---|
+| `agent.max_turns_truncated` | A run stopped at `maxTurns` with tool work pending. |
+| `turn.thinking` | The full reasoning text of a turn. Bus only. |
+| `agent.run_retry` | A failed run is being tried again (`attempt`, `of`, `delayMs`). |
+| `agent.resumed`, `agent.resume_failed` | A cut-off run was resumed, or resuming it (or a waiting prompt) failed. |
+| `agent.duplicate_request` | A `requestId` that was already submitted came again. |
+| `agent.request_id_reused` | The same `requestId` came with a different prompt. |
+| `agent.yield_continued` | An `onYield` hook continued the run. |
+| `hook.error` | An `afterTool` hook threw. The original result was kept. |
+| `worker.invalid` | A saved `worker.json` is damaged. That worker is skipped. |
+| `session.local_media_paths` | An imported session points at local files and `fileAccess.roots` is not set. |
+| `session.media_write_failed` | `saveSessionDir` could not write a media file. The media stays inside the session file. |
+| `session.journal_corrupt` | `journal.ndjson` is damaged before its last line. Replay stopped there and kept what came before. |
 
-## Video generation
+### Tools
 
-`generateVideo(options)` returns a `VideoResult` (`video`, `text`, `usage`, `model`, `provider`, `finishReason`, `responseId`, `jobId`, `raw`, `durationMs`); `result.video` is a `GeneratedVideo` (`bytes`, `mimeType`, `base64`, `dataUrl`, `extension`, `durationSeconds`, `save(file)`, `toPart()`); `listVideoModels(provider?)` and `getVideoModel(model)` describe the known video models; `refreshOpenRouterVideoModels()` reads OpenRouter's model list now; `video.edit(prompt, options?)` changes a clip on the model that made it; `resumeVideo({ model, jobId })` waits for an OpenRouter job a timeout or abort left running. A timeout or abort leaves the provider's job running: the error carries `jobId`. Options, models, checks and errors: [Generating videos](guides/videos.md).
+`tool.call_started`, `tool.attempt_started`, `tool.progress`, `tool.attempt_failed`, `tool.retry_scheduled`, `tool.call_succeeded`, `tool.call_failed`, `tool.call_timed_out`, `tool.call_aborted`, `tool.call_stopped` (a tool called `ctx.stop`), `tool.call_blocked` (a hook blocked it) and `tool.call_interrupted` (crash recovery did not run it again).
 
-## Embeddings
+Each has `toolCallId`, `toolName`, `agentName` and `sessionId`. Failures add the full error. A `call_started` with no ending event was running when the process died. Attach a sink to keep them.
 
-`generateEmbedding(options)` returns an `EmbeddingResult` (`vectors`, `vector`, `dimensions`, `usage`, `model`, `provider`, `requests`, `raw`); `listEmbeddingModels(provider?)` and `getEmbeddingModel(model)` describe the known embedding models; `refreshOpenRouterEmbeddingModels()` reads OpenRouter's model list now; `cosineSimilarity(a, b)` compares two vectors; `EMBEDDING_TASKS` lists the values of `task`. Options, models, checks and errors: [Generating embeddings](guides/embeddings.md).
+### Concurrency and scheduled actions
 
-## Decisions
-
-`generateDecision(options)` returns a `DecisionResult` (`answers`, `usage`, `model`, `provider`, `raw`); each answer is a `NoulAnswer`, `ChoiceAnswer`, `ScoreAnswer` or `RefusalAnswer` (check `type`); `listDecisionModels(provider?)` and `getDecisionModel(model)` describe the known decision models; `refreshOpenRouterDecisionModels()` reads OpenRouter's model list now (needs an OpenRouter key); `DECISION_QUESTION_TYPES` lists the question types. Options, models, checks and errors: [Asking decision models](guides/decisions.md).
+| Code | Meaning |
+|---|---|
+| `concurrency.queued` | A provider call waited for a free slot (`provider`, `waiting`, `active`, `paused`). Only with the `concurrency` setting. |
+| `concurrency.paused` | A provider answered 429 with a `Retry-After`. No new calls to it for `ms`. |
+| `scheduled_action.created`, `scheduled_action.updated`, `scheduled_action.started`, `scheduled_action.ready`, `scheduled_action.failed`, `scheduled_action.delivered`, `scheduled_action.missed`, `scheduled_action.skipped`, `scheduled_action.deleted`, `scheduled_action.invalid`, `scheduled_action.store_corrupt`, `scheduled_action.error` | The life of a scheduled action. Payloads are in [Scheduled action files](scheduled-action-files.md#events). |
 
 ## Errors
 
-All extend `AgentAccelError` (`code`, `retryable`, `context`).
+All extend `AgentAccelError`, which has `code`, `retryable` and `context`.
 
 | Class | Raised when |
 |---|---|
-| `ConfigError` | Missing key/base URL, no or bad model string, a removed provider, Gemini 1.x/2.x, invalid config, a `steer`/`queue`/`enqueue` call the `midSession.mode` forbids (before any network call) |
-| `ProviderError` | The API failed; `code` is `"provider"` (`"incomplete_stream"` for a cut stream), `retryable` says whether a retry can help; `statusCode`, `provider`, `model`, `providerCode` (the provider's own code), `retryAfterMs` (non-enumerable) |
-| `TimeoutError` | A request, first-byte or idle timeout (retryable) |
-| `BudgetExceededError` | `budget` or `limits.maxTotalTokens` / `deadlineMs` / `maxToolCallsPerRun` exceeded; partial usage attached |
-| `ToolError` | A tool failed in a way surfaced to the caller |
-| `ValidationError` | Structured output or scheduled-action input did not validate; input the model cannot take (an unsupported modality), before any network call; an empty prompt; a call made the wrong way (a streaming option on `steer`/`queue`/`interrupt(message)`, `resume()` while busy, a full queue or steer inbox); a bad session id, `registerModel` spec or media input |
-| `SettingNotEditableError` | `setConfig` on a setting the program keeps hidden (a `ConfigError`, never retried); `key` names it |
-| `ModelNotAllowedError` | A model outside the program's `setModels` list (a `ConfigError`, never retried); `model` and `allowed` say what was asked and what is available |
-| `ThinkingLevelError` | Level not supported by the model (a `ConfigError`); `allowedLevels` lists valid ones |
-| `SubAgentModelError` | Dynamic workers or scheduling without a worker model |
-| `SessionLoadError` | A valid session file exceeds limits (never quarantined) |
-| `SecurityPolicyError`, `RemoteFetchError` | File root or private-host policy refused a path or URL |
+| `ConfigError` | A missing key or address, no model or a bad model string, a removed provider, Gemini 1.x or 2.x, invalid config, or a `steer`, `queue` or `enqueue` call that `midSession` forbids (before any network call). |
+| `ProviderError` | The API failed, or it answered HTTP 200 with something that is not a reply (an empty object, a list, no `choices`). That is treated like a 502 and is retryable. A reply over the size cap (64 MB for chat) is not retryable. `code` is `"provider"` (`"incomplete_stream"` for a cut stream). `retryable` says whether a retry can help. Also `statusCode`, `provider`, `model`, `providerCode` (the provider's own code) and `retryAfterMs`, which are not enumerable. |
+| `TimeoutError` | A request, first-byte or idle timeout. Retryable. |
+| `BudgetExceededError` | `budget`, or `limits.maxTotalTokens`, `deadlineMs` or `maxToolCallsPerRun`, was exceeded. Partial usage is attached. |
+| `ToolError` | A tool failed in a way that reaches the caller. |
+| `ValidationError` | Structured output or scheduled-action input did not validate. An input the model cannot take, before any network call. An empty prompt. A call made the wrong way: a streaming option on `steer`, `queue` or `interrupt(message)`, `resume()` while busy, or a full queue. A bad session id, `registerModel` spec or media input. |
+| `SettingNotEditableError` | `setConfig` on a hidden setting. A `ConfigError`, never retried. `key` names it. |
+| `ModelNotAllowedError` | A model outside your `setModels` list. A `ConfigError`, never retried. `model` and `allowed` say what was asked and what is available. |
+| `ThinkingLevelError` | A level the model does not support. A `ConfigError`. `allowedLevels` lists the valid ones. |
+| `SubAgentModelError` | Workers or scheduling without a worker model. |
+| `SessionLoadError` | A valid session file is over the load limits. It is never quarantined. |
+| `SecurityPolicyError`, `RemoteFetchError` | A file root or private-address policy refused a path or URL. |
 
-Abort detection: `isAbortError(err)` (true only when `name === "AbortError"`; never message text, and a signal's `aborted` flag alone is not checked).
+`isAbortError(err)` is true only when `name === "AbortError"`. It never reads message text, and a signal's `aborted` flag alone is not checked.
 
 ## Environment variables
 
-Since 0.7.0 the environment holds **API keys and nothing else**. Every other setting is set in code (see [Settings in code](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them)); the old `MODEL`, `SUB_AGENT_MODEL`, `*_BASE_URL`, `OPENROUTER_*`, `COMPAT_*`, `AGENT_ACCEL_*`, `AGENT_CACHE_DIR`, `AGENT_CATALOG_REFRESH` and `MODELS_DEV_SHA256` variables are no longer read.
+The environment holds API keys and nothing else. Every other option is a setting in code: see [Settings](guides/settings.md). The older variables are listed in [Migration](migration.md#environment-variables).
 
 | Variable | Purpose |
 |---|---|
-| `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY` | Google key (checked in this order of preference) |
-| `OPENAI_API_KEY`, `OPENAI_BASE_API_KEY` | OpenAI key |
-| `ANTHROPIC_API_KEY` | Anthropic key |
-| `OPENROUTER_API_KEY` | OpenRouter key |
-| `<PREFIX>_API_KEY`, `<PREFIX>_BASE_API_KEY` | Key of any OpenAI-compatible endpoint (for `PREFIX/model`), e.g. `GROQ_API_KEY`; local endpoints may omit it |
+| `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY` | The Google key. Checked in this order. |
+| `OPENAI_API_KEY`, `OPENAI_BASE_API_KEY` | The OpenAI key. |
+| `ANTHROPIC_API_KEY` | The Anthropic key. |
+| `OPENROUTER_API_KEY` | The OpenRouter key. |
+| `<PREFIX>_API_KEY`, `<PREFIX>_BASE_API_KEY` | The key of any OpenAI-compatible service (for `PREFIX/model`), such as `GROQ_API_KEY`. Local services may have none. |
 
-Where the old variables went:
+The library reads `process.env` only for keys. Pass `env: { ... }` in the config or a run option to override a key for one agent.
 
-| Was | Now |
-|---|---|
-| `MODEL`, `MODEL_NAME`, `SUB_AGENT_MODEL` | `setModels({ default: { model, sub_agent_model }, providers })`, and the user's choice with `setModel(id)` / `setSubAgentModel(id)` |
-| `GOOGLE_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENROUTER_BASE_URL`, `<PREFIX>_BASE_URL` | setting `base_urls: { google, openai, anthropic, openrouter, <prefix> }` (a bare model id routes to OpenAI when `base_urls.openai` is set) |
-| `OPENROUTER_ORDER`, `_ONLY`, `_IGNORE`, `_ALLOW_FALLBACKS`, `_REQUIRE_PARAMETERS`, `_ZDR`, `_DATA_COLLECTION`, `_SORT`, `_PARALLEL_TOOL_CALLS`, `_REASONING_EXCLUDE`, `_USER` | setting `openrouter: { order, only, ignore, allow_fallbacks, require_parameters, zdr, data_collection, sort, parallel_tool_calls, reasoning_exclude, user }` |
-| `COMPAT_NO_STREAM_OPTIONS`, `COMPAT_NO_SESSION_HEADERS` | setting `compat: { no_stream_options, no_session_headers }` |
-| `AGENT_ACCEL_USAGE_LIMIT_USD` / `_TOKENS`, `AGENT_ACCEL_SCHEDULED_BUDGET_USD` / `_TOKENS`, `configure({ usageLimit, scheduledActionBudget })` | settings `usage_limit` and `scheduled_action_budget` (`{ max_cost_usd, max_total_tokens }`) |
-| `configure({ concurrency })` | setting `concurrency: { max_requests, per_provider }`; `getConcurrencyStatus()` is unchanged |
-| `AGENT_CATALOG_REFRESH=off`, `AGENT_CACHE_DIR`, `MODELS_DEV_SHA256` | settings `catalog_refresh: "off"`, `catalog_cache_dir`, `models_dev_sha256` |
-| `AGENT_ACCEL_HOME` | `setHome(dir)` or an Agent's `home` (code only) |
+## Generators
 
-Library functions read `process.env` only for keys. Pass `env: { ... }` in config or run options to override a key per agent.
+| Function | Returns | Guide |
+|---|---|---|
+| `generateImage(options)` | `ImageResult`. Also `listImageModels`, `getImageModel`, `image.edit` and `imageTool`. | [Images](guides/images.md) |
+| `generateVideo(options)` | `VideoResult`. Also `listVideoModels`, `getVideoModel`, `refreshOpenRouterVideoModels`, `video.edit` and `resumeVideo`. | [Videos](guides/videos.md) |
+| `generateEmbedding(options)` | `EmbeddingResult`. Also `listEmbeddingModels`, `getEmbeddingModel`, `refreshOpenRouterEmbeddingModels`, `cosineSimilarity` and `EMBEDDING_TASKS`. | [Embeddings](guides/embeddings.md) |
+| `generateDecision(options)` | `DecisionResult`. Also `listDecisionModels`, `getDecisionModel`, `refreshOpenRouterDecisionModels` and `DECISION_QUESTION_TYPES`. | [Decisions](guides/decisions.md) |

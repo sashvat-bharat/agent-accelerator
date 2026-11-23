@@ -1,11 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import {
-  OpenAIResponsesProvider,
-  resolveModel,
-  ModelProvider,
-  getProvider,
-  setConfigs,
-} from "../src/index.ts";
+import { resolveModel, ModelProvider, getProvider, setConfigs } from "../src/index.ts";
+import { OpenAIResponsesProvider } from "../src/providers/openai.ts";
 import {
   mapThinkingLevelToOpenAI,
   mapServiceTierToOpenAI,

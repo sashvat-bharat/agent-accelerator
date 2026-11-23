@@ -10,7 +10,7 @@ import type { SubAgentExecutionMetadata } from "../types/response.ts";
 const SUBAGENT_RESULT_BRAND: unique symbol = Symbol("agent-accelerator.subagent-result") as never;
 
 /** Branded envelope returned by delegation tools. */
-export interface SubagentResult {
+interface SubagentResult {
   xml: string;
   _subagentMetadata: SubAgentExecutionMetadata[];
   toString(): string;
@@ -56,6 +56,7 @@ export function normalizeSubagentMetadata(metas: unknown): SubAgentExecutionMeta
       totalTokens: num(u.totalTokens),
     };
     out.push({
+      // why: `m` is untrusted worker metadata; the fields the loop reads are rebuilt and checked right below.
       ...(m as unknown as SubAgentExecutionMetadata),
       model: typeof m.model === "string" ? m.model : "unknown",
       provider: typeof m.provider === "string" ? m.provider : "unknown",

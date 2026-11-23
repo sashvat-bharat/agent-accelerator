@@ -31,24 +31,35 @@ export interface AgentRunLimits {
   streamIdleTimeoutMs: number;
 }
 
-/** Resolves `(config as any).limits` with defaults (timeouts tolerate reasoning). */
-export function resolveAgentLimits(config: { limits?: Record<string, unknown> }): AgentRunLimits {
-  const raw = (config as { limits?: Record<string, unknown> }).limits ?? {};
+/** Resolves `config.limits` with defaults (timeouts tolerate reasoning). */
+export function resolveAgentLimits(config: { limits?: object }): AgentRunLimits {
+  const raw: Record<string, unknown> = { ...config.limits };
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-  // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
+  const maxTurns = num(raw.maxTurns);
+  const deadlineMs = num(raw.deadlineMs);
+  const maxToolCallsPerRun = num(raw.maxToolCallsPerRun);
+  const maxTotalTokens = num(raw.maxTotalTokens);
+  return {
+    ...(maxTurns !== undefined ? { maxTurns: Math.max(1, Math.floor(maxTurns)) } : {}),
+    ...(deadlineMs !== undefined ? { deadlineMs } : {}),
+    ...(maxToolCallsPerRun !== undefined ? { maxToolCallsPerRun: Math.max(1, Math.floor(maxToolCallsPerRun)) } : {}),
+    ...(maxTotalTokens !== undefined ? { maxTotalTokens: Math.max(1, Math.floor(maxTotalTokens)) } : {}),
+    ...resolveNetworkTimeouts(raw),
+  };
+}
+
+/** The three network timeouts of a `limits` object in ms (300 s for a call, 120 s to the first byte, 300 s of silence on a stream): `0` or `Infinity` turns one off, and anything that is not a number gets the default. */
+export function resolveNetworkTimeouts(limits: Record<string, unknown> | undefined): {
+  requestTimeoutMs: number;
+  firstByteTimeoutMs: number;
+  streamIdleTimeoutMs: number;
+} {
+  // One timeout value: a number (not NaN) is kept, anything else is unset so the default applies; in: the three reads below, out: ms or undefined.
   const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
   return {
-    ...(num(raw.maxTurns) !== undefined ? { maxTurns: Math.max(1, Math.floor(num(raw.maxTurns)!)) } : {}),
-    ...(num(raw.deadlineMs) !== undefined ? { deadlineMs: num(raw.deadlineMs)! } : {}),
-    ...(num(raw.maxToolCallsPerRun) !== undefined
-      ? { maxToolCallsPerRun: Math.max(1, Math.floor(num(raw.maxToolCallsPerRun)!)) }
-      : {}),
-    ...(num(raw.maxTotalTokens) !== undefined
-      ? { maxTotalTokens: Math.max(1, Math.floor(num(raw.maxTotalTokens)!)) }
-      : {}),
-    requestTimeoutMs: timeout(raw.requestTimeoutMs) ?? 300_000,
-    firstByteTimeoutMs: timeout(raw.firstByteTimeoutMs) ?? 120_000,
-    streamIdleTimeoutMs: timeout(raw.streamIdleTimeoutMs) ?? 300_000,
+    requestTimeoutMs: timeout(limits?.["requestTimeoutMs"]) ?? 300_000,
+    firstByteTimeoutMs: timeout(limits?.["firstByteTimeoutMs"]) ?? 120_000,
+    streamIdleTimeoutMs: timeout(limits?.["streamIdleTimeoutMs"]) ?? 300_000,
   };
 }
 
@@ -162,7 +173,7 @@ export function normalizeThinking(config: AgentConfig, fallbackLevel?: string): 
 }
 
 /** Maps the public `toolChoice` option onto the provider wire-neutral form. */
-export function normalizeToolChoiceOption(choice: ToolChoiceOption | undefined): ProviderRequestOptions["toolChoice"] {
+function normalizeToolChoiceOption(choice: ToolChoiceOption | undefined): ProviderRequestOptions["toolChoice"] {
   if (!choice) return undefined;
   if (typeof choice === "string") return choice;
   if (choice.tool) return { type: "function", function: { name: choice.tool } };

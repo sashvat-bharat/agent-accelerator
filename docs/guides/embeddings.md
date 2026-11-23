@@ -1,5 +1,7 @@
 # Generating embeddings
 
+> Turn text, pictures, sounds and PDFs into vectors, to search by meaning, find duplicates or group similar items.
+
 An embedding turns a piece of text (or, on some models, a picture, a sound clip, a video or a PDF) into a list of numbers. Things with a similar meaning get lists that are close to each other, so you can search by meaning, find duplicates, group similar items, or give an agent a memory of earlier notes.
 
 `generateEmbedding` makes the vectors. It is one function and stateless: no `Agent`, no session. The SDK does not store or search the vectors for you; keep them in a vector database, a file, or memory, and compare them with `cosineSimilarity`.
@@ -7,14 +9,25 @@ An embedding turns a piece of text (or, on some models, a picture, a sound clip,
 ```ts
 import { generateEmbedding, cosineSimilarity } from "agent-accelerator";
 
-const docs = await generateEmbedding({
-  model: "openai/text-embedding-3-small",
-  input: ["Cats purr when they are content.", "Dogs bark at strangers.", "Rust has a borrow checker."],
-});
-const question = await generateEmbedding({ model: "openai/text-embedding-3-small", input: "Which animal purrs?" });
+const model = "openai/text-embedding-3-small";
 
-docs.vectors.map((v) => cosineSimilarity(question.vector, v)); // the first number is the highest
-docs.usage.cost;                                                // what it cost, or undefined when unknown
+const docs = await generateEmbedding({
+  model,
+  input: [
+    "Cats purr when they are content.",
+    "Dogs bark at strangers.",
+    "Rust has a borrow checker.",
+  ],
+});
+const question = await generateEmbedding({
+  model,
+  input: "Which animal purrs?",
+});
+
+// The first number is the highest:
+console.log(docs.vectors.map((v) => cosineSimilarity(question.vector, v)));
+// What it cost, or undefined when unknown:
+console.log(docs.usage.cost);
 ```
 
 A list always gives **one vector per item, in the same order**, on every model.
@@ -44,7 +57,14 @@ Only the models that read pictures, sounds, video or PDFs accept them; any other
 | `openai/text-embedding-ada-002` | text | 1536, fixed | $0.10 |
 | `openrouter/<vendor>/<model>` | what the model reads | not stated: sent as asked | the list's price |
 
-Google and OpenAI are checked by hand against the providers' pages. **OpenRouter has dozens of embedding models that change often, so the SDK reads OpenRouter's own public list** (`GET https://openrouter.ai/api/v1/embeddings/models`, no key needed) the first time you use one, saves it in `<home>/catalog/openrouter-embeddings.json` and refreshes it every 12 hours. A failed refresh keeps the old copy and is not retried for 10 minutes; `catalog_refresh: "off"` never downloads (the saved copy is used). `listEmbeddingModels("openrouter")` is empty until the list was read once; `await refreshOpenRouterEmbeddingModels()` reads it on demand. OpenRouter also lists free models (`...:free`); their price is a known $0.
+Google and OpenAI are checked by hand against the providers' pages.
+
+**OpenRouter has dozens of embedding models that change often, so the SDK reads OpenRouter's own public list** (`GET https://openrouter.ai/api/v1/embeddings/models`, no key needed).
+
+- It reads the list the first time you use an OpenRouter model, saves it in `<home>/catalog/openrouter-embeddings.json` and refreshes it every 12 hours.
+- A failed refresh keeps the old copy and is not retried for 10 minutes. `catalog_refresh: "off"` never downloads, and the saved copy is used.
+- `listEmbeddingModels("openrouter")` is empty until the list was read once. `await refreshOpenRouterEmbeddingModels()` reads it on demand.
+- OpenRouter also lists free models (`...:free`). Their price is a known $0.
 
 Vectors of different models are **not comparable**, and neither are two lengths of the same model: `gemini-embedding-001` and `gemini-embedding-2` live in different spaces, so embed everything you compare with the same model and `dimensions`. `cosineSimilarity` throws when the lengths differ.
 
@@ -62,7 +82,14 @@ Vectors of different models are **not comparable**, and neither are two lengths 
 | `apiKey`, `baseUrl`, `headers`, `env`, `fetch`, `retry` | Connection settings, as for `generateImage`. |
 | `captureRaw` | What `result.raw` keeps of the wire exchange (default: no text, like `AgentConfig.captureRaw`). |
 
-The same `task` works everywhere; the SDK turns it into what each model needs: a `taskType` field on `gemini-embedding-001`, the documented words in front of the text on `gemini-embedding-2` (for a query, `task: search result | query: ...`; for a document, `title: <title or none> | text: ...`; media in the same item is never prefixed), `input_type` on OpenRouter. A model with no such control (OpenAI) gets a single `provider_warning` and the option is dropped. `gemini-embedding-001` vectors shorter than 3072 are not unit length, so the SDK normalizes them for you.
+The same `task` works everywhere. The SDK turns it into what each model needs:
+
+- `gemini-embedding-001`: a `taskType` field.
+- `gemini-embedding-2`: the documented words in front of the text. For a query: `task: search result | query: ...`. For a document: `title: <title or none> | text: ...`. Media in the same item is never prefixed.
+- OpenRouter: `input_type`.
+- A model with no such control (OpenAI) gets a single `provider_warning`, and the option is dropped.
+
+`gemini-embedding-001` vectors shorter than 3072 are not unit length, so the SDK normalizes them for you.
 
 ## Checks, warnings and long lists
 
@@ -82,7 +109,11 @@ A list longer than the model takes in one request (OpenAI: 2048; Google and Open
 | `requests` | Provider requests made |
 | `raw` | The wire audit (bodies redacted unless `captureRaw: true`) |
 
-`usage.cost` is the provider's reported cost when it sends one (OpenRouter), else the reported tokens priced from the table in integer micro-USD (so a tiny call rounds up to a whole micro-dollar). A reply with no usage, or media tokens with no per-kind split, leaves the cost **unknown (`undefined`), never $0**. `gemini-embedding-001` reports no usage at all, so its cost is always unknown; `gemini-embedding-2` reports tokens per kind (an image counts 258 tokens), so its cost is exact.
+`usage.cost` is the provider's reported cost when it sends one (OpenRouter). Otherwise the reported tokens are priced from the table in whole micro-dollars, so a tiny call rounds up to one micro-dollar.
+
+- A reply with no usage, or media tokens with no per-kind split, leaves the cost **unknown (`undefined`), never $0**.
+- `gemini-embedding-001` reports no usage at all, so its cost is always unknown.
+- `gemini-embedding-2` reports tokens per kind (an image counts 258 tokens), so its cost is exact.
 
 ## Errors
 

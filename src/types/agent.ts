@@ -28,7 +28,7 @@ export type ModelRef = string | ModelSpec | ModelProviderInstance;
 /** Canonical reasoning option: bare level, or level + explicit token budget. */
 export type ThinkingOption = ThinkingLevel | { level?: ThinkingLevel; budgetTokens?: number };
 
-/** Canonical retry policy. Read by the loop via `(config as any).retry`. */
+/** Canonical retry policy. Read by the loop from `AgentConfig.retry`. */
 export interface RetryPolicyConfig {
   maxRetries?: number;
   baseDelayMs?: number;
@@ -66,16 +66,16 @@ export interface HookContext {
 }
 
 /** What `beforeTool` answers: nothing to let the call run, `{ block }` to refuse it (the reason is the call's error result), or `{ arguments }` to run it with other arguments (still validated against the tool's schema). */
-export type BeforeToolDecision = void | undefined | { block: string } | { arguments: Record<string, unknown> };
+type BeforeToolDecision = void | undefined | { block: string } | { arguments: Record<string, unknown> };
 
 /** What `afterTool` answers: nothing to keep the result, or the new `result` and/or `isError`. */
-export type AfterToolDecision = void | undefined | { result?: unknown; isError?: boolean };
+type AfterToolDecision = void | undefined | { result?: unknown; isError?: boolean };
 
 /** What `beforeRequest` answers: nothing to send as is, or the `messages` and/or `systemPrompt` to send instead (the saved history is not changed). */
-export type BeforeRequestDecision = void | undefined | { messages?: Message[]; systemPrompt?: string };
+type BeforeRequestDecision = void | undefined | { messages?: Message[]; systemPrompt?: string };
 
 /** What `onYield` answers: nothing to end the run, or `{ continue }`, a user message that keeps the run going (same budget and turn limit). */
-export type OnYieldDecision = void | undefined | { continue: string | ContentPart[] };
+type OnYieldDecision = void | undefined | { continue: string | ContentPart[] };
 
 /**
  * Hooks of one Agent (`AgentConfig.hooks`). Each may be async. `beforeTool` fails closed: a hook that throws blocks the call.
@@ -193,7 +193,7 @@ export interface AgentConfig {
    * An explicit `persist.dir` / `persist.file` still wins for sessions.
    */
   home?: string;
-  // Additional options (all optional, additive; loop reads via `(config as any).*`).
+  // Additional options (all optional and additive).
   /**
    * Canonical tool-selection control (`"auto"` default). `"none"` applies to
    * every turn of a run; `"required"` and a pinned tool (`{ tool: "name" }`)
@@ -494,7 +494,7 @@ export interface BudgetState {
   startedAtMs: number;
 }
 
-/** Run/turn lineage attached to sub-agent metadata via `(metadata as any)`. */
+/** Run and turn lineage attached to sub-agent metadata. */
 export interface SubAgentRunIds {
   /** Stable id for this worker batch/run (`newRunId`). */
   runId?: string;

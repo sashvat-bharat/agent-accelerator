@@ -8,6 +8,7 @@
  * text, so there are no output tokens.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
 import type { InputPartData } from "../utils/provider-call.ts";
 import type { TokenUsage } from "../types/core.ts";
@@ -18,6 +19,7 @@ import { ConfigError, ValidationError } from "../types/errors.ts";
 import {
   combinedSignal,
   headersToRecord,
+  modalityTokens,
   redactedHeaders,
   resolveProviderApiKey,
   resolveProviderBaseUrl,
@@ -26,7 +28,6 @@ import {
 } from "./shared.ts";
 import { throwGoogleHttpError } from "./google-image.ts";
 
-const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** What Gemini Decision 1 reads inline, by kind (docs: decisions, "Input"). */
 const MEDIA_MIME: Record<"image" | "audio" | "video" | "pdf", readonly string[]> = {
   image: ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp", "image/tiff"],
@@ -85,15 +86,6 @@ function toBlock(part: InputPartData, modelId: string): Record<string, unknown> 
   };
 }
 
-// Tokens of one modality in the reply's breakdown, or undefined when it does not list it; in: mapUsage, out: a count.
-function tokensOf(
-  list: NonNullable<DecisionReply["usage"]>["input_tokens_by_modality"],
-  modality: string
-): number | undefined {
-  const hits = (list ?? []).filter((m) => m.modality === modality);
-  return hits.length > 0 ? hits.reduce((n, m) => n + (m.tokens ?? 0), 0) : undefined;
-}
-
 // Usage as TokenUsage: the input tokens, with the per-modality split Google reports (a PDF's pages count as image tokens, as Google bills them); in: a reply, out: TokenUsage.
 function mapUsage(raw: DecisionReply["usage"]): TokenUsage {
   const input = raw?.total_input_tokens ?? 0;
@@ -104,10 +96,10 @@ function mapUsage(raw: DecisionReply["usage"]): TokenUsage {
     totalTokens: raw?.total_tokens ?? input + output,
   };
   const parts = {
-    textTokens: tokensOf(raw?.input_tokens_by_modality, "text"),
-    imageTokens: tokensOf(raw?.input_tokens_by_modality, "image"),
-    audioTokens: tokensOf(raw?.input_tokens_by_modality, "audio"),
-    videoTokens: tokensOf(raw?.input_tokens_by_modality, "video"),
+    textTokens: modalityTokens(raw?.input_tokens_by_modality, "text"),
+    imageTokens: modalityTokens(raw?.input_tokens_by_modality, "image"),
+    audioTokens: modalityTokens(raw?.input_tokens_by_modality, "audio"),
+    videoTokens: modalityTokens(raw?.input_tokens_by_modality, "video"),
   };
   const kept = Object.fromEntries(Object.entries(parts).filter(([, v]) => v !== undefined));
   if (Object.keys(kept).length > 0) usage.inputDetails = kept;
@@ -126,7 +118,7 @@ export async function googleDecide(
     throw new ConfigError(
       "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
     );
-  const url = `${resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options)}/decisions`;
+  const url = `${resolveProviderBaseUrl("google", options)}/decisions`;
   const only = request.input.length === 1 ? request.input[0] : undefined;
   const body = {
     model: modelId,
@@ -148,7 +140,7 @@ export async function googleDecide(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

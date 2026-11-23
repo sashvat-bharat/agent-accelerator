@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import type { ToolDefinition } from "../src/index.ts";
-import { tool, toStandardToolDeclarations } from "../src/index.ts";
+import { tool } from "../src/index.ts";
+import { toStandardToolDeclarations } from "../src/tools/tool.ts";
 import { executeToolCalls } from "../src/tools/executor.ts";
 import { z } from "zod";
 

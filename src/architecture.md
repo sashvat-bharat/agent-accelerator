@@ -32,5 +32,8 @@ The whole SDK. `index.ts` is the only public entry (`main`/`module`/`types`); ev
 - No `console.*`: warnings and traces go to `telemetryBus` (exceptions: the `update-models.ts` CLI and one compat `console.warn` in `providers.ts`).
 - All state is written under the one home folder (`utils/home.ts`). Files are replaced through `utils/durable.ts`; the append-only ones are the session journal and tool logs (fsynced per line) and the opt-in telemetry file (not fsynced).
 - Provider differences never leave `providers/` and `providers.ts`.
+- Every export has an explicit type: `tsconfig.src.json` checks `src/` with `isolatedDeclarations`, and `bun run typecheck` runs it. Every `as unknown as` cast and every empty `catch` has a reason line.
 - Every function has one comment line above it (how it works, where input comes from, where output goes).
+- `utils/` is the bottom layer: it imports only from `utils/` and `types/`, never from `models/`, `providers/` or `agent/` (`test/layering.test.ts` checks it); a helper that needs the catalog lives next to its caller.
+- `index.ts` is the whole public API. A name goes in only when a user needs it to call, configure or type a documented API; plumbing stays in its file. `test/public-surface.test.ts` lists the names that were made internal and holds the most names the barrel may export.
 - Change a public option, export, env var or telemetry code: update `README.md` and `docs/` in the same change.

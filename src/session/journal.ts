@@ -61,6 +61,8 @@ export class SessionJournal {
   private pending = EMPTY_PENDING;
   /** JSON of the last journaled spending totals. */
   private usage = "";
+  /** JSON of the last journaled fixed-worker spending tree. */
+  private fixed = "";
   /** Run ids whose ending is on disk. */
   private readonly endsOnDisk = new Set<string>();
   /** How many of the current run's finished tool results are on disk, and the last one. */
@@ -105,6 +107,8 @@ export class SessionJournal {
     if (pending !== this.pending) records.push(`{"t":"pending","p":${pending}}`);
     const usage = this.usageOf(agent);
     if (usage !== this.usage) records.push(`{"t":"usage","u":${usage}}`);
+    const fixed = this.fixedOf(agent);
+    if (fixed !== this.fixed) records.push(`{"t":"fixed","u":${fixed}}`);
     if (records.length === 0) return;
     const text = records.join("\n") + "\n";
     try {
@@ -126,6 +130,7 @@ export class SessionJournal {
     this.lastRun = runs[runs.length - 1];
     this.pending = pending;
     this.usage = usage;
+    this.fixed = fixed;
     this.toolCount = tools.length;
     this.lastTool = tools[tools.length - 1];
     for (const mark of runs) if (mark.end) this.endsOnDisk.add(mark.id);
@@ -157,6 +162,7 @@ export class SessionJournal {
     this.epoch = epoch;
     this.pending = pending;
     this.usage = this.usageOf(agent); // the snapshot holds it
+    this.fixed = this.fixedOf(agent); // and this
     this.runs(agent);
     this.count = messages.length;
     this.last = messages[messages.length - 1];
@@ -196,6 +202,12 @@ export class SessionJournal {
     return agent.usageTotals && agent.usageTotals.turns > 0 ? JSON.stringify(agent.usageTotals) : "null";
   }
 
+  // JSON of the spending of the agent's fixed workers (`null` when there is none); in: the live agent, out: change detection + the `fixed` record, written only when it changes so a long tree is not repeated every turn.
+  private fixedOf(agent: SessionAgentLike): string {
+    const nodes = agent.fixedUsage?.() ?? [];
+    return nodes.length > 0 ? JSON.stringify(nodes) : "null";
+  }
+
   // JSON of everything in the snapshot that is not a message, identity or totals; in: the live agent, out: change detection + the `meta` record.
   private metaOf(agent: SessionAgentLike): string {
     const {
@@ -205,6 +217,7 @@ export class SessionJournal {
       totals: _t,
       runs: _r,
       usage: _u,
+      fixedUsage: _f,
       ...rest
     } = buildSessionData({ ...agent, context: { ...agent.context, messages: [] } }, null);
     return JSON.stringify(rest);
@@ -226,10 +239,10 @@ export class SessionJournal {
         if (!fs.existsSync(dest)) writeFileDurable(dest, found.bytes, { backup: false });
         changed = true;
         return {
-          ...(part as unknown as Record<string, unknown>),
+          ...part,
           [found.key]: `media/${file}`,
           ...(found.mimeType ? { mimeType: found.mimeType } : {}),
-        } as unknown as ContentPart;
+        } as ContentPart;
       });
       if (changed) out = { ...slim, content };
     }

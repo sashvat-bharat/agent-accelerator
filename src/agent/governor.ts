@@ -7,6 +7,7 @@
 import { readRetryAfterMs } from "../utils/retry.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { getSetting } from "../config/settings.ts";
+import { abortErrorFor } from "../types/errors.ts";
 
 /** What the governor limits; every key is optional and unset means unlimited. */
 export interface GovernorLimits {
@@ -29,19 +30,8 @@ function limitOf(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : Infinity;
 }
 
-// The error a waiter gets when its signal aborts while it queues; in: acquire, out: a rejection the loops treat as an abort.
-function abortError(signal: AbortSignal): Error {
-  const reason = (signal as { reason?: unknown }).reason;
-  return Object.assign(
-    reason instanceof Error ? new Error(reason.message) : new Error("Aborted while waiting for a provider slot"),
-    {
-      name: "AbortError",
-    }
-  );
-}
-
 /** The clock the governor reads; tests pass a fake one. `later` schedules `fn` after `ms` and returns its canceller. */
-export interface GovernorClock {
+interface GovernorClock {
   now(): number;
   later(fn: () => void, ms: number): () => void;
 }
@@ -50,13 +40,13 @@ const realClock: GovernorClock = {
   now: () => Date.now(),
   later: (fn, ms) => {
     const timer = setTimeout(fn, ms);
-    (timer as { unref?: () => void }).unref?.(); // a pause never keeps the process alive
+    timer.unref?.(); // a pause never keeps the process alive
     return () => clearTimeout(timer);
   },
 };
 
 /** Longest a provider is paused for one rate-limit answer (the same 60 s cap as the retry layer). */
-export const MAX_PAUSE_MS = 60_000;
+const MAX_PAUSE_MS = 60_000;
 
 /** FIFO limiter: grants slots in arrival order, per provider and overall. */
 export class Governor {
@@ -157,7 +147,8 @@ export class Governor {
   // Grants slots to waiting calls in arrival order; a waiter blocked only by its own provider's limit does not hold back the others; in: every release, out: grants.
   private pump(): void {
     for (let i = 0; i < this.queue.length && this.active < this.max; ) {
-      const w = this.queue[i]!;
+      const w = this.queue[i];
+      if (!w) break;
       if (!this.fits(w.provider)) {
         i++;
         continue;
@@ -170,14 +161,14 @@ export class Governor {
 
   /** Waits in line for a slot of `provider` (at once when there is room) and resolves with its release; rejects with an `AbortError` when `signal` aborts first. */
   acquire(provider: string, signal?: AbortSignal): Promise<() => void> {
-    if (signal?.aborted) return Promise.reject(abortError(signal));
+    if (signal?.aborted) return Promise.reject(abortErrorFor(signal, "Aborted while waiting for a provider slot"));
     if (this.fits(provider)) return Promise.resolve(this.take(provider));
     return new Promise((resolve, reject) => {
       const waiter: Waiter = { provider, grant: resolve, fail: reject, signal };
       waiter.onAbort = () => {
         const i = this.queue.indexOf(waiter);
         if (i >= 0) this.queue.splice(i, 1);
-        reject(abortError(signal!));
+        if (signal) reject(abortErrorFor(signal, "Aborted while waiting for a provider slot")); // the listener exists only when there is a signal
         this.pump(); // a removed waiter may have been the one holding the line
       };
       signal?.addEventListener("abort", waiter.onAbort, { once: true });

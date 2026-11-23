@@ -4,8 +4,8 @@
  * is still running when the call ends (a timeout or an abort) stays at the provider and may keep billing, so every error that
  * leaves the loop carries the job's id (`error.jobId`) for the caller to look it up or ask for it again.
  */
-import { TimeoutError } from "../types/errors.ts";
-import { abortError } from "../utils/provider-call.ts";
+import { TimeoutError, abortErrorFor } from "../types/errors.ts";
+
 import { sleep } from "../utils/retry.ts";
 import type { VideoProgress } from "../types/video.ts";
 
@@ -37,7 +37,7 @@ export async function pollJob<T>(args: {
   const { jobId, poll, intervalMs, deadlineMs, signal, onProgress, what } = args;
   const started = Date.now();
   for (;;) {
-    if (signal.aborted) throw withJobId(abortError(signal, `${what} ${jobId} aborted`), jobId);
+    if (signal.aborted) throw withJobId(abortErrorFor(signal, `${what} ${jobId} aborted`), jobId);
     let answer: PollAnswer<T>;
     try {
       answer = await poll();

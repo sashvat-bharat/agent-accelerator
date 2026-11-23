@@ -8,13 +8,13 @@
 function uint(bytes: Uint8Array, at: number, size: 4 | 8): number | undefined {
   if (at < 0 || at + size > bytes.length) return undefined;
   let n = 0;
-  for (let i = 0; i < size; i++) n = n * 256 + bytes[at + i]!;
+  for (let i = 0; i < size; i++) n = n * 256 + (bytes[at + i] ?? 0); // the length check above keeps every read inside the data
   return n;
 }
 
 // The four-character type of the box at `at`; in: the box walker, out: a string.
 function typeAt(bytes: Uint8Array, at: number): string {
-  return String.fromCharCode(bytes[at]!, bytes[at + 1]!, bytes[at + 2]!, bytes[at + 3]!);
+  return String.fromCharCode(bytes[at] ?? 0, bytes[at + 1] ?? 0, bytes[at + 2] ?? 0, bytes[at + 3] ?? 0);
 }
 
 // Walks the boxes in [start, end) and calls `visit` for each (type, body start, body end); `visit` returns true to stop; in: mp4DurationSeconds, out: nothing.

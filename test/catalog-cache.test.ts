@@ -1,14 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import {
-  getCatalogStatus,
-  getCacheFilePath,
-  getCacheDir,
-  setCatalogTTL,
-  getCatalogTTL,
-  DEFAULT_CATALOG_TTL_MS,
-  ensureModelCatalogFresh,
-  isValidCatalogPayload,
-} from "../src/index.ts";
+import { getCatalogStatus, setCatalogTTL, ensureModelCatalogFresh } from "../src/index.ts";
+import { getCacheFilePath, getCacheDir, getCatalogTTL, DEFAULT_CATALOG_TTL_MS, isValidCatalogPayload } from "../src/models/catalog.ts";
 
 describe("Model Catalog Dynamic Cache & 12h TTL", () => {
   it("should resolve cache directory and one shard per provider under <home>/catalog by default", () => {

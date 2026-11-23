@@ -6,6 +6,7 @@
  * task control, so a task never reaches here. Vectors are asked as floats (the default); `base64` is never used.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
@@ -22,8 +23,6 @@ import {
   timeoutFor,
 } from "./shared.ts";
 import { throwOpenAIHttpError } from "./openai-image.ts";
-
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
 interface EmbeddingsReply {
   data?: Array<{ embedding?: number[] | string; index?: number }>;
@@ -62,7 +61,7 @@ export async function openaiEmbed(
       "[Agent Accelerator] Missing OpenAI API key. Set OPENAI_API_KEY (or OPENAI_BASE_API_KEY) or pass apiKey."
     );
   }
-  const url = `${resolveProviderBaseUrl("openai", DEFAULT_BASE_URL, options)}/embeddings`;
+  const url = `${resolveProviderBaseUrl("openai", options)}/embeddings`;
   const body = {
     model: modelId,
     input: texts(request, modelId),
@@ -84,7 +83,7 @@ export async function openaiEmbed(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

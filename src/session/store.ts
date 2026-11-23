@@ -22,6 +22,8 @@
  * `loadSessionDir(dir)` resolves them back.
  */
 import * as fs from "node:fs";
+import { beforeFirst } from "../utils/text.ts";
+import { mediaKeyOf, type MediaKey } from "../utils/media-part.ts";
 import * as path from "node:path";
 import type { Message, ContentPart } from "../types/message.ts";
 import { CACHE_OPTIONS, type TokenUsage, type CacheOption, type ServiceTier } from "../types/core.ts";
@@ -33,7 +35,7 @@ import type { SubAgentStep } from "../types/response.ts";
 import { SecurityPolicyError, SessionLoadError, ValidationError } from "../types/errors.ts";
 import { createSessionId } from "../utils/session.ts";
 import { writeFileDurable, readWithBackup } from "../utils/durable.ts";
-import type { UsageTotals } from "./usage.ts";
+import { readFixedUsage, type UsageNode, type UsageTotals } from "./usage.ts";
 
 /** Cumulative per-session token + cost totals (JSON-safe). */
 export interface SessionTotals {
@@ -123,6 +125,8 @@ export interface PersistedAgentSession {
   runs?: SessionRunMark[];
   /** What this agent spent on its own model calls (see `usage.ts`); the journal keeps it current with `usage` records. */
   usage?: UsageTotals;
+  /** What this agent's fixed workers (`subagents: [...]`) spent through their per-call copies, and the workers those copies started, as a usage tree; the journal keeps it current with `fixed` records. */
+  fixedUsage?: UsageNode[];
   /** Read from the journal only (never in `session.json`): prompts that were still waiting. */
   pending?: SessionPending;
   /** Read from the journal only: results of tool calls finished in the current run (used to resume without repeating them). */
@@ -146,13 +150,13 @@ function specFor(modelStr: string): ReturnType<typeof getModelFromCatalog> {
     const raw = String(modelStr ?? "").trim();
     if (!raw) return undefined;
     if (raw.includes("/")) {
-      const [prefix, ...rest] = raw.split("/");
+      const [prefix = "", ...rest] = raw.split("/");
       const id = rest.join("/");
-      const known = getModelFromCatalog(prefix!, id) || getModelFromCatalog(prefix!.toLowerCase(), id);
+      const known = getModelFromCatalog(prefix, id) || getModelFromCatalog(prefix.toLowerCase(), id);
       if (known) return known;
       // A bare-id global search is only meaningful for first-class prefixes: a
       // custom endpoint's model must not borrow an unrelated model's price.
-      return ["google", "gemini", "openai", "openrouter"].includes(prefix!.toLowerCase())
+      return ["google", "gemini", "openai", "openrouter"].includes(prefix.toLowerCase())
         ? getModelFromCatalog(id, id)
         : undefined;
     }
@@ -167,13 +171,15 @@ function specFor(modelStr: string): ReturnType<typeof getModelFromCatalog> {
   }
 }
 
-/** Context window for telemetry display, 1M when the model is unknown (`getSessionContextWindowOrUndefined` says when it is unknown). */
+/** Context window for telemetry display, 1M when the model is unknown. */
 export function getSessionContextWindow(modelStr: string): number {
   try {
     const spec = specFor(modelStr);
     if (spec?.limit?.context) return spec.limit.context;
     if (spec?.contextWindow) return spec.contextWindow;
-  } catch {}
+  } catch {
+    // why: a catalog problem makes the model "unknown", and this call goes ahead.
+  }
   return 1_048_576;
 }
 
@@ -345,6 +351,8 @@ export interface SessionAgentLike {
   toolRecords?: SessionToolRecord[];
   /** What this agent spent on its own model calls. */
   usageTotals?: UsageTotals;
+  /** What its fixed workers' per-call copies spent (empty when it has none); called by the snapshot and the journal. */
+  fixedUsage?: () => UsageNode[];
   context: { systemPrompt?: string; messages: Message[] };
 }
 
@@ -446,14 +454,15 @@ function inlineBinaryMedia(messages: Message[]): Message[] {
     if (!Array.isArray(m.content)) return m;
     let changed = false;
     const content = (m.content as ContentPart[]).map((part) => {
-      const p = part as unknown as Record<string, unknown>;
-      if (!p || typeof p.type !== "string" || !(MEDIA_PART_KEYS as readonly string[]).includes(p["type"])) return part;
-      const value = p[p.type];
+      const key = mediaKeyOf(part);
+      if (!key) return part;
+      const value: unknown = Reflect.get(part, key);
       if (!(value instanceof Uint8Array) && !(value instanceof ArrayBuffer)) return part;
       changed = true;
       const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-      const mime = typeof p.mimeType === "string" && p.mimeType ? p.mimeType : "application/octet-stream";
-      return { ...p, [p.type]: `data:${mime};base64,${bytesToBase64(bytes)}` } as unknown as ContentPart;
+      const mimeType: unknown = Reflect.get(part, "mimeType");
+      const mime = typeof mimeType === "string" && mimeType ? mimeType : "application/octet-stream";
+      return { ...part, [key]: `data:${mime};base64,${bytesToBase64(bytes)}` } as ContentPart;
     });
     return changed ? { ...m, content } : m;
   });
@@ -472,6 +481,7 @@ export function buildSessionData(
   const parentSessionId = typeof agent.parentSessionId === "string" ? agent.parentSessionId : undefined;
   const subagents = snapshotSubagents(agent.subagentTraces);
   const messages = inlineBinaryMedia(stripRedundantRawArguments(agent.context.messages));
+  const fixedUsage = readFixedUsage(agent.fixedUsage?.() ?? []); // a validated deep copy: the live nodes keep changing
   // Field order is the on-disk layout contract: identity → config →
   // systemPrompt → totals → messages → lineage/traces. `instructions` is
   // intentionally never written: `systemPrompt` already embeds it (plus the
@@ -493,6 +503,7 @@ export function buildSessionData(
     ...(agent.usageTotals && agent.usageTotals.turns > 0
       ? { usage: JSON.parse(JSON.stringify(agent.usageTotals)) as UsageTotals }
       : {}),
+    ...(fixedUsage.length > 0 ? { fixedUsage } : {}),
   };
 }
 
@@ -687,6 +698,7 @@ function parseSession(raw: string, limits?: SessionLimits): PersistedAgentSessio
       ...(typeof obj.epoch === "string" ? { epoch: obj.epoch } : {}),
       ...(Array.isArray(obj.runs) ? { runs: obj.runs as SessionRunMark[] } : {}),
       ...(obj.usage && typeof obj.usage === "object" ? { usage: obj.usage as UsageTotals } : {}),
+      ...(Array.isArray(obj.fixedUsage) ? { fixedUsage: readFixedUsage(obj.fixedUsage) } : {}),
     };
   } catch {
     return null;
@@ -749,10 +761,10 @@ function sessionFromPayload(raw: string, file: string, limits?: SessionLimits): 
 }
 
 /** Public name of the durable writer (temp file, fsync, `.bak`, atomic rename): a crash or power cut never leaves half-written JSON. */
-export const writeFileAtomic = writeFileDurable;
+export const writeFileAtomic: typeof writeFileDurable = writeFileDurable;
 
 /** Session id grammar: no traversal, no slashes, no hidden files. */
-export function assertValidSessionId(sessionId: string): void {
+function assertValidSessionId(sessionId: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sessionId)) {
     throw new ValidationError(
       `[Agent Accelerator] Invalid sessionId "${sessionId}": must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`
@@ -770,7 +782,7 @@ export function quarantineIfCorrupt(file: string): void {
   }
 }
 
-/** Saves an agent + telemetry snapshot as a pretty-printed `.json` document (2-space indent). */
+/** Saves an agent + telemetry snapshot as a pretty-printed `.json` document (2-space indent). Throws when the file cannot be written; the agent's own persistence catches that and calls `persist.onPersistError`. */
 export function saveSessionFile(
   filePath: string,
   agent: SessionAgentLike,
@@ -779,18 +791,12 @@ export function saveSessionFile(
   const resolved = path.resolve(filePath);
   quarantineIfCorrupt(resolved);
   const data = buildSessionData(agent, telemetry);
-  try {
-    writeFileAtomic(resolved, serializeSession(data) + "\n");
-  } catch {
-    // persistence must never crash a chat turn
-  }
+  writeFileAtomic(resolved, serializeSession(data) + "\n");
 }
 
 // ---------------------------------------------------------------------------
 // Session directories: sessions/<sessionId>/{session.json, media/*}
 // ---------------------------------------------------------------------------
-
-const MEDIA_PART_KEYS = ["image", "audio", "video", "file"] as const;
 
 // True for an http(s) link, which stays a reference instead of being saved as media; in: embeddedMedia, out: a boolean.
 function isHttpRef(value: string): boolean {
@@ -813,7 +819,7 @@ function looksLikeEmbeddedBase64(value: string): boolean {
 
 // File extension for saved media from its mime type, else its filename, else `bin`; in: embeddedMedia, out: the extension.
 function extForMedia(mimeType?: string, filename?: string): string {
-  const mime = (mimeType || "").toLowerCase().split(";")[0]!.trim();
+  const mime = beforeFirst((mimeType || "").toLowerCase(), ";").trim();
   const known: Record<string, string> = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -833,7 +839,7 @@ function extForMedia(mimeType?: string, filename?: string): string {
   };
   if (mime && known[mime]) return known[mime]!;
   if (filename) {
-    const ext = filename.split("?")[0]!.split(".").pop()?.toLowerCase() ?? "";
+    const ext = beforeFirst(filename, "?").split(".").pop()?.toLowerCase() ?? "";
     if (/^[a-z0-9]{1,5}$/.test(ext)) return ext;
   }
   if (mime) {
@@ -846,14 +852,14 @@ function extForMedia(mimeType?: string, filename?: string): string {
 // Finds embedded media bytes in a part (binary, `data:` URL or raw base64); remote URLs and local paths are references and give undefined; in: any content part, out: extractMediaToDir and the session journal.
 export function embeddedMedia(
   part: ContentPart
-): { key: (typeof MEDIA_PART_KEYS)[number]; bytes: Uint8Array; mimeType?: string; ext: string } | undefined {
-  const p = part as unknown as Record<string, unknown> | null;
-  if (!p || typeof p["type"] !== "string" || !(MEDIA_PART_KEYS as readonly string[]).includes(p["type"]))
-    return undefined;
-  const key = p["type"] as (typeof MEDIA_PART_KEYS)[number];
-  const raw = p[key];
+): { key: MediaKey; bytes: Uint8Array; mimeType?: string; ext: string } | undefined {
+  const key = mediaKeyOf(part);
+  if (!key) return undefined;
+  const raw: unknown = Reflect.get(part, key);
+  const givenMime: unknown = Reflect.get(part, "mimeType");
+  const filename: unknown = Reflect.get(part, "filename");
   let bytes: Uint8Array;
-  let mimeType = typeof p["mimeType"] === "string" ? (p["mimeType"] as string) : undefined;
+  let mimeType = typeof givenMime === "string" ? givenMime : undefined;
   if (raw instanceof Uint8Array) bytes = raw;
   else if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
   else if (typeof raw === "string") {
@@ -869,7 +875,7 @@ export function embeddedMedia(
     key,
     bytes,
     ...(mimeType ? { mimeType } : {}),
-    ext: extForMedia(mimeType, typeof p["filename"] === "string" ? (p["filename"] as string) : undefined),
+    ext: extForMedia(mimeType, typeof filename === "string" ? filename : undefined),
   };
 }
 
@@ -877,7 +883,9 @@ export function embeddedMedia(
 function cloneMessages(messages: Message[]): Message[] {
   try {
     return structuredClone(messages);
-  } catch {}
+  } catch {
+    // why: `structuredClone` cannot copy some values, so the JSON copy below is used.
+  }
   try {
     return JSON.parse(JSON.stringify(messages));
   } catch {
@@ -885,10 +893,23 @@ function cloneMessages(messages: Message[]): Message[] {
   }
 }
 
+// Writes one media file only when its bytes differ from what is on disk, durably and without a `.bak`; in: extractMediaToDir, out: nothing (throws when the write fails).
+function writeMediaFile(dest: string, bytes: Uint8Array): void {
+  try {
+    const current = fs.readFileSync(dest);
+    if (current.length === bytes.length && Buffer.compare(current, bytes) === 0) return;
+  } catch {
+    // why: no file yet (or it cannot be read): it is written below.
+  }
+  writeFileDurable(dest, bytes, { backup: false });
+}
+
 /**
- * Extracts embedded media bytes (binary, `data:` URLs, raw base64) into
- * `<sessionDir>/media/` and rewrites those parts to relative `media/…`
- * paths. Remote URLs and filesystem paths are left as references.
+ * Embedded binary media (bytes, data URLs, base64) of `messages` is written to `<sessionDir>/media/` and those parts are rewritten to
+ * relative `media/…` paths. Remote URLs and filesystem paths stay references. Nothing is deleted here and a file whose bytes are
+ * unchanged is not rewritten, so the previous `session.json` keeps working until the new one is in place; call `removeOrphanMedia`
+ * after it. A file that cannot be written keeps its media inline in the session (nothing is lost) and sends a
+ * `session.media_write_failed` warning.
  */
 export function extractMediaToDir(messages: Message[], sessionDir: string): { messages: Message[]; wrote: string[] } {
   const cloned = cloneMessages(messages);
@@ -897,19 +918,6 @@ export function extractMediaToDir(messages: Message[], sessionDir: string): { me
   if (!mediaDir.startsWith(root + path.sep) && mediaDir !== root) {
     throw new SecurityPolicyError("[Agent Accelerator] Media dir escapes session dir");
   }
-  try {
-    fs.mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
-  } catch {}
-  // Never rm -rf: remove only previously written media files matching our pattern.
-  try {
-    for (const f of fs.readdirSync(mediaDir)) {
-      if (/^(image|audio|video|file)-\d+\.[a-z0-9]{1,5}$/.test(f)) {
-        try {
-          fs.unlinkSync(path.join(mediaDir, f));
-        } catch {}
-      }
-    }
-  } catch {}
   const wrote: string[] = [];
   const counters: Record<string, number> = {};
 
@@ -921,25 +929,45 @@ export function extractMediaToDir(messages: Message[], sessionDir: string): { me
       const { key, bytes, mimeType } = found;
       const n = (counters[key] = (counters[key] ?? 0) + 1);
       const file = `${key}-${String(n).padStart(3, "0")}.${found.ext}`;
+      const dest = path.resolve(mediaDir, file);
+      if (!dest.startsWith(mediaDir + path.sep)) continue;
       try {
-        fs.mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
-        const dest = path.resolve(mediaDir, file);
-        if (!dest.startsWith(mediaDir + path.sep)) continue;
-        fs.writeFileSync(dest, bytes, { mode: 0o600 });
-        try {
-          fs.chmodSync(dest, 0o600);
-        } catch {}
-      } catch {
+        writeMediaFile(dest, bytes);
+      } catch (err) {
+        telemetryBus.emitWarning(
+          "session.media_write_failed",
+          `[Agent Accelerator] Could not write ${dest}; the media stays inside the session file: ${err instanceof Error ? err.message : String(err)}`,
+          { file: dest }
+        );
         continue;
       }
-      const p = part as unknown as Record<string, unknown>;
-      p[key] = `media/${file}`;
-      if (mimeType) p["mimeType"] = mimeType;
+      Reflect.set(part, key, `media/${file}`);
+      if (mimeType) Reflect.set(part, "mimeType", mimeType);
       wrote.push(`media/${file}`);
     }
   }
 
   return { messages: cloned, wrote };
+}
+
+/** Removes the media files this module wrote in earlier saves (`image-001.png` and so on) that the current snapshot no longer uses. Call it only after `session.json` was replaced. Never removes anything else. */
+function removeOrphanMedia(sessionDir: string, keep: readonly string[]): void {
+  const mediaDir = path.resolve(sessionDir, "media");
+  const kept = new Set(keep.map((k) => path.basename(k)));
+  let names: string[];
+  try {
+    names = fs.readdirSync(mediaDir);
+  } catch {
+    return; // why: no media folder, so there is nothing to remove.
+  }
+  for (const f of names) {
+    if (kept.has(f) || !/^(image|audio|video|file)-\d+\.[a-z0-9]{1,5}$/.test(f)) continue;
+    try {
+      fs.unlinkSync(path.join(mediaDir, f));
+    } catch {
+      // why: an orphan that cannot be removed is only wasted space; the next save tries again.
+    }
+  }
 }
 
 /**
@@ -953,15 +981,14 @@ export function resolveMediaPaths(messages: Message[], sessionDir: string): Mess
   for (const msg of cloned) {
     if (!Array.isArray((msg as Message).content)) continue;
     for (const part of (msg as Message).content as ContentPart[]) {
-      const p = part as unknown as Record<string, unknown>;
-      if (!p || typeof p["type"] !== "string") continue;
-      if (!(MEDIA_PART_KEYS as readonly string[]).includes(p["type"])) continue;
-      const v = p[p["type"]] as unknown;
+      const key = mediaKeyOf(part);
+      if (!key) continue;
+      const v: unknown = Reflect.get(part, key);
       if (typeof v === "string" && (v === "media" || v.startsWith("media/"))) {
         if (v.includes("..") || path.isAbsolute(v)) continue;
         const resolved = path.resolve(root, v);
         if (!resolved.startsWith(root + path.sep) && resolved !== root) continue;
-        p[p.type] = resolved;
+        Reflect.set(part, key, resolved);
       }
     }
   }
@@ -981,9 +1008,10 @@ export function sessionDirFor(rootDir: string, sessionId: string): string {
 }
 
 /**
- * Saves `sessions/<sessionId>/session.json` (pretty, 2-space) plus
- * `media/*` for embedded bytes. Returns the session folder. Re-saving the
- * same session id rewrites the folder (no orphan accumulation).
+ * Saves a session as a folder: `session.json` plus `media/*` for embedded bytes. Returns the session folder. Re-saving the same
+ * session id rewrites it without leaving orphans. The order is crash-safe: media files first (unchanged ones are not rewritten),
+ * then the atomic `session.json` swap, then the removal of media the new snapshot no longer uses. Throws when the folder or the file
+ * cannot be written; the agent's own persistence catches that and calls `persist.onPersistError`.
  */
 export function saveSessionDir(
   rootDir: string,
@@ -992,18 +1020,13 @@ export function saveSessionDir(
 ): string {
   // sessionDirFor already enforces assertValidSessionId.
   const sessionDir = sessionDirFor(rootDir, agent.sessionId);
-  try {
-    fs.mkdirSync(sessionDir, { recursive: true });
-  } catch {}
-  const { messages } = extractMediaToDir(agent.context.messages, sessionDir);
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const { messages, wrote } = extractMediaToDir(agent.context.messages, sessionDir);
   const data = buildSessionData({ ...agent, context: { ...agent.context, messages } }, telemetry);
-  try {
-    const target = path.join(sessionDir, "session.json");
-    quarantineIfCorrupt(target);
-    writeFileAtomic(target, serializeSession(data) + "\n");
-  } catch {
-    // persistence must never crash a chat turn
-  }
+  const target = path.join(sessionDir, "session.json");
+  quarantineIfCorrupt(target);
+  writeFileAtomic(target, serializeSession(data) + "\n");
+  removeOrphanMedia(sessionDir, wrote);
   return sessionDir;
 }
 
@@ -1081,8 +1104,9 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
       if (!session.runs?.some((r) => r.id === rec.id))
         session.runs = [...(session.runs ?? []), { id: rec.id, i: rec.i, at: rec.at }];
     } else if (rec.t === "end" && typeof rec.id === "string" && typeof rec.status === "string") {
-      const mark = session.runs?.find((r) => r.id === rec.id);
-      if (mark) session.runs = session.runs!.map((r) => (r === mark ? { ...r, end: rec.status as SessionRunEnd } : r));
+      const marks = session.runs;
+      const mark = marks?.find((r) => r.id === rec.id);
+      if (marks && mark) session.runs = marks.map((r) => (r === mark ? { ...r, end: rec.status as SessionRunEnd } : r));
     } else if (rec.t === "tool" && typeof rec.call === "string" && typeof rec.name === "string") {
       session.tools = [
         ...(session.tools ?? []).filter((x) => x.id !== rec.call),
@@ -1097,6 +1121,10 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
       ];
     } else if (rec.t === "usage" && rec.u && typeof rec.u === "object") {
       session.usage = rec.u as UsageTotals; // latest record wins
+    } else if (rec.t === "fixed" && "u" in rec) {
+      const nodes = readFixedUsage(rec.u); // latest record wins; `null` (or nothing usable) clears it
+      if (nodes.length > 0) session.fixedUsage = nodes;
+      else delete session.fixedUsage;
     } else if (rec.t === "pending" && rec.p && typeof rec.p === "object") {
       const p = rec.p as SessionPending; // latest record wins
       if (Array.isArray(p.steer) && Array.isArray(p.queue)) {
@@ -1106,7 +1134,7 @@ function replayJournal(snapshot: PersistedAgentSession, text: string, file: stri
     } else if (rec.t === "meta" && rec.m && typeof rec.m === "object") {
       const meta = rec.m as Record<string, unknown>;
       for (const key of JOURNAL_META_KEYS) {
-        if (key in meta) (session as unknown as Record<string, unknown>)[key] = meta[key];
+        if (key in meta) Reflect.set(session, key, meta[key]);
         else delete session[key];
       }
     }
@@ -1197,9 +1225,9 @@ export function findLatestSessionDir(rootDir: string): string | null {
 // ---------------------------------------------------------------------------
 
 /** Default max messages accepted when loading a session snapshot (override via `SessionLimits`). */
-export const MAX_SESSION_MESSAGES = 50_000;
+const MAX_SESSION_MESSAGES = 50_000;
 /** Default max raw JSON size accepted when loading a session snapshot (override via `SessionLimits`). */
-export const MAX_SESSION_JSON_BYTES = 100 * 1024 * 1024;
+const MAX_SESSION_JSON_BYTES: number = 100 * 1024 * 1024;
 
 // A SessionLoadError with the SDK prefix; in: validateSessionData, out: the error.
 function sessionLoadError(message: string): SessionLoadError {
@@ -1245,21 +1273,6 @@ export function validateSessionData(data: unknown): PersistedAgentSession {
 // Context-window lookup without the legacy 1M fallback.
 // ---------------------------------------------------------------------------
 
-/**
- * Returns the catalog context window for a model, or `undefined` when unknown.
- * Prefer this over `getSessionContextWindow` for new code.
- */
-export function getSessionContextWindowOrUndefined(modelStr: string): number | undefined {
-  try {
-    const spec = specFor(modelStr);
-    if (spec?.limit?.context) return spec.limit.context;
-    if (spec?.contextWindow) return spec.contextWindow;
-  } catch {
-    // why: catalog lookup is best-effort — unknown models yield undefined.
-  }
-  return undefined;
-}
-
 // ---------------------------------------------------------------------------
 // Telemetry bus lives in `../telemetry.ts` (dependency-free, so low-level
 // modules such as the catalog cache and event stream can emit without import
@@ -1269,18 +1282,9 @@ import { telemetryBus } from "../telemetry.ts";
 export { telemetryBus };
 export type { TelemetryEvent, TelemetryListener } from "../telemetry.ts";
 
-/** Reports a usage/cost anomaly via the global hook + telemetry bus. Never logs. */
+/** Reports a usage or cost anomaly on the telemetry bus. The bus never throws and never logs. */
 export function reportUsageAnomaly(detail: { type: string; [k: string]: unknown }): void {
-  try {
-    (globalThis as unknown as { __agentAccelAnomaly?: (d: unknown) => void }).__agentAccelAnomaly?.(detail);
-  } catch {
-    // why: anomaly hooks are third-party — must never throw into the loop.
-  }
-  try {
-    telemetryBus.emitWarning(detail.type, `usage anomaly: ${detail.type}`, detail);
-  } catch {
-    // why: telemetry emission is observability-only.
-  }
+  telemetryBus.emitWarning(detail.type, `usage anomaly: ${detail.type}`, detail);
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,7 +1349,7 @@ export function assertUsageInvariants(usage: TokenUsage): void {
 export type CostSource = "provider" | "catalog" | "unknown";
 
 /** Integer micro-USD breakdown behind a priced cost. */
-export interface CostBreakdown {
+interface CostBreakdown {
   inputMicroUSD: number;
   outputMicroUSD: number;
   cacheReadMicroUSD: number;

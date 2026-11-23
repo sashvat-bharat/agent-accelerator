@@ -26,12 +26,8 @@ import {
   saveSessionDir,
   findLatestSessionDir,
   SessionTelemetry,
-  getSessionContextWindow,
-  formatSessionTokens,
-  formatSessionCost,
-  formatSessionBanner,
 } from "agent-accelerator";
-import { MODEL, SUB_AGENT_MODEL } from "./_shared";
+import { MODEL, SUB_AGENT_MODEL, formatTokens, formatCost, contextWindow, sessionBanner } from "./_shared";
 
 // ---------------------------------------------------------------------------
 // 1. Storage: <home>/sessions/<sessionId>/{session.json, media/*}
@@ -107,9 +103,9 @@ Object.assign(agent, {
 // 3. Interactive CLI loop
 // ---------------------------------------------------------------------------
 console.log(`\n\x1b[1;36mAgent Accelerator — Interactive CLI\x1b[0m`);
-console.log(formatSessionBanner(saved, telemetry, sessionLocation));
+console.log(sessionBanner(saved, telemetry, sessionLocation));
 console.log(
-  `Model: \x1b[32m"${agent.modelStringOrSpec}"\x1b[0m • Thinking: \x1b[33m${THINKING_LEVEL}\x1b[0m • Context: \x1b[34m${formatSessionTokens(getSessionContextWindow(agent.modelStringOrSpec as string))}\x1b[0m`
+  `Model: \x1b[32m"${agent.modelStringOrSpec}"\x1b[0m • Thinking: \x1b[33m${THINKING_LEVEL}\x1b[0m • Context: \x1b[34m${formatTokens(contextWindow(agent.modelStringOrSpec as string))}\x1b[0m`
 );
 console.log(`Session: \x1b[90m${agent.sessionId.slice(0, 16)}… (${sessionLocation})\x1b[0m`);
 console.log(`Commands: \x1b[90m/model "provider/model-id"  /help  /exit\x1b[0m\n`);
@@ -184,9 +180,9 @@ while (true) {
       onEvent: (e) => {
         if (e.type === "subagent_complete") {
           const sCost = e.subagent!.usage?.cost?.totalCost ?? 0;
-          const sCostLabel = sCost > 0 ? ` • ${formatSessionCost(sCost)}` : "";
+          const sCostLabel = sCost > 0 ? ` • ${formatCost(sCost)}` : "";
           console.log(
-            `\n\x1b[90m↳ ${e.subagent!.name} done (${formatSessionTokens(e.subagent!.usage.totalTokens)} tok${sCostLabel})\x1b[0m`
+            `\n\x1b[90m↳ ${e.subagent!.name} done (${formatTokens(e.subagent!.usage.totalTokens)} tok${sCostLabel})\x1b[0m`
           );
         }
       },
@@ -201,7 +197,7 @@ while (true) {
     if (res.subagents?.length) {
       console.log(
         `\x1b[90m  ↳ subagents: ${res.subagents
-          .map((s) => `${s.name}:${s.isError ? "ERR" : "ok"} (${formatSessionCost(s.usage?.cost?.totalCost ?? 0)})`)
+          .map((s) => `${s.name}:${s.isError ? "ERR" : "ok"} (${formatCost(s.usage?.cost?.totalCost ?? 0)})`)
           .join(", ")}\x1b[0m`
       );
     }

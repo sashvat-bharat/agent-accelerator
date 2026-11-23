@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getCacheDir } from "../src/index.ts";
+import { getCacheDir } from "../src/models/catalog.ts";
 
 const SRC_INDEX = path.resolve(import.meta.dir, "../src/index.ts");
 

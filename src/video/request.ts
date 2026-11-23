@@ -11,7 +11,7 @@ import type { VideoModelInfo } from "../models/video-models.ts";
 import type { VideoOptions } from "../types/video.ts";
 
 /** A control the model does not have: reported once on the bus by the caller, then dropped (or, for a clip a provider may ignore, sent as asked). */
-export interface VideoWarning {
+interface VideoWarning {
   capability: string;
   requested: string;
   reason: string;
@@ -19,7 +19,7 @@ export interface VideoWarning {
 }
 
 /** The request after the checks: values are final (the tier spelled as the model lists it), the media is only counted here. */
-export interface ResolvedVideoRequest {
+interface ResolvedVideoRequest {
   def: VideoModelInfo;
   prompt?: string;
   /** Whole seconds: the caller's, else the model's default. Unset when the model states none and none was given. */
@@ -53,8 +53,9 @@ export function resolveVideoRequest(
 ): { request: ResolvedVideoRequest; warnings: VideoWarning[] } {
   const problems: string[] = [];
   const warnings: VideoWarning[] = [];
-  const drop = (capability: string, requested: string, reason: string): void =>
-    void warnings.push({ capability, requested, reason, fallback: "the model's default (the option is not sent)" });
+  const drop = (capability: string, requested: string, reason: string): void => {
+    warnings.push({ capability, requested, reason, fallback: "the model's default (the option is not sent)" });
+  };
 
   const hasFirstFrame = opts.firstFrame !== undefined;
   const hasLastFrame = opts.lastFrame !== undefined;

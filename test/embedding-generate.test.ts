@@ -22,7 +22,7 @@ import { setConfigs, SETTING_KEYS } from "../src/config/settings.ts";
 import { setGovernorLimits } from "../src/agent/governor.ts";
 import { clearEmittedWarnings } from "../src/providers.ts";
 import { resetOpenRouterEmbeddingsCache } from "../src/models/openrouter-embeddings.ts";
-import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../src/index.ts";
+import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../src/types/embedding.ts";
 
 type Hook = (modelId: string, req: ProviderEmbeddingRequest, options: any) => Promise<ProviderEmbeddingResult>;
 // One vector per item: [position in the whole list encoded in the text "n<k>", 0.5]; texts that are not "n<k>" give [0, 0.5].

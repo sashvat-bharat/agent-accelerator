@@ -11,6 +11,7 @@ import type {
   InterruptedRun,
 } from "../types/agent.ts";
 import type { TokenUsage } from "../types/core.ts";
+import { noop } from "../utils/noop.ts";
 import { normalizeThinkingV2, resolveWhenBusy } from "../tools/tool.ts";
 import type { ToolDefinition, ToolResultRecord } from "../types/tool.ts";
 import { isSubagentResult } from "../tools/subagent-result.ts";
@@ -78,8 +79,10 @@ import {
   addTurn,
   buildUsageReport,
   emptyUsage,
+  foldOldNodes,
   mergeUsage,
   modelName,
+  readFixedUsage,
   readUsage,
   type UsageNode,
   type UsageReport,
@@ -105,7 +108,7 @@ import { validateModelThinking, ensureModelCatalogFresh } from "../models/catalo
 import { buildSessionData, type PersistedAgentSession, type SessionTotals } from "../session/store.ts";
 import { SessionTelemetry } from "../session/store.ts";
 
-import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
+import { ConfigError, ValidationError, isAbortError, abortError } from "../types/errors.ts";
 
 /**
  * Disposers for the manual user-signal forward listeners (fallback when
@@ -115,6 +118,8 @@ import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 const mergeDisposers = new WeakMap<AbortController, () => void>();
 
 /** Waits before run retry 1, 2, 3 ... (the last one repeats). Module-level so tests can shrink it; not public API. */
+// How many workers started by the copies of one fixed worker are listed one by one in `usageReport()`; the oldest past this fold into one line (totals stay exact).
+const MAX_COPIED_WORKER_NODES = 1000;
 export const RUN_RETRY_DELAYS_MS: number[] = [5_000, 15_000, 45_000, 60_000];
 
 /** Thrown when dynamic sub-agent spawning is enabled without an explicit model. */
@@ -293,6 +298,14 @@ export class Agent {
   /** The resume in flight, so a second `resume()` returns the same promise. */
   private resuming?: Promise<AgentResponse | undefined>;
   private workerRegistry?: WorkerRegistry;
+  /** The workers that the per-call copies of this agent (as a fixed worker) started, as usage nodes; kept so `usageReport()` lists them. */
+  private readonly copiedWorkers: UsageNode[] = [];
+  /** What the per-call copies of this agent (as a fixed worker) spent; kept apart from its own calls, so a restored session never doubles them. */
+  private readonly copiedUsage: UsageTotals = emptyUsage();
+  /** Saved fixed-worker spending whose worker is no longer in `subagents` (renamed or removed); kept so the total stays exact. */
+  private readonly orphanFixed: UsageNode[] = [];
+  /** The spending of this agent's fixed workers as a usage tree, for the snapshot and the journal; an own property so a `{ ...agent }` copy keeps it. @internal */
+  readonly fixedUsage: () => UsageNode[] = () => this.fixedUsageNodes();
   /** The chat-wide spending cap this agent counts into and checks against: its own (`usageLimit`) or the root's, handed down to workers. @internal */
   chat?: UsageLimit;
   /** True for the agent that created `chat` from its own `usageLimit` (the root of the chat). */
@@ -337,7 +350,7 @@ export class Agent {
       this.chat = new UsageLimit(chatCap);
       this.ownsChat = true;
     }
-    // Unified model resolution (shared with SubAgent/workers): supports
+    // Unified model resolution (shared with workers): supports
     // ModelProviderInstance {model,apiKey,...} and ModelSpec {id,provider}.
     const { modelStringOrSpec, rawModel } = resolveMainModel(config.model);
     this.modelStringOrSpec = modelStringOrSpec as string | ModelSpec;
@@ -471,7 +484,7 @@ export class Agent {
       maxSteers: this.maxSteers,
     });
     // Run limits (sub-agents inherit unless overridden).
-    this.runLimits = resolveAgentLimits(config as unknown as { limits?: Record<string, unknown> });
+    this.runLimits = resolveAgentLimits(config);
 
     // DX4: single thinkingLevel flag — also inherit from ModelProviderInstance when omitted
     const mpThinking = modelHelper?.thinkingLevel;
@@ -619,7 +632,7 @@ export class Agent {
     if (!(session.runs ?? []).some((r) => !r.end) && waiting.length === 0) return false;
     this.context.messages = session.messages;
     this.runMarks.splice(0, this.runMarks.length, ...(session.runs ?? []));
-    this.restoreUsage(session.usage);
+    this.restoreUsage(session.usage, session.fixedUsage);
     const open = new Set(unfinishedToolCalls(this.context.messages).map((c) => c.id));
     this.toolRecords.splice(0, this.toolRecords.length, ...(session.tools ?? []).filter((t) => open.has(t.id)));
     for (const w of waiting) {
@@ -627,17 +640,19 @@ export class Agent {
         prompt: w.prompt,
         options: w.additionalContext ? { additionalContext: w.additionalContext } : undefined,
         isStream: false,
-        resolve: () => {},
+        resolve: noop,
         reject: (err) => this.reportResumeFailure(err),
       });
     }
     return true;
   }
 
-  // Puts saved spending totals back after a restart or import (zeros when the file has none); in: a loaded session's `usage`, out: this.usageTotals.
-  restoreUsage(saved: unknown): void {
+  // Puts saved spending back after a restart or import (zeros when the file has none): this agent's own totals and what its fixed workers spent; in: a loaded session's `usage` and `fixedUsage`, out: this.usageTotals and the fixed workers' copied spending.
+  restoreUsage(saved: unknown, fixed?: unknown): void {
     Object.assign(this.usageTotals, readUsage(saved));
-    if (this.ownsChat) this.chat!.restart(); // a restored session changes the starting point of the chat total
+    this.clearFixed();
+    this.placeFixed(readFixedUsage(fixed));
+    if (this.ownsChat) this.chat?.restart(); // a restored session changes the starting point of the chat total
   }
 
   // Records one model call of THIS agent (priced per turn, with the service tier); in: the loop's onTurnUsage, out: this.usageTotals (saved by the next persist).
@@ -647,22 +662,39 @@ export class Agent {
     this.chat?.add((usage.inputTokens || 0) + (usage.outputTokens || 0), priced?.breakdown.totalMicroUSD ?? 0);
   }
 
-  /** Adds another agent's spending to this one (a fixed worker's per-call copy into its template). @internal */
+  /** Adds the spending of one per-call copy of this agent (as a fixed worker) to what its copies spent. @internal */
   absorbUsage(other: UsageTotals): void {
-    mergeUsage(this.usageTotals, other);
+    mergeUsage(this.copiedUsage, other);
+  }
+
+  /** Keeps the workers a fixed worker's per-call copy started as usage nodes under this template (the oldest past 1,000 fold into one node). @internal */
+  absorbWorkers(nodes: UsageNode[]): void {
+    this.copiedWorkers.push(...nodes);
+    foldOldNodes(this.copiedWorkers, MAX_COPIED_WORKER_NODES);
+  }
+
+  /** The usage nodes of the workers this agent started (none, without creating the registry, when it never started one). @internal */
+  startedWorkerNodes(): UsageNode[] {
+    return this.workerRegistry?.usageNodes() ?? [];
   }
 
   /**
    * What this agent and every worker below it spent: per agent and per worker (tokens, cache hits, thinking, exact
    * cost per turn) plus a whole-session total, with nothing counted twice. `agent` is this agent's own model calls;
-   * workers (open, closed, nested, and rebuilt from disk after a restart) and fixed `subagents` workers are listed
-   * below it. Spending of one-shot scheduled-action workers is in their run files, not here.
+   * workers (open, closed, nested, and rebuilt from disk after a restart) and fixed `subagents` workers (with the
+   * workers their copies started) are listed below it. Spending of one-shot scheduled-action workers is in their run
+   * files, not here.
    */
   usageReport(): UsageReport {
     return buildUsageReport(
       { id: this.sessionId, name: this.name, model: modelName(this.modelStringOrSpec), totals: this.usageTotals },
-      [...this.workers.usageNodes(), ...this.fixedWorkerNodes(), ...this.imageToolNodes()]
+      [...this.workerNodes(), ...this.imageToolNodes()]
     );
+  }
+
+  // Everything below this agent as usage nodes: the workers it started, its fixed workers (each with what lies below it) and the workers its fixed workers' copies started; in: usageReport and fixedWorkerNodes, out: UsageNode[].
+  private workerNodes(): UsageNode[] {
+    return [...this.workers.usageNodes(), ...this.fixedWorkerNodes(), ...this.copiedWorkers];
   }
 
   // The picture spending of this agent's `imageTool`s as usage nodes (status "fixed"); in: this.tools, out: usageReport.
@@ -684,22 +716,72 @@ export class Agent {
     return nodes;
   }
 
-  // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is merged into them); in: the constructor config, out: usageReport.
+  // The `subagents: [...]` workers with the name each is listed under; in: the constructor config, out: fixedWorkerNodes, fixedUsageNodes and placeFixed.
+  private fixedEntries(): Array<{ name: string; worker: Agent }> {
+    return (this.forkConfig.subagents ?? []).map((entry) =>
+      "agent" in entry ? { name: entry.name, worker: entry.agent } : { name: entry.name, worker: entry }
+    );
+  }
+
+  // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is added to them, and the workers those copies started hang below them), plus saved ones that no longer exist; in: the constructor config, out: workerNodes.
   private fixedWorkerNodes(): UsageNode[] {
+    const nodes: UsageNode[] = this.fixedEntries().map(({ name, worker }) => {
+      const totals = emptyUsage();
+      mergeUsage(totals, worker.usageTotals);
+      mergeUsage(totals, worker.copiedUsage);
+      return {
+        id: name,
+        name,
+        model: modelName(worker.modelStringOrSpec),
+        status: "fixed",
+        totals,
+        workers: worker.workerNodes(),
+      };
+    });
+    return [...nodes, ...this.orphanFixed];
+  }
+
+  // What the copies of this agent's fixed workers spent, as the tree the session saves (a worker with nothing to save is left out); in: `fixedUsage`, out: the snapshot and the `fixed` journal record.
+  private fixedUsageNodes(): UsageNode[] {
     const nodes: UsageNode[] = [];
-    for (const entry of this.forkConfig.subagents ?? []) {
-      const worker = "agent" in entry ? entry.agent : entry;
-      const name = "agent" in entry ? entry.name : worker.name;
+    for (const { name, worker } of this.fixedEntries()) {
+      const below = [...worker.copiedWorkers, ...worker.fixedUsageNodes()];
+      if (worker.copiedUsage.turns === 0 && below.length === 0) continue;
       nodes.push({
         id: name,
         name,
         model: modelName(worker.modelStringOrSpec),
         status: "fixed",
-        totals: worker.usageTotals,
-        workers: [],
+        totals: worker.copiedUsage,
+        workers: below,
       });
     }
-    return nodes;
+    return [...nodes, ...this.orphanFixed];
+  }
+
+  // Forgets what the copies of this agent's fixed workers spent, all the way down; in: restoreUsage, out: empty copied spending.
+  private clearFixed(): void {
+    this.orphanFixed.length = 0;
+    for (const { worker } of this.fixedEntries()) {
+      Object.assign(worker.copiedUsage, emptyUsage());
+      worker.copiedWorkers.length = 0;
+      worker.clearFixed();
+    }
+  }
+
+  // Puts a saved fixed-worker tree back: each node goes to the fixed worker of the same name, and one with no such worker is kept as it is; in: restoreUsage, out: copied spending and workers.
+  private placeFixed(nodes: UsageNode[]): void {
+    const entries = this.fixedEntries();
+    for (const node of nodes) {
+      const found = entries.find((e) => e.name === node.id);
+      if (!found) {
+        this.orphanFixed.push(node);
+        continue;
+      }
+      Object.assign(found.worker.copiedUsage, node.totals);
+      found.worker.copiedWorkers.push(...node.workers.filter((w) => w.status !== "fixed"));
+      found.worker.placeFixed(node.workers.filter((w) => w.status === "fixed"));
+    }
   }
 
   // Says on the telemetry bus that resuming (or a prompt that was waiting) failed; in: a rejected resume, out: telemetryBus.
@@ -824,10 +906,14 @@ export class Agent {
     // Reset also drops session-scoped provider chaining/routing.
     try {
       clearInteractionChains(sid);
-    } catch {}
+    } catch {
+      // why: clearing provider state is best effort; what is left expires by itself.
+    }
     try {
       clearSessionRouting(sid);
-    } catch {}
+    } catch {
+      // why: clearing provider state is best effort; what is left expires by itself.
+    }
   }
 
   /**
@@ -863,15 +949,19 @@ export class Agent {
   clearQueue(): number {
     const n = this.rc.queue.length;
     if (n === 0) return 0;
-    const err = Object.assign(new Error("Queue cleared"), { name: "AbortError" });
+    const err = abortError("Queue cleared");
     const pending = this.rc.queue.splice(0);
     for (const entry of pending) {
       try {
         entry.reject(err);
-      } catch {}
+      } catch {
+        // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+      }
       try {
         entry.deferredStream?.fail(err instanceof Error ? err : new Error(String(err)));
-      } catch {}
+      } catch {
+        // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+      }
     }
     this.persistNow();
     return n;
@@ -1050,7 +1140,9 @@ export class Agent {
   private announceQueued(prompt: string | ContentPart[], queueLength: number): void {
     try {
       this.rc.current?.outerStream?.push({ type: "queued", queuedPrompt: previewPrompt(prompt), queueLength });
-    } catch {}
+    } catch {
+      // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+    }
   }
 
   // Adds a non-streaming follow-up to the waiting queue after the room check, saves it and announces it; in: queue() and run() while busy, out: the promise of that later run.
@@ -1070,10 +1162,14 @@ export class Agent {
       if (dispose) {
         try {
           dispose();
-        } catch {}
+        } catch {
+          // why: cancelling or releasing something that is already closed is harmless.
+        }
         mergeDisposers.delete(runController);
       }
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   }
 
   // Joins the caller's AbortSignal with the run's own controller (AbortSignal.any, else a manual forward) so both stop the run; in: AgentRunOptions.signal + the run controller, out: the signal handed to the loop.
@@ -1086,17 +1182,21 @@ export class Agent {
       } catch {
         try {
           runController.abort();
-        } catch {}
+        } catch {
+          // why: cancelling or releasing something that is already closed is harmless.
+        }
       }
       return runController.signal;
     }
     // Prefer AbortSignal.any (no expando, no listener leak).
     try {
-      const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+      const anyFn = AbortSignal.any;
       if (typeof anyFn === "function") {
         return anyFn.call(AbortSignal, [userSignal, runController.signal]);
       }
-    } catch {}
+    } catch {
+      // why: `AbortSignal.any` is missing in older runtimes, so the manual merge below is used.
+    }
     // Fallback: manual forward without expando (disposer in WeakMap).
     const forward = () => {
       try {
@@ -1104,19 +1204,27 @@ export class Agent {
       } catch {
         try {
           runController.abort();
-        } catch {}
+        } catch {
+          // why: cancelling or releasing something that is already closed is harmless.
+        }
       }
     };
     try {
       userSignal.addEventListener("abort", forward, { once: true });
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     try {
       mergeDisposers.set(runController, () => {
         try {
           userSignal.removeEventListener("abort", forward);
-        } catch {}
+        } catch {
+          // why: cancelling or releasing something that is already closed is harmless.
+        }
       });
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     return runController.signal;
   }
 
@@ -1161,7 +1269,7 @@ export class Agent {
       persist: undefined,
       ...(dyn?.allowScheduledActions ? { dynamicSubagents: { ...dyn, allowScheduledActions: false } } : {}),
     });
-    if (parentSessionId) (copy as unknown as { parentSessionId?: string }).parentSessionId = parentSessionId;
+    if (parentSessionId) copy.parentSessionId = parentSessionId;
     return copy;
   }
 
@@ -1186,7 +1294,7 @@ export class Agent {
   // Takes the chat total's starting point (what the saved sessions of this agent and its workers already spent) once, before the first turn of the chat's root agent; in: the run starters, out: this.chat.
   private beginChat(): void {
     if (!this.ownsChat) return;
-    this.chat!.begin(() => {
+    this.chat?.begin(() => {
       // A persisted chat starts from its saved sessions (this agent's and every worker's); a memory-only one from what it holds now.
       const root = this.persistConfig?.dir;
       if (root && !this.stateless) {
@@ -1212,7 +1320,7 @@ export class Agent {
   private enforceBudget(usage?: TokenUsage): void {
     this.chat?.check(); // the chat-wide cap: before every turn and right after each one
     if (!this.budget) return;
-    if (usage) chargeBudgetUsage(this as unknown as Parameters<typeof chargeBudgetUsage>[0], usage);
+    if (usage) chargeBudgetUsage(this, usage);
     checkBudget(this.budget, this.budgetState);
   }
 
@@ -1343,7 +1451,9 @@ export class Agent {
     const cleanup = () => {
       try {
         this.cleanupMerge(runController);
-      } catch {}
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
       if (this.rc.current?.runPromise === task) this.rc.finishCurrentRun();
     };
     task.then(cleanup, cleanup);
@@ -1404,10 +1514,14 @@ export class Agent {
         try {
           this.mergeSubagentTraces(res.subagents);
           this.persistNow();
-        } catch {}
+        } catch {
+          // why: bookkeeping must never fail a run; the run result is what counts.
+        }
         try {
           this.cleanupMerge(runController);
-        } catch {}
+        } catch {
+          // why: cancelling or releasing something that is already closed is harmless.
+        }
         if (this.stateless) {
           targetContext.messages = [];
           targetContext.thoughtSignatures = [];
@@ -1418,7 +1532,9 @@ export class Agent {
         this.endRun(mark, isAbortError(err) ? "aborted" : "failed");
         try {
           this.cleanupMerge(runController);
-        } catch {}
+        } catch {
+          // why: cancelling or releasing something that is already closed is harmless.
+        }
         if (this.rc.current?.outerStream === s) this.rc.finishCurrentRun();
       }
     );
@@ -1474,11 +1590,11 @@ export class Agent {
     const root = this.persistConfig?.dir;
     if (!root || this.stateless || sessionId !== this.sessionId) return undefined;
     const dir = sessionDirFor(root, this.sessionId);
-    if (this.toolLogsDir !== dir) {
+    if (this.toolLogsDir !== dir || !this.toolLogs) {
       this.toolLogs = new ToolLogs(dir);
       this.toolLogsDir = dir;
     }
-    return this.toolLogs!.open(call);
+    return this.toolLogs.open(call);
   }
 
   /** Synchronous persistence write behind the coalesced `persistNow()` gate. */
@@ -1653,8 +1769,9 @@ export class Agent {
       // If callbacks are used, proxy them through string stream as well
       if (runOpts.onDelta || runOpts.onThinkingDelta || runOpts.onEvent) {
         if (runOpts.onEvent) stream.on("*", runOpts.onEvent);
-        if (runOpts.onDelta) stream.on("text_delta", (e) => runOpts.onDelta!(e.delta!, e));
-        if (runOpts.onThinkingDelta) stream.on("thinking_delta", (e) => runOpts.onThinkingDelta!(e.thinkingDelta!, e));
+        const { onDelta, onThinkingDelta } = runOpts;
+        if (onDelta) stream.on("text_delta", (e) => onDelta(e.delta ?? "", e));
+        if (onThinkingDelta) stream.on("thinking_delta", (e) => onThinkingDelta(e.thinkingDelta ?? "", e));
       }
       const stringStream = {
         [Symbol.asyncIterator]: async function* () {
@@ -1678,12 +1795,14 @@ export class Agent {
       };
       // Make await work (resolves to AgentResponse)
       const resultPromise = stream.result();
+      // why: `stringStream` yields text and now also has `then`/`catch`, which is the promise-and-iterable type `ask` promises.
       return Object.assign(stringStream, {
         then: resultPromise.then.bind(resultPromise),
         catch: resultPromise.catch.bind(resultPromise),
       }) as unknown as Promise<AgentResponse> & AsyncIterable<string | StreamEvent>;
     }
 
+    // why: `run` with `stream: true` returns the stream that is also awaitable, but its overloads do not say so for this union.
     return this.run(prompt, runOpts) as unknown as Promise<AgentResponse> & AsyncIterable<string | StreamEvent>;
   }
 
@@ -1735,21 +1854,29 @@ export class Agent {
                   finishReason: res.finishReason,
                   responseId: res.responseId,
                 });
-              } catch {}
+              } catch {
+                // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+              }
               try {
                 stub.end(res);
-              } catch {}
+              } catch {
+                // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+              }
             },
             (err) => {
               try {
                 stub.fail(err instanceof Error ? err : new Error(String(err)));
-              } catch {}
+              } catch {
+                // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+              }
             }
           );
         } else {
           try {
             stub.fail(new ValidationError("[Agent Accelerator] No active run to steer."));
-          } catch {}
+          } catch {
+            // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+          }
         }
         return stub;
       }
@@ -1769,30 +1896,31 @@ export class Agent {
         options,
         isStream: true,
         deferredStream: deferred,
-        resolve: () => {},
-        reject: () => {},
+        resolve: noop,
+        reject: noop,
       };
       const done = new Promise<AgentResponse>((resolve, reject) => {
         queuedEntry.resolve = resolve;
         queuedEntry.reject = reject;
       });
       // Keep result() in sync: deferred ends when the queued turn completes.
-      done.then(
-        () => {},
-        () => {}
-      );
+      done.then(noop, noop);
       // Forward cancellation before start: drop from queue and fail.
       deferred.onCancel(() => {
         try {
           const idx = this.rc.queue.indexOf(queuedEntry);
           if (idx >= 0) {
             this.rc.queue.splice(idx, 1);
-            queuedEntry.reject(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
+            queuedEntry.reject(abortError("Stream aborted"));
             try {
-              deferred.fail(Object.assign(new Error("Stream aborted"), { name: "AbortError" }));
-            } catch {}
+              deferred.fail(abortError("Stream aborted"));
+            } catch {
+              // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+            }
           }
-        } catch {}
+        } catch {
+          // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+        }
       });
       if (urgent) {
         this.rc.queueUrgent(queuedEntry);
@@ -1817,14 +1945,18 @@ export class Agent {
               });
               deferred.end(res);
             }
-          } catch {}
+          } catch {
+            // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+          }
         },
         (err) => {
           try {
             if (!isPiped(deferred)) {
               deferred.fail(err instanceof Error ? err : new Error(String(err)));
             }
-          } catch {}
+          } catch {
+            // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+          }
         }
       );
       return deferred;
@@ -1838,8 +1970,10 @@ export class Agent {
   // Attaches the caller's onEvent/onDelta/onThinkingDelta callbacks to a stream; in: stream()/pumpQueue, out: listeners on the stream.
   private wireStreamCallbacks(s: AssistantMessageEventStream, options?: AgentRunOptions): void {
     if (options?.onEvent) s.on("*", options.onEvent);
-    if (options?.onDelta) s.on("text_delta", (e) => options.onDelta!(e.delta!, e));
-    if (options?.onThinkingDelta) s.on("thinking_delta", (e) => options.onThinkingDelta!(e.thinkingDelta!, e));
+    const onDelta = options?.onDelta;
+    if (onDelta) s.on("text_delta", (e) => onDelta(e.delta ?? "", e));
+    const onThinkingDelta = options?.onThinkingDelta;
+    if (onThinkingDelta) s.on("thinking_delta", (e) => onThinkingDelta(e.thinkingDelta ?? "", e));
   }
 }
 

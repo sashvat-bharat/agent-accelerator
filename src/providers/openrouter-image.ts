@@ -7,6 +7,7 @@
  * seed and markup are never sent. A failed generation is a 502 with no charge and is retried like any 5xx.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { openRouterSetting } from "../config/settings.ts";
@@ -29,7 +30,6 @@ import {
   timeoutFor,
 } from "./shared.ts";
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 const FORMAT_MIME: Record<string, string> = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" };
 
 interface ImagesReply {
@@ -92,7 +92,7 @@ export async function openrouterGenerateImage(
   const apiKey = resolveProviderApiKey("openrouter", options);
   if (!apiKey)
     throw new ConfigError("[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey.");
-  const url = `${resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options)}/images`;
+  const url = `${resolveProviderBaseUrl("openrouter", options)}/images`;
 
   // Provider routing and `user` come from the developer's `openrouter` setting, exactly as for chat.
   const setting = openRouterSetting();
@@ -128,7 +128,7 @@ export async function openrouterGenerateImage(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

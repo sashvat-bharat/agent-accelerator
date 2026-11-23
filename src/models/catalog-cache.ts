@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { noop } from "../utils/noop.ts";
+import { readTextCapped } from "../utils/body.ts";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { getSetting, onSettingsChange } from "../config/settings.ts";
@@ -8,10 +10,10 @@ import { writeFileDurable } from "../utils/durable.ts";
 import { buildShards, isShard, CATALOG_PROVIDERS, type CatalogProvider, type SlimModel } from "./catalog-shards.ts";
 
 /** Default TTL: 12 Hours (in milliseconds). */
-export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
+export const DEFAULT_CATALOG_TTL_MS: number = 12 * 60 * 60 * 1000;
 
 /** Max accepted models.dev payload size: 15MB. Larger payloads are rejected before parse. */
-export const MAX_CATALOG_PAYLOAD_BYTES = 15 * 1024 * 1024;
+const MAX_CATALOG_PAYLOAD_BYTES: number = 15 * 1024 * 1024;
 
 let globalCatalogTtlMs = DEFAULT_CATALOG_TTL_MS;
 
@@ -32,7 +34,7 @@ export function getCatalogTTL(): number {
 }
 
 /** `<cache>/meta.json`: written LAST after a refresh (the commit marker); the shards it counts are read lazily. */
-export interface CatalogMeta {
+interface CatalogMeta {
   version: 2;
   fetchedAt: number;
   ttlMs: number;
@@ -78,7 +80,9 @@ function notifyUpdateListeners(): void {
   for (const listener of updateListeners) {
     try {
       listener();
-    } catch {}
+    } catch {
+      // why: a callback or listener of yours must never break the run.
+    }
   }
 }
 
@@ -118,7 +122,7 @@ function writeJsonFileSync(filePath: string, data: unknown): void {
 }
 
 /** Verifies the optional sha256 pin (`models_dev_sha256` setting). Returns false on mismatch. */
-export function verifyCatalogSha256(text: string): boolean {
+function verifyCatalogSha256(text: string): boolean {
   const pin = getSetting("models_dev_sha256") as string | undefined;
   if (!pin) return true;
   const hex = createHash("sha256").update(text, "utf8").digest("hex").toLowerCase();
@@ -128,7 +132,7 @@ export function verifyCatalogSha256(text: string): boolean {
 /** Wall-clock of the last failed network refresh (0 = none); drives the retry backoff. */
 let lastRefreshFailureAt = 0;
 /** After a failed refresh, `ensureModelCatalogFresh` stays quiet this long (10 min). */
-export const REFRESH_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
+export const REFRESH_FAILURE_BACKOFF_MS: number = 10 * 60 * 1000;
 /** Network timeout for a background refresh when a usable catalog is already loaded. */
 const BACKGROUND_REFRESH_TIMEOUT_MS = 8_000;
 
@@ -186,7 +190,7 @@ export function getShardModels(provider: string): Record<string, SlimModel> | un
 }
 
 /** Checks whether the active model catalog has expired based on its TTL. */
-export function isCatalogExpired(): boolean {
+function isCatalogExpired(): boolean {
   if (!activeMeta) return true;
   const age = Date.now() - activeMeta.fetchedAt;
   return age < 0 || age >= activeMeta.ttlMs;
@@ -292,7 +296,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
     }
 
     // Size-cap before parse (check text length, reject >15MB).
-    const text = await res.text();
+    const text = await readTextCapped(res, MAX_CATALOG_PAYLOAD_BYTES);
     if (text.length > MAX_CATALOG_PAYLOAD_BYTES) {
       clearTimeout(timer);
       fallbackToDiskCache();
@@ -409,7 +413,7 @@ export async function ensureModelCatalogFresh(options: RefreshCatalogOptions = {
   };
 
   if (current.loaded && !options.force) {
-    start().catch(() => {}); // background revalidation; failures are non-fatal
+    start().catch(noop); // background revalidation; failures are non-fatal
     return current;
   }
   return start();

@@ -10,6 +10,7 @@
  * redesigning this abstraction — only new per-provider mappers/adapters.
  */
 import type { CacheOption, ServiceTier, ThinkingLevel } from "./types/core.ts";
+import { isRecord } from "./utils/guards.ts";
 import type { StructuredOutputSpec } from "./types/model.ts";
 import type { Message } from "./types/message.ts";
 import type { EmbeddingTask } from "./types/embedding.ts";
@@ -18,9 +19,6 @@ import { ValidationError } from "./types/errors.ts";
 import { TRUNCATED_ARGS_KEY } from "./types/tool.ts";
 import { telemetryBus } from "./telemetry.ts";
 import { DEFAULT_PROMPTS, fillPrompt } from "./prompts/prompts.ts";
-
-/** Classification of a canonical capability on a given provider. */
-export type ProviderCapabilityStatus = "NATIVE" | "TRANSLATED" | "AUTOMATIC" | "EMULATED" | "UNSUPPORTED";
 
 /**
  * Single warning mechanism for provider capability differences.
@@ -64,7 +62,9 @@ export function emitProviderWarning(options: {
   });
   try {
     console.warn(msg);
-  } catch {}
+  } catch {
+    // why: a console that throws (some embedded runtimes) must not break the call.
+  }
 }
 
 /** Clears deduped-warning state (mainly for tests). */
@@ -273,7 +273,7 @@ function warnValidatedToolChoice(provider: string): void {
 }
 
 /** OpenRouter Chat Completions `tool_choice` wire values. */
-export type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+type OpenRouterChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 
 /**
  * Maps canonical toolChoice onto Chat Completions `tool_choice`.
@@ -324,7 +324,7 @@ export function mapServiceTierToOpenAI(tier: ServiceTier | undefined): "flex" | 
 }
 
 /** OpenAI Responses `tool_choice` wire values (most-important subset). */
-export type OpenAIToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
+type OpenAIToolChoice = "auto" | "none" | "required" | { type: "function"; name: string };
 
 /**
  * Maps canonical toolChoice onto OpenAI Responses `tool_choice`.
@@ -345,7 +345,7 @@ export function mapToolChoiceToOpenAI(
 }
 
 /** Normalized tool-choice mode shared by provider adapters. */
-export type CanonicalToolChoiceMode = "auto" | "any" | "none" | "validated";
+type CanonicalToolChoiceMode = "auto" | "any" | "none" | "validated";
 
 /**
  * Normalizes canonical toolChoice into a provider-neutral mode + optional
@@ -372,10 +372,6 @@ export function normalizeToolChoice(
 }
 
 // True for a non-array object; in: the argument and schema helpers, out: a type guard.
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
 /**
  * Reconstructs tool arguments from streamed chunks.
  *
@@ -393,7 +389,7 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
   for (const candidate of candidates) {
     try {
       const parsed: unknown = JSON.parse(candidate);
-      if (isPlainObject(parsed)) return parsed;
+      if (isRecord(parsed)) return parsed;
     } catch {
       // try next candidate
     }
@@ -417,7 +413,7 @@ export function selectRawArguments(startText: string, deltaText: string): string
   for (const candidate of candidates) {
     try {
       const parsed: unknown = JSON.parse(candidate);
-      if (isPlainObject(parsed)) return candidate;
+      if (isRecord(parsed)) return candidate;
     } catch {
       // try next candidate
     }
@@ -430,7 +426,7 @@ export function selectRawArguments(startText: string, deltaText: string): string
 // ---------------------------------------------------------------------------
 
 /** Canonical generation controls as carried on `ProviderRequestOptions`. */
-export interface GenerationParams {
+interface GenerationParams {
   maxOutputTokens?: number;
 }
 
@@ -471,17 +467,17 @@ function isZodLike(value: unknown): boolean {
 
 // True when a plain object has JSON Schema keywords; in: structured-output normalization, out: a boolean.
 function looksLikeJsonSchema(value: unknown): boolean {
-  if (!isPlainObject(value)) return false;
+  if (!isRecord(value)) return false;
   const v = value as Record<string, unknown>;
   return (
     typeof v["type"] === "string" ||
-    isPlainObject(v["properties"]) ||
+    isRecord(v["properties"]) ||
     Array.isArray(v["anyOf"]) ||
     Array.isArray(v["oneOf"]) ||
     Array.isArray(v["allOf"]) ||
     typeof v["$schema"] === "string" ||
-    isPlainObject(v["$defs"]) ||
-    isPlainObject(v["definitions"])
+    isRecord(v["$defs"]) ||
+    isRecord(v["definitions"])
   );
 }
 
@@ -497,12 +493,12 @@ function schemaToJsonSchema(schema: unknown, what: string): Record<string, unkno
   if (isZodLike(schema)) {
     try {
       const converted = zodToJsonSchema(schema);
-      if (isPlainObject(converted)) return converted;
+      if (isRecord(converted)) return converted;
     } catch {
       // fall through to error below
     }
   }
-  if (isPlainObject(schema)) return schema as Record<string, unknown>;
+  if (isRecord(schema)) return schema as Record<string, unknown>;
   throw new ValidationError(
     `[Agent Accelerator] Invalid structured output ${what}: expected a Zod schema, a JSON Schema object, or { name, schema, strict }.`
   );
@@ -519,7 +515,7 @@ function schemaToJsonSchema(schema: unknown, what: string): Record<string, unkno
  */
 export function normalizeStructuredOutput(output: unknown): StructuredOutputSpec | undefined {
   if (output === undefined || output === null) return undefined;
-  if (isPlainObject(output) && "schema" in (output as Record<string, unknown>)) {
+  if (isRecord(output) && "schema" in (output as Record<string, unknown>)) {
     const rec = output as Record<string, unknown>;
     const schema = schemaToJsonSchema(rec["schema"], "`output.schema`");
     return {
@@ -548,14 +544,14 @@ export function normalizeStructuredOutput(output: unknown): StructuredOutputSpec
  * present (bare Zod schema or `{ schema: Zod }`). Used by the loop for
  * post-parse validation; `undefined` means JSON-parse only.
  */
-export function extractOutputValidator(
+function extractOutputValidator(
   output: unknown
 ): { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } } | undefined {
   if (!output) return undefined;
   if (isZodLike(output) && typeof (output as { safeParse?: unknown }).safeParse === "function") {
     return output as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } };
   }
-  if (isPlainObject(output) && isZodLike((output as Record<string, unknown>)["schema"])) {
+  if (isRecord(output) && isZodLike((output as Record<string, unknown>)["schema"])) {
     const inner = (output as Record<string, unknown>)["schema"] as { safeParse?: unknown };
     if (typeof inner.safeParse === "function") {
       return inner as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } };
@@ -653,7 +649,7 @@ export function mapOutputToGoogle(
 }
 
 /** Chat Completions `response_format` wire shape (OpenRouter + compat). */
-export type ChatCompletionsResponseFormat = {
+type ChatCompletionsResponseFormat = {
   type: "json_schema";
   json_schema: { name: string; schema: Record<string, unknown>; strict: boolean; description?: string };
 };
@@ -698,9 +694,9 @@ export function mapOutputToCompatChat(
  *
  * @example `augmentSystemPromptWithStructuredOutput(sys, spec)`
  */
-export function buildStructuredOutputInstruction(
+function buildStructuredOutputInstruction(
   spec: StructuredOutputSpec,
-  template = DEFAULT_PROMPTS.structuredOutput
+  template: string = DEFAULT_PROMPTS.structuredOutput
 ): string {
   return fillPrompt(template, { schema: JSON.stringify(spec.schema) });
 }
@@ -727,10 +723,10 @@ export function augmentSystemPromptWithStructuredOutput(
 // ---------------------------------------------------------------------------
 
 /** Anthropic `thinking` request value: adaptive (with visible summaries) or one of the "off" shapes some models accept. */
-export type AnthropicThinking = { type: "adaptive"; display: "summarized" } | { type: "disabled" | "between_tools" };
+type AnthropicThinking = { type: "adaptive"; display: "summarized" } | { type: "disabled" | "between_tools" };
 
 /** Anthropic `output_config.effort` values. */
-export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
+type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
  * Maps a canonical ThinkingLevel onto Anthropic 5.x thinking. Thinking is adaptive and on by default, so a level only sets
@@ -787,7 +783,7 @@ export function mapServiceTierToAnthropic(tier: ServiceTier | undefined): "auto"
 }
 
 /** Anthropic `tool_choice` wire values (`auto` is the server default and is never sent). */
-export type AnthropicToolChoice = { type: "none" } | { type: "any" } | { type: "tool"; name: string };
+type AnthropicToolChoice = { type: "none" } | { type: "any" } | { type: "tool"; name: string };
 
 /**
  * Maps canonical toolChoice onto Anthropic `tool_choice`. `required` is `any` and a pinned function is `tool`; models that reject forced
@@ -848,7 +844,7 @@ const ANTHROPIC_DROPPED_KEYWORDS = [
 // Rewrites one JSON Schema node (and its children) into Anthropic's strict subset: objects closed with additionalProperties:false, unsupported constraints moved into the description; in: mapOutputToAnthropic and strict tool schemas, out: the cleaned copy.
 function cleanSchemaForAnthropic(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(cleanSchemaForAnthropic);
-  if (!isPlainObject(node)) return node;
+  if (!isRecord(node)) return node;
   const out: Record<string, unknown> = { ...node };
   delete out["$schema"];
   const notes: string[] = [];
@@ -870,10 +866,10 @@ function cleanSchemaForAnthropic(node: unknown): unknown {
     out["anyOf"] = out["oneOf"];
     delete out["oneOf"];
   }
-  if (out["type"] === "object" || isPlainObject(out["properties"])) out["additionalProperties"] = false;
+  if (out["type"] === "object" || isRecord(out["properties"])) out["additionalProperties"] = false;
   for (const key of ["properties", "$defs", "definitions"] as const) {
     const group = out[key];
-    if (isPlainObject(group)) {
+    if (isRecord(group)) {
       out[key] = Object.fromEntries(Object.entries(group).map(([k, v]) => [k, cleanSchemaForAnthropic(v)]));
     }
   }

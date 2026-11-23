@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { withRetries } from "../src/utils/retry.ts";
 import { parseRetryAfterMs } from "../src/providers/shared.ts";
-import { OpenAICompatibleChatProvider } from "../src/index.ts";
+import { OpenAICompatibleChatProvider } from "../src/providers/openai-compat.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 afterEach(() => {

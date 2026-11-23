@@ -1,13 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import {
-  OpenAICompatibleChatProvider,
-  CustomProvider,
-  createOpenAICompatibleProvider,
-  createCustomProvider,
-  ensureCustomProvider,
-  resolveModel,
-  getProvider,
-} from "../src/index.ts";
+import { ensureCustomProvider, resolveModel, getProvider } from "../src/index.ts";
+import { OpenAICompatibleChatProvider, CustomProvider, createOpenAICompatibleProvider, createCustomProvider } from "../src/providers/openai-compat.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 

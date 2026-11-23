@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { noop } from "../utils/noop.ts";
 import { tool } from "../tools/tool.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { AgentResponse, SubAgentExecutionMetadata, SubAgentStep } from "../types/response.ts";
@@ -221,7 +222,9 @@ function notifyTrace(trackingId: string): void {
   for (const fn of [...listeners]) {
     try {
       fn(snap);
-    } catch {}
+    } catch {
+      // why: a callback or listener of yours must never break the run.
+    }
   }
 }
 
@@ -258,7 +261,7 @@ export function subscribeToSubAgentForSessions(
   fn: (trace: SubAgentTrace) => void
 ): () => void {
   const t = lookupTrace(id);
-  if (t && !parentSessionIds.has(t.parentSessionId)) return () => {};
+  if (t && !parentSessionIds.has(t.parentSessionId)) return noop;
   return subscribeToSubAgent(id, fn);
 }
 
@@ -278,21 +281,29 @@ export function subscribeToSubAgent(id: string, fn: (trace: SubAgentTrace) => vo
   const timer = setTimeout(() => {
     try {
       subagentListeners.get(key)?.delete(fn);
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   }, SUBAGENT_SUBSCRIBE_TTL_MS);
   try {
-    (timer as unknown as { unref?: () => void }).unref?.();
-  } catch {}
+    timer.unref?.();
+  } catch {
+    // why: cancelling or releasing something that is already closed is harmless.
+  }
   let done = false;
   return () => {
     if (done) return;
     done = true;
     try {
       clearTimeout(timer);
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     try {
       subagentListeners.get(key)?.delete(fn);
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   };
 }
 
@@ -315,7 +326,7 @@ export interface WorkerRunResult {
 }
 
 /** Live handle of one worker run: its trace plus the hooks that feed it and the closers that finalize it. */
-export interface WorkerTraceHandle {
+interface WorkerTraceHandle {
   trackingId: string;
   /** `NAME-{trackingId}`, the id shown in metadata and accepted by `agent.track`. */
   displayId: string;
@@ -363,7 +374,9 @@ export function openWorkerTrace(a: {
   if (a.parent) {
     try {
       a.parent.subagentTraces[trackingId] = trace;
-    } catch {}
+    } catch {
+      // why: bookkeeping must never fail a run; the run result is what counts.
+    }
   }
   const live = createLiveWorker(trace, trackingId, displayId, {
     trim: (t) => trimTraceSteps(t),
@@ -373,15 +386,19 @@ export function openWorkerTrace(a: {
       ? {
           persist: () => {
             try {
-              a.parent!.persistNow();
-            } catch {}
+              a.parent?.persistNow(); // the closure exists only when there is a parent
+            } catch {
+              // why: bookkeeping must never fail a run; the run result is what counts.
+            }
           },
         }
       : {}),
     emit: (ev) => {
       try {
         a.emit?.(ev);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
     },
   });
   const settle = (): void => {
@@ -481,13 +498,11 @@ export function workerMetadata(a: {
         isError: true,
         error: a.error,
       };
-  try {
-    const m = metadata as unknown as Record<string, unknown>;
-    m["runId"] = a.runId;
-    m["turnId"] = a.turnId;
-    const extra = (r as { meta?: unknown } | undefined)?.meta;
-    if (extra !== undefined) m["meta"] = extra;
-  } catch {}
+  // Reflect.set gives false, and never throws, for a frozen metadata object: the run result is what counts.
+  Reflect.set(metadata, "runId", a.runId);
+  Reflect.set(metadata, "turnId", a.turnId);
+  const extra = (r as { meta?: unknown } | undefined)?.meta;
+  if (extra !== undefined) Reflect.set(metadata, "meta", extra);
   return metadata;
 }
 
@@ -499,16 +514,15 @@ export function workerMetadata(a: {
 
 // Reads the agent's configured budget; in: budget helpers, out: Budget or undefined.
 function readBudget(parentAgent: Agent): Budget | undefined {
-  return (parentAgent as unknown as { budget?: Budget }).budget;
+  return parentAgent.budget;
 }
 
 // Returns the agent's per-run budget counters, creating them on first use; in: charge and reserve helpers, out: BudgetState.
 function ensureBudgetState(parentAgent: Agent): BudgetState {
-  const host = parentAgent as unknown as { budgetState?: BudgetState };
-  if (!host.budgetState) {
-    host.budgetState = { spawned: 0, totalTokens: 0, totalCostUsd: 0, startedAtMs: nowMs() };
+  if (!parentAgent.budgetState) {
+    parentAgent.budgetState = { spawned: 0, totalTokens: 0, totalCostUsd: 0, startedAtMs: nowMs() };
   }
-  return host.budgetState;
+  return parentAgent.budgetState;
 }
 
 // Total tokens of a usage value, defensively (total, else input + output); in: budget helpers, out: a non-negative integer.
@@ -622,7 +636,7 @@ export interface AgentAsToolTarget {
 /**
  * Converts one agent into a `{ task: string }` ToolDefinition.
  *
- * @example `const researchTool = researcher.asTool("research");`
+ * @example `const researchTool = agentToTool({ name: "research", agent: researcher });`
  */
 export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: UsageLimit }): ToolDefinition {
   const agentInstance = "agent" in input ? input.agent : input;
@@ -676,24 +690,29 @@ export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: Us
           sessionId: subSessionId,
           onTurn: live.onWorkerTurn,
         });
-        const detachWorkerListeners = live.attachToStream(
-          workerStream as unknown as Parameters<typeof live.attachToStream>[0]
-        );
+        const detachWorkerListeners = live.attachToStream(workerStream);
         let response: AgentResponse;
         try {
           response = await workerStream.result();
         } finally {
           try {
             detachWorkerListeners();
-          } catch {}
+          } catch {
+            // why: cancelling or releasing something that is already closed is harmless.
+          }
           // The per-call session id is never reused: drop its provider chain/routing state.
           if (worker !== agentInstance) {
             try {
               agentInstance.absorbUsage(worker.usageTotals);
-            } catch {} // the template keeps what its copies spent
+              agentInstance.absorbWorkers(worker.startedWorkerNodes()); // and the workers the copy started: they die with it
+            } catch {
+              // why: bookkeeping must never fail a run; the run result is what counts.
+            } // the template keeps what its copies spent
             try {
               worker.reset();
-            } catch {}
+            } catch {
+              // why: bookkeeping must never fail a run; the run result is what counts.
+            }
           }
         }
         live.finish(response);

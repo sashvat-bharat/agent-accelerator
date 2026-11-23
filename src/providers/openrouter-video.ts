@@ -11,6 +11,8 @@
  * Mock-verified only: written from OpenRouter's video guide and API reference, no paid key was used.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { BULK_REPLY_LIMIT, DOWNLOAD_LIMIT, ERROR_BODY_LIMIT, readBytesCapped, readTextCapped } from "../utils/body.ts";
 import type { ProviderVideoRequest, ProviderVideoResult, ProviderVideoResumeRequest } from "../types/video.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { openRouterSetting } from "../config/settings.ts";
@@ -32,7 +34,6 @@ import {
 } from "./shared.ts";
 import { throwOpenRouterHttpError } from "./openrouter-image.ts";
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 /** The wait for a job when the call sets no deadline. */
 const NO_DEADLINE_MS = 24 * 60 * 60 * 1000;
 
@@ -58,7 +59,7 @@ function mapUsage(raw: JobReply["usage"]): TokenUsage {
 const imageUrl = (dataUrl: string) => ({ type: "image_url", image_url: { url: dataUrl } });
 
 /** The `POST /videos` body for one request, without routing (exported for the tests). */
-export function buildOpenRouterVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
+function buildOpenRouterVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
   const frames = [
     ...(request.firstFrame ? [{ ...imageUrl(request.firstFrame.dataUrl), frame_type: "first_frame" }] : []),
     ...(request.lastFrame ? [{ ...imageUrl(request.lastFrame.dataUrl), frame_type: "last_frame" }] : []),
@@ -93,7 +94,7 @@ function connect(modelId: string, options: ProviderRequestOptions | undefined) {
   const apiKey = resolveProviderApiKey("openrouter", options);
   if (!apiKey)
     throw new ConfigError("[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey.");
-  const baseUrl = resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options);
+  const baseUrl = resolveProviderBaseUrl("openrouter", options);
   const headers = buildSessionHeaders("openrouter", options?.headers, undefined);
   setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
   if (apiKey !== "unused") setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
@@ -123,7 +124,7 @@ function connect(modelId: string, options: ProviderRequestOptions | undefined) {
     what: string
   ): Promise<{ reply: JobReply; res: Response }> => {
     const res = await call(target, init, what);
-    const text = await res.text();
+    const text = await readTextCapped(res, BULK_REPLY_LIMIT);
     throwOpenRouterHttpError(res.status, target, text, modelId, headersToRecord(res.headers), "video");
     try {
       return { reply: JSON.parse(text) as JobReply, res };
@@ -205,18 +206,18 @@ async function finishJob(
       throwOpenRouterHttpError(
         res.status,
         fileTarget.url,
-        await res.text(),
+        await readTextCapped(res, ERROR_BODY_LIMIT),
         modelId,
         headersToRecord(res.headers),
         "video"
       );
-    return { bytes: new Uint8Array(await res.arrayBuffer()), type: res.headers.get("content-type") };
+    return { bytes: await readBytesCapped(res, DOWNLOAD_LIMIT), type: res.headers.get("content-type") };
   }, c.retry).catch((err: unknown) => {
     throw withJob(err, jobId);
   });
   const mimeType =
     file.type && file.type.startsWith("video/")
-      ? file.type.split(";")[0]!.trim()
+      ? beforeFirst(file.type, ";").trim()
       : (sniffMimeType(file.bytes) ?? "video/mp4");
 
   return {

@@ -28,7 +28,11 @@
       },
       "suspicious": {
         "noExplicitAny": "error",
-        "noConsole": "error"
+        "noConsole": "error",
+        "noEmptyBlockStatements": "warn"
+      },
+      "style": {
+        "noNonNullAssertion": "warn"
       }
     }
   },
@@ -43,6 +47,18 @@
         "rules": {
           "suspicious": {
             "noConsole": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "examples/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noNonNullAssertion": "off"
           }
         }
       }

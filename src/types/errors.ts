@@ -166,6 +166,17 @@ export function isAbortError(error: unknown): boolean {
   return false;
 }
 
+/** An error named `AbortError` (the one `isAbortError` recognizes): use it wherever a run, a call or a stream stops because it was aborted. */
+export function abortError(message: string): Error {
+  return Object.assign(new Error(message), { name: "AbortError" });
+}
+
+/** An `AbortError` that carries the signal's reason message when the reason is an error, else `fallback`. */
+export function abortErrorFor(signal: AbortSignal, fallback: string): Error {
+  const reason: unknown = signal.reason;
+  return abortError(reason instanceof Error ? reason.message : fallback);
+}
+
 /** Format without ANSI for CLI pretty-printing. */
 export function formatErrorPlain(err: unknown): string {
   if (err instanceof AgentAccelError) {

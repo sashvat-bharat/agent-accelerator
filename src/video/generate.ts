@@ -14,8 +14,8 @@ import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { mp4DurationSeconds } from "../utils/mp4.ts";
 import { base64ToBytes } from "../utils/base64.ts";
-import { abortError, providerOptionsFrom } from "../utils/provider-call.ts";
-import { BudgetExceededError, ConfigError, ValidationError } from "../types/errors.ts";
+import { providerOptionsFrom } from "../utils/provider-call.ts";
+import { BudgetExceededError, ConfigError, ValidationError, abortErrorFor } from "../types/errors.ts";
 import { readImageInput } from "../image/generate.ts";
 import type { ProviderVideoRequest, ReadClip, VideoInput, VideoOptions } from "../types/video.ts";
 import { estimateVideoCostUsd } from "./pricing.ts";
@@ -35,11 +35,11 @@ const ABORT_GRACE_MS = 250;
 
 // Runs the adapter; once the signal aborts it waits ABORT_GRACE_MS for the adapter's own error (which holds the job id), then rejects with an AbortError; in: generateVideo, out: the adapter's result.
 function withAbortGrace<T>(task: () => Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortError(signal, "Video generation aborted"));
+  if (signal.aborted) return Promise.reject(abortErrorFor(signal, "Video generation aborted"));
   return new Promise<T>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const onAbort = (): void => {
-      timer = setTimeout(() => reject(abortError(signal, "Video generation aborted")), ABORT_GRACE_MS);
+      timer = setTimeout(() => reject(abortErrorFor(signal, "Video generation aborted")), ABORT_GRACE_MS);
     };
     signal.addEventListener("abort", onAbort, { once: true });
     task()
@@ -168,7 +168,7 @@ export async function generateVideo(opts: VideoOptions): Promise<VideoResult> {
   const deadlineMs = timeoutOpt === 0 ? Infinity : timeoutOpt;
   const providerOptions = providerOptionsFrom(opts, Number.isFinite(deadlineMs) ? deadlineMs : 0);
   const signal = opts.signal ?? new AbortController().signal;
-  if (signal.aborted) throw abortError(signal, "Video generation aborted");
+  if (signal.aborted) throw abortErrorFor(signal, "Video generation aborted");
 
   const body: ProviderVideoRequest = {
     referenceImages,

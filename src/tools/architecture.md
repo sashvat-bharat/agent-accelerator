@@ -12,7 +12,7 @@ Defining tools and running them.
 
 ## Invariants
 
-- Tool names match `^[a-zA-Z0-9_-]{1,64}$` and must not collide after normalization (checked in the `Agent` constructor).
+- Tool names match `^[a-zA-Z0-9_-]{1,64}$`, must not be `__proto__`, and must not collide after normalization (checked in the `Agent` constructor). The name a model asks for is looked up among the agent's OWN tools only (`Object.hasOwn`), so `constructor` or `toString` is an unknown tool, never an inherited member of `Object`.
 - One attempt by default; only idempotent tools retry transient failures (what counts as transient is the one `isTransientError` in `utils/errors.ts`, shared with the provider retries); the timeout is best effort (`ctx.signal` is cooperative), and an uncooperative tool no longer holds an aborted run.
 - Results are capped by serialized size (default 20000 chars); nested error stacks and absolute paths are scrubbed. The telemetry bus gets full detail, the model gets the scrubbed text.
 - After a crash, `finishInterruptedTools` (`agent/loop.ts`) runs a call that has no saved result again only when `isReplaySafe` (`replay: "safe"` or `idempotent: true`); every other call gets the `toolInterrupted` result and a `tool.call_interrupted` event. The `subagents` tool is `replay: "safe"` (the worker registry makes the replay exactly-once).

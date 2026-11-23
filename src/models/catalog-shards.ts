@@ -83,16 +83,12 @@ export function buildShards(payload: Record<string, unknown>): Record<CatalogPro
   return out;
 }
 
-/** True when a parsed shard file has the expected shape (a hand-edited or truncated file is not trusted). */
+/** True when a parsed shard file has the expected shape: version, provider, and a `models` map whose entries are all objects (a hand-edited or truncated file is not trusted). */
 export function isShard(value: unknown, provider: CatalogProvider): value is Shard {
-  const v = value as Partial<Shard> | null;
-  return (
-    !!v &&
-    typeof v === "object" &&
-    v.version === 1 &&
-    v.provider === provider &&
-    !!v.models &&
-    typeof v.models === "object" &&
-    !Array.isArray(v.models)
-  );
+  if (value === null || typeof value !== "object") return false;
+  const shard = value as Partial<Shard>;
+  if (shard.version !== 1 || shard.provider !== provider) return false;
+  const models: unknown = shard.models;
+  if (!models || typeof models !== "object" || Array.isArray(models)) return false;
+  return Object.values(models).every((m) => m !== null && typeof m === "object" && !Array.isArray(m));
 }

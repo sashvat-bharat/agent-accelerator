@@ -1,6 +1,4 @@
-import type { ProviderContext } from "../types/message.ts";
-import { getModelFromCatalog } from "../models/catalog.ts";
-import { AgentAccelError, ProviderError, ValidationError, isAbortError } from "../types/errors.ts";
+import { AgentAccelError, ProviderError, isAbortError } from "../types/errors.ts";
 
 /**
  * Checks whether a provider error is transient and safe to retry.
@@ -34,8 +32,8 @@ export function isTransientError(error: unknown): boolean {
 
 const CONCISE = "__agentAccelConcise";
 
-// Reads a nested field of an unknown value (`dig(e, "response", "status")`), undefined when any step is missing; in: the error readers below, out: the value.
-function dig(value: unknown, ...path: string[]): unknown {
+/** Reads a nested field of an unknown value (`dig(e, "response", "status")`), undefined when any step is missing; in: the error readers below, out: the value. */
+export function dig(value: unknown, ...path: string[]): unknown {
   let cur = value;
   for (const key of path) {
     if (cur === null || typeof cur !== "object") return undefined;
@@ -82,14 +80,16 @@ function readProviderMessage(error: unknown): string {
       const parsed: unknown = JSON.parse(body);
       const fromBody = text(dig(parsed, "error", "message")) ?? text(dig(parsed, "message"));
       if (fromBody) return fromBody;
-    } catch {}
+    } catch {
+      // why: the body is not JSON, so the raw text is used instead.
+    }
     if (body.length <= 300) return body.trim();
   }
   return String(dig(error, "message") ?? error).slice(0, 300);
 }
 
-// `provider/model` without doubling an existing prefix; in: the error messages, out: a label.
-function displayModel(providerId: string, modelId: string): string {
+/** `provider/model` without doubling an existing prefix; in: the error messages, out: a label. */
+export function displayModel(providerId: string, modelId: string): string {
   if (modelId.toLowerCase().startsWith(`${providerId.toLowerCase()}/`)) return modelId;
   return `${providerId}/${modelId}`;
 }
@@ -150,85 +150,8 @@ export function toConciseProviderError(error: unknown, providerId: string, model
   return concise;
 }
 
-const PART_TO_MODALITY: Record<string, "image" | "audio" | "video" | "pdf"> = {
-  image: "image",
-  audio: "audio",
-  video: "video",
-  file: "pdf",
-};
-
-/**
- * Fails fast — before any network call — when the catalog knows the model
- * lacks a requested input modality (image/audio/video/document; files are
- * not checked on OpenRouter, which parses them for any model). Unknown
- * models (custom providers, dynamic routers) are skipped: the provider
- * verdict stands and surfaces via toConciseProviderError instead. Throws a `ValidationError`.
- */
-export function assertModalitiesSupported(context: ProviderContext, providerId: string, modelId: string): void {
-  const needed = new Set<string>();
-  for (const msg of context.messages) {
-    const content: unknown = dig(msg, "content");
-    if (!Array.isArray(content)) continue;
-    for (const part of content) {
-      const mapped = PART_TO_MODALITY[String(dig(part, "type"))];
-      if (mapped) needed.add(mapped);
-    }
-  }
-  // OpenRouter reads a file with the model's native support or its own parser, so the catalog's "pdf" flag never gates a file there.
-  if (providerId === "openrouter") needed.delete("pdf");
-  if (needed.size === 0) return;
-  let supported: readonly string[] | undefined;
-  try {
-    supported = getModelFromCatalog(providerId, modelId)?.modalities?.input;
-  } catch {
-    return;
-  }
-  if (!supported) return;
-  const missing = [...needed].filter((k) => !supported.includes(k));
-  if (missing.length === 0) return;
-  throw new ValidationError(
-    `[${displayModel(providerId, modelId)}] unsupported ${missing.join("+")} input (supports: ${supported.join(", ") || "text"}). Use a capable model or drop the ${missing.join("+")} part.`,
-    { provider: providerId, model: modelId }
-  );
-}
-
-/**
- * Rejects `video` parts on the OpenAI Responses transport.
- *
- * That wire has no video shape — only `input_text`/`input_image`/`input_file`
- * exist in either vendor's Responses docs — so a video part sent as
- * `input_file` lands in the router's document parser and 400s confusingly
- * (`Failed to parse the file ... Provide a PDF document`, observed live under
- * the old OpenRouter Responses skin despite the catalog `video` flag, which is
- * chat-transport oriented). Fail fast with
- * a clear one-liner instead; video stays Gemini-only, and OpenRouter Chat
- * Completions carries `video_url` natively (no guard there). Throws a `ValidationError`.
- */
-export function assertNoVideoPartsOnResponses(context: ProviderContext, providerId: string, modelId: string): void {
-  let hasVideo = false;
-  for (const msg of context.messages) {
-    const content: unknown = dig(msg, "content");
-    if (!Array.isArray(content)) continue;
-    for (const part of content) {
-      if (dig(part, "type") === "video") {
-        hasVideo = true;
-        break;
-      }
-    }
-    if (hasVideo) break;
-  }
-  if (!hasVideo) return;
-  let supported = "text, image";
-  try {
-    const known = getModelFromCatalog(providerId, modelId)?.modalities?.input;
-    // List transport-usable modalities only: `video` is excluded even when
-    // the catalog flags it, since this error exists precisely because the
-    // Responses wire cannot carry it (listing it as "supported" would
-    // contradict the rejection).
-    if (known && known.length > 0) supported = known.filter((m) => m !== "video").join(", ") || "text";
-  } catch {}
-  throw new ValidationError(
-    `[${displayModel(providerId, modelId)}] unsupported video input (the Responses API accepts text/image/file only; supports: ${supported}). Use a video-capable model (e.g. google/gemini-*) or drop the video part.`,
-    { provider: providerId, model: modelId }
-  );
+/** Marks an error as worth retrying: the retry layers read its `retryable` and `transient` flags. */
+export function markRetryable(error: Error): void {
+  Reflect.set(error, "retryable", true);
+  Reflect.set(error, "transient", true);
 }

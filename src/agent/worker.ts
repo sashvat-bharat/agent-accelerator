@@ -1,4 +1,7 @@
 import type { ToolDefinition } from "../types/tool.ts";
+import { isModelSpec } from "../utils/session.ts";
+import type { StreamEvent } from "../types/response.ts";
+import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import type { SubAgentStep } from "../types/response.ts";
 import type { AgentConfig } from "../types/agent.ts";
 import type { ModelSpec } from "../types/model.ts";
@@ -6,10 +9,9 @@ import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
 import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 import { resolveModelUnchecked } from "../providers/registry.ts";
-import { ConfigError } from "../types/errors.ts";
 
 /** Minimal live-trace shape shared by fixed + dynamic workers (structural subset of `SubAgentTrace`). */
-export interface LiveWorkerTrace {
+interface LiveWorkerTrace {
   trackingId: string;
   name: string;
   sessionId: string;
@@ -24,11 +26,11 @@ export interface LiveWorkerTrace {
 }
 
 // ---------------------------------------------------------------------------
-// Shared identity helpers (single home for Agent / SubAgent / Dynamic workers)
+// Shared identity helpers (single home for Agent / dynamic workers)
 // ---------------------------------------------------------------------------
 
 /** Sanitizes a worker name into an XML tag (`UPPER-KEBAB`, 64 chars). */
-export function sanitizeXmlTag(raw: string): string {
+function sanitizeXmlTag(raw: string): string {
   let s = raw.toUpperCase().replace(/[^A-Z0-9.-]/g, "-");
   if (!/^[A-Z]/.test(s)) s = `AGENT-${s}`;
   s = s
@@ -51,7 +53,7 @@ export function sanitizeToolName(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Shared Agent / SubAgent config normalization (behavior-preserving)
+// Shared Agent / worker config normalization (behavior-preserving)
 // ---------------------------------------------------------------------------
 
 /**
@@ -83,13 +85,8 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
   let modelStringOrSpec: string | ModelSpec | undefined;
   if (rawModel && typeof rawModel === "object" && "model" in (rawModel as Record<string, unknown>)) {
     modelStringOrSpec = (rawModel as { model: string }).model as string;
-  } else if (
-    rawModel &&
-    typeof rawModel === "object" &&
-    "id" in (rawModel as Record<string, unknown>) &&
-    "provider" in (rawModel as Record<string, unknown>)
-  ) {
-    modelStringOrSpec = rawModel as unknown as ModelSpec;
+  } else if (isModelSpec(rawModel)) {
+    modelStringOrSpec = rawModel;
   } else {
     modelStringOrSpec = (rawModel as string | undefined) || chosenModel();
   }
@@ -101,18 +98,13 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
  * `dynamicSubagents.model ?? subagentModel ?? the saved or default worker model`.
  * Unwraps `ModelProviderInstance` / `ModelSpec` the same way.
  */
-export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | ModelSpec | undefined {
+function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | ModelSpec | undefined {
   const dynModelRaw = dynModelRawInput as { model?: unknown; id?: unknown; provider?: unknown } | string | undefined;
   let dynModel: string | ModelSpec | undefined;
   if (dynModelRaw && typeof dynModelRaw === "object" && "model" in (dynModelRaw as Record<string, unknown>)) {
     dynModel = (dynModelRaw as { model: string }).model;
-  } else if (
-    dynModelRaw &&
-    typeof dynModelRaw === "object" &&
-    "id" in (dynModelRaw as Record<string, unknown>) &&
-    "provider" in (dynModelRaw as Record<string, unknown>)
-  ) {
-    dynModel = dynModelRaw as unknown as ModelSpec;
+  } else if (isModelSpec(dynModelRaw)) {
+    dynModel = dynModelRaw;
   } else {
     dynModel = (dynModelRaw as string | undefined) || chosenSubAgentModel();
   }
@@ -130,25 +122,6 @@ export function resolveDynamicModelInput(
 ): string | ModelSpec | undefined {
   const dynModelRaw = (dynamicSubagents as { model?: unknown } | undefined)?.model ?? subagentModel;
   return resolveDynamicWorkerModel(dynModelRaw);
-}
-
-/**
- * Resolves a `SubAgent` model exactly like `SubAgent` ctor:
- * `config.model ?? saved or default worker model ?? saved or default main model`, throwing with the same message
- * when nothing resolves. Kept here so `Agent` / `SubAgent` share one chain.
- */
-export function resolveSubAgentModel(config: {
-  name?: string;
-  model?: AgentConfig["model"];
-}): NonNullable<AgentConfig["model"]> {
-  const resolvedModel = config.model ?? chosenSubAgentModel() ?? chosenModel();
-  if (!resolvedModel) {
-    throw new ConfigError(
-      `[Agent Accelerator] SubAgent '${config.name || "subagent"}' requires a model. ` +
-        `Specify 'model' in SubAgent config, or set a default with setModels() or a saved choice with setSubAgentModel().`
-    );
-  }
-  return resolvedModel as NonNullable<AgentConfig["model"]>;
 }
 
 /**
@@ -228,7 +201,7 @@ function providerOf(modelStr: string | unknown | undefined): string | undefined 
  * Resolves worker credentials: reuses parent `apiKey`/`baseUrl` ONLY when the
  * worker provider matches the parent provider (otherwise env resolves).
  */
-export function resolveWorkerCredentials(
+function resolveWorkerCredentials(
   parentAgent: { modelStringOrSpec?: unknown; apiKey?: string; baseUrl?: string },
   chosenModel: unknown
 ): { apiKeyToUse: string | undefined; baseUrlToUse: string | undefined; attemptedProvider: string | undefined } {
@@ -256,7 +229,7 @@ export function isWorkerConfig(config: object): boolean {
 }
 
 /** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise: unlimited. */
-export const DEFAULT_MAX_DEPTH = Infinity;
+export const DEFAULT_MAX_DEPTH: number = Infinity;
 
 /**
  * Config of a dynamic worker (scheduled actions, the worker registry): the developer's fixed worker
@@ -327,7 +300,7 @@ export function buildDynamicWorkerConfig(
 // ---------------------------------------------------------------------------
 
 /** Turn summary fed into the live worker trace (mirrors `AgentRunOptions.onTurn`). */
-export interface LiveWorkerTurn {
+interface LiveWorkerTurn {
   turns: number;
   text?: string;
   thinking?: string;
@@ -336,7 +309,7 @@ export interface LiveWorkerTurn {
 }
 
 /** Deltas forwarded to the parent stream via `onSubagentEvent`. */
-export interface LiveWorkerEvent {
+interface LiveWorkerEvent {
   trackingId: string;
   delta?: string;
   thinkingDelta?: string;
@@ -345,7 +318,7 @@ export interface LiveWorkerEvent {
 }
 
 /** Hooks owned by the trace store (`delegation.ts`); worker core stays pure. */
-export interface LiveWorkerHooks {
+interface LiveWorkerHooks {
   trim?: (trace: LiveWorkerTrace) => void;
   touch?: (trackingId: string) => void;
   notify?: (trackingId: string) => void;
@@ -368,10 +341,7 @@ export function createLiveWorker(
   hooks: LiveWorkerHooks = {}
 ): {
   onWorkerTurn: (turn: LiveWorkerTurn) => void;
-  attachToStream: (workerStream: {
-    on: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
-    off: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
-  }) => () => void;
+  attachToStream: (workerStream: Pick<AssistantMessageEventStream, "on" | "off">) => () => void;
 } {
   let liveTurn = 1;
   let partialText = "";
@@ -406,17 +376,27 @@ export function createLiveWorker(
       trace.turns = Math.max(trace.turns, turn.turns);
       try {
         hooks.trim?.(trace);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.touch?.(trace.trackingId);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.notify?.(trackingId);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.persist?.();
-      } catch {}
-    } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
+    } catch {
+      // why: a callback or listener of yours must never break the run.
+    }
   };
 
   const onWorkerDelta = (delta?: string, thinkingDelta?: string): void => {
@@ -443,10 +423,14 @@ export function createLiveWorker(
       }
       try {
         hooks.trim?.(trace);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.notify?.(trackingId);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.emit?.({
           trackingId: displayId,
@@ -455,29 +439,38 @@ export function createLiveWorker(
           partialText: partialText || undefined,
           partialThinking: partialThinking || undefined,
         });
-      } catch {}
-    } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
+    } catch {
+      // why: a callback or listener of yours must never break the run.
+    }
   };
 
-  const attachToStream = (workerStream: {
-    on: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
-    off: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
-  }): (() => void) => {
-    const textListener = (e: { delta?: string }): void => onWorkerDelta(e.delta, undefined);
-    const thinkingListener = (e: { thinkingDelta?: string }): void => onWorkerDelta(undefined, e.thinkingDelta);
+  const attachToStream = (workerStream: Pick<AssistantMessageEventStream, "on" | "off">): (() => void) => {
+    const textListener = (e: StreamEvent): void => onWorkerDelta(e.delta, undefined);
+    const thinkingListener = (e: StreamEvent): void => onWorkerDelta(undefined, e.thinkingDelta);
     try {
-      workerStream.on("text_delta", textListener as (e: { delta?: string; thinkingDelta?: string }) => void);
-    } catch {}
+      workerStream.on("text_delta", textListener);
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     try {
-      workerStream.on("thinking_delta", thinkingListener as (e: { delta?: string; thinkingDelta?: string }) => void);
-    } catch {}
+      workerStream.on("thinking_delta", thinkingListener);
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     return () => {
       try {
-        workerStream.off("text_delta", textListener as (e: { delta?: string; thinkingDelta?: string }) => void);
-      } catch {}
+        workerStream.off("text_delta", textListener);
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
       try {
-        workerStream.off("thinking_delta", thinkingListener as (e: { delta?: string; thinkingDelta?: string }) => void);
-      } catch {}
+        workerStream.off("thinking_delta", thinkingListener);
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
     };
   };
 

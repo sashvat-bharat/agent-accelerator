@@ -3,7 +3,7 @@ import { Agent, setConfigs, setModels } from "../src/index.ts";
 import { SETTING_KEYS } from "../src/config/settings.ts";
 import { resetModels } from "../src/config/models.ts";
 import { resolveHome } from "../src/utils/home.ts";
-import { getCacheDir } from "../src/index.ts";
+import { getCacheDir } from "../src/models/catalog.ts";
 import { GoogleInteractionsProvider } from "../src/providers/google.ts";
 import { OpenAIResponsesProvider } from "../src/providers/openai.ts";
 import { OpenRouterChatCompletionsProvider } from "../src/providers/openrouter.ts";

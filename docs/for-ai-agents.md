@@ -1,38 +1,39 @@
 # For AI agents
-[Docs](README.md) › For AI agents
 
-> A compact, rule-first page for coding agents that write code against `agent-accelerator`. Humans: the [guides](README.md#pages) explain the same things with more context.
+> A compact, rule-first page for coding agents that write code with `agent-accelerator`. People can read the [guides](README.md#i-want-to), which explain the same things in more detail.
 
 ## How to work
 
-1. Import everything from `"agent-accelerator"`. Use `.ts` extensions only for relative imports inside the repo.
-2. Read the **For AI agents** section at the bottom of each guide before writing code for that feature.
-3. Run only what the task needs. Examples in `examples/` call real providers and cost money; the test suite is fully mocked.
+1. Import everything from `"agent-accelerator"`. Use `.ts` extensions only for relative imports inside a repo.
+2. Read the guide for a feature before you write code for it. The notes by feature at the bottom of this page list exact signatures and traps.
+3. Run only what the task needs. The programs in `examples/` call real providers and cost money. The test suite is fully mocked.
 4. Never print or hard-code API keys. Use `process.env` and placeholders.
 
 ## Decision table
 
 | Task | Use | Guide |
 |---|---|---|
-| One answer | `await agent.run(prompt)` → `res.text` | [Agents](guides/agents-and-models.md) |
-| Live output | `agent.stream(prompt)`, then `await stream.result()` | [Tools and streaming](guides/tools-and-streaming.md) |
-| Call my code | `tool({ description, input: z.object(...), execute })` in `tools` | [Tools and streaming](guides/tools-and-streaming.md) |
-| JSON result | `output: zodSchema`, read `res.parsed` | [Agents](guides/agents-and-models.md) |
-| Specialist helpers | `subagents: [agentA, agentB]` | [Multi-agent](guides/multi-agent.md) |
-| Model-invented helpers | `dynamicSubagents: { model, tools }` | [Multi-agent](guides/multi-agent.md) |
-| Work later or on repeat | `dynamicSubagents.allowScheduledActions` + `agent.scheduled.create(...)` | [Multi-agent](guides/multi-agent.md) |
-| Redirect a busy agent | `steer()`, `queue()`, `interrupt()`, `interrupt(message)` | [Tools and streaming](guides/tools-and-streaming.md) |
-| Save / resume / survive a crash | `persist: { dir }` + same `sessionId` (cut-off runs resume by themselves), `loadSessionDir`, `importSession` | [Data and media](guides/data-and-media.md) |
-| Images, PDFs | `ContentPart[]` prompt, `fileAccess.roots` | [Data and media](guides/data-and-media.md) |
-| Change a prompt the SDK sends (tool refusal, worker header, tool manual) | `prompts: { name: "text with {{placeholders}}" }`; keep the original unless you must | [Prompts](guides/prompts.md) |
-| Cost control | `budget`, `limits`, `res.usage` | [Safety](guides/safety-and-ops.md) |
-| Limit provider calls running at once (many agents, workers, 429s) | the `concurrency` setting (`setConfigs({ values: { concurrency: { max_requests, per_provider } } })`), `getConcurrencyStatus()` | [Safety](guides/safety-and-ops.md#concurrency-limit) |
-| Set limits and options in code, and choose what the end user may change | `setConfigs({ values, editable })`, `getConfigs()`, `setConfig(key, value)` | [Safety](guides/safety-and-ops.md#settings-in-code-and-who-may-change-them) |
-| Fix the list of models a program may use, let the user pick | `setModels(modelsJson)`, `listModels()` for a picker, `setModel(id)`, `setSubAgentModel(id)` | [Agents](guides/agents-and-models.md#the-list-of-allowed-models) |
-| What it cost (per agent and worker, cache-aware) | `agent.usageReport()`; one run: `res.usage` | [Safety](guides/safety-and-ops.md) |
-| Let an agent improve itself (model, instructions, tools only) | `agent.toConfig()`, `Agent.fromConfig(edited, base)`, the model list (`setModels`) | [Agents](guides/agents-and-models.md#self-improving-agents) |
-| Observe | `telemetryBus.onEvent` |
-| Ask permission before a tool acts | check inside `execute`, refuse with `ctx.stop(reason)` (run ends `stopped`) | [Tools and streaming](guides/tools-and-streaming.md) | [Safety](guides/safety-and-ops.md) |
+| One answer | `await agent.run(prompt)`, then `res.text` | [Agents](guides/agents.md) |
+| Live output | `agent.stream(prompt)`, then `await stream.result()` | [Streaming and steering](guides/streaming-and-steering.md) |
+| Call my code | `tool({ description, input: z.object(...), execute })` in `tools` | [Tools](guides/tools.md) |
+| JSON result | `output: zodSchema`, then read `res.parsed` | [Agents](guides/agents.md) |
+| Specialist helpers | `subagents: [agentA, agentB]` | [Workers](guides/workers.md) |
+| Helpers the model starts | `dynamicSubagents: { model, tools }` | [Workers](guides/workers.md) |
+| Work later or on repeat | `dynamicSubagents.allowScheduledActions` and `agent.scheduled.create(...)` | [Scheduled actions](guides/scheduled-actions.md) |
+| Redirect a busy agent | `steer()`, `queue()`, `interrupt()`, `interrupt(message)` | [Streaming and steering](guides/streaming-and-steering.md) |
+| Do not run a repeated message twice | `{ requestId }` on `run`, `queue`, `steer` or `ask` | [Streaming and steering](guides/streaming-and-steering.md#run-a-prompt-only-once) |
+| Save, resume, survive a crash | `persist: { dir }` and the same `sessionId`. Also `loadSessionDir` and `importSession`. | [Sessions](guides/sessions.md) |
+| Images, audio, video, PDFs | A `ContentPart[]` prompt, and `fileAccess.roots` | [Media input](guides/media-input.md) |
+| Change a prompt the SDK sends | `prompts: { name: "text with {{placeholders}}" }`. Keep the original unless you must. | [Prompts](guides/prompts.md) |
+| Cost control | `budget`, `limits`, `usageLimit`, `res.usage` | [Limits and retries](guides/limits-and-retries.md) |
+| Limit provider calls at once | The `concurrency` setting and `getConcurrencyStatus()` | [Limits and retries](guides/limits-and-retries.md#limit-calls-that-run-at-once) |
+| Set options in code, choose what a user may change | `setConfigs({ values, editable })`, `getConfigs()`, `setConfig(key, value)` | [Settings](guides/settings.md) |
+| Fix the models a program may use | `setModels(list)`, `listModels()`, `setModel(id)`, `setSubAgentModel(id)` | [Allowed models](guides/allowed-models.md) |
+| What it cost | `agent.usageReport()`. For one run, `res.usage`. | [Usage and cost](guides/usage-and-cost.md) |
+| Let a program edit an agent | `agent.toConfig()` and `Agent.fromConfig(edited, base)` | [Agents](guides/agents.md#let-a-program-edit-an-agent) |
+| Approve or change a tool call | The `beforeTool` hook, or `ctx.stop(reason)` inside `execute` | [Tools](guides/tools.md#ask-for-permission) |
+| Watch what the SDK does | `telemetryBus.onEvent` | [Errors and telemetry](guides/errors-and-telemetry.md) |
+| Test an agent offline | `fauxProvider(steps)` | [Testing](guides/testing.md) |
 
 ## Template: a safe production agent
 
@@ -45,7 +46,8 @@ const search_docs = tool({
   input: z.object({ query: z.string().describe("Search terms") }),
   idempotent: true,
   timeoutMs: 5_000,
-  execute: async ({ query }) => ({ query, hits: [] as string[] }), // pass ctx.signal to real I/O
+  // Pass ctx.signal to real I/O.
+  execute: async ({ query }) => ({ query, hits: [] as string[] }),
 });
 
 const agent = new Agent({
@@ -58,56 +60,109 @@ const agent = new Agent({
   fileAccess: { roots: [process.cwd()] },
 });
 
-const res = await agent.run("How do I reset my password?", { signal: AbortSignal.timeout(130_000) });
+const res = await agent.run("How do I reset my password?", {
+  signal: AbortSignal.timeout(130_000),
+});
 console.log(res.text, res.usage.cost ?? "cost unknown");
 ```
 
 ## Hard rules
 
-- **Stable prompts.** Never put timestamps or per-request data in `instructions` or change the tool set between calls; use `additionalContext`.
-- **Explicit config wins** over env. A custom provider prefix needs its own `<PREFIX>_API_KEY` and its endpoint in the `base_urls.<prefix>` setting; never reuse another vendor's key.
-- **Bound everything unattended:** nothing is limited by default except three network timeouts, so set `maxTurns`, `limits.deadlineMs`, `budget`, a `signal`, and for workers `usageLimit` / `dynamicSubagents.workerBudget` / `scheduledActionBudget` / `maxSpawn` / `maxDepth` (all unlimited until set). `0` or `Infinity` turns a network timeout off.
+- **Stable prompts.** Never put timestamps or per-request data in `instructions`, and never change the tool set between calls. Use `additionalContext`.
+- **Explicit config wins** over the environment. A custom provider prefix needs its own `<PREFIX>_API_KEY` and its address in the `base_urls.<prefix>` setting. Never reuse another vendor's key.
+- **Bound everything that runs unattended.** Nothing is limited by default except three network timeouts. Set `maxTurns`, `limits.deadlineMs`, `budget` and a `signal`. For workers, set `usageLimit`, `dynamicSubagents.workerBudget`, `scheduledActionBudget`, `maxSpawn` and `maxDepth`. `0` or `Infinity` turns a network timeout off.
 - **Branch on error classes and `err.retryable`, never on message text.** Use `isAbortError(err)` for cancellation.
 - **Unknown cost is `undefined`**, not zero.
 - **Tool names** match `^[a-zA-Z0-9_-]{1,64}$`. Pass `ctx.signal` to I/O.
-- **Workers are developer-configured.** The LLM never chooses a worker's model or reasoning level.
-- **Keep a scheduled action's creating `Agent` referenced**; several processes may share a home, and the process that registered the Agent runs and delivers its actions.
-- Never edit the model catalog cache (`<home>/catalog/<provider>/models.json`); use `registerModel()`. It keeps only gemini-3+, gpt-5+, claude-5+ and text-output OpenRouter models: anything else is unknown (no price, permissive thinking).
-- **Everything the SDK stores lives in one folder** (`sessions/` with each session's own `telemetry.ndjson`, `scheduled/`, `telemetry/`, `catalog/`). Move it with `setHome(dir)` (or an Agent's `home`); never write SDK state elsewhere.
+- **Workers are set by the developer.** The model never chooses a worker's model or reasoning level.
+- **Keep a scheduled action's creating `Agent` referenced.** Several processes may share a home. The process that registered the agent runs and delivers its actions.
+- **Never edit the model catalog cache** (`<home>/catalog/<provider>/models.json`). Use `registerModel()`. The catalog keeps only gemini-3+, gpt-5+, claude-5+ and text-output OpenRouter models. Anything else is unknown: no price and permissive thinking.
+- **Everything the SDK stores lives in one folder.** Move it with `setHome(dir)` or an agent's `home`. Never write SDK state anywhere else.
 
-## Things that do not exist (do not generate code for them)
+## Things that do not exist
 
-| Do not use | Why / instead |
+Do not generate code for these.
+
+| Do not use | Why, and what to use instead |
 |---|---|
-| `hooks` config | `{ beforeTool, afterTool, beforeRequest, onYield }`: see the hooks section of the tools guide. A hook with another name is a `ConfigError` |
-| `needsApproval` | Removed. Ask inside `execute` and refuse with `ctx.stop(reason)` |
-| Tool `retry` / `tags` / `output` | Stored but not enforced |
-| `thinking.budgetTokens` | Not forwarded by any adapter |
-| `stop`, `seed` | Removed in 0.6.0; do not pass them |
-| `temperature` / `topP` / `sampling` | Removed on every provider; do not pass them |
-| Gemini 1.x / 2.x | Rejected; minimum is Gemini 3 |
-| `cache` TTLs (`5m`, `30m`, `1h`, `12h`) | Honoured only where the provider supports them (see README Cache table); others warn and fall back |
-| Two processes opening the same persisted session | The session folder is locked: the second process gets a `ConfigError`. Use a different `sessionId` per process (they can share one `home`) |
-| The `SubAgent` class | Deprecated; use `Agent` + `subagents` |
-| OpenRouter Responses transport | Discontinued; OpenRouter uses Chat Completions |
+| Ignoring a failed `saveSessionDir` or `saveSessionFile` | They throw when they cannot write. Catch the error, or use `persist` with `onPersistError`. |
+| A tool named `__proto__` | Refused. Use a name that matches `^[a-zA-Z0-9_-]{1,64}$`. |
+| `needsApproval` | Removed. Ask inside `execute` and refuse with `ctx.stop(reason)`, or use the `beforeTool` hook. |
+| A `hooks` name other than `beforeTool`, `afterTool`, `beforeRequest`, `onYield` | It throws `ConfigError`. |
+| Tool `retry`, `tags`, `output` | Removed. They did nothing. |
+| `thinking.budgetTokens` | Not forwarded to any provider. |
+| `stop`, `seed` | Removed. Do not pass them. |
+| `temperature`, `topP`, `sampling` | Removed on every provider. |
+| Gemini 1.x or 2.x | Rejected. The minimum is Gemini 3. |
+| `cache` values a provider lacks | They warn and fall back. See [Reasoning and caching](guides/reasoning-and-caching.md). |
+| Two processes on one saved session | The folder is locked. The second process gets a `ConfigError`. Use a different `sessionId` per process. They can share a `home`. |
+| The `SubAgent` class, `agentFromEnv()`, `Agent.fromEnv()`, `.asTool()`, `.toTool()` | Removed. Use `new Agent({ name, model, instructions })` in `subagents: [...]`, or `agentToTool({ name, agent })`. To use the saved or default model, leave out `model`. See [Migration](migration.md). |
+| The OpenRouter Responses transport | Gone. OpenRouter uses Chat Completions. |
 
 ## Error to fix
 
 | Symptom | Likely cause and fix |
 |---|---|
-| `ConfigError` before any request | No key or base URL for that prefix. Set `<PREFIX>_API_KEY` and the `base_urls.<prefix>` setting |
-| `SettingNotEditableError` | `setConfig` on a hidden setting; only keys in `getConfigs()` can be changed |
-| `ModelNotAllowedError` | Model not in the program's `setModels` list; pick one from `err.allowed` |
-| `ThinkingLevelError` | Level unsupported by the model; use one from `err.allowedLevels` |
-| `SubAgentModelError` | Set `dynamicSubagents.model`, or a default worker model (`setModels`, `setSubAgentModel`) |
-| `BudgetExceededError` | Raise `budget` or reduce work; `err.partial` has progress |
-| `SecurityPolicyError` | Path outside `fileAccess.roots`, or a private/loopback URL |
-| `SessionLoadError` | Session file over limits; split or raise `SessionLimits` |
-| Tool result `repeat_blocked` | The model repeated an identical call 3 times; fix the tool output or mark it `repeatable` |
-| `finishReason: "max_turns"` | Raise `maxTurns` or simplify the task |
-| Scheduled action never fires | The creating `Agent` was garbage-collected, or the process exited |
-| Repeated `provider_warning` | An option isn't supported by that provider; remove it |
+| `ConfigError` before any request | No key or address for that prefix. Set `<PREFIX>_API_KEY` and the `base_urls.<prefix>` setting. |
+| `SettingNotEditableError` | `setConfig` on a hidden setting. Only keys in `getConfigs()` can be changed. |
+| `ModelNotAllowedError` | The model is not in your `setModels` list. Pick one from `err.allowed`. |
+| `ThinkingLevelError` | The model does not support that level. Use one from `err.allowedLevels`. |
+| `SubAgentModelError` | Set `dynamicSubagents.model`, or a default worker model with `setModels` or `setSubAgentModel`. |
+| `BudgetExceededError` | Raise `budget`, or reduce the work. `err.partial` has the progress. |
+| `SecurityPolicyError` | A path outside `fileAccess.roots`, or a private or loopback URL. |
+| `SessionLoadError` | A session file is over the limits. Split it, or raise `SessionLimits`. |
+| A tool result `repeat_blocked` | The model repeated an identical call 3 times. Fix the tool's output, or mark it `repeatable`. |
+| `finishReason: "max_turns"` | Raise `maxTurns`, or simplify the task. |
+| A scheduled action never fires | Its creating `Agent` was garbage-collected, or the process exited. |
+| Repeated `provider_warning` | An option is not supported by that provider. Remove it. |
+
+## Notes by feature
+
+**Agents and models**
+- Create: `new Agent(config: AgentConfig)`. Run: `await agent.run(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse>`.
+- Precedence: explicit config beats the environment. `thinking` beats `thinkingLevel`. A per-run option beats the agent's default, and objects merge key by key.
+- `maxTurns: 0` means unlimited. An unknown or unsupported option is warned about and dropped. It is not an error.
+- To see where a model string goes: `resolveModel(modelString)` returns `{ provider, modelId, modelSpec }`.
+- Errors you can branch on: `ThinkingLevelError`, `ValidationError`, `ConfigError`, `ProviderError`. See the [Reference](reference.md#errors).
+
+**Tools and streaming**
+- Define a tool with `tool({ description, input: z.object({...}), execute })`. Register it with `tools: { name: def }`. The record key is the name.
+- Defaults: 1 attempt (3 if `idempotent`), a 20,000 character result cap, 8 tools at once, and the third identical consecutive call is blocked.
+- `ctx.stop(reason)` throws and never returns. It saves `reason` as the call's result, lets the rest of the batch finish, and ends the run with `finishReason: "stopped"` and no more model turns.
+- `agent.stream()` returns an `AssistantMessageEventStream`. Always `await stream.result()` for the final `AgentResponse`.
+- `steer`, `queue` and `interrupt` only make sense while `agent.isBusy`.
+
+**Workers and scheduling**
+- Fixed: `new Agent({ subagents: [a, b] })`. Dynamic: `dynamicSubagents: { model, tools, maxSpawn }`, and the model gets the `subagents` tool. Scheduling: `dynamicSubagents.allowScheduledActions: true` and a worker model, or you get `SubAgentModelError`.
+- `agent.scheduled.create(input)` throws one `ValidationError` that lists every problem. `scheduled_action.id` must be lowercase kebab-case, at most 48 characters. `timeToDeliver` has `HH` from 01 to 12.
+- Workers that keep a conversation: `agent.workers.spawn`, `message`, `close` and `list`. Pass `callId` for exactly-once after a crash. They need a worker model, and `persist: { dir }` on the parent to survive a restart.
+- Track workers with `track`, `listTrackedSubAgents` and `subscribeToSubAgent`. Do not poll files.
+- Scheduled action files: read each `<id>/task.json` and the run files as plain JSON. Never write `state`, `current`, `next*`, `lastRun` or `delivery.json`. To change an action, call `agent.scheduled.update`, not the file. A run's cost is in its header. `costUsd` is `unknown` (never 0) when no price is known, so check `unpricedTurns` before you treat it as exact.
+
+**Sessions, media and cost**
+- Crash recovery: `persist: { dir }` and the same `sessionId`. Use `resume: "automatic"` or `"explicit"`, `agent.interrupted()` and `agent.resume()`. To continue a finished chat by hand: `findLatestSessionDir`, then `loadSessionDir`, then `agent.importSession(saved.session)`.
+- A prompt is `string | ContentPart[]`. Part keys are `image`, `audio`, `video` and `file`, plus `filename` and `mimeType`.
+- Cost may be `undefined`. Handle it. Use `SessionTelemetry` for running totals.
+- Older models (gemini-2, gpt-4, claude-4 and so on) are not in the catalog.
+
+**Safety**
+- For anything unattended, set `maxTurns`, `limits.deadlineMs` and `budget`, and pass a `signal` per call.
+- `err.partial` holds progress. `err.retryable` tells you whether to retry.
+- Keep `captureRaw` at `"redacted"` unless you are debugging locally.
+- Use `fileAccess: { roots: [...] }` whenever file paths or sessions come from outside your program.
+
+**Generators**
+- Images: import `generateImage`. The model is a `provider/model` string from `listImageModels()`. Do not invent model ids. Never combine `size` with `aspectRatio` or `resolution`. Read `getImageModel(model)` for what a model accepts.
+- `result.image` is never undefined. Save it with `await result.image.save(path)`. To change a picture, call `image.edit(prompt)`.
+- To let a text agent make pictures, use `imageTool({ model, allow, maxImages })` in `tools`. Set `allow` only for options the model has.
+- A runnable offline demo for each generator is in `examples/` (17 to 20).
+
+**Prompts**
+- `prompts` is `Partial<Record<PromptName, string>>`. `DEFAULT_PROMPTS` is a frozen `Record<PromptName, string>`. `PromptName` and `PromptOverrides` are exported types.
+- An agent cannot edit prompts through `toConfig` or `fromConfig`. Only `model`, `instructions` and `tools` are editable.
+- Machine-readable parts stay out of the prompt text: `repeat_blocked` is also an `errorCode`, and the `[worker <id>]` header is only text for the model.
+- Do not rely on a prompt change for safety. It is advice to the model, not enforcement.
 
 ## Where to look
 
-[`llms.txt`](llms.txt) is a one-screen index. [Reference](reference.md) has every key and code. The authoritative source is `src/index.ts` (public exports) and `src/types/`.
+[`llms.txt`](llms.txt) is a one-screen index. The [Reference](reference.md) has every key and code. The authoritative source is `src/index.ts` (the public exports) and `src/types/`.

@@ -10,7 +10,7 @@ import { normalizeToolMap } from "./worker.ts";
 const EDITABLE_FIELDS = ["model", "instructions", "tools"] as const;
 
 // The model as a plain `provider/id` string (a string stays as written, a ModelSpec becomes `provider/id`); in: Agent.modelStringOrSpec or a base `model`, out: toConfig, applyEditable.
-export function modelKey(model: unknown): string | undefined {
+function modelKey(model: unknown): string | undefined {
   if (typeof model === "string") return model.trim() || undefined;
   const m = model as { model?: unknown; id?: unknown; provider?: unknown } | null | undefined;
   if (m && typeof m.model === "string") return m.model.trim() || undefined;
@@ -85,7 +85,10 @@ export function applyEditable(editable: EditableAgentConfig, base: AgentConfig):
       );
     }
     const picked: Record<string, ToolDefinition> = {};
-    for (const n of e.tools as string[]) picked[n] = pool[n]!;
+    for (const n of e.tools as string[]) {
+      const def = pool[n]; // every name was checked against the pool above
+      if (def) picked[n] = def;
+    }
     out.tools = picked;
   }
   return out; // the model list (`setModels`) is enforced by the Agent constructor

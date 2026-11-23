@@ -41,6 +41,8 @@ import type {
   ProviderRawData,
 } from "../types/model.ts";
 import type { ProviderContext, ContentPart, ProviderSteps } from "../types/message.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { CHAT_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -48,7 +50,9 @@ import { AgentResponse } from "../types/response.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { clampCacheKey } from "../utils/cache.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { toConciseProviderError, assertModalitiesSupported, assertNoVideoPartsOnResponses } from "../utils/errors.ts";
+import { toConciseProviderError } from "../utils/errors.ts";
+import { assertModalitiesSupported, assertNoVideoPartsOnResponses } from "./modalities.ts";
+import { badReplyError, responsesReplyProblem } from "./reply-guard.ts";
 import { ConfigError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { openaiGenerateImage } from "./openai-image.ts";
@@ -181,15 +185,13 @@ interface ResponsesObject {
   [k: string]: unknown;
 }
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
-
 // ---------------------------------------------------------------------------
 // Request building (canonical -> Responses)
 // ---------------------------------------------------------------------------
 
 // The openai base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return resolveProviderBaseUrl("openai", DEFAULT_BASE_URL, options);
+  return resolveProviderBaseUrl("openai", options);
 }
 
 // The openai key of this request; in: each request, out: the shared resolver.
@@ -434,7 +436,7 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
       if (typeof m.content === "string") {
         const queue = (m.name && idsByName.get(m.name)) || [];
         const rawPair = queue.shift() || newToolCallId();
-        const rawCall = rawPair.includes("|") ? rawPair.split("|")[0]! : rawPair;
+        const rawCall = rawPair.includes("|") ? beforeFirst(rawPair, "|") : rawPair;
         items.push({
           type: "function_call_output",
           call_id: normalizeResponsesIdPart(rawCall),
@@ -446,7 +448,7 @@ async function fullHistoryInput(context: ProviderContext): Promise<ResponseInput
       for (const part of m.content) {
         if (part.type === "tool_result") {
           const rawPair = pairing.get(part.id) || part.id;
-          const rawCall = rawPair.includes("|") ? rawPair.split("|")[0]! : rawPair;
+          const rawCall = rawPair.includes("|") ? beforeFirst(rawPair, "|") : rawPair;
           items.push({
             type: "function_call_output",
             call_id: normalizeResponsesIdPart(rawCall),
@@ -700,7 +702,9 @@ export class OpenAIResponsesProvider implements Provider {
         if (spec && typeof spec.capabilities?.supportsLongCacheRetention === "boolean") {
           supportsLong = spec.capabilities.supportsLongCacheRetention;
         }
-      } catch {}
+      } catch {
+        // why: a catalog problem makes the model "unknown", and this call goes ahead.
+      }
       if (supportsLong) {
         (body as Record<string, unknown>)["prompt_cache_retention"] = "24h";
       } else {
@@ -747,7 +751,7 @@ export class OpenAIResponsesProvider implements Provider {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
-      const text = await res.text();
+      const text = await readTextCapped(res, CHAT_REPLY_LIMIT);
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => {
         headers[k] = v;
@@ -861,9 +865,9 @@ export class OpenAIResponsesProvider implements Provider {
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, sessionId, options?.signal);
       this.throwIfError(res.status, url, res.text, clean, res.headers);
-      let response: ResponsesObject;
+      let parsed: unknown;
       try {
-        response = JSON.parse(res.text) as ResponsesObject;
+        parsed = JSON.parse(res.text);
       } catch {
         throw toConciseProviderError(
           Object.assign(new Error("Invalid JSON response from OpenAI Responses API"), {
@@ -875,6 +879,9 @@ export class OpenAIResponsesProvider implements Provider {
           clean
         );
       }
+      const problem = responsesReplyProblem(parsed);
+      if (problem) throw badReplyError("openai", clean, url, problem, res.text);
+      const response = parsed as ResponsesObject; // checked by responsesReplyProblem above
       // Stateless turns never establish chains, but the session store still
       // records the turn so other providers' switch detection keeps working.
       noteProviderTurn(sessionId, "openai");
@@ -1113,11 +1120,11 @@ export class OpenAIResponsesProvider implements Provider {
             // when present) so nothing depends solely on delta assembly.
             for (const item of response.output ?? []) {
               if (item.type !== "function_call") continue;
-              const key = [...calls.entries()].find(
-                ([, c]) => (c.itemId && c.itemId === item.id) || (c.callId && c.callId === item.call_id)
-              )?.[0];
-              if (key !== undefined && typeof item.arguments === "string") {
-                const entry = calls.get(key)!;
+              const found = [...calls.values()].find(
+                (c) => (c.itemId && c.itemId === item.id) || (c.callId && c.callId === item.call_id)
+              );
+              if (found && typeof item.arguments === "string") {
+                const entry = found;
                 entry.itemId = item.id || entry.itemId;
                 entry.callId = item.call_id || entry.callId;
                 entry.name = item.name || entry.name;
@@ -1161,7 +1168,7 @@ export class OpenAIResponsesProvider implements Provider {
           }
         };
 
-        await readSseData(res.body!, linked, eventStream, handleMessage); // openStreamResponse guarantees a body
+        await readSseData(res.body, linked, eventStream, handleMessage);
 
         const toolCalls: ToolCallRecord[] = [];
         for (const c of calls.values()) {
@@ -1221,7 +1228,7 @@ export class OpenAIResponsesProvider implements Provider {
           provider: "openai",
           raw: {
             request: rawRequest,
-            response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
+            response: { ...responseMeta, body: completedBody, badFrames },
           },
           durationMs: Date.now() - startTime,
           providerSteps: replayItems(completedOutput, toolCalls),

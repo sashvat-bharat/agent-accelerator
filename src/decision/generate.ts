@@ -11,8 +11,8 @@ import { assertModelAllowed } from "../config/models.ts";
 import { getProvider } from "../providers/registry.ts";
 import { withProviderSlot } from "../agent/governor.ts";
 import { applyCaptureRaw } from "../utils/raw-capture.ts";
-import { abortError, bounded, providerOptionsFrom, readInputPart } from "../utils/provider-call.ts";
-import { BudgetExceededError, ConfigError, ProviderError, ValidationError } from "../types/errors.ts";
+import { bounded, providerOptionsFrom, readInputPart } from "../utils/provider-call.ts";
+import { BudgetExceededError, ConfigError, ProviderError, ValidationError, abortErrorFor } from "../types/errors.ts";
 import type {
   DecisionAnswer,
   DecisionOptions,
@@ -132,7 +132,7 @@ export async function generateDecision(opts: DecisionOptions): Promise<DecisionR
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const providerOptions = providerOptionsFrom(opts, timeoutMs);
   const signal = opts.signal ?? new AbortController().signal;
-  if (signal.aborted) throw abortError(signal, "Decision aborted");
+  if (signal.aborted) throw abortErrorFor(signal, "Decision aborted");
 
   const body: ProviderDecisionRequest = { input, questions: request.questions };
   const started = Date.now();

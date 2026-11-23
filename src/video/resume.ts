@@ -8,8 +8,8 @@ import { ensureOpenRouterVideoModels } from "../models/openrouter-videos.ts";
 import { assertModelAllowed } from "../config/models.ts";
 import { getProvider } from "../providers/registry.ts";
 import { withProviderSlot } from "../agent/governor.ts";
-import { abortError, providerOptionsFrom } from "../utils/provider-call.ts";
-import { ConfigError, ValidationError } from "../types/errors.ts";
+import { providerOptionsFrom } from "../utils/provider-call.ts";
+import { ConfigError, ValidationError, abortErrorFor } from "../types/errors.ts";
 import type { ResumeVideoOptions } from "../types/video.ts";
 import { finishVideo, inheritFrom } from "./finish.ts";
 import type { VideoResult } from "./result.ts";
@@ -53,7 +53,7 @@ export async function resumeVideo(opts: ResumeVideoOptions): Promise<VideoResult
 
   const deadlineMs = timeoutOpt === 0 ? Infinity : timeoutOpt;
   const signal = opts.signal ?? new AbortController().signal;
-  if (signal.aborted) throw abortError(signal, "Video generation aborted");
+  if (signal.aborted) throw abortErrorFor(signal, "Video generation aborted");
   const providerOptions = providerOptionsFrom(opts, Number.isFinite(deadlineMs) ? deadlineMs : 0);
   const started = Date.now();
   const res = await withProviderSlot(def.provider, signal, () =>

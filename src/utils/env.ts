@@ -20,7 +20,7 @@ export function getEnv(key: string, fallback?: string): string | undefined {
   return fallback;
 }
 
-export type ProviderEnv = Record<string, string>;
+type ProviderEnv = Record<string, string>;
 
 /**
  * Resolves a provider API key from explicit input, overrides, and standard aliases.

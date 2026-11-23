@@ -49,6 +49,7 @@ import type {
   ProviderRawData,
 } from "../types/model.ts";
 import type { ProviderContext, ContentPart } from "../types/message.ts";
+import { CHAT_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage, ThinkingConfig } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -57,7 +58,9 @@ import { getApiKey } from "../utils/env.ts";
 import { baseUrlSetting, compatSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
+import { toConciseProviderError } from "../utils/errors.ts";
+import { assertModalitiesSupported } from "./modalities.ts";
+import { badReplyError, chatReplyProblem } from "./reply-guard.ts";
 import { withRetries } from "../utils/retry.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
 import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
@@ -132,6 +135,8 @@ interface ChatRequestBody {
   model: string;
   messages: ChatMessage[];
   tools?: Array<Record<string, unknown>>;
+  /** Streaming only: asks the server to report token usage on the final chunk. */
+  stream_options?: { include_usage: boolean };
   tool_choice?: string | { type: "function"; function: { name: string } };
   response_format?: {
     type: "json_schema";
@@ -789,7 +794,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     if (stream) {
       const noStreamOptions = options?.streamOptions === false || compatSetting().no_stream_options === true;
       if (!noStreamOptions) {
-        (body as unknown as Record<string, unknown>)["stream_options"] = { include_usage: true };
+        body.stream_options = { include_usage: true };
       }
     }
     return body;
@@ -808,17 +813,15 @@ export class OpenAICompatibleChatProvider implements Provider {
     // the `compat.no_session_headers` setting or per-call `sendSessionHeaders:false`
     // drops affinity headers that trigger CORS preflights / strict 400s.
     // Body `session_id` is already omitted on compat (headers-only affinity).
-    try {
-      const noAffinity = options?.sendSessionHeaders === false || compatSetting().no_session_headers === true;
-      if (noAffinity) {
-        for (const k of Object.keys(headers)) {
-          const lower = k.toLowerCase();
-          if (lower === "x-session-id" || lower === "x-client-request-id" || lower === "session_id") {
-            delete headers[k];
-          }
+    const noAffinity = options?.sendSessionHeaders === false || compatSetting().no_session_headers === true;
+    if (noAffinity) {
+      for (const k of Object.keys(headers)) {
+        const lower = k.toLowerCase();
+        if (lower === "x-session-id" || lower === "x-client-request-id" || lower === "session_id") {
+          delete headers[k];
         }
       }
-    } catch {}
+    }
     setHeaderCaseInsensitive(headers, "Content-Type", "application/json");
     if (apiKey && apiKey !== "unused") setHeaderCaseInsensitive(headers, "Authorization", `Bearer ${apiKey}`);
     return { method: "POST", headers, body: JSON.stringify(body), signal };
@@ -836,7 +839,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, effective));
-      const text = await res.text();
+      const text = await readTextCapped(res, CHAT_REPLY_LIMIT);
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => {
         headers[k] = v;
@@ -911,9 +914,9 @@ export class OpenAICompatibleChatProvider implements Provider {
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, sessionId, options?.signal);
       this.throwIfError(res.status, url, res.text, clean, res.headers);
-      let response: ChatResponse;
+      let parsed: unknown;
       try {
-        response = JSON.parse(res.text) as ChatResponse;
+        parsed = JSON.parse(res.text);
       } catch {
         throw toConciseProviderError(
           Object.assign(new Error("Invalid JSON response from OpenAI-compatible Chat Completions API"), {
@@ -925,6 +928,9 @@ export class OpenAICompatibleChatProvider implements Provider {
           clean
         );
       }
+      const problem = chatReplyProblem(parsed);
+      if (problem) throw badReplyError(this.prefix, clean, url, problem, res.text);
+      const response = parsed as ChatResponse; // checked by chatReplyProblem above
       // Stateless turns never establish chains, but the session store still
       // records the turn so other providers' switch detection keeps working.
       noteProviderTurn(sessionId, this.prefix);
@@ -1148,7 +1154,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           }
         };
 
-        await readSseData(res.body!, linked, eventStream, handleMessage); // openStreamResponse guarantees a body
+        await readSseData(res.body, linked, eventStream, handleMessage);
 
         const toolCalls: ToolCallRecord[] = [];
         for (const [index, c] of calls) {
@@ -1207,7 +1213,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           provider: prefix as ProviderId,
           raw: {
             request: rawRequest,
-            response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
+            response: { ...responseMeta, body: completedBody, badFrames },
           },
           durationMs: Date.now() - startTime,
         });
@@ -1235,6 +1241,6 @@ export function createOpenAICompatibleProvider(
   return new OpenAICompatibleChatProvider(prefix, opts);
 }
 /** Backward-compatible alias for {@link createOpenAICompatibleProvider}. @example `createCustomProvider("ollama")` */
-export const createCustomProvider = createOpenAICompatibleProvider;
+export const createCustomProvider: typeof createOpenAICompatibleProvider = createOpenAICompatibleProvider;
 /** Backward-compatible class alias for {@link OpenAICompatibleChatProvider}. @example `new CustomProvider("ollama")` */
-export const CustomProvider = OpenAICompatibleChatProvider;
+export const CustomProvider: typeof OpenAICompatibleChatProvider = OpenAICompatibleChatProvider;

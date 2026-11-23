@@ -12,17 +12,10 @@ export type Run = AssistantMessageEventStreamT & {
 
 // Core Agent & Tool Classes
 export { Agent, SubAgentModelError } from "./agent/agent.ts";
-export { SubAgent, agentFromEnv } from "./agent/subagent.ts";
-export type { SubAgentConfig } from "./agent/subagent.ts";
 export type { EditableAgentConfig } from "./types/agent.ts";
-export {
-  tool,
-  toStandardToolDeclarations,
-  assertValidToolName,
-  TOOL_NAME_PATTERN,
-} from "./tools/tool.ts";
+export { tool } from "./tools/tool.ts";
 export type { CreateToolOptions } from "./tools/tool.ts";
-export { zodToJsonSchema, cleanJsonSchema } from "./tools/schema.ts";
+
 export { toolContent } from "./tools/tool-content.ts";
 export { DEFAULT_PROMPTS } from "./prompts/prompts.ts";
 export type { PromptName, PromptOverrides } from "./prompts/prompts.ts";
@@ -34,9 +27,6 @@ export { RemoteFetchError } from "./utils/safe-io.ts";
 export {
   buildAgentTools,
   agentToTool,
-  createChildSessionId,
-  createFixedChildSessionId,
-  isSessionDescendant,
 } from "./agent/delegation.ts";
 export type { AgentAsToolTarget, SubAgentTrace } from "./agent/delegation.ts";
 export type { WorkerRegistry, WorkerSpec, WorkerInfo, WorkerReply, WorkerCallOptions } from "./agent/workers.ts";
@@ -87,16 +77,11 @@ export {
   ensureModelCatalogFresh,
   getCatalogStatus,
   setCatalogTTL,
-  getCatalogTTL,
-  getCacheDir,
-  getCacheFilePath,
-  isValidCatalogPayload,
   createGenericModelSpec,
-  DEFAULT_CATALOG_TTL_MS,
   type CatalogStatus,
   type RefreshCatalogOptions,
 } from "./models/catalog.ts";
-export { CATALOG_PROVIDERS } from "./models/catalog-shards.ts";
+
 export { listImageModels, getImageModel } from "./models/image-models.ts";
 export { generateImage } from "./image/generate.ts";
 export { imageTool } from "./image/tool.ts";
@@ -108,18 +93,11 @@ export type {
   ImageInput,
   ImageResolution,
   ImageFormat,
-  ProviderImageRequest,
-  ProviderImageResult,
 } from "./types/image.ts";
-export type { ImageModelInfo, ImageTokenPrices, ImageSizeRules } from "./models/image-models.ts";
+export type { ImageModelInfo } from "./models/image-models.ts";
 export type { CatalogProvider } from "./models/catalog-shards.ts";
 export { listEmbeddingModels, getEmbeddingModel } from "./models/embedding-models.ts";
-export type {
-  EmbeddingModelInfo,
-  EmbeddingPrices,
-  EmbeddingInputKind,
-  EmbeddingTaskStyle,
-} from "./models/embedding-models.ts";
+export type { EmbeddingModelInfo } from "./models/embedding-models.ts";
 export { refreshOpenRouterEmbeddingModels } from "./models/openrouter-embeddings.ts";
 export type { RefreshOpenRouterEmbeddingsOptions } from "./models/openrouter-embeddings.ts";
 export { generateEmbedding } from "./embedding/generate.ts";
@@ -132,11 +110,9 @@ export type {
   EmbeddingPart,
   EmbeddingTask,
   EmbeddingPartData,
-  ProviderEmbeddingRequest,
-  ProviderEmbeddingResult,
 } from "./types/embedding.ts";
 export { listDecisionModels, getDecisionModel } from "./models/decision-models.ts";
-export type { DecisionModelInfo, DecisionPrices, DecisionInputKind } from "./models/decision-models.ts";
+export type { DecisionModelInfo } from "./models/decision-models.ts";
 export { refreshOpenRouterDecisionModels } from "./models/openrouter-decisions.ts";
 export type { RefreshOpenRouterDecisionsOptions } from "./models/openrouter-decisions.ts";
 export { generateDecision } from "./decision/generate.ts";
@@ -150,26 +126,10 @@ export type {
   DecisionInstructions,
   DecisionQuestion,
   DecisionQuestionType,
-  NoulQuestion,
-  ChoiceQuestion,
-  ScoreQuestion,
   DecisionAnswer,
-  NoulAnswer,
-  ChoiceAnswer,
-  ScoreAnswer,
-  RefusalAnswer,
-  ResolvedDecisionQuestion,
-  ProviderDecisionRequest,
-  ProviderDecisionAnswer,
-  ProviderDecisionResult,
 } from "./types/decision.ts";
 export { listVideoModels, getVideoModel } from "./models/video-models.ts";
-export type {
-  VideoModelInfo,
-  VideoTokenPrices,
-  VideoClipReferences,
-  VideoFrameRole,
-} from "./models/video-models.ts";
+export type { VideoModelInfo } from "./models/video-models.ts";
 export { refreshOpenRouterVideoModels } from "./models/openrouter-videos.ts";
 export type { RefreshOpenRouterVideosOptions } from "./models/openrouter-videos.ts";
 export { generateVideo } from "./video/generate.ts";
@@ -179,49 +139,17 @@ export type {
   VideoOptions,
   VideoInput,
   VideoProgress,
-  ProviderVideoRequest,
-  ProviderVideoResult,
-  ProviderVideoResumeRequest,
   VideoEditOptions,
   ResumeVideoOptions,
 } from "./types/video.ts";
-export { resolveEffectiveThinking } from "./agent/options.ts";
+
 export { withRetries, isTransientError } from "./utils/retry.ts";
-export { toConciseProviderError, assertModalitiesSupported } from "./utils/errors.ts";
+
 // Native provider implementations.
-export {
-  OpenAICompatibleChatProvider,
-  createOpenAICompatibleProvider,
-  createCustomProvider,
-  CustomProvider,
-} from "./providers/openai-compat.ts";
-export type { CustomProviderOptions } from "./providers/openai-compat.ts";
 
 // Canonical provider contract (provider-agnostic) + native adapters.
-export {
-  GoogleInteractionsProvider,
-  clearInteractionChains,
-} from "./providers/google.ts";
-export { OpenRouterChatCompletionsProvider } from "./providers/openrouter.ts";
-export { OpenAIResponsesProvider } from "./providers/openai.ts";
-export { AnthropicMessagesProvider } from "./providers/anthropic.ts";
 
-export {
-  GOOGLE_MODELS,
-  OPENAI_MODELS,
-  ANTHROPIC_MODELS,
-  OPENROUTER_MODELS,
-  modelSupportsStructuredOutput,
-} from "./models/catalog.ts";
-export {
-  isValidThoughtSignature,
-  retainThoughtSignature,
-  extractGoogleThoughtSignature,
-} from "./utils/thought-signature.ts";
-
-export { stripSchemaForGoogle } from "./tools/schema.ts";
-
-export { clampCacheKey } from "./utils/cache.ts";
+export { modelSupportsStructuredOutput } from "./models/catalog.ts";
 
 // Streaming & Events
 export { AssistantMessageEventStream } from "./streaming/event-stream.ts";
@@ -271,44 +199,22 @@ export {
   saveSessionFile,
   loadSessionDir,
   saveSessionDir,
-  writeFileAtomic,
   findLatestSessionDir,
   sessionDirFor,
-  extractMediaToDir,
-  resolveMediaPaths,
-  buildSessionData,
-  serializeSession,
-  deserializeSession,
-  inspectSessionPayload,
-  getSessionContextWindow,
-  computeSessionTurnCost,
-  formatSessionTokens,
-  formatSessionCost,
-  formatSessionBanner,
 } from "./session/store.ts";
 export type { UsageReport, UsageLine, UsageTotals, AgentUsage, WorkerUsage, CostSource } from "./session/usage.ts";
 export type {
   SessionLimits,
-  SessionPayloadStatus,
   PersistedAgentSession,
   SessionTotals,
-  SessionAgentLike,
   LoadedSessionDir,
-  PersistedSubAgentTrace,
-  SessionRunMark,
-  SessionRunEnd,
-  SessionPending,
-  SessionPendingPrompt,
-  SessionToolRecord,
 } from "./session/store.ts";
 
 // Utilities
-export { createSessionId, createTrackingId } from "./utils/session.ts";
-export { buildSessionHeaders, setAttribution, getAttribution } from "./utils/headers.ts";
+export { createSessionId } from "./utils/session.ts";
+export { setAttribution } from "./utils/headers.ts";
 export type { AttributionConfig } from "./utils/headers.ts";
 export { normalizeMediaInput, inferMimeType, sniffMimeType } from "./utils/media.ts";
-
-export { CACHE_OPTIONS } from "./types/core.ts";
 
 // TypeScript Type Exports
 export type {
@@ -332,7 +238,6 @@ export type {
   ToolResultPart,
   ThinkingPart,
   ProviderContext,
-  ProviderSteps,
   MediaResolution,
   VideoProcessing,
 } from "./types/message.ts";
@@ -343,7 +248,6 @@ export type {
   ToolExecutionContext,
   ToolCallRecord,
   ToolResultRecord,
-  StandardToolDeclaration,
   ToolEmitFn,
 } from "./types/tool.ts";
 
@@ -352,8 +256,6 @@ export type {
   ModelCapabilities,
   Provider,
   ProviderId,
-  ProviderRequestOptions,
-  ProviderGenerateResult,
   ProviderRawData,
   StructuredOutputSpec,
 } from "./types/model.ts";

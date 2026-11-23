@@ -10,6 +10,8 @@
  * another endpoint of the same model.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
 import type { InputPartData } from "../utils/provider-call.ts";
 import type { TokenUsage } from "../types/core.ts";
@@ -30,7 +32,6 @@ import {
 } from "./shared.ts";
 import { throwOpenRouterHttpError } from "./openrouter-image.ts";
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 /** `input_audio.format` for the MIME subtypes that are spelled differently. */
 const AUDIO_FORMAT: Record<string, string> = { mpeg: "mp3", "x-wav": "wav", wave: "wav", mp4: "m4a" };
 /** `ImagePart.resolution` as OpenRouter's `image_url.detail` (auto, low, high). */
@@ -49,7 +50,7 @@ interface DecisionReply {
 
 // The alpha endpoint next to the chat API (`.../api/v1` becomes `.../api/alpha/decisions`), also for a proxy or `base_urls.openrouter`; in: openrouterDecide, out: the URL.
 function decisionsUrl(options?: ProviderRequestOptions): string {
-  return `${resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options).replace(/\/v1$/, "")}/alpha/decisions`;
+  return `${resolveProviderBaseUrl("openrouter", options).replace(/\/v1$/, "")}/alpha/decisions`;
 }
 
 // One part as OpenRouter takes it in `state`: text as a string, media as its own part shape; in: buildState, out: the item.
@@ -61,7 +62,7 @@ function toItem(part: InputPartData): string | Record<string, unknown> {
       image_url: { url: part.media.dataUrl, ...(part.resolution ? { detail: IMAGE_DETAIL[part.resolution] } : {}) },
     };
   if (part.kind === "audio") {
-    const subtype = part.media.mimeType.split(";")[0]!.split("/")[1] ?? "";
+    const subtype = beforeFirst(part.media.mimeType, ";").split("/")[1] ?? "";
     return {
       type: "input_audio",
       input_audio: { data: part.media.base64Data, format: AUDIO_FORMAT[subtype] ?? subtype },
@@ -127,7 +128,7 @@ export async function openrouterDecide(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

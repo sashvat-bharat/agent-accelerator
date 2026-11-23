@@ -1,0 +1,6 @@
+{
+  // The shipped code (src/) must stay readable to a compiler without whole-program inference: every export is annotated.
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "declaration": true, "isolatedDeclarations": true, "allowJs": false },
+  "include": ["src/**/*"]
+}

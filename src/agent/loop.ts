@@ -36,13 +36,14 @@ import {
 import { getModelFromCatalog, ensureModelCatalogFresh, validateModelThinking } from "../models/catalog.ts";
 import { enforceFileAccess } from "../utils/safe-io.ts";
 import { isSubagentResult, normalizeSubagentMetadata } from "../tools/subagent-result.ts";
-import { BudgetExceededError, TimeoutError } from "../types/errors.ts";
+import { BudgetExceededError, TimeoutError, ToolError } from "../types/errors.ts";
 import { applyCaptureRaw, type CaptureRawMode } from "../utils/raw-capture.ts";
 import { previewPrompt } from "../utils/session.ts";
 import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts";
 import { noteProviderTurn, normalizeStructuredOutput, parseStructuredOutput } from "../providers.ts";
 import { withProviderSlot } from "./governor.ts";
 import { applyBeforeRequest, applyOnYield, hookContext } from "./hooks.ts";
+import { resolveNetworkTimeouts } from "./options.ts";
 
 /** One mid-session steer request buffered while a run is active. */
 export interface SteerEntry {
@@ -57,7 +58,7 @@ export interface SteerEntry {
   settle?: { resolve: (res: AgentResponse) => void; reject: (err: unknown) => void; deferredToQueue?: boolean };
 }
 
-export interface AgentLoopConfig {
+interface AgentLoopConfig {
   agentName?: string;
   provider: Provider;
   modelId: string;
@@ -130,8 +131,7 @@ export interface AgentLoopConfig {
 function drainSteerInbox(context: AgentContext, inbox?: SteerEntry[], prompts: Prompts = DEFAULT_PROMPTS): string[] {
   if (!inbox || inbox.length === 0) return [];
   const injected: string[] = [];
-  while (inbox.length > 0) {
-    const entry = inbox.shift()!;
+  for (let entry = inbox.shift(); entry; entry = inbox.shift()) {
     try {
       let prompt = entry.prompt as string | ContentPart[];
       const opts = entry.options;
@@ -169,7 +169,9 @@ function emitTurn(
       toolCalls: turn.toolCalls?.map((c) => ({ id: c.id, name: c.name })),
       toolResults: turn.toolResults?.map((r) => ({ id: r.id, name: r.name, isError: r.isError })),
     });
-  } catch {}
+  } catch {
+    // why: a callback or listener of yours must never break the run.
+  }
 }
 
 /**
@@ -203,7 +205,9 @@ function shouldRollbackOnFailure(
 function emitProgress(config: { onProgress?: () => void }): void {
   try {
     config.onProgress?.();
-  } catch {}
+  } catch {
+    // why: a callback or listener of yours must never break the run.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -342,14 +346,16 @@ export function ensureToolPairing(context: AgentContext, prompts: Prompts = DEFA
     }
     const unchanged = rebuilt.length === messages.length && rebuilt.every((m, i) => m === messages[i]);
     if (!unchanged) context.messages = rebuilt;
-  } catch {}
+  } catch {
+    // why: this repair replaces the history only when it is complete, so if it fails the history stays as it was.
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Abort + limits helpers.
 // ---------------------------------------------------------------------------
 
-export interface LoopLimits {
+interface LoopLimits {
   maxTurns?: number;
   deadlineMs?: number;
   maxToolCallsPerRun?: number;
@@ -375,11 +381,7 @@ function resolveLoopLimits(
   const deadlineMs = num(raw.deadlineMs) ?? Infinity;
   const maxToolCallsPerRun = num(raw.maxToolCallsPerRun) ?? Infinity;
   const maxTotalTokens = num(raw.maxTotalTokens) ?? Infinity;
-  // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
-  const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
-  const requestTimeoutMs = timeout(raw.requestTimeoutMs) ?? 300_000;
-  const firstByteTimeoutMs = timeout(raw.firstByteTimeoutMs) ?? 120_000;
-  const streamIdleTimeoutMs = timeout(raw.streamIdleTimeoutMs) ?? 300_000;
+  const { requestTimeoutMs, firstByteTimeoutMs, streamIdleTimeoutMs } = resolveNetworkTimeouts(raw);
   return {
     maxTurns,
     deadlineMs,
@@ -410,13 +412,16 @@ function makeAbortError(partial: { usage: TokenUsage; turns: number; text?: stri
   else if (reason instanceof Error) base = new Error(reason.message || "Aborted");
   else if (typeof reason === "string" && reason) base = new Error(reason);
   else base = new Error("Aborted");
-  try {
-    (base as { name: string }).name = "AbortError";
-  } catch {}
-  try {
-    (base as unknown as { partial: unknown }).partial = partial;
-  } catch {}
+  // Reflect.set gives false, and never throws, for a frozen or read-only error: the failure is still reported.
+  Reflect.set(base, "name", "AbortError");
+  Reflect.set(base, "partial", partial);
   return base;
+}
+
+// Attaches the progress of a failed run to its error unless the error already carries some (a thrown string or number has nowhere to keep it); in: the failure paths of both loops, out: nothing.
+function attachPartial(error: unknown, partial: unknown): void {
+  if (error === null || typeof error !== "object") return;
+  if (Reflect.get(error, "partial") == null) Reflect.set(error, "partial", partial);
 }
 
 // Throws the run's AbortError as soon as its signal is aborted; in: loop checkpoints, out: nothing or a thrown abort.
@@ -425,7 +430,7 @@ function throwIfAborted(
   partial: { usage: TokenUsage; turns: number; text?: string }
 ): void {
   if (signal?.aborted) {
-    throw makeAbortError(partial, (signal as unknown as { reason?: unknown })?.reason ?? new Error("Aborted"));
+    throw makeAbortError(partial, signal?.reason ?? new Error("Aborted"));
   }
 }
 
@@ -456,8 +461,10 @@ async function generateWithTimeout<T>(task: () => Promise<T>, timeoutMs: number)
         reject(new TimeoutError(`[Agent Accelerator] Request timed out after ${timeoutMs}ms.`));
       }, timeoutMs);
       try {
-        (timer as unknown as { unref?: () => void }).unref?.();
-      } catch {}
+        timer.unref?.();
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
     });
     return await Promise.race([task(), timeoutP]);
   } finally {
@@ -626,11 +633,9 @@ function buildTurnOptions(
     ...(outputSpec ? { output: outputSpec } : {}),
   };
   // Per-request timeout pass-through (providers honor timeoutMs).
-  try {
-    if (Number.isFinite(requestTimeoutMs) && requestTimeoutMs !== Infinity) {
-      providerOptions.timeoutMs = requestTimeoutMs;
-    }
-  } catch {}
+  if (Number.isFinite(requestTimeoutMs) && requestTimeoutMs !== Infinity) {
+    providerOptions.timeoutMs = requestTimeoutMs;
+  }
   return providerOptions;
 }
 
@@ -666,7 +671,9 @@ function recordModelTurn(
   accumulateUsage(accumulated, usage, spec, serviceTier);
   try {
     config.onTurnUsage?.(usage, spec);
-  } catch {}
+  } catch {
+    // why: a callback or listener of yours must never break the run.
+  }
   config.enforceBudget?.({ ...usage, cost: computeCostFromPricing(usage, spec, serviceTier) });
   checkTokenLimit(accumulated, maxTotalTokens);
 }
@@ -693,7 +700,9 @@ function emitThinkingTrace(
         ...(turn.thoughtSignature ? { thoughtSignature: turn.thoughtSignature } : {}),
       },
     });
-  } catch {}
+  } catch {
+    // why: telemetry is observability only and must never break the call.
+  }
 }
 
 // Turns executed tool results into what goes into history: unwraps delegation envelopes, rolls each worker's usage into the run's total and budget (calling `onWorker` for each), and returns the sanitized results; in: both loops after a tool batch, out: the results for the context and `allSubagents`.
@@ -913,7 +922,9 @@ async function finishInterruptedTools(
   const ran = new Map([...skipped, ...executed.map((r): [string, ToolResultRecord] => [r.id, r])]);
   const subagents: SubAgentExecutionMetadata[] = [];
   const results = open.map((call) => {
-    const { sanitized, metas } = sanitizeToolResult(ran.get(call.id) ?? stored.get(call.id)!);
+    const result = ran.get(call.id) ?? stored.get(call.id);
+    if (!result) throw new ToolError(`[Agent Accelerator] No result for tool call ${call.id} (${call.name}).`);
+    const { sanitized, metas } = sanitizeToolResult(result);
     subagents.push(...metas);
     return sanitized;
   });
@@ -1052,7 +1063,9 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         if (noToolSteered.length > 0) {
           try {
             config.onSteerInjected?.(noToolSteered);
-          } catch {}
+          } catch {
+            // why: a callback or listener of yours must never break the run.
+          }
         }
         emitProgress(config);
         if (noToolSteered.length > 0) continue;
@@ -1127,7 +1140,9 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       if (toolSteered.length > 0) {
         try {
           config.onSteerInjected?.(toolSteered);
-        } catch {}
+        } catch {
+          // why: a callback or listener of yours must never break the run.
+        }
       }
       emitProgress(config);
 
@@ -1196,18 +1211,10 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
       throw makeAbortError({ usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, turns: 0 }, err);
     }
     // Every failure carries its partial progress for observability.
-    try {
-      (err as unknown as { partial?: unknown }).partial ??= partialProgress(
-        accumulatedUsage,
-        turns,
-        allToolCalls,
-        allToolResults,
-        allSubagents,
-        finalResult?.text
-      );
-    } catch {
-      // why: partial attachment is observability-only and must never mask the error.
-    }
+    attachPartial(
+      err,
+      partialProgress(accumulatedUsage, turns, allToolCalls, allToolResults, allSubagents, finalResult?.text)
+    );
     throw err;
   }
 }
@@ -1230,7 +1237,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
     } catch {
       try {
         linked.abort();
-      } catch {}
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
     }
   };
   if (userSignal?.aborted) forwardUserAbort();
@@ -1239,22 +1248,28 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
   const removeOuterCancel = outerStream.onCancel(() => {
     try {
       linked.abort();
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     try {
       currentInner?.cancel();
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   });
   linked.signal.addEventListener("abort", () => {
     try {
       currentInner?.cancel();
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   });
   const throwIfCancelled = (partial?: { usage: TokenUsage; turns: number; text?: string }) => {
     if (linked.signal.aborted || outerStream.isCancelled()) {
       const fallback: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
       throw makeAbortError(
         partial ?? { usage: fallback, turns: 0 },
-        (linked.signal as unknown as { reason?: unknown })?.reason ?? new Error("Stream aborted")
+        linked.signal?.reason ?? new Error("Stream aborted")
       );
     }
   };
@@ -1377,8 +1392,10 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
                         );
                       }, waitMs);
                       try {
-                        (timer as unknown as { unref?: () => void }).unref?.();
-                      } catch {}
+                        timer.unref?.();
+                      } catch {
+                        // why: cancelling or releasing something that is already closed is harmless.
+                      }
                     })
                   : null;
               try {
@@ -1406,7 +1423,9 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
                 if ((e as Error)?.name === "TimeoutError") {
                   try {
                     currentInner?.cancel();
-                  } catch {}
+                  } catch {
+                    // why: cancelling or releasing something that is already closed is harmless.
+                  }
                 }
                 throw e;
               }
@@ -1569,13 +1588,13 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
         emitProgress(config);
       }
 
-      const truncatedByMaxTurns =
-        !stoppedByTool && turns >= maxTurns && !!lastResponse?.toolCalls && lastResponse.toolCalls.length > 0;
+      const lastToolCalls = lastResponse?.toolCalls ?? [];
+      const truncatedByMaxTurns = !stoppedByTool && turns >= maxTurns && lastToolCalls.length > 0;
       if (truncatedByMaxTurns) {
         warnMaxTurnsHit(
           agentName,
           maxTurns,
-          lastResponse!.toolCalls.map((c) => c.name)
+          lastToolCalls.map((c) => c.name)
         );
       }
       const truncatedFinish = stoppedByTool
@@ -1591,16 +1610,10 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           streamParsed = parseFinalStructuredOutput(lastResponse?.text || "", streamOutputRaw, streamOutputSpec);
         } catch (err) {
           const raw = err instanceof Error ? err : new Error(String(err));
-          try {
-            (raw as unknown as { partial?: unknown }).partial ??= partialProgress(
-              accumulatedUsage,
-              turns,
-              allToolCalls,
-              allToolResults,
-              allSubagents,
-              lastResponse?.text
-            );
-          } catch {}
+          attachPartial(
+            raw,
+            partialProgress(accumulatedUsage, turns, allToolCalls, allToolResults, allSubagents, lastResponse?.text)
+          );
           outerStream.fail(raw);
           return;
         }
@@ -1663,18 +1676,10 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
       // Aborts always surface as AbortError with partial attached.
       if (isAbort) {
         const abortErr = raw.name === "AbortError" ? raw : makeAbortError(partial, raw);
-        try {
-          (abortErr as unknown as { partial?: unknown }).partial ??= partial;
-        } catch {
-          // why: partial attachment is observability-only and must never mask the error.
-        }
+        attachPartial(abortErr, partial);
         outerStream.fail(abortErr);
       } else {
-        try {
-          (raw as unknown as { partial?: unknown }).partial ??= partial;
-        } catch {
-          // why: partial attachment is observability-only and must never mask the error.
-        }
+        attachPartial(raw, partial);
         outerStream.fail(raw);
       }
     } finally {
@@ -1710,7 +1715,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
  * finishReason instead of fabricating an answer from reasoning. Opt in with
  * the run option `thinkingAsAnswerFallback: true`.
  */
-export function shouldPromoteThinkingToAnswer(runOptions?: AgentRunOptions): boolean {
+function shouldPromoteThinkingToAnswer(runOptions?: AgentRunOptions): boolean {
   return runOptions?.thinkingAsAnswerFallback === true;
 }
 
@@ -1721,7 +1726,7 @@ export function shouldPromoteThinkingToAnswer(runOptions?: AgentRunOptions): boo
  * Otherwise delegates to `normalizeFinishReason` (unknown vendor strings map
  * to `"error"` with the original in `rawFinishReason`).
  */
-export function canonicalFinishReason(
+function canonicalFinishReason(
   providerReason: unknown,
   truncated: boolean
 ): { finishReason?: FinishReason; rawFinishReason?: string } {

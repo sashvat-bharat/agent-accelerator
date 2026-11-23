@@ -5,6 +5,7 @@
  * wire, reads the reply and maps errors. Streaming (`partial_images`), masks, markup, SVG and GIF are never sent.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { base64ToBytes } from "../utils/base64.ts";
@@ -25,7 +26,6 @@ import {
   timeoutFor,
 } from "./shared.ts";
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const FORMAT_MIME: Record<string, string> = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" };
 
 interface ImagesResponse {
@@ -112,7 +112,7 @@ export async function openaiGenerateImage(
     );
   }
   const editing = request.images.length > 0;
-  const url = `${resolveProviderBaseUrl("openai", DEFAULT_BASE_URL, options)}/images/${editing ? "edits" : "generations"}`;
+  const url = `${resolveProviderBaseUrl("openai", options)}/images/${editing ? "edits" : "generations"}`;
   const body: Record<string, unknown> = {
     model: modelId,
     prompt: request.prompt,
@@ -139,7 +139,7 @@ export async function openaiGenerateImage(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

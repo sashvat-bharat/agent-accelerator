@@ -12,8 +12,8 @@ import { withProviderSlot } from "../agent/governor.ts";
 import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
 import { normalizeMediaInput, type NormalizedMedia } from "../utils/media.ts";
 import { applyCaptureRaw } from "../utils/raw-capture.ts";
-import { BudgetExceededError, ConfigError, ProviderError, ValidationError } from "../types/errors.ts";
-import { abortError, addUsage, bounded, providerOptionsFrom } from "../utils/provider-call.ts";
+import { BudgetExceededError, ConfigError, ProviderError, ValidationError, abortErrorFor } from "../types/errors.ts";
+import { addUsage, bounded, providerOptionsFrom } from "../utils/provider-call.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type {
   ImageEditOptions,
@@ -105,7 +105,7 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
   // One shared controller: the caller's signal plus "a sibling request failed", so a failure stops the rest from billing.
   const stop = new AbortController();
   const signal = opts.signal ? AbortSignal.any([opts.signal, stop.signal]) : stop.signal;
-  if (signal.aborted) throw abortError(signal, "Image generation aborted");
+  if (signal.aborted) throw abortErrorFor(signal, "Image generation aborted");
 
   // How many pictures each request asks for: the model's per-request maximum, the last one gets the rest.
   const per = def.imagesPerRequest.max;

@@ -10,8 +10,8 @@ export function cosineSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): nu
   let na = 0;
   let nb = 0;
   for (let i = 0; i < a.length; i++) {
-    const x = a[i]!;
-    const y = b[i]!;
+    const x = a[i] ?? 0; // both lists have the same length, checked above
+    const y = b[i] ?? 0;
     dot += x * y;
     na += x * x;
     nb += y * y;

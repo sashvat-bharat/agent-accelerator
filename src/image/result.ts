@@ -133,7 +133,17 @@ export class ImageResult {
 
   /** JSON without the picture bytes. */
   toJSON(): Omit<ImageResultData, "images"> & { images: Array<{ mimeType: string; bytes: number }> } {
-    const { images, ...rest } = this;
-    return { ...(rest as unknown as Omit<ImageResultData, "images">), images: images.map((i) => i.toJSON()) };
+    const { images, text, usage, model, provider, finishReason, raw, durationMs, requests } = this;
+    return {
+      text,
+      usage,
+      model,
+      provider,
+      finishReason,
+      raw,
+      durationMs,
+      requests,
+      images: images.map((i) => i.toJSON()),
+    };
   }
 }

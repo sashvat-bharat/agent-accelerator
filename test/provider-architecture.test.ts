@@ -1,18 +1,12 @@
 import { describe, it, expect } from "bun:test";
-import {
-  getProvider,
-  resolveModel,
-  GoogleInteractionsProvider,
-  OpenAIResponsesProvider,
-  OpenRouterChatCompletionsProvider,
-  OpenAICompatibleChatProvider,
-  stripSchemaForGoogle,
-  isValidThoughtSignature,
-  retainThoughtSignature,
-  GOOGLE_MODELS,
-  OPENAI_MODELS,
-  OPENROUTER_MODELS,
-} from "../src/index.ts";
+import { getProvider, resolveModel } from "../src/index.ts";
+import { GoogleInteractionsProvider } from "../src/providers/google.ts";
+import { OpenAIResponsesProvider } from "../src/providers/openai.ts";
+import { OpenRouterChatCompletionsProvider } from "../src/providers/openrouter.ts";
+import { OpenAICompatibleChatProvider } from "../src/providers/openai-compat.ts";
+import { stripSchemaForGoogle } from "../src/tools/schema.ts";
+import { isValidThoughtSignature, retainThoughtSignature } from "../src/utils/thought-signature.ts";
+import { GOOGLE_MODELS, OPENAI_MODELS, OPENROUTER_MODELS } from "../src/models/catalog.ts";
 // Minimalist core: legacy wire types removed; structural records used instead.
 type GoogleGenerateContentRequest = Record<string, any>;
 type OpenAIChatCompletionRequest = Record<string, any>;

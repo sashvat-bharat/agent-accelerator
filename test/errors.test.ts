@@ -1,22 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import {
-  Agent,
-  tool,
-  resolveModel,
-  validateModelThinking,
-  GoogleInteractionsProvider,
-  OpenAICompatibleChatProvider,
-  ConfigError,
-  ValidationError,
-  BudgetExceededError,
-  ThinkingLevelError,
-  AgentAccelError,
-  SessionLoadError,
-  registerModel,
-  sessionDirFor,
-  normalizeMediaInput,
-} from "../src/index.ts";
+import { Agent, tool, resolveModel, validateModelThinking, ConfigError, ValidationError, BudgetExceededError, ThinkingLevelError, AgentAccelError, SessionLoadError, registerModel, sessionDirFor, normalizeMediaInput } from "../src/index.ts";
+import { GoogleInteractionsProvider } from "../src/providers/google.ts";
+import { OpenAICompatibleChatProvider } from "../src/providers/openai-compat.ts";
 
 // A thrown error, or what a promise rejects with.
 const caught = async (fn: () => unknown): Promise<any> => {

@@ -1,7 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import { resolveEffectiveThinking } from "../src/agent/agent.ts";
 import { withRetries, isTransientError } from "../src/utils/retry.ts";
-import { toConciseProviderError, assertModalitiesSupported } from "../src/utils/errors.ts";
+import { toConciseProviderError } from "../src/utils/errors.ts";
+import { assertModalitiesSupported } from "../src/providers/modalities.ts";
 import { ProviderError, ValidationError, AgentAccelError } from "../src/types/errors.ts";
 import { isNotFoundChainError } from "../src/providers/shared.ts";
 
@@ -91,6 +92,16 @@ describe("modality guard (catalog-driven)", () => {
     ).toThrow(/unsupported image input.*supports: text/);
   });
 
+  it("ignores a part type that every object has as a property, such as constructor or __proto__", () => {
+    expect(() =>
+      assertModalitiesSupported(
+        ctx({ type: "text", text: "x" }, { type: "constructor" }, { type: "toString" }, { type: "__proto__" }),
+        "openrouter",
+        "z-ai/glm-5.1"
+      )
+    ).not.toThrow();
+  });
+
   it("rejects video naming the supported set", () => {
     expect(() =>
       assertModalitiesSupported(ctx({ type: "video", video: "https://x/y.mp4" }), "openrouter", "z-ai/glm-5.1")
@@ -127,7 +138,7 @@ describe("modality guard (catalog-driven)", () => {
 
   it("accepts pdf on test-model via user-registered override", async () => {
     const { registerModel, clearCustomModels } = await import("../src/index.ts");
-    const { assertNoVideoPartsOnResponses } = await import("../src/utils/errors.ts");
+    const { assertNoVideoPartsOnResponses } = await import("../src/providers/modalities.ts");
     clearCustomModels();
     registerModel({
       id: "acme/test-model",

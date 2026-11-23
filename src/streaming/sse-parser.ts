@@ -1,5 +1,5 @@
 /** Parsed Server-Sent Events message. */
-export interface SSEMessage {
+interface SSEMessage {
   id?: string;
   event?: string;
   data: string;

@@ -4,14 +4,15 @@
  * class; the class only needs the few things in {@link RunHost}.
  */
 import type { AgentRunOptions, MidSessionConfig } from "../types/agent.ts";
+import { noop } from "../utils/noop.ts";
 import type { ContentPart } from "../types/message.ts";
 import type { AgentResponse, StreamEvent } from "../types/response.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
-import { ValidationError } from "../types/errors.ts";
+import { ValidationError, abortError } from "../types/errors.ts";
 import type { SteerEntry } from "./loop.ts";
 
 /** The run that is active right now. */
-export interface ActiveRun {
+interface ActiveRun {
   steerInbox: SteerEntry[];
   outerStream?: AssistantMessageEventStream;
   runPromise?: Promise<AgentResponse>;
@@ -31,7 +32,7 @@ export interface QueuedPrompt {
 }
 
 /** What the run control needs from its Agent. */
-export interface RunHost {
+interface RunHost {
   persistNow(): void;
   run(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse>;
   startNonStreamingRun(prompt: string | ContentPart[], options?: AgentRunOptions): Promise<AgentResponse>;
@@ -80,10 +81,14 @@ export class RunControl {
     if (!active) return;
     try {
       active.abortController.abort(reason ?? new Error("Agent interrupted"));
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     try {
       active.outerStream?.cancel(reason);
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   }
 
   // Puts a prompt ahead of everything waiting (behind earlier interrupts) and aborts the active run, so it starts as soon as that run has settled; ignores midSession mode and maxQueued; in: run()/stream() with enqueue "interrupt", out: pendingQueue + the abort.
@@ -109,7 +114,7 @@ export class RunControl {
     const reply = new Promise<AgentResponse>((resolve, reject) => {
       entry.settle = { resolve, reject };
     });
-    reply.catch(() => {}); // a fire-and-forget caller must not trigger an unhandled rejection
+    reply.catch(noop); // a fire-and-forget caller must not trigger an unhandled rejection
     active.steerInbox.push(entry);
     this.host.persistNow();
     runDone.then(
@@ -132,21 +137,27 @@ export class RunControl {
     // Reject queued items whose signal aborted before start.
     try {
       if ((next.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
-        const reason = ((next.options as { signal?: AbortSignal }).signal as unknown as { reason?: unknown })?.reason;
+        const reason = (next.options as { signal?: AbortSignal }).signal?.reason;
         const abortErr = Object.assign(
           reason instanceof Error ? reason : new Error("Queued run aborted before start"),
           { name: "AbortError" }
         );
         try {
           next.reject(abortErr);
-        } catch {}
+        } catch {
+          // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+        }
         try {
           next.deferredStream?.fail(abortErr instanceof Error ? abortErr : new Error(String(abortErr)));
-        } catch {}
+        } catch {
+          // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+        }
         queueMicrotask(() => this.pumpQueue());
         return;
       }
-    } catch {}
+    } catch {
+      // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+    }
     if (next.isStream && next.deferredStream) {
       const deferred = next.deferredStream;
       try {
@@ -155,42 +166,60 @@ export class RunControl {
         const forward = (e: StreamEvent) => {
           try {
             deferred.push(e);
-          } catch {}
+          } catch {
+            // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+          }
         };
         real.on("*", forward);
         try {
           deferred.onCancel(() => {
             try {
               real.cancel();
-            } catch {}
+            } catch {
+              // why: cancelling or releasing something that is already closed is harmless.
+            }
           });
-        } catch {}
+        } catch {
+          // why: cancelling or releasing something that is already closed is harmless.
+        }
         real.result().then(
           (res) => {
             try {
               next.resolve(res);
-            } catch {}
+            } catch {
+              // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+            }
             try {
               deferred.end(res);
-            } catch {}
+            } catch {
+              // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+            }
           },
           (err) => {
             try {
               next.reject(err);
-            } catch {}
+            } catch {
+              // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+            }
             // Pipe failures into the deferred stream so for-await sees them.
             try {
               deferred.fail(err instanceof Error ? err : new Error(String(err)));
-            } catch {}
+            } catch {
+              // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+            }
           }
         );
       } catch (err) {
         try {
           next.reject(err);
-        } catch {}
+        } catch {
+          // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+        }
         try {
           deferred.fail(err instanceof Error ? err : new Error(String(err)));
-        } catch {}
+        } catch {
+          // why: a promise or stream that has already settled cannot be settled twice, and that is fine.
+        }
         // Keep draining even if starting failed.
         queueMicrotask(() => this.pumpQueue());
       }
@@ -217,9 +246,7 @@ export class RunControl {
         for (const entry of leftover) {
           try {
             if ((entry.options as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
-              entry.settle?.reject(
-                Object.assign(new Error("Steer aborted before it could run"), { name: "AbortError" })
-              );
+              entry.settle?.reject(abortError("Steer aborted before it could run"));
               continue;
             }
           } catch {
@@ -238,14 +265,16 @@ export class RunControl {
             prompt: entry.prompt,
             options: entry.options,
             isStream: false,
-            resolve: entry.settle?.resolve ?? (() => {}),
-            reject: entry.settle?.reject ?? (() => {}),
+            resolve: entry.settle?.resolve ?? noop,
+            reject: entry.settle?.reject ?? noop,
           });
         }
         // ...but behind an interrupt(message), which is the newest and most urgent instruction.
         const firstOrdinary = this.queue.findIndex((e) => !e.urgent);
         this.queue.splice(firstOrdinary < 0 ? this.queue.length : firstOrdinary, 0, ...lateSteers);
-      } catch {}
+      } catch {
+        // why: this runs while a run is being closed; a failure here must not hide that run's own result.
+      }
     }
     this.host.persistNow();
     // Defer pump so the completing run's .then handlers settle first.

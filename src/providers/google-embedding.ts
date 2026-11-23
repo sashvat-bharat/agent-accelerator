@@ -8,6 +8,7 @@
  * media travels inline as base64. `gemini-embedding-001` reports no usage, so its cost stays unknown.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { EmbeddingPartData, ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { getEmbeddingModel } from "../models/embedding-models.ts";
@@ -19,6 +20,7 @@ import { googleEmbeddingText, mapEmbeddingTaskToGoogleTaskType } from "../provid
 import {
   combinedSignal,
   headersToRecord,
+  modalityTokens,
   redactedHeaders,
   resolveProviderApiKey,
   resolveProviderBaseUrl,
@@ -27,7 +29,6 @@ import {
 } from "./shared.ts";
 import { throwGoogleHttpError } from "./google-image.ts";
 
-const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** What `gemini-embedding-2` reads, by kind (docs: embeddings, "Supported modalities and limits"). */
 const MEDIA_MIME: Record<"image" | "audio" | "video" | "pdf", readonly string[]> = {
   image: ["image/png", "image/jpeg"],
@@ -47,26 +48,19 @@ interface BatchReply {
   usageMetadata?: { promptTokenCount?: number; promptTokenDetails?: Array<{ modality?: string; tokenCount?: number }> };
 }
 
-// The tokens of one modality in the reply's breakdown, or undefined when it does not list it; in: mapUsage, out: a count.
-function tokensOf(
-  details: NonNullable<BatchReply["usageMetadata"]>["promptTokenDetails"],
-  modality: string
-): number | undefined {
-  const hits = (details ?? []).filter((d) => d.modality === modality);
-  return hits.length > 0 ? hits.reduce((n, d) => n + (d.tokenCount ?? 0), 0) : undefined;
-}
-
 // Usage as TokenUsage with the per-kind split the pricing reads; a reply that counts DOCUMENT tokens leaves the split out (the table has no document rate, so the cost stays unknown); in: a reply, out: TokenUsage.
 function mapUsage(raw: BatchReply["usageMetadata"]): TokenUsage {
   const input = raw?.promptTokenCount ?? 0;
   const usage: TokenUsage = { inputTokens: input, outputTokens: 0, totalTokens: input };
-  const d = raw?.promptTokenDetails;
-  if (!d || tokensOf(d, "DOCUMENT") !== undefined) return usage;
+  const details = raw?.promptTokenDetails;
+  if (!details) return usage;
+  const d = details.map((x) => ({ modality: x.modality, tokens: x.tokenCount }));
+  if (modalityTokens(d, "DOCUMENT") !== undefined) return usage;
   const parts = {
-    textTokens: tokensOf(d, "TEXT"),
-    imageTokens: tokensOf(d, "IMAGE"),
-    audioTokens: tokensOf(d, "AUDIO"),
-    videoTokens: tokensOf(d, "VIDEO"),
+    textTokens: modalityTokens(d, "TEXT"),
+    imageTokens: modalityTokens(d, "IMAGE"),
+    audioTokens: modalityTokens(d, "AUDIO"),
+    videoTokens: modalityTokens(d, "VIDEO"),
   };
   const kept = Object.fromEntries(Object.entries(parts).filter(([, v]) => v !== undefined));
   if (Object.keys(kept).length > 0) usage.inputDetails = kept;
@@ -107,7 +101,7 @@ export async function googleEmbed(
       "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
     );
   const style = getEmbeddingModel(`google/${modelId}`)?.task;
-  const url = `${resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options)}/models/${modelId}:batchEmbedContents`;
+  const url = `${resolveProviderBaseUrl("google", options)}/models/${modelId}:batchEmbedContents`;
   const body = {
     requests: request.items.map((item) => ({
       model: `models/${modelId}`,
@@ -132,7 +126,7 @@ export async function googleEmbed(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

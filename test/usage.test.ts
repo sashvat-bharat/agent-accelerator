@@ -4,8 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, registerModel, clearCustomModels } from "../src/index.ts";
 import { createGenericModelSpec } from "../src/models/catalog.ts";
-import { loadSessionDir, priceUsage, sessionDirFor } from "../src/session/store.ts";
-import { addTurn, buildUsageReport, emptyUsage, mergeUsage, readUsage, usageLine } from "../src/session/usage.ts";
+import { loadSessionDir, loadSessionFile, priceUsage, saveSessionDir, saveSessionFile, sessionDirFor } from "../src/session/store.ts";
+import { OLDER_WORKERS_ID, addTurn, buildUsageReport, emptyUsage, foldOldNodes, mergeUsage, readFixedUsage, readUsage, usageLine, type UsageNode } from "../src/session/usage.ts";
 import { sseFrame } from "./helpers.ts";
 
 const roots: string[] = [];
@@ -239,6 +239,273 @@ describe("agent.usageReport()", () => {
     expect([report.agent.turns, report.workers[0]!.turns]).toEqual([2, 1]);
     expect(report.total.tokens.total).toBe(res.usage.totalTokens);
     expect(report.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
+  });
+});
+
+// One model reply that makes several tool calls at once (parallel calls of one turn).
+const callTools = (calls: Array<{ name: string; args: Record<string, unknown> }>, body: any, u = usage()): Response =>
+  body.stream
+    ? new Response(
+        sseFrame({ id: "r", choices: [{ delta: { tool_calls: calls.map((c, i) => ({ index: i, id: `call_${i}`, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })) } }] }) +
+          sseFrame({ id: "r", choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: u }) +
+          "data: [DONE]\n\n",
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      )
+    : new Response(
+        JSON.stringify({
+          id: "r",
+          choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: calls.map((c, i) => ({ id: `call_${i}`, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })) } }],
+          usage: u,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+const fetchOf = (handler: Handler): typeof fetch => (async (_url: string, init: RequestInit) => handler(JSON.parse(String(init.body)))) as unknown as typeof fetch;
+const wire = { apiKey: "k", baseUrl: "https://example.test/v1" };
+// A usage node with `turns` model calls of the standard size, for the folding tests.
+const nodeOf = (id: string, turns: number): UsageNode => {
+  const totals = emptyUsage();
+  const turn = { inputTokens: 1000, outputTokens: 200, totalTokens: 1200 };
+  for (let i = 0; i < turns; i++) addTurn(totals, turn, undefined);
+  return { id, name: id, model: "groq/w", status: "closed", totals, workers: [] };
+};
+
+describe("workers started below a fixed worker", () => {
+  it("lists them under that fixed worker, and the total still matches the response", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const handler: Handler = (body) => {
+      if (body.model === "w") return reply("worker done", body);
+      if (body.model === "f") return hasTool(body) ? reply("fixed done", body) : callTool("subagents", { command: "spawn", name: "inner", task: "go" }, body);
+      return hasTool(body) ? reply("all done", body) : callTool("researcher", { task: "go" }, body);
+    };
+    const fixed = new Agent({ ...wire, name: "researcher", model: "groq/f", fetch: fetchOf(handler), dynamicSubagents: { model: "groq/w" } });
+    const lead = new Agent({ ...wire, model: "groq/p", subagents: [fixed], fetch: fetchOf(handler) });
+    const res = await lead.run("go");
+
+    const report = lead.usageReport();
+    expect(report.total.turns).toBe(5); // lead 2, the fixed worker 2, the worker the fixed worker started 1
+    expect(report.total.tokens.total).toBe(res.usage.totalTokens);
+    expect(report.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
+    const line = report.workers[0]!;
+    expect([line.id, line.status, line.turns, line.workers.length]).toEqual(["researcher", "fixed", 2, 1]);
+    expect(line.workers[0]).toMatchObject({ turns: 1, model: "groq/w" });
+  });
+
+  it("keeps the workers of two parallel calls apart", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const handler: Handler = (body) => {
+      if (body.model === "w") return reply("worker done", body);
+      if (body.model === "f") return hasTool(body) ? reply("fixed done", body) : callTool("subagents", { command: "spawn", name: "inner", task: "go" }, body);
+      return hasTool(body)
+        ? reply("all done", body)
+        : callTools([{ name: "researcher", args: { task: "one" } }, { name: "researcher", args: { task: "two" } }], body);
+    };
+    const fixed = new Agent({ ...wire, name: "researcher", model: "groq/f", fetch: fetchOf(handler), dynamicSubagents: { model: "groq/w" } });
+    const lead = new Agent({ ...wire, model: "groq/p", subagents: [fixed], fetch: fetchOf(handler) });
+    const res = await lead.run("go");
+
+    const report = lead.usageReport();
+    expect(report.total.turns).toBe(2 + 2 * 2 + 2); // lead 2, two copies of 2, two workers of 1
+    expect(report.total.tokens.total).toBe(res.usage.totalTokens);
+    expect(report.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
+    expect(report.workers).toHaveLength(1);
+    expect(report.workers[0]!.turns).toBe(4);
+    expect(report.workers[0]!.workers.map((w) => w.turns)).toEqual([1, 1]);
+    expect(new Set(report.workers[0]!.workers.map((w) => w.id)).size).toBe(2);
+  });
+
+  it("goes down through fixed workers of fixed workers", async () => {
+    price("p");
+    price("a");
+    price("b");
+    price("w");
+    const handler: Handler = (body) => {
+      if (body.model === "w") return reply("worker done", body);
+      if (body.model === "b") return hasTool(body) ? reply("beta done", body) : callTool("subagents", { command: "spawn", name: "inner", task: "go" }, body);
+      if (body.model === "a") return hasTool(body) ? reply("alpha done", body) : callTool("beta", { task: "go" }, body);
+      return hasTool(body) ? reply("all done", body) : callTool("alpha", { task: "go" }, body);
+    };
+    const beta = new Agent({ ...wire, name: "beta", model: "groq/b", fetch: fetchOf(handler), dynamicSubagents: { model: "groq/w" } });
+    const alpha = new Agent({ ...wire, name: "alpha", model: "groq/a", fetch: fetchOf(handler), subagents: [beta] });
+    const lead = new Agent({ ...wire, model: "groq/p", subagents: [alpha], fetch: fetchOf(handler) });
+    const res = await lead.run("go");
+
+    const report = lead.usageReport();
+    expect(report.total.turns).toBe(7); // lead 2, alpha 2, beta 2, the worker 1
+    expect(report.total.tokens.total).toBe(res.usage.totalTokens);
+    const a = report.workers[0]!;
+    const b = a.workers[0]!;
+    expect([a.id, a.turns, b.id, b.turns, b.workers.length, b.workers[0]!.turns]).toEqual(["alpha", 2, "beta", 2, 1, 1]);
+  });
+
+  it("keeps the list bounded: the oldest fold into one line and the total never changes", () => {
+    const agent = new Agent({ ...wire, model: "groq/p", fetch: fetchOf((body) => reply("x", body)) });
+    agent.absorbWorkers(Array.from({ length: 1010 }, (_, i) => nodeOf(`w${i}`, 1)));
+    const report = agent.usageReport();
+    expect(report.workers.length).toBeLessThanOrEqual(1000);
+    expect(report.workers[0]!.id).toBe(OLDER_WORKERS_ID);
+    expect(report.workers.at(-1)!.id).toBe("w1009"); // the newest are still listed one by one
+    expect(report.total.turns).toBe(1010);
+  });
+
+  it("foldOldNodes adds up the oldest nodes (and what lies below them) and folds again on the next call", () => {
+    const parent = nodeOf("parent", 1);
+    parent.workers = [nodeOf("child", 2)];
+    const nodes = [parent, nodeOf("n1", 1), nodeOf("n2", 1), nodeOf("n3", 1), nodeOf("n4", 1)];
+    foldOldNodes(nodes, 3);
+    expect(nodes.map((n) => n.id)).toEqual([OLDER_WORKERS_ID, "n3", "n4"]);
+    expect(nodes[0]!.totals.turns).toBe(5); // parent 1 + child 2 + n1 + n2
+    nodes.push(nodeOf("n5", 1));
+    foldOldNodes(nodes, 3);
+    expect(nodes.map((n) => n.id)).toEqual([OLDER_WORKERS_ID, "n4", "n5"]);
+    expect(nodes[0]!.totals.turns).toBe(6);
+    const small = [nodeOf("only", 1)];
+    foldOldNodes(small, 3);
+    expect(small.map((n) => n.id)).toEqual(["only"]);
+  });
+});
+
+// A fixed worker called "researcher" that starts one worker per call, under a lead; `extra` goes to the lead (persist, sessionId), `fixedName` renames the fixed worker.
+const fixedHandler: Handler = (body) => {
+  if (body.model === "w") return reply("worker done", body);
+  if (body.model === "f") return hasTool(body) ? reply("fixed done", body) : callTool("subagents", { command: "spawn", name: "inner", task: "go" }, body);
+  return hasTool(body) ? reply("all done", body) : callTool("researcher", { task: "go" }, body);
+};
+const leadWithFixed = (handler: Handler, extra: Record<string, unknown> = {}, fixedName = "researcher"): Agent => {
+  const fixed = new Agent({ ...wire, name: fixedName, model: "groq/f", fetch: fetchOf(handler), dynamicSubagents: { model: "groq/w" } });
+  return new Agent({ ...wire, model: "groq/p", subagents: [fixed], fetch: fetchOf(handler), ...extra });
+};
+
+describe("fixed workers across a restart", () => {
+  it("come back from the folder, written to the journal once and not again on the lead's next turn", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const root = tmp();
+    const before = leadWithFixed(fixedHandler, { sessionId: "lead", persist: { dir: root } });
+    const res = await before.run("go");
+    const live = before.usageReport();
+    expect(live.total.turns).toBe(5);
+
+    const journal = fs.readFileSync(path.join(sessionDirFor(root, "lead"), "journal.ndjson"), "utf8");
+    expect(journal.match(/"t":"fixed"/g)?.length).toBe(1);
+
+    const after = leadWithFixed(fixedHandler, { sessionId: "lead", persist: { dir: root } }); // a new process: nothing is in memory
+    after.importSession(loadSessionDir(sessionDirFor(root, "lead"))!.session);
+    const restored = after.usageReport();
+    expect(restored.total.turns).toBe(5);
+    expect(restored.total.tokens.total).toBe(res.usage.totalTokens);
+    expect(restored.total.cost.totalUsd).toBeCloseTo(res.usage.cost!.totalCost!, 9);
+    expect(restored.workers).toEqual(live.workers);
+  });
+
+  it("come back from a single file too", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const file = path.join(tmp(), "lead.json");
+    const before = leadWithFixed(fixedHandler, { sessionId: "lead", persist: { file } });
+    await before.run("go");
+    const after = leadWithFixed(fixedHandler);
+    after.importSession(loadSessionFile(file)!);
+    expect(after.usageReport().workers).toEqual(before.usageReport().workers);
+    expect(after.usageReport().total.turns).toBe(5);
+  });
+
+  it("survive a reset and a later snapshot of the folder", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const root = tmp();
+    let plain = false;
+    const handler: Handler = (body) => (plain && body.model === "p" ? reply("plain answer", body) : fixedHandler(body));
+    const before = leadWithFixed(handler, { sessionId: "lead", persist: { dir: root } });
+    await before.run("go");
+    before.reset(); // the conversation is gone, the spending is not
+    plain = true;
+    await before.run("hello"); // a shorter history: the journal starts a new snapshot
+    expect(before.usageReport().total.turns).toBe(6);
+
+    const after = leadWithFixed(fixedHandler);
+    after.importSession(loadSessionDir(sessionDirFor(root, "lead"))!.session);
+    expect(after.usageReport().total.turns).toBe(6);
+    expect(after.usageReport().workers[0]).toMatchObject({ id: "researcher", turns: 2 });
+    expect(after.usageReport().workers[0]!.workers).toHaveLength(1);
+
+    const copy = tmp(); // and saveSessionDir (which copies the agent too) keeps it
+    saveSessionDir(copy, before);
+    const again = leadWithFixed(fixedHandler);
+    again.importSession(loadSessionDir(sessionDirFor(copy, "lead"))!.session);
+    expect(again.usageReport().total.turns).toBe(6);
+  });
+
+  it("are replaced, not added, when the same session is imported twice", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const before = leadWithFixed(fixedHandler);
+    await before.run("go");
+    const saved = before.exportSession();
+    const after = leadWithFixed(fixedHandler);
+    after.importSession(saved);
+    after.importSession(saved);
+    expect(after.usageReport().total.turns).toBe(5);
+    expect(after.usageReport().workers[0]!.workers).toHaveLength(1);
+  });
+
+  it("keep their spending when the fixed worker was renamed, and give it back when the name returns", async () => {
+    price("p");
+    price("f");
+    price("w");
+    const before = leadWithFixed(fixedHandler);
+    await before.run("go");
+    const saved = before.exportSession();
+
+    const renamed = leadWithFixed(fixedHandler, {}, "analyst");
+    renamed.importSession(saved);
+    const report = renamed.usageReport();
+    expect(report.total.turns).toBe(5); // nothing lost
+    expect(report.workers.map((w) => [w.id, w.turns]).sort()).toEqual([["analyst", 0], ["researcher", 2]]);
+
+    const next = leadWithFixed(fixedHandler, {}, "analyst");
+    next.importSession(renamed.exportSession()); // the kept spending is saved again
+    expect(next.usageReport().total.turns).toBe(5);
+    const original = leadWithFixed(fixedHandler);
+    original.importSession(renamed.exportSession());
+    expect(original.usageReport().workers).toEqual(before.usageReport().workers); // the name matches again
+  });
+
+  it("a hand-edited file is read defensively", () => {
+    const file = path.join(tmp(), "edited.json");
+    const agent = leadWithFixed((body) => reply("x", body));
+    saveSessionFile(file, agent, null);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    raw.fixedUsage = [{ id: 3 }, { id: "ok", totals: "bad", workers: "bad" }, "junk"];
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(loadSessionFile(file)!.fixedUsage).toEqual([{ id: "ok", name: "ok", model: "", status: "closed", totals: emptyUsage(), workers: [] }]);
+  });
+
+  it("readFixedUsage drops wrong shapes, cuts long text and caps depth and size", () => {
+    expect(readFixedUsage(undefined)).toEqual([]);
+    expect(readFixedUsage("text")).toEqual([]);
+    expect(readFixedUsage([null, 5, "a", {}, { id: "" }, { id: 7 }])).toEqual([]);
+
+    const [node] = readFixedUsage([{ id: "a".repeat(500), status: "weird", totals: { turns: -3, inputTokens: "x" }, workers: [{ id: "b", status: "open" }, "junk"] }]);
+    expect(node!.id).toHaveLength(200);
+    expect(node!.status).toBe("closed");
+    expect(node!.totals.turns).toBe(0);
+    expect(node!.workers.map((w) => [w.id, w.status])).toEqual([["b", "open"]]);
+
+    let deep: Record<string, unknown> = { id: "leaf" };
+    for (let i = 0; i < 20; i++) deep = { id: `n${i}`, workers: [deep] };
+    let levels = 0;
+    for (let cur: UsageNode | undefined = readFixedUsage([deep])[0]; cur; cur = cur.workers[0]) levels++;
+    expect(levels).toBe(9); // the root and 8 levels below it
+
+    expect(readFixedUsage(Array.from({ length: 25_000 }, (_, i) => ({ id: `n${i}` }))).length).toBe(20_000);
   });
 });
 

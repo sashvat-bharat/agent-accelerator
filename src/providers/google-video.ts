@@ -13,6 +13,8 @@
  * core turns it into an error. Checked against Google's Gemini Omni guide only (mock-verified, no paid key).
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { BULK_REPLY_LIMIT, DOWNLOAD_LIMIT, ERROR_BODY_LIMIT, readBytesCapped, readTextCapped } from "../utils/body.ts";
 import type { ProviderVideoRequest, ProviderVideoResult } from "../types/video.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { NormalizedMedia } from "../utils/media.ts";
@@ -25,6 +27,7 @@ import { pollJob } from "../video/poll.ts";
 import {
   combinedSignal,
   headersToRecord,
+  modalityTokens,
   redactedHeaders,
   resolveProviderApiKey,
   resolveProviderBaseUrl,
@@ -33,7 +36,6 @@ import {
 } from "./shared.ts";
 import { GOOGLE_IMAGE_INPUT_MIME, GOOGLE_IMAGE_MIME_ALIASES, throwGoogleHttpError } from "./google-image.ts";
 
-const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** Video types Google reads inline (the Gemini video list), and the common spelling it is not given as. */
 const VIDEO_MIME = [
   "video/mp4",
@@ -76,12 +78,6 @@ interface InteractionReply {
   };
 }
 
-// Tokens of one modality in a by-modality list, or undefined when the list does not mention it; in: mapUsage, out: a count.
-function tokensOf(list: Modality[] | undefined, modality: string): number | undefined {
-  const hits = (list ?? []).filter((m) => m.modality?.toLowerCase() === modality);
-  return hits.length > 0 ? hits.reduce((n, m) => n + (m.tokens ?? 0), 0) : undefined;
-}
-
 // Usage as TokenUsage: thinking tokens are billed as output (folded into it) and, with the per-modality split, priced as text; the video tokens are kept apart for the video price; in: a reply, out: TokenUsage.
 function mapUsage(raw: InteractionReply["usage"]): TokenUsage {
   const input = raw?.total_input_tokens ?? 0;
@@ -93,9 +89,9 @@ function mapUsage(raw: InteractionReply["usage"]): TokenUsage {
     totalTokens: raw?.total_tokens ?? input + output,
   };
   if (thought > 0) usage.thinkingTokens = thought;
-  const video = tokensOf(raw?.output_tokens_by_modality, "video");
+  const video = modalityTokens(raw?.output_tokens_by_modality, "video");
   if (video !== undefined) {
-    const text = (tokensOf(raw?.output_tokens_by_modality, "text") ?? 0) + thought;
+    const text = (modalityTokens(raw?.output_tokens_by_modality, "text") ?? 0) + thought;
     usage.outputDetails = { videoTokens: video, textTokens: text };
   }
   return usage;
@@ -128,7 +124,7 @@ function decodedBytes(b64: string): number {
 }
 
 /** The Interactions request body for one video request (exported for the tests). */
-export function buildGoogleVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
+function buildGoogleVideoBody(modelId: string, request: ProviderVideoRequest): Record<string, unknown> {
   const media = [request.firstFrame, request.lastFrame, ...request.referenceImages].filter(
     (m): m is NormalizedMedia => !!m
   );
@@ -189,7 +185,7 @@ export async function googleGenerateVideo(
     throw new ConfigError(
       "[Agent Accelerator] Missing Google API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or pass apiKey."
     );
-  const baseUrl = resolveProviderBaseUrl("google", DEFAULT_BASE_URL, options);
+  const baseUrl = resolveProviderBaseUrl("google", options);
   const url = `${baseUrl}/interactions`;
   const body = buildGoogleVideoBody(modelId, request);
   const headers: Record<string, string> = { "Content-Type": "application/json", ...options?.headers };
@@ -231,7 +227,7 @@ export async function googleGenerateVideo(
     headers: Record<string, string>;
   }> => {
     const r = await call(url, { method: "POST", headers, body: JSON.stringify(body) }, "The Google video request");
-    const text = await r.res.text();
+    const text = await readTextCapped(r.res, BULK_REPLY_LIMIT);
     throwGoogleHttpError(r.status, url, text, modelId, r.headers);
     try {
       return {
@@ -299,7 +295,7 @@ export async function googleGenerateVideo(
         const r = await withRetries(
           async () => {
             const got = await call(fileUrl, { method: "GET", headers: fileHeaders }, "The Google file check");
-            const text = await got.res.text();
+            const text = await readTextCapped(got.res, BULK_REPLY_LIMIT);
             throwGoogleHttpError(got.status, fileUrl, text, modelId, got.headers);
             return text;
           },
@@ -322,13 +318,19 @@ export async function googleGenerateVideo(
       async () => {
         const got = await call(downloadUrl, { method: "GET", headers: fileHeaders }, "The Google video download");
         if (got.status < 200 || got.status >= 300)
-          throwGoogleHttpError(got.status, downloadUrl, await got.res.text(), modelId, got.headers);
-        return { buffer: new Uint8Array(await got.res.arrayBuffer()), type: got.headers["content-type"] };
+          throwGoogleHttpError(
+            got.status,
+            downloadUrl,
+            await readTextCapped(got.res, ERROR_BODY_LIMIT),
+            modelId,
+            got.headers
+          );
+        return { buffer: await readBytesCapped(got.res, DOWNLOAD_LIMIT), type: got.headers["content-type"] };
       },
       { ...retryOptionsFrom(options), signal: options?.signal, label: { providerId: "google", modelId } }
     );
     bytes = dl.buffer;
-    if (dl.type && dl.type.startsWith("video/")) mimeType = dl.type.split(";")[0]!.trim();
+    if (dl.type && dl.type.startsWith("video/")) mimeType = beforeFirst(dl.type, ";").trim();
   }
 
   const finishReason = reply.status === "incomplete" ? "length" : bytes.byteLength > 0 ? "stop" : undefined;

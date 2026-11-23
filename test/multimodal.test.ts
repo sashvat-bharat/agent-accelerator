@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { normalizeMediaInput, inferMimeType } from "../src/index.ts";
-import { OpenAICompatibleChatProvider } from "../src/index.ts";
+import { OpenAICompatibleChatProvider } from "../src/providers/openai-compat.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 

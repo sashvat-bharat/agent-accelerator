@@ -1,5 +1,7 @@
 # Asking decision models
 
+> Ask typed yes/no, choice and rating questions and get probabilities back, not text.
+
 A decision model answers **typed questions about an input and returns probabilities, not text**. Your code can branch, sort or route on the numbers: "is this ticket about billing, and how sure are you?" costs a fraction of a chat call, answers in a moment, and gives a value you can put a threshold on.
 
 `generateDecision` is one function and stateless: no `Agent`, no session. It works with Google (`gemini-decision-1`), OpenAI (`gpt-6-luna`) and every decision model OpenRouter lists.
@@ -9,21 +11,32 @@ import { generateDecision } from "agent-accelerator";
 
 const r = await generateDecision({
   model: "google/gemini-decision-1",
-  input: "I was charged twice for my order and I will cancel if nobody helps today.",
+  input: "I was charged twice and I will cancel if nobody helps today.",
   questions: {
     upset: { type: "noul", instructions: "Is the customer upset?" },
     dept: {
       type: "choice",
       instructions: "Which department should handle this?",
-      criteria: { billing: "Payments and refunds.", technical: "Problems using the product.", other: "" },
+      criteria: {
+        billing: "Payments and refunds.",
+        technical: "Problems using the product.",
+        other: "",
+      },
     },
-    urgency: { type: "score", instructions: "How urgent is this?", criteria: ["Low", "Medium", "High"] },
+    urgency: {
+      type: "score",
+      instructions: "How urgent is this?",
+      criteria: ["Low", "Medium", "High"],
+    },
   },
 });
 
-const { dept } = r.answers;
-if (dept.type === "choice" && dept.confidence > 0.8) route(dept.choice);
-else route("human_review"); // a low-confidence answer goes to a person
+const dept = r.answers.dept;
+if (dept?.type === "choice" && dept.confidence > 0.8) {
+  console.log("route to", dept.choice);
+} else {
+  console.log("route to a person"); // a low-confidence answer goes to a human
+}
 ```
 
 All the questions of one call share one request, so the input is paid for once however many questions you ask, and the questions cannot see each other.
@@ -59,7 +72,11 @@ An answer can also be `{ type: "refusal" }`: the model declined that question (t
 | `{ type: "json", json: { order: { id: 8821 } } }` | data, written as compact text (refer to its fields by key path in your instructions) |
 | `{ type: "image", image: "photo.png" }` (also `audio`, `video`, `file` for a PDF) | a picture, sound, video or PDF: a path, URL, data URL, base64 string or bytes |
 
-Only the models that read media accept it: an input kind the model does not read fails before the network with a message that lists what it does read. Local paths must be inside `fileAccess.roots` when you set it. Pass the real file type: the providers reject generic types. An image or video part can carry a `resolution` (`low`, `medium`, `high`, `ultra_high`) that sets how much detail the model spends on it (and its token cost): Google sends it as `resolution`, OpenAI as the image `detail` (`low`, `medium` becomes `auto`, `high`, `ultra_high` becomes `original`); video parts keep it only where the model has such a control.
+Only the models that read media accept it. An input kind the model does not read fails before the network, with a message that lists what it does read.
+
+- Local paths must be inside `fileAccess.roots` when you set it.
+- Pass the real file type. The providers reject generic types.
+- An image or video part can carry a `resolution` (`low`, `medium`, `high`, `ultra_high`). It sets how much detail the model spends on the part, and so its token cost. Google sends it as `resolution`. OpenAI sends it as the image `detail`: `medium` becomes `auto` and `ultra_high` becomes `original`. Video parts keep it only where the model has such a control.
 
 ## Models
 
@@ -71,9 +88,29 @@ Only the models that read media accept it: an input kind the model does not read
 | `openai/gpt-6-luna` | text, images | 400 (score: up to 10 levels) | $0.10, cache reads $0.01, prompts over 272,000 tokens cost double; output is not charged |
 | `openrouter/<vendor>/<model>` | what the model reads | not stated | the list's price |
 
-Google and OpenAI are checked by hand against the providers' pages. **OpenRouter serves dozens of decision models that change often, so the SDK reads OpenRouter's own list** (`GET /api/v1/models?output_modalities=decisions`, which needs your OpenRouter key) the first time you use one, saves it in `<home>/catalog/openrouter-decisions.json` and refreshes it every 12 hours. A failed refresh keeps the old copy and is not retried for 10 minutes; `catalog_refresh: "off"` never downloads (the saved copy is used). `listDecisionModels("openrouter")` is empty until the list was read once; `await refreshOpenRouterDecisionModels()` reads it on demand. OpenRouter also lists free models (`...:free`); their price is a known $0. OpenRouter's decisions endpoint is in alpha ("the shape may change"), so a change on their side can break a call before it breaks this SDK's tests.
+Google and OpenAI are checked by hand against the providers' pages.
 
-The same questions work on every model; the SDK writes each provider's own request. OpenAI's wire differs, so the SDK translates: a `noul` becomes a `predicate`, which has no criteria field, so your `true` and `false` descriptions are written under its instructions ("Yes means: ... No means: ..."); a `choice` becomes `choices` with an optional description; a `score` becomes `levels` labelled by their number. OpenAI answers come back as an array in question order, and the SDK matches them to your question names (an answer that names another question is treated as missing). Through OpenRouter, media goes in OpenRouter's own part shapes (the SDK writes them), your `openrouter` setting's provider routing and `user` are sent along, and the cost is the one OpenRouter reports (a free or BYOK request reports 0, which the SDK keeps). Models you can use through OpenRouter keep OpenRouter's limits (a media kind the model does not read is a 400 there, and the SDK says so first).
+**OpenRouter serves dozens of decision models that change often, so the SDK reads OpenRouter's own list** (`GET /api/v1/models?output_modalities=decisions`, which needs your OpenRouter key).
+
+- It reads the list the first time you use an OpenRouter model, saves it in `<home>/catalog/openrouter-decisions.json` and refreshes it every 12 hours.
+- A failed refresh keeps the old copy and is not retried for 10 minutes. `catalog_refresh: "off"` never downloads, and the saved copy is used.
+- `listDecisionModels("openrouter")` is empty until the list was read once. `await refreshOpenRouterDecisionModels()` reads it on demand.
+- OpenRouter also lists free models (`...:free`). Their price is a known $0.
+- OpenRouter's decisions endpoint is in alpha ("the shape may change"), so a change on their side can break a call before it breaks this SDK's tests.
+
+The same questions work on every model. The SDK writes each provider's own request.
+
+**OpenAI** has a different wire format, so the SDK translates:
+- A `noul` becomes a `predicate`. It has no criteria field, so your `true` and `false` descriptions are written under its instructions ("Yes means: ... No means: ...").
+- A `choice` becomes `choices` with an optional description.
+- A `score` becomes `levels`, labelled by their number.
+- Answers come back as an array in question order. The SDK matches them to your question names. An answer that names another question is treated as missing.
+
+**OpenRouter**:
+- Media goes in OpenRouter's own part shapes. The SDK writes them.
+- Your `openrouter` setting's provider routing and `user` are sent along.
+- The cost is the one OpenRouter reports. A free or BYOK request reports 0, which the SDK keeps.
+- Models keep OpenRouter's limits. A media kind the model does not read is a 400 there, and the SDK says so first.
 
 ## Options
 
@@ -86,7 +123,11 @@ The same questions work on every model; the SDK writes each provider's own reque
 | `apiKey`, `baseUrl`, `headers`, `env`, `fetch`, `retry` | Connection settings, as for `generateImage`. |
 | `captureRaw` | What `result.raw` keeps of the wire exchange (default: no text, like `AgentConfig.captureRaw`). |
 
-Every request is checked before any network call. A problem (a name outside the allowed characters, a choice with one option, an input kind the model does not read, too many questions or levels for the model) is one `ValidationError` that lists every problem. Option names follow Google's rule (1 to 128 characters, no control characters, no leading or trailing space), which keeps a request valid on every model. A call runs under the `concurrency` setting like every provider call, and the SDK never splits one request into several: over a model's question limit is an error, because splitting would pay for the input again.
+Every request is checked before any network call. These problems are one `ValidationError` that lists every problem: a name outside the allowed characters, a choice with one option, an input kind the model does not read, and too many questions or levels for the model.
+
+- Option names follow Google's rule: 1 to 128 characters, no control characters, no leading or trailing space. This keeps a request valid on every model.
+- A call runs under the `concurrency` setting like every provider call.
+- The SDK never splits one request into several. Going over a model's question limit is an error, because splitting would pay for the input again.
 
 ## The result
 

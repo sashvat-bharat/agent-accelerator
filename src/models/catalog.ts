@@ -344,7 +344,7 @@ export function getModelFromCatalog(providerInput: string, modelIdInput: string)
 }
 
 /** Thinking capabilities and allowed levels for a catalog model. */
-export interface ModelThinkingInfo {
+interface ModelThinkingInfo {
   supportsThinking: boolean;
   reasoningOptions?: ReasoningOption[];
   allowedLevels: string[];
@@ -598,11 +598,14 @@ export function getModelsForProvider(provider: string): ModelSpec[] {
 // A model list that reads its provider's shard on first use and follows catalog changes: every array operation is forwarded to the cached list, so importing the SDK loads no model data.
 function lazyModelList(provider: string): ModelSpec[] {
   const list = (): ModelSpec[] => {
-    if (!providerModelsCache.has(provider)) getModelsForProvider(provider);
-    return providerModelsCache.get(provider)!;
+    const cached = providerModelsCache.get(provider);
+    if (cached) return cached;
+    getModelsForProvider(provider); // fills the cache
+    return providerModelsCache.get(provider) ?? [];
   };
   return new Proxy([] as ModelSpec[], {
     get: (_t, key) => {
+      // why: a Proxy needs a plain-object target type; the list itself is only read through it.
       const target = list() as unknown as Record<PropertyKey, unknown>;
       const value = target[key];
       return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;

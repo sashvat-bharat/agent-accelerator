@@ -6,21 +6,18 @@
  * optionally pictures) are kept: the list also holds source-video tools (upscalers, editors, avatar makers) that have no
  * `supported_durations`; those are skipped. The list says nothing about which models read a reference VIDEO, so that stays unknown.
  */
-import { createOpenRouterList, type RefreshOpenRouterListOptions } from "./openrouter-list.ts";
+import { createOpenRouterList, type OpenRouterList, type RefreshOpenRouterListOptions } from "./openrouter-list.ts";
+import { isRecord } from "../utils/guards.ts";
 import type { VideoModelInfo } from "./video-models.ts";
+import { DEFAULT_BASE_URLS } from "../providers/base-urls.ts";
 
-const DEFAULT_URL = "https://openrouter.ai/api/v1/videos/models";
+const DEFAULT_URL = `${DEFAULT_BASE_URLS.openrouter}/videos/models`;
 
 /** Ids OpenRouter still lists that this SDK deliberately does not know: Google's previous generation, which Google reroutes to `gemini-omni-1.2-flash` (so there is one Omni model, and an old id is simply not found). */
 const NOT_KNOWN = new Set(["google/gemini-omni-1.1-flash"]);
 
 /** Options of a refresh. */
 export type RefreshOpenRouterVideosOptions = RefreshOpenRouterListOptions;
-
-// True for a plain object; in: the readers below, out: a type guard.
-function isObject(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
 
 // The strings of a list field, or undefined when it is not a list of strings; in: toModel, out: the strings.
 function strings(v: unknown): string[] | undefined {
@@ -34,7 +31,7 @@ function integers(v: unknown): number[] | undefined {
 
 // One entry of OpenRouter's list as our model info, or undefined for an entry that is not usable (no id, no durations because it is not a prompt-to-video model, a model this SDK does not know, or expired); in: parseList, out: the entry.
 function toModel(raw: unknown, now: number): VideoModelInfo | undefined {
-  if (!isObject(raw) || typeof raw["id"] !== "string" || !raw["id"]) return undefined;
+  if (!isRecord(raw) || typeof raw["id"] !== "string" || !raw["id"]) return undefined;
   const id = raw["id"];
   if (NOT_KNOWN.has(id)) return undefined;
   const all = integers(raw["supported_durations"]);
@@ -46,7 +43,7 @@ function toModel(raw: unknown, now: number): VideoModelInfo | undefined {
   const frames = (strings(raw["supported_frame_images"]) ?? []).filter(
     (f): f is "first_frame" | "last_frame" => f === "first_frame" || f === "last_frame"
   );
-  const skus = isObject(raw["pricing_skus"]) ? raw["pricing_skus"] : undefined;
+  const skus = isRecord(raw["pricing_skus"]) ? raw["pricing_skus"] : undefined;
   const sizes = strings(raw["supported_sizes"]);
   const passthrough = strings(raw["allowed_passthrough_parameters"]);
   return {
@@ -82,7 +79,7 @@ function toModel(raw: unknown, now: number): VideoModelInfo | undefined {
 
 // Turns OpenRouter's `{ data: [...] }` into model infos (unusable entries are skipped); throws when the body is not the list; in: refresh, out: the models.
 function parseList(body: unknown, now: number): VideoModelInfo[] {
-  const data = isObject(body) ? body["data"] : undefined;
+  const data = isRecord(body) ? body["data"] : undefined;
   if (!Array.isArray(data)) throw new Error("the reply has no `data` list");
   const models = data.flatMap((raw) => {
     const m = toModel(raw, now);
@@ -101,20 +98,20 @@ const list = createOpenRouterList<VideoModelInfo>({
 });
 
 /** The OpenRouter video models from the saved list, read from disk without any network call (empty until the list was downloaded once). */
-export const openRouterVideoModels = list.read;
+export const openRouterVideoModels: OpenRouterList<VideoModelInfo>["read"] = list.read;
 
 /**
  * Downloads OpenRouter's video model list and saves it (unless the saved copy is still fresh and `force` is not set).
  * Throws a `ProviderError` when the download fails or is not the list; the saved copy is left as it was.
  */
-export const refreshOpenRouterVideoModels = list.refresh;
+export const refreshOpenRouterVideoModels: OpenRouterList<VideoModelInfo>["refresh"] = list.refresh;
 
 /**
  * The OpenRouter video models, downloading the list only when needed: a fresh saved copy is returned at once; a missing or stale
  * one is refreshed (one download at a time). If the refresh fails, a stale copy is still used (with a warning on the bus); without
  * any copy the failure is thrown. The `catalog_refresh: "off"` setting never downloads: the saved copy, or `[]`, is returned.
  */
-export const ensureOpenRouterVideoModels = list.ensure;
+export const ensureOpenRouterVideoModels: OpenRouterList<VideoModelInfo>["ensure"] = list.ensure;
 
 /** Forgets the in-memory copy and the failure backoff (tests only). */
-export const resetOpenRouterVideosCache = list.reset;
+export const resetOpenRouterVideosCache: OpenRouterList<VideoModelInfo>["reset"] = list.reset;

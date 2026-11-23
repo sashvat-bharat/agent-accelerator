@@ -1,14 +1,14 @@
 import { describe, it, expect } from "bun:test";
 import {
   Agent,
-  SubAgent,
+  agentToTool,
   buildAgentTools,
   AgentResponse,
 } from "../src/index.ts";
 
 describe("Multi-Agent Dynamic Delegation & Metadata", () => {
   it("should automatically inject subagents as tools on parent Agent", () => {
-    const subAgent = new SubAgent({
+    const subAgent = new Agent({
       name: "Domain-Specialist",
       description: "Handles specialized domain tasks",
       model: "google/gemini-3.5-flash-lite",
@@ -138,10 +138,8 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(json.subagents![1]!.usage.totalTokens).toBe(315);
   });
 
-  it("should instantiate a SubAgent with smart defaults and tool export capabilities", () => {
-    const { SubAgent } = require("../src/index.ts");
-
-    const critique = new SubAgent({
+  it("should build a fixed worker from a plain Agent and export it with agentToTool", () => {
+    const critique = new Agent({
       name: "code_critique",
       description: "Reviews code architecture and edge cases",
       instructions: "You are a senior reviewer.",
@@ -154,28 +152,26 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     expect(critique.stateless).toBe(true);
     expect(critique.modelStringOrSpec).toBe("google/gemini-3.5-flash-lite");
 
-    // Verify .asTool() and .toTool()
-    const asToolDef = critique.asTool();
-    expect(asToolDef.name).toBe("code-critique");
-    expect(asToolDef.description).toBe("Reviews code architecture and edge cases");
+    // The tool name and description come from the agent unless you override them.
+    const defaultDef = agentToTool({ agent: critique });
+    expect(defaultDef.name).toBe("code-critique");
+    expect(defaultDef.description).toBe("Reviews code architecture and edge cases");
 
-    const customToolDef = critique.toTool("custom-reviewer", "Custom override");
-    expect(customToolDef.name).toBe("custom-reviewer");
-    expect(customToolDef.description).toBe("Custom override");
+    const customDef = agentToTool({ name: "custom-reviewer", description: "Custom override", agent: critique });
+    expect(customDef.name).toBe("custom-reviewer");
+    expect(customDef.description).toBe("Custom override");
   });
 
-  it("should throw when SubAgent has no model in config and no saved or default model", () => {
-    const { SubAgent } = require("../src/index.ts");
-    expect(() => {
-      new SubAgent({
-        name: "no_model_sub",
-        instructions: "Test instructions",
-      });
-    }).toThrow(/requires a model/i);
+  it("no longer exports the SubAgent class, SubAgentConfig or agentFromEnv, and Agent has no fromEnv", async () => {
+    const api = (await import("../src/index.ts")) as Record<string, unknown>;
+    expect("SubAgent" in api).toBe(false);
+    expect("agentFromEnv" in api).toBe(false);
+    expect(typeof api["Agent"]).toBe("function");
+    expect("fromEnv" in (api["Agent"] as object)).toBe(false); // and there is no `Agent.fromEnv` either
   });
 
   it("should support clean separation of tools: { get_status } and subagents: [critique, researcher]", () => {
-    const { SubAgent, tool } = require("../src/index.ts");
+    const { tool } = require("../src/index.ts");
     const { z } = require("zod");
 
     const get_status = tool({
@@ -185,7 +181,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
       execute: async () => "Valid",
     });
 
-    const critique = new SubAgent({
+    const critique = new Agent({
       name: "code_critique",
       description: "Reviews code architecture.",
       instructions: "Review code rigorously.",
@@ -193,7 +189,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
       apiKey: "TEST_KEY",
     });
 
-    const researcher = new SubAgent({
+    const researcher = new Agent({
       name: "tech_researcher",
       description: "Researches technologies.",
       instructions: "Research tech thoroughly.",
@@ -220,9 +216,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
   });
 
   it("should not accumulate conversation history when stateless: true is set", async () => {
-    const { SubAgent } = require("../src/index.ts");
-
-    const statelessAgent = new SubAgent({
+    const statelessAgent = new Agent({
       name: "Stateless_Auditor",
       model: "google/gemini-3.5-flash-lite",
       apiKey: "TEST_KEY",
@@ -275,7 +269,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
 
   it("should scope worker traces to the owning agent's sessions (no cross-tenant reads)", async () => {
     const { executeToolCalls } = require("../src/tools/executor.ts");
-    const worker = new SubAgent({
+    const worker = new Agent({
       name: "tenant_worker",
       description: "Does work",
       model: "google/gemini-3.5-flash-lite",
@@ -339,7 +333,7 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     };
     try {
       for (const midSession of [undefined, { mode: "steer" as const }]) {
-        const researcher = new SubAgent({
+        const researcher = new Agent({
           name: "researcher",
           description: "Researches",
           model: "google/gemini-3.5-flash-lite",
@@ -371,10 +365,9 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     // Regression: `parent-sub-adversarial_critic` (65 chars) 400d on OpenAI
     // (`Invalid 'prompt_cache_key': string too long`), yielding 0-tok
     // `provider: unknown` sub-agents. Child ids must fit 64 chars.
-    const { SubAgent } = require("../src/index.ts");
     const { executeToolCalls } = require("../src/tools/executor.ts");
 
-    const critic = new SubAgent({
+    const critic = new Agent({
       name: "adversarial_critic",
       description: "Critiques findings",
       instructions: "Critique briefly.",

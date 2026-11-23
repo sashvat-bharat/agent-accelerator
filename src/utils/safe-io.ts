@@ -1,10 +1,11 @@
 // NOTE: no static node:fs / node:path / node:dns imports: they break browser
 // bundles. Everything Node-specific is loaded lazily inside the helpers.
 import type { Message } from "../types/message.ts";
+import { mediaKeyOf } from "./media-part.ts";
 import { SecurityPolicyError } from "../types/errors.ts";
 
 /** Default cap for one remote media download (bytes). */
-export const MAX_REMOTE_FETCH_BYTES = 200_000_000;
+const MAX_REMOTE_FETCH_BYTES = 200_000_000;
 
 /**
  * True when a media string would be read from the local filesystem
@@ -74,8 +75,6 @@ export async function assertPathAllowed(target: string, roots: readonly string[]
   );
 }
 
-const MEDIA_KEYS = ["image", "audio", "video", "file"] as const;
-
 /**
  * Validates every local-path media part in `messages` against `roots`. Used by
  * the loop each turn so developer-supplied parts, steered prompts and
@@ -85,10 +84,9 @@ export async function enforceFileAccess(messages: Message[], roots: readonly str
   for (const m of messages) {
     if (!Array.isArray(m.content)) continue;
     for (const part of m.content) {
-      const p = part as unknown as Record<string, unknown>;
-      const key = MEDIA_KEYS.find((k) => k === p?.type);
+      const key = mediaKeyOf(part);
       if (!key) continue;
-      const value = p[key];
+      const value: unknown = Reflect.get(part, key);
       if (isLocalPathInput(value)) await assertPathAllowed(value, roots);
     }
   }
@@ -183,7 +181,9 @@ async function readCapped(res: Response, maxBytes: number, url: string): Promise
   if (Number.isFinite(declared) && declared > maxBytes) {
     try {
       await res.body?.cancel();
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     throw tooLarge();
   }
   if (!res.body) {
@@ -201,7 +201,9 @@ async function readCapped(res: Response, maxBytes: number, url: string): Promise
     if (total > maxBytes) {
       try {
         await reader.cancel();
-      } catch {}
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
       throw tooLarge();
     }
     chunks.push(value);
@@ -216,7 +218,7 @@ async function readCapped(res: Response, maxBytes: number, url: string): Promise
 }
 
 /** Result of {@link fetchRemoteBytes}; `bytes` is empty when `ok` is false. */
-export interface RemoteBytes {
+interface RemoteBytes {
   ok: boolean;
   status: number;
   statusText: string;
@@ -262,7 +264,9 @@ export async function fetchRemoteBytes(
     if (location) {
       try {
         await res.body?.cancel();
-      } catch {}
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
       current = new URL(location, current);
       continue;
     }

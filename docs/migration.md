@@ -1,0 +1,99 @@
+# Migration
+
+> What was removed or renamed, and what to use now. Everything that still works but has a better name is marked.
+
+## Upgrading to 0.9.0
+
+0.9.0 removes the old worker class, makes the public API smaller and makes a few failures louder. If you use nothing listed here, you need no change.
+
+**Removed**
+
+- The `SubAgent` class, `SubAgentConfig`, `agentFromEnv()`, `Agent.fromEnv()`, `.asTool()` and `.toTool()`. A fixed worker is a plain `Agent`. See the first table below.
+- 92 names that were exported but are internal: session plumbing, provider classes and tables, schema and signature helpers, wire-level provider types and inner types. See [Names that are no longer exported](#names-that-are-no-longer-exported).
+- The callback `globalThis.__agentAccelAnomaly`. Warnings go to `telemetryBus`.
+
+**Behavior that changed**
+
+- `saveSessionDir` and `saveSessionFile` throw when they cannot write. An agent with `persist` still reports a failed save to `persist.onPersistError`, which now also works with `persist: { file }`.
+- A tool named `__proto__` is refused. The name a model asks for is looked up among your own tools only, so a call to `constructor` is an unknown tool.
+- A provider that answers HTTP 200 with something that is not a reply (an empty object, a list, no `choices`) now fails as a retryable 502 `ProviderError`, not as an empty answer.
+- A provider reply over its size cap is refused with a `ProviderError` that is not retried: 64 MB for chat, 256 MB for pictures, vectors and decisions, 1 MB for an error body and 512 MB for a downloaded video.
+- `agent.usageReport()` lists the workers that a fixed worker started, so its total matches the response. The session saves the spending of fixed workers as `fixedUsage`, so it survives a restart.
+- The `User-Agent` header names the SDK's own version, not the version of the app that runs it.
+
+## Options and APIs
+
+| Was | Now | Since |
+|---|---|---|
+| `stop`, `seed` agent options | Removed. Do not pass them. | 0.6.0 |
+| `temperature`, `topP`, `sampling` | Removed on every provider. | earlier |
+| `allowedModels` | `setModels(list)`. See [Allowed models](guides/allowed-models.md). | 0.7.0 |
+| `configure()` and the settings env vars | `setConfigs({ values })`. See [Settings](guides/settings.md). | 0.7.0 |
+| Tool `retry`, `tags`, `output` | Removed. They were stored and never used. | 0.7.0 |
+| `needsApproval` | Ask inside `execute` and refuse with `ctx.stop(reason)`, or use the `beforeTool` hook. | earlier |
+| `dynamicSubagents.timeout`, `modelMaySetTimeout` | `dynamicSubagents.workerTimeoutMs` and the action's own `timeoutMs`. | 0.5.5 |
+| Event `scheduled_action.killed` | `scheduled_action.deleted` | 0.5.5 |
+| The `SubAgent` class, `SubAgentConfig`, `agentFromEnv()`, `Agent.fromEnv()`, `.asTool()` and `.toTool()` | Removed. A fixed worker is a plain `new Agent({ name, model, instructions })` in `subagents: [...]`, or `agentToTool({ name, agent })`. For `agentFromEnv()` and `Agent.fromEnv()`, leave out `model`: an `Agent` without one uses the saved choice, then the list default (see [Allowed models](guides/allowed-models.md)). `fromEnv` also fell back to the saved worker model when nothing else was set, so name the model in that case. Name the model of every worker: the old class used the saved worker model when you named none, but a plain `Agent` looks for the saved main model first. See [Workers](guides/workers.md#fixed-workers). | 0.9.0 |
+| `hooks` (a placeholder that only warned) | A working option: `beforeTool`, `afterTool`, `beforeRequest`, `onYield`. An unknown hook name throws a `ConfigError`. | 0.8.9 |
+
+## Names that still work
+
+These older names are still accepted. When both are set, the winner is the one in the last column.
+
+| Older name | Newer name | Wins |
+|---|---|---|
+| `thinkingLevel` | `thinking` | `thinking` |
+| `subagentModel` | `dynamicSubagents.model` | `dynamicSubagents.model` |
+| `midSession.mode` | `midSession.whenBusy` | `whenBusy` |
+
+Two tool options have two names for the same thing: `maxTries` and `maxAttempts` (`maxTries` wins), and `redactError` and `redact` (`redactError` wins).
+
+## Names that are no longer exported
+
+These were internal helpers that happened to be exported. They are still in the source, but they are not part of the public API.
+
+| Name | Use instead | Since |
+|---|---|---|
+| `buildSessionData`, `serializeSession`, `deserializeSession`, `inspectSessionPayload`, `SessionAgentLike`, `SessionPayloadStatus` | `agent.exportSession()` and `agent.importSession()`, or `saveSessionFile` and `loadSessionFile`. | 0.9.0 |
+| `extractMediaToDir`, `resolveMediaPaths` | `saveSessionDir` and `loadSessionDir` move the media for you. | 0.9.0 |
+| `computeSessionTurnCost` | `agent.usageReport()`, or `res.usage.cost` for one run. | 0.9.0 |
+| `writeFileAtomic` | Nothing. It was the SDK's own crash-safe writer: write a temp file, then rename it. | 0.9.0 |
+| The provider classes `GoogleInteractionsProvider`, `OpenAIResponsesProvider`, `AnthropicMessagesProvider`, `OpenRouterChatCompletionsProvider`, `OpenAICompatibleChatProvider`, the tables `GOOGLE_MODELS`, `OPENAI_MODELS`, `ANTHROPIC_MODELS`, `OPENROUTER_MODELS`, and `createOpenAICompatibleProvider`, `createCustomProvider`, `CustomProvider`, `CustomProviderOptions` | Use an `Agent`. `getProvider(id)` and `ensureCustomProvider(prefix, { baseUrl })` still give you a provider. | 0.9.0 |
+| `zodToJsonSchema`, `cleanJsonSchema`, `toStandardToolDeclarations`, `StandardToolDeclaration`, `stripSchemaForGoogle`, `assertValidToolName`, `TOOL_NAME_PATTERN` | `tool({ input })` converts and checks the schema and the name for you. | 0.9.0 |
+| `isValidThoughtSignature`, `retainThoughtSignature`, `extractGoogleThoughtSignature`, `clearInteractionChains` | Nothing. The SDK keeps thought signatures and Google chains itself. | 0.9.0 |
+| `clampCacheKey`, `resolveEffectiveThinking`, `CACHE_OPTIONS` | Nothing. Set `cache` and `thinking` on the agent or on a run. | 0.9.0 |
+| `toConciseProviderError`, `assertModalitiesSupported` | Nothing. Errors already reach you as one-line typed errors, and unsupported input fails before the network. | 0.9.0 |
+| `getAttribution` | Keep the values you gave to `setAttribution`. | 0.9.0 |
+| `buildSessionHeaders` | Nothing. Agents send their session headers themselves. | 0.9.0 |
+| `createTrackingId`, `createChildSessionId`, `createFixedChildSessionId`, `isSessionDescendant` | The `trackingId`, `sessionId` and `parentSessionId` in a worker's result metadata. | 0.9.0 |
+| `getCacheDir`, `getCacheFilePath`, `getCatalogTTL`, `isValidCatalogPayload`, `DEFAULT_CATALOG_TTL_MS`, `CATALOG_PROVIDERS` | `getCatalogStatus()` (cache path, age and TTL) and the `catalog_cache_dir` setting. | 0.9.0 |
+| `formatSessionBanner`, `formatSessionTokens`, `formatSessionCost`, `getSessionContextWindow` | Copy the small helpers from `examples/_shared.ts`. `SessionTelemetry.formatBar()` stays. | 0.9.0 |
+| `ProviderRequestOptions`, `ProviderGenerateResult`, `ProviderSteps` | Nothing. They are what an adapter receives and returns, and you cannot plug in your own. Set options on the agent or the run, and read an `AgentResponse`. | 0.9.0 |
+| `PersistedSubAgentTrace`, `SessionRunMark`, `SessionRunEnd`, `SessionPending`, `SessionPendingPrompt`, `SessionToolRecord` | Read them off `PersistedAgentSession`, for example `NonNullable<PersistedAgentSession["runs"]>[number]`. | 0.9.0 |
+| `NoulQuestion`, `ChoiceQuestion`, `ScoreQuestion`, `NoulAnswer`, `ChoiceAnswer`, `ScoreAnswer`, `RefusalAnswer`, `ResolvedDecisionQuestion` | `DecisionQuestion` and `DecisionAnswer`, narrowed on `type`: `Extract<DecisionAnswer, { type: "choice" }>`. | 0.9.0 |
+| `ImageTokenPrices`, `ImageSizeRules`, `VideoTokenPrices`, `VideoClipReferences`, `VideoFrameRole`, `EmbeddingPrices`, `EmbeddingInputKind`, `EmbeddingTaskStyle`, `DecisionPrices`, `DecisionInputKind` | Read them off the model-info type that holds them, for example `ImageModelInfo["prices"]` or `DecisionModelInfo["prices"]`. | 0.9.0 |
+| `ProviderImageRequest`, `ProviderImageResult`, `ProviderEmbeddingRequest`, `ProviderEmbeddingResult`, `ProviderDecisionRequest`, `ProviderDecisionAnswer`, `ProviderDecisionResult`, `ProviderVideoRequest`, `ProviderVideoResult`, `ProviderVideoResumeRequest` | `ImageOptions`, `EmbeddingOptions`, `DecisionOptions` and `VideoOptions` for what you pass in, and `ImageResult`, `EmbeddingResult`, `DecisionResult` and `VideoResult` for what comes back. | 0.9.0 |
+
+## Providers and models
+
+- The OpenRouter Responses transport is gone. OpenRouter uses Chat Completions.
+- Gemini 1.x and 2.x are rejected. The minimum is Gemini 3.
+
+## Environment variables
+
+The environment holds API keys and nothing else. The older variables are no longer read:
+
+| Was | Now |
+|---|---|
+| `MODEL`, `MODEL_NAME`, `SUB_AGENT_MODEL` | `setModels({ default: { model, sub_agent_model }, providers })`. The user's choice: `setModel(id)` and `setSubAgentModel(id)`. |
+| `GOOGLE_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OPENROUTER_BASE_URL`, `<PREFIX>_BASE_URL` | The `base_urls` setting: `{ google, openai, anthropic, openrouter, <prefix> }`. |
+| `OPENROUTER_ORDER`, `_ONLY`, `_IGNORE`, `_ALLOW_FALLBACKS`, `_REQUIRE_PARAMETERS`, `_ZDR`, `_DATA_COLLECTION`, `_SORT`, `_PARALLEL_TOOL_CALLS`, `_REASONING_EXCLUDE`, `_USER` | The `openrouter` setting: `{ order, only, ignore, allow_fallbacks, require_parameters, zdr, data_collection, sort, parallel_tool_calls, reasoning_exclude, user }`. |
+| `COMPAT_NO_STREAM_OPTIONS`, `COMPAT_NO_SESSION_HEADERS` | The `compat` setting: `{ no_stream_options, no_session_headers }`. |
+| `AGENT_ACCEL_USAGE_LIMIT_USD` and `_TOKENS`, `AGENT_ACCEL_SCHEDULED_BUDGET_USD` and `_TOKENS` | The `usage_limit` and `scheduled_action_budget` settings: `{ max_cost_usd, max_total_tokens }`. |
+| `configure({ concurrency })` | The `concurrency` setting: `{ max_requests, per_provider }`. |
+| `AGENT_CATALOG_REFRESH=off`, `AGENT_CACHE_DIR`, `MODELS_DEV_SHA256` | The settings `catalog_refresh: "off"`, `catalog_cache_dir` and `models_dev_sha256`. |
+| `AGENT_ACCEL_HOME` | `setHome(dir)`, or an Agent's `home`. Code only. |
+
+## Scheduled action files
+
+The on-disk format has its own changelog: [Scheduled action files](scheduled-action-files.md#compatibility-rules-and-changelog).

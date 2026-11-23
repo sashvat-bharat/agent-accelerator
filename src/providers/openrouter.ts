@@ -35,9 +35,9 @@ import type {
   ModelSpec,
   ProviderRequestOptions,
   ProviderGenerateResult,
-  ProviderRawData,
 } from "../types/model.ts";
 import type { ProviderContext, ContentPart } from "../types/message.ts";
+import { beforeFirst } from "../utils/text.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
@@ -53,8 +53,9 @@ import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
-import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
-import { ConfigError, isAbortError } from "../types/errors.ts";
+import { toConciseProviderError, markRetryable } from "../utils/errors.ts";
+import { assertModalitiesSupported } from "./modalities.ts";
+import { ConfigError, isAbortError, abortError } from "../types/errors.ts";
 import { DEFAULT_PROMPTS } from "../prompts/prompts.ts";
 import {
   newToolCallId,
@@ -166,15 +167,13 @@ interface ChatUsage {
   [k: string]: unknown;
 }
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
-
 // ---------------------------------------------------------------------------
 // Request building (canonical -> Chat Completions)
 // ---------------------------------------------------------------------------
 
 // The openrouter base URL of this request; in: each request, out: the shared resolver.
 function resolveBaseUrl(options?: ProviderRequestOptions): string {
-  return resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options);
+  return resolveProviderBaseUrl("openrouter", options);
 }
 
 // The openrouter key of this request; in: each request, out: the shared resolver.
@@ -252,7 +251,10 @@ const AUDIO_FORMAT: Record<string, string> = {
 };
 // The `input_audio.format` for an audio MIME type (see AUDIO_FORMAT above); in: contentPartsToBlocks, out: the format string.
 function audioFormatFor(mimeType?: string): string {
-  const subtype = (mimeType || "").toLowerCase().split(";")[0]!.split("/")[1]?.replace(/^x-/, "") ?? "";
+  const subtype =
+    beforeFirst((mimeType || "").toLowerCase(), ";")
+      .split("/")[1]
+      ?.replace(/^x-/, "") ?? "";
   return AUDIO_FORMAT[subtype] ?? (subtype || "mp3");
 }
 
@@ -768,8 +770,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
     const concise = toConciseProviderError(err, "openrouter", modelId);
     // A 402 from the in-flight spending budget clears by itself once running requests settle (errors-and-debugging.md, Retry-After): retry it after the header's wait. A 402 for missing credits does not.
     if (status === 402 && limitSource === "openrouter_in_flight_budget") {
-      (concise as unknown as Record<string, unknown>)["retryable"] = true;
-      (concise as unknown as Record<string, unknown>)["transient"] = true;
+      markRetryable(concise);
     }
     throw concise;
   }
@@ -807,7 +808,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
       // A stream reports its own generic abort; the caller's reason (`interrupt(new Error("..."))`) is what the run should carry.
       const reason = options?.signal?.reason;
       if (options?.signal?.aborted && reason instanceof Error && isAbortError(err)) {
-        throw Object.assign(new Error(reason.message), { name: "AbortError" });
+        throw abortError(reason.message);
       }
       throw err;
     } finally {
@@ -1039,7 +1040,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           }
         };
 
-        await readSseData(res.body!, linked, eventStream, handleMessage); // openStreamResponse guarantees a body
+        await readSseData(res.body, linked, eventStream, handleMessage);
 
         const toolCalls: ToolCallRecord[] = [];
         for (const c of calls.values()) {
@@ -1095,7 +1096,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           provider: "openrouter",
           raw: {
             request: rawRequest,
-            response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
+            response: { ...responseMeta, body: completedBody, badFrames },
           },
           durationMs: Date.now() - startTime,
           ...(reasoningBlocks.length + annotationBlocks.length > 0

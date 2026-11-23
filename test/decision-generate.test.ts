@@ -20,7 +20,7 @@ import { resetModels } from "../src/config/models.ts";
 import { setConfigs, SETTING_KEYS } from "../src/config/settings.ts";
 import { setGovernorLimits } from "../src/agent/governor.ts";
 import { resetOpenRouterDecisionsCache } from "../src/models/openrouter-decisions.ts";
-import type { ProviderDecisionRequest, ProviderDecisionResult, ProviderDecisionAnswer } from "../src/index.ts";
+import type { ProviderDecisionRequest, ProviderDecisionResult, ProviderDecisionAnswer } from "../src/types/decision.ts";
 
 type Hook = (modelId: string, req: ProviderDecisionRequest, options: any) => Promise<ProviderDecisionResult>;
 

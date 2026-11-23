@@ -6,6 +6,8 @@
  * across the four REST transports, plus timeout/signal and id helpers.
  */
 import { toConciseProviderError } from "../utils/errors.ts";
+import { noop } from "../utils/noop.ts";
+import { ERROR_BODY_LIMIT, readTextCapped } from "../utils/body.ts";
 import { getApiKey } from "../utils/env.ts";
 import { baseUrlSetting } from "../config/settings.ts";
 import { safeStringify } from "../utils/serialization.ts";
@@ -15,6 +17,8 @@ import { redactHeadersCentral } from "../utils/cache.ts";
 import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { abortError } from "../types/errors.ts";
+import { DEFAULT_BASE_URLS } from "./base-urls.ts";
 
 /** Parses a JSON tool-argument string; non-objects degrade to the truncated-arguments marker. */
 export function parseArguments(raw: string | undefined): Record<string, unknown> {
@@ -142,20 +146,26 @@ export function combinedSignal(
   signal?: AbortSignal,
   timeoutMs?: number
 ): { signal: AbortSignal | undefined; cleanup: () => void } {
-  if (timeoutMs === undefined) return { signal, cleanup: () => {} };
+  if (timeoutMs === undefined) return { signal, cleanup: noop };
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
     try {
       ctrl.abort();
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   }, timeoutMs);
   try {
-    (timer as unknown as { unref?: () => void }).unref?.();
-  } catch {}
+    timer.unref?.();
+  } catch {
+    // why: cancelling or releasing something that is already closed is harmless.
+  }
   const cleanup = () => {
     try {
       clearTimeout(timer);
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   };
   if (signal) {
     if (signal.aborted) {
@@ -168,7 +178,9 @@ export function combinedSignal(
           cleanup();
           try {
             ctrl.abort(signal.reason);
-          } catch {}
+          } catch {
+            // why: cancelling or releasing something that is already closed is harmless.
+          }
         },
         { once: true }
       );
@@ -179,11 +191,9 @@ export function combinedSignal(
 
 /** Crypto-backed tool-call id, no Math.random primary. */
 export function newToolCallId(prefix = "call"): string {
-  try {
-    if (typeof crypto !== "undefined" && crypto.randomUUID) {
-      return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-    }
-  } catch {}
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  }
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
@@ -280,7 +290,10 @@ export function headersToRecord(headers: Headers): Record<string, string> {
  * `retry-after-ms`, then `retry-after` (delta-seconds or HTTP-date).
  * Returns undefined when absent or unparseable.
  */
-export function parseRetryAfterMs(headers: Record<string, string> | undefined, now = Date.now()): number | undefined {
+export function parseRetryAfterMs(
+  headers: Record<string, string> | undefined,
+  now: number = Date.now()
+): number | undefined {
   if (!headers) return undefined;
   const get = (name: string): string | undefined => {
     for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() === name) return v;
@@ -297,6 +310,14 @@ export function parseRetryAfterMs(headers: Record<string, string> | undefined, n
   return Number.isFinite(at) ? Math.max(0, at - now) : undefined;
 }
 
+/** A response that is known to have a body stream: what `openStreamResponse` gives back. */
+export type StreamingResponse = Response & { body: ReadableStream<Uint8Array> };
+
+// True when the response has a body stream; in: openStreamResponse, out: a type guard.
+function hasBody(res: Response): res is StreamingResponse {
+  return res.body !== null;
+}
+
 /**
  * Opens an SSE response, retrying transient failures (429/5xx/network) BEFORE
  * any byte is consumed, so a streaming caller gets the same resilience as
@@ -310,15 +331,15 @@ export function openStreamResponse(args: {
   retry: ReturnType<typeof retryOptionsFrom>;
   signal: AbortSignal;
   label: { providerId: string; modelId: string };
-}): Promise<Response> {
+}): Promise<StreamingResponse> {
   return withRetries(
     async () => {
       const res = await args.fetchOnce();
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
+        const text = await readTextCapped(res, ERROR_BODY_LIMIT).catch(() => "");
         args.onHttpError(res, text);
       }
-      if (!res.body) throw args.noBodyError();
+      if (!hasBody(res)) throw args.noBodyError();
       return res;
     },
     { ...args.retry, signal: args.signal, label: args.label }
@@ -360,7 +381,9 @@ export function linkStreamAbort(
     } catch {
       try {
         linked.abort();
-      } catch {}
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
     }
   };
   if (signal?.aborted) forwardUserAbort();
@@ -368,17 +391,23 @@ export function linkStreamAbort(
   const removeStreamCancel = eventStream.onCancel(() => {
     try {
       linked.abort();
-    } catch {}
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
   });
   return {
     linked,
     release: () => {
       try {
         signal?.removeEventListener("abort", forwardUserAbort);
-      } catch {}
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
       try {
         removeStreamCancel();
-      } catch {}
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
     },
   };
 }
@@ -394,7 +423,9 @@ export async function withAbortTimer<T>(
       ? setTimeout(() => {
           try {
             controller.abort();
-          } catch {}
+          } catch {
+            // why: cancelling or releasing something that is already closed is harmless.
+          }
         }, ms)
       : undefined;
   try {
@@ -414,13 +445,15 @@ export async function readSseData(
   const parser = new SSEParser();
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  const abort = (): Error => Object.assign(new Error("Stream aborted"), { name: "AbortError" });
-  linked.signal.addEventListener("abort", () => void reader.cancel().catch(() => {}), { once: true }); // an aborted body is already errored: its cancel() rejects, and nobody else listens
+  const abort = (): Error => abortError("Stream aborted");
+  linked.signal.addEventListener("abort", () => void reader.cancel().catch(noop), { once: true }); // an aborted body is already errored: its cancel() rejects, and nobody else listens
   while (true) {
     if (linked.signal.aborted || eventStream.isCancelled()) {
       try {
         await reader.cancel();
-      } catch {}
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
       throw abort();
     }
     const { done, value } = await reader.read();
@@ -430,7 +463,9 @@ export async function readSseData(
   for (const m of parser.flush()) onData(m.data);
   try {
     reader.releaseLock();
-  } catch {}
+  } catch {
+    // why: cancelling or releasing something that is already closed is harmless.
+  }
   if (linked.signal.aborted || eventStream.isCancelled()) throw abort();
 }
 
@@ -459,7 +494,7 @@ export function failStream(eventStream: AssistantMessageEventStream, linked: Abo
   const raw = err instanceof Error ? err : new Error(String(err));
   const isAbort =
     linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
-  eventStream.fail(isAbort ? Object.assign(new Error("Stream aborted"), { name: "AbortError" }) : raw);
+  eventStream.fail(isAbort ? abortError("Stream aborted") : raw);
 }
 
 /** A tool result as the text of a tool message or function_call_output; in: each adapter's history builder, out: a string. */
@@ -482,13 +517,12 @@ export function resolveProviderApiKey(provider: string, options?: ProviderReques
   return undefined;
 }
 
-/** The base URL of a first-class provider (option, then the `base_urls` setting, then its default) without trailing slashes; in: each request, out: a URL. */
+/** The base URL of a first-class provider (option, then the `base_urls` setting, then its default in `base-urls.ts`) without trailing slashes; in: each request, out: a URL. */
 export function resolveProviderBaseUrl(
-  provider: string,
-  defaultBaseUrl: string,
+  provider: keyof typeof DEFAULT_BASE_URLS,
   options?: ProviderRequestOptions
 ): string {
-  return (options?.baseUrl || baseUrlSetting(provider) || defaultBaseUrl).replace(/\/+$/, "");
+  return (options?.baseUrl || baseUrlSetting(provider) || DEFAULT_BASE_URLS[provider]).replace(/\/+$/, "");
 }
 
 /** The OpenRouter provider-routing keys taken from the `openrouter` setting (`order`, `only`, `ignore`, `allow_fallbacks`, `require_parameters`, `zdr`, `data_collection`, `sort`); the text and the image adapters both read them. */
@@ -502,3 +536,13 @@ export const OPENROUTER_ROUTING_KEYS = [
   "data_collection",
   "sort",
 ] as const;
+
+/** The tokens of one modality in a by-modality list (names compare in lower case), or undefined when the list does not mention it. */
+export function modalityTokens(
+  list: ReadonlyArray<{ modality?: string; tokens?: number }> | undefined,
+  modality: string
+): number | undefined {
+  const want = modality.toLowerCase();
+  const hits = (list ?? []).filter((m) => m.modality?.toLowerCase() === want);
+  return hits.length > 0 ? hits.reduce((n, m) => n + (m.tokens ?? 0), 0) : undefined;
+}

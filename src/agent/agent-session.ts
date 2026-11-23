@@ -54,7 +54,9 @@ function warnOnLocalMediaPaths(agent: Agent, messages: ReadonlyArray<{ content?:
       `[Agent Accelerator] Imported session references ${paths.length} local file path(s) that will be read and sent to the provider on the next turn. Set fileAccess.roots to restrict them.`,
       { count: paths.length, examples: paths.slice(0, 3) }
     );
-  } catch {}
+  } catch {
+    // why: telemetry is observability only and must never break the call.
+  }
 }
 
 export function importSessionInto(agent: Agent, data?: PersistedAgentSession | null): void {
@@ -86,7 +88,7 @@ export function importSessionInto(agent: Agent, data?: PersistedAgentSession | n
     try {
       agent.subagentTraces = JSON.parse(JSON.stringify(data.subagents));
     } catch {
-      agent.subagentTraces = { ...data.subagents } as unknown as Record<string, SubAgentTrace>;
+      agent.subagentTraces = { ...data.subagents } as Record<string, SubAgentTrace>;
     }
   }
   if (data.model) self.modelStringOrSpec = data.model;
@@ -121,7 +123,7 @@ export function importSessionInto(agent: Agent, data?: PersistedAgentSession | n
     agent.runMarks.length,
     ...(data.runs ?? []).filter((r) => r.i < agent.context.messages.length)
   );
-  agent.restoreUsage(data.usage);
+  agent.restoreUsage(data.usage, data.fixedUsage);
   if (data.systemPrompt) {
     agent.context.systemPrompt = data.systemPrompt;
   } else {
@@ -131,14 +133,22 @@ export function importSessionInto(agent: Agent, data?: PersistedAgentSession | n
   // for both the previous and the restored session.
   try {
     clearInteractionChains(prevSid);
-  } catch {}
+  } catch {
+    // why: clearing provider state is best effort; what is left expires by itself.
+  }
   try {
     clearSessionRouting(prevSid);
-  } catch {}
+  } catch {
+    // why: clearing provider state is best effort; what is left expires by itself.
+  }
   try {
     clearInteractionChains(agent.sessionId);
-  } catch {}
+  } catch {
+    // why: clearing provider state is best effort; what is left expires by itself.
+  }
   try {
     clearSessionRouting(agent.sessionId);
-  } catch {}
+  } catch {
+    // why: clearing provider state is best effort; what is left expires by itself.
+  }
 }

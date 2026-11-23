@@ -1,5 +1,7 @@
 # Testing your agents
 
+> Test your own agents with a scripted model: no network, no key, no cost.
+
 `fauxProvider` is a scripted stand-in for a model: no network, no key, no cost. You write down what the model should answer, build an `Agent` with `faux.config`, and run your own code against it.
 
 It is a `fetch` that speaks the OpenAI-compatible chat wire, so your agent still runs through the **real adapter**: history building, streaming, tool-call parsing, usage, retries and errors behave as in production. Only the model's answers are scripted.
@@ -15,15 +17,18 @@ const getWeather = tool({
 });
 
 const faux = fauxProvider([
-  { toolCalls: [{ name: "getWeather", arguments: { city: "Paris" } }] }, // 1st model call: asks for the tool
-  "It is sunny in Paris.", // 2nd model call: the final answer
+  // 1st model call: asks for the tool.
+  { toolCalls: [{ name: "getWeather", arguments: { city: "Paris" } }] },
+  // 2nd model call: the final answer.
+  "It is sunny in Paris.",
 ]);
 
 const agent = new Agent({ ...faux.config, tools: { getWeather } });
 const res = await agent.run("Weather in Paris?");
 
-res.text; // "It is sunny in Paris."
-faux.calls[1].body.messages; // what the model was sent the second time (it includes the tool result)
+console.log(res.text); // "It is sunny in Paris."
+// What the model got the second time, with the tool result:
+console.log(faux.calls[1]?.body.messages);
 ```
 
 ## Steps

@@ -8,6 +8,8 @@
  * in USD, which the SDK takes as the price (an explicit 0, a free model, counts). Vectors are asked as floats; `base64` is never used.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { EmbeddingPartData, ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { openRouterSetting } from "../config/settings.ts";
@@ -28,7 +30,6 @@ import {
 } from "./shared.ts";
 import { throwOpenRouterHttpError } from "./openrouter-image.ts";
 
-const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 /** `MultimodalMedia.format` for the common MIME subtypes that differ from it. */
 const FORMAT_ALIASES: Record<string, string> = { mpeg: "mp3", "x-wav": "wav", wave: "wav", quicktime: "mov" };
 
@@ -53,7 +54,7 @@ interface EmbeddingsReply {
 function toContentPart(p: EmbeddingPartData): Record<string, unknown> {
   if (p.kind === "text") return { type: "text", text: p.text };
   if (p.kind === "image") return { type: "image_url", image_url: { url: p.media.dataUrl } };
-  const subtype = p.media.mimeType.split(";")[0]!.split("/")[1] ?? "";
+  const subtype = beforeFirst(p.media.mimeType, ";").split("/")[1] ?? "";
   const media = { data: p.media.dataUrl, format: p.kind === "pdf" ? "pdf" : (FORMAT_ALIASES[subtype] ?? subtype) };
   return p.kind === "audio"
     ? { type: "input_audio", input_audio: media }
@@ -92,7 +93,7 @@ export async function openrouterEmbed(
   const apiKey = resolveProviderApiKey("openrouter", options);
   if (!apiKey)
     throw new ConfigError("[Agent Accelerator] Missing OpenRouter API key. Set OPENROUTER_API_KEY or pass apiKey.");
-  const url = `${resolveProviderBaseUrl("openrouter", DEFAULT_BASE_URL, options)}/embeddings`;
+  const url = `${resolveProviderBaseUrl("openrouter", options)}/embeddings`;
 
   // Provider routing and `user` come from the developer's `openrouter` setting, exactly as for chat and images.
   const setting = openRouterSetting();
@@ -138,7 +139,7 @@ export async function openrouterEmbed(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

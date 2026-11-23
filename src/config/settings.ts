@@ -15,6 +15,7 @@
  * setting is ignored with a warning on the telemetry bus.
  */
 import { ConfigError, SettingNotEditableError } from "../types/errors.ts";
+import { isRecord } from "../utils/guards.ts";
 import { currentUserFile, invalidateUserFile, saveUserFile, warnOnce, configsPath } from "./user-file.ts";
 import { onHomeChange, resolveHome } from "../utils/home.ts";
 
@@ -22,7 +23,6 @@ import { onHomeChange, resolveHome } from "../utils/home.ts";
 type Check = (v: unknown) => { value: unknown } | { problem: string };
 
 // Plain-object guard; in: the checks, out: a type guard.
-const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const isPositive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
 const isWhole = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1;
 const ok = (value: unknown) => ({ value });
@@ -31,7 +31,7 @@ const bad = (problem: string) => ({ problem });
 // Builds a check for an object with a fixed set of optional keys, each with its own rule; in: the settings table, out: a Check.
 function shape(what: string, fields: Record<string, (v: unknown) => string | undefined>, needOne = false): Check {
   return (v) => {
-    if (!isObject(v)) return bad(`expected an object with ${Object.keys(fields).join(", ")}`);
+    if (!isRecord(v)) return bad(`expected an object with ${Object.keys(fields).join(", ")}`);
     const keys = Object.keys(v).filter((k) => v[k] !== undefined);
     for (const k of keys)
       if (!(k in fields)) return bad(`unknown key "${k}" (allowed: ${Object.keys(fields).join(", ")})`);
@@ -59,8 +59,24 @@ const oneOf =
 // A check for a spending cap ({ max_cost_usd, max_total_tokens }); in: usage_limit and scheduled_action_budget, out: a Check.
 const cap = (what: string): Check => shape(what, { max_cost_usd: positive, max_total_tokens: positive }, true);
 
+/** The name of every setting the SDK knows. */
+const SETTING_NAMES = [
+  "usage_limit",
+  "scheduled_action_budget",
+  "concurrency",
+  "catalog_refresh",
+  "catalog_cache_dir",
+  "models_dev_sha256",
+  "base_urls",
+  "openrouter",
+  "compat",
+] as const;
+
+/** The name of one setting. */
+export type SettingKey = (typeof SETTING_NAMES)[number];
+
 /** Every setting the SDK knows, with the rule its value must follow. */
-const SETTINGS = {
+const SETTINGS: Record<SettingKey, Check> = {
   usage_limit: cap("usage_limit"),
   scheduled_action_budget: cap("scheduled_action_budget"),
   concurrency: (v) => {
@@ -69,7 +85,7 @@ const SETTINGS = {
       {
         max_requests: (x) => (isWhole(x) ? undefined : "must be a whole number >= 1"),
         per_provider: (x) =>
-          isObject(x) && Object.keys(x).length > 0 && Object.values(x).every(isWhole)
+          isRecord(x) && Object.keys(x).length > 0 && Object.values(x).every(isWhole)
             ? undefined
             : "must be an object like { google: 4 } of whole numbers >= 1",
       },
@@ -82,7 +98,7 @@ const SETTINGS = {
   models_dev_sha256: (v) =>
     typeof v === "string" && /^[a-f0-9]{64}$/i.test(v) ? ok(v.toLowerCase()) : bad("must be 64 hex characters"),
   base_urls: (v) => {
-    if (!isObject(v) || Object.keys(v).length === 0)
+    if (!isRecord(v) || Object.keys(v).length === 0)
       return bad('expected an object like { "openai": "https://host/v1" }');
     const out: Record<string, string> = {};
     for (const [name, url] of Object.entries(v)) {
@@ -117,11 +133,9 @@ const SETTINGS = {
     true
   ),
   compat: shape("compat", { no_stream_options: bool, no_session_headers: bool }, true),
-} as const satisfies Record<string, Check>;
+};
 
-/** The name of one setting. */
-export type SettingKey = keyof typeof SETTINGS;
-const KEYS = Object.keys(SETTINGS) as SettingKey[];
+const KEYS: readonly SettingKey[] = SETTING_NAMES;
 
 /** Every setting name (tests build "everything editable" policies from it). Internal. */
 export const SETTING_KEYS: readonly SettingKey[] = KEYS;
@@ -148,7 +162,7 @@ function freeze<T>(v: T): T {
 
 // Checks one setting value, throwing nothing: the cleaned value or the problem; in: setConfigs and setConfig, out: the result.
 function checkValue(key: SettingKey, v: unknown): { value: unknown } | { problem: string } {
-  const r = (SETTINGS[key] as Check)(v);
+  const r = SETTINGS[key](v);
   return "problem" in r ? { problem: `${key}: ${r.problem}.` } : r;
 }
 
@@ -160,14 +174,14 @@ export function parseConfigs(json: unknown): Policy {
   const problems: string[] = [];
   const values: Partial<Record<SettingKey, unknown>> = {};
   const editable = new Set<SettingKey>();
-  if (!isObject(json)) {
+  if (!isRecord(json)) {
     problems.push('expected an object like { "values": { ... }, "editable": ["concurrency"] }.');
   } else {
     for (const k of Object.keys(json))
       if (k !== "values" && k !== "editable") problems.push(`configs: unknown key "${k}" (allowed: values, editable).`);
     const v = json["values"];
     if (v !== undefined) {
-      if (!isObject(v)) problems.push("values: expected an object of settings.");
+      if (!isRecord(v)) problems.push("values: expected an object of settings.");
       else
         for (const [key, raw] of Object.entries(v)) {
           if (!KEYS.includes(key as SettingKey)) {

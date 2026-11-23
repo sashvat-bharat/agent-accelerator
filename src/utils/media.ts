@@ -1,6 +1,7 @@
 // NOTE: no static node:fs import — it breaks browser bundles. Local file
 // paths are loaded via a lazy dynamic import so browsers never resolve it.
 import { bytesToBase64, base64ToBytes } from "./base64.ts";
+import { beforeFirst } from "./text.ts";
 import { fetchRemoteBytes } from "./safe-io.ts";
 import { ValidationError } from "../types/errors.ts";
 
@@ -19,7 +20,7 @@ export interface NormalizedMedia {
  * @example `const mime = inferMimeType("photo.webp");`
  */
 export function inferMimeType(input: string, fallback = "application/octet-stream"): string {
-  const clean = input.toLowerCase().split("?")[0]!;
+  const clean = beforeFirst(input.toLowerCase(), "?");
   if (clean.endsWith(".png")) return "image/png";
   if (clean.endsWith(".jpg") || clean.endsWith(".jpeg")) return "image/jpeg";
   if (clean.endsWith(".webp")) return "image/webp";
@@ -86,7 +87,7 @@ function resolveMime(
 ): string {
   if (explicit) return explicit;
   const specific =
-    candidate && !GENERIC_MIME.has(candidate.split(";")[0]!.trim().toLowerCase()) ? candidate : undefined;
+    candidate && !GENERIC_MIME.has(beforeFirst(candidate, ";").trim().toLowerCase()) ? candidate : undefined;
   return specific || sniffMimeType(bytes) || candidate || fallback;
 }
 

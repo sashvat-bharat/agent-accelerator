@@ -19,7 +19,9 @@ function shouldPersist(agent: Agent): boolean {
   if (!cfg || (!cfg.dir && !cfg.file)) return false;
   try {
     if (agent.stateless && !cfg.allowStateless) return false;
-  } catch {}
+  } catch {
+    // why: if the setting cannot be read, saving stays on.
+  }
   return true;
 }
 
@@ -35,14 +37,16 @@ export function persistNow(agent: Agent): void {
 
 /** Writes the session now (journal sync in folder mode, else a snapshot file); a failure goes to `persist.onPersistError` and never throws; in: `Agent.doPersist`, out: files on disk. */
 export function doPersist(agent: Agent): void {
-  if (!shouldPersist(agent)) return;
-  const cfg = agent.persistConfig!;
+  const cfg = agent.persistConfig;
+  if (!cfg || !shouldPersist(agent)) return;
   try {
     if (cfg.dir) journalFor(agent, cfg.dir).sync(agent);
     else if (cfg.file) saveSessionFile(cfg.file, agent, null);
   } catch (err) {
     try {
       cfg.onPersistError?.(err);
-    } catch {}
+    } catch {
+      // why: your `onPersistError` callback must never break the run.
+    }
   }
 }

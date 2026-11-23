@@ -11,6 +11,7 @@
  * into `provider/model`. The two defaults are full `provider/model` strings and must be in the list.
  */
 import { ConfigError, ModelNotAllowedError } from "../types/errors.ts";
+import { isRecord } from "../utils/guards.ts";
 import { currentUserFile, saveUserFile, warnOnce } from "./user-file.ts";
 
 /** One allowed model: its provider, its id inside that provider, and the full `provider/id` string agents use. */
@@ -28,11 +29,6 @@ export interface ModelList {
 
 const TOP_KEYS = ["default", "providers"];
 const DEFAULT_KEYS = ["model", "sub_agent_model"];
-
-// True for a plain object (not null, not an array); in: the validators, out: a type guard.
-function isObject(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
 
 // Names the keys of `obj` that are not in `allowed`; in: the validators, out: problem lines.
 function unknownKeys(where: string, obj: Record<string, unknown>, allowed: string[]): string[] {
@@ -59,14 +55,14 @@ export function parseModels(json: unknown): ModelList {
   const problems: string[] = [];
   const options: ModelOption[] = [];
   const full = new Set<string>();
-  if (!isObject(json)) {
+  if (!isRecord(json)) {
     problems.push(
       "expected an object like { default: { model, sub_agent_model }, providers: { google: { models: [...] } } }."
     );
   } else {
     problems.push(...unknownKeys("models", json, TOP_KEYS));
     const providers = json["providers"];
-    if (!isObject(providers) || Object.keys(providers).length === 0) {
+    if (!isRecord(providers) || Object.keys(providers).length === 0) {
       problems.push(
         'providers: required, an object with at least one provider, e.g. { "google": { "models": ["gemini-4-argon"] } }.'
       );
@@ -79,7 +75,7 @@ export function parseModels(json: unknown): ModelList {
           problems.push(`${where}: not a provider name (letters, digits, "_" or "-").`);
           continue;
         }
-        if (!isObject(entry)) {
+        if (!isRecord(entry)) {
           problems.push(`${where}: expected an object like { "models": [...] }.`);
           continue;
         }
@@ -106,7 +102,7 @@ export function parseModels(json: unknown): ModelList {
       }
     }
     const def = json["default"];
-    if (!isObject(def)) {
+    if (!isRecord(def)) {
       problems.push(
         'default: required, an object like { "model": "google/gemini-4-argon", "sub_agent_model": "google/gemini-4-argon" }.'
       );
@@ -175,22 +171,29 @@ export function allowedIds(provider: string): ReadonlySet<string> | undefined {
   if (!current) return undefined;
   if (!ids) {
     ids = new Map();
-    for (const m of current.models) (ids.get(m.provider) ?? ids.set(m.provider, new Set()).get(m.provider)!).add(m.id);
+    for (const m of current.models) {
+      let provided = ids.get(m.provider);
+      if (!provided) {
+        provided = new Set();
+        ids.set(m.provider, provided);
+      }
+      provided.add(m.id);
+    }
   }
   return ids.get(provider) ?? new Set();
 }
 
 /** True when `provider/id` may be used: always without a list, else only if it is listed. */
-export function isModelAllowed(provider: string, id: string): boolean {
-  return !current || allowedIds(provider)!.has(id);
+function isModelAllowed(provider: string, id: string): boolean {
+  return !current || (allowedIds(provider)?.has(id) ?? false);
 }
 
 /** Throws a {@link ModelNotAllowedError} (listing the available models) unless `provider/id` is allowed. Called by `resolveModel`, the Agent constructor and `importSession`. */
 export function assertModelAllowed(provider: string, id: string): void {
-  if (isModelAllowed(provider, id)) return;
+  if (!current || isModelAllowed(provider, id)) return;
   throw new ModelNotAllowedError(
     `${provider}/${id}`,
-    current!.models.map((m) => m.model)
+    current.models.map((m) => m.model)
   );
 }
 

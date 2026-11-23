@@ -63,5 +63,10 @@ describe("buildShards: which models each provider shard keeps", () => {
     expect(isShard(shards.google, "openai")).toBe(false);
     expect(isShard({ version: 1, provider: "google", models: [] }, "google")).toBe(false);
     expect(isShard(null, "google")).toBe(false);
+    // A hand-edited shard whose model entries are not objects is not trusted either.
+    expect(isShard({ version: 1, provider: "google", models: { a: 5 } }, "google")).toBe(false);
+    expect(isShard({ version: 1, provider: "google", models: { a: null } }, "google")).toBe(false);
+    expect(isShard({ version: 1, provider: "google", models: { a: [] } }, "google")).toBe(false);
+    expect(isShard({ version: 1, provider: "google", models: { a: { id: "a" } } }, "google")).toBe(true);
   });
 });

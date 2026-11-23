@@ -18,7 +18,9 @@ export function trackSubAgent(agent: Agent, trackingId: string): SubAgentTrace |
   try {
     const hit = agent.subagentTraces[trackingId];
     if (hit) return { ...hit, steps: hit.steps.map((s) => ({ ...s })) };
-  } catch {}
+  } catch {
+    // why: bookkeeping must never fail a run; the run result is what counts.
+  }
   // Process-wide store, filtered to sessions THIS agent owns: another agent's workers (e.g. a different tenant) are never reachable.
   return getSubAgentTraceForSessions(trackingId, agent.ownedSessionIds());
 }
@@ -68,5 +70,7 @@ export function mergeSubagentTraces(agent: Agent, subagents: SubAgentExecutionMe
         };
       }
     }
-  } catch {}
+  } catch {
+    // why: bookkeeping must never fail a run; the run result is what counts.
+  }
 }

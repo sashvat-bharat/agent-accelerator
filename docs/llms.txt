@@ -1,19 +1,32 @@
 # Agent Accelerator
 
-> Thin, typed TypeScript SDK (Bun, ships TypeScript source): one `Agent` class over Google Gemini, OpenAI, Anthropic, OpenRouter and any OpenAI-compatible endpoint. Tools, streaming, sub-agents, scheduled actions, mid-session steer/queue/interrupt, durable sessions, structured output, multimodal input, prompt caching, budgets/retries, telemetry bus, safe file/URL handling. Pre-1.0: pin a version. Import everything from "agent-accelerator". Paths are relative to docs/.
+> TypeScript SDK (Bun, ships TypeScript source): one `Agent` class over Google Gemini, OpenAI, Anthropic, OpenRouter and any OpenAI-compatible service. Tools, streaming, hooks, workers, scheduled actions, steer/queue/interrupt, saved sessions with crash recovery, structured output, media input, prompt caching, budgets and retries, a telemetry bus, safe file and URL handling. Pre-1.0: pin a version. Import everything from "agent-accelerator". Paths are relative to docs/.
 
-- [For AI agents](for-ai-agents.md): decision table, templates, hard rules, what does NOT exist, error-to-fix lookup
-- [Getting started](getting-started.md): install, keys, first agent, concepts
-- [Agents and models](guides/agents-and-models.md): Agent, run/ask/stream, sessions in memory, model routing, providers, thinking, caching, structured output, self-improving agents (`toConfig`/`fromConfig`), the program's model list (`setModels`)
-- [Tools and streaming](guides/tools-and-streaming.md): tool(), execution rules, toolChoice, streaming, events, steer/queue/interrupt
-- [Multi-agent and scheduling](guides/multi-agent.md): fixed and dynamic sub-agents, tracking, scheduled actions (DD:HH:MM)
-- [Data and media](guides/data-and-media.md): persistence/resume, images/audio/video/files, usage and cost, model catalog
-- [Generating images](guides/images.md): `generateImage`, the supported image models (`listImageModels`), options checked per model, results, `image.edit`, `imageTool`, errors
-- [Generating videos](guides/videos.md): `generateVideo`, the known video models (`listVideoModels`: Google `gemini-omni-1.2-flash` and OpenRouter's cached list), options checked per model (length, tier, ratio, frames, reference pictures and clips with MP4 length limits), polling and `onProgress`, `jobId` on timeouts, `video.edit` (Google interaction / OpenRouter `previous_job_id`), `resumeVideo`, `VideoResult`, errors
-- [Testing your agents](guides/testing.md): `fauxProvider(steps)` (scripted model: text, thinking, tool calls, usage, cost, errors, delays, function steps), `faux.config` / `calls` / `remaining` / `push` / `reset`, runs through the real adapter, streaming works
-- [Asking decision models](guides/decisions.md): `generateDecision`, typed yes/no (`noul`), `choice` and `score` questions in the providers' own shapes, probabilities and `confidence`, the known decision models (`listDecisionModels`), checks per model, OpenRouter's cached model list, errors
-- [Generating embeddings](guides/embeddings.md): `generateEmbedding`, the known embedding models (`listEmbeddingModels`), one `task` option for every model, options checked per model, `cosineSimilarity`, OpenRouter's cached model list, errors
-- [Safety and operations](guides/safety-and-ops.md): limits, budget, retry, onFailure, errors, telemetry, security, known limitations
+- [For AI agents](for-ai-agents.md): decision table, a safe template, hard rules, what does NOT exist, error-to-fix lookup, notes by feature
+- [Getting started](getting-started.md): install, keys, first agent, streaming, a tool, running with no key, first-run errors
+- [How it works](how-it-works.md): a run, the conversation, providers, workers, the home folder, limits, cost, telemetry
+- [Agents](guides/agents.md): `Agent`, `run`/`ask`/`stream`, `additionalContext`, `stateless`, structured output (`output`), `toConfig`/`fromConfig`
+- [Provider notes](guides/provider-notes.md): what the adapters send to Google, OpenAI, Anthropic, OpenRouter and OpenAI-compatible services, and how they read the answer
+- [Models and providers](guides/models-and-providers.md): model strings and keys, `ModelProvider`, `resolveModel`, provider differences, the model catalog, `registerModel`
+- [Allowed models](guides/allowed-models.md): `setModels`, `listModels`, `setModel`, `setSubAgentModel`, where the list is enforced
+- [Reasoning and caching](guides/reasoning-and-caching.md): `thinking` levels, `cache` per provider, `serviceTier`, session affinity
+- [Tools](guides/tools.md): `tool()`, how a call runs, `toolContent`, `toolChoice`, `ctx.stop` approval, `hooks` (beforeTool, afterTool, beforeRequest, onYield), crash replay
+- [Streaming and steering](guides/streaming-and-steering.md): streaming, `steer`/`queue`/`interrupt`, `requestId`, what an interrupt stops, provider cancel behavior
+- [Workers](guides/workers.md): fixed `subagents`, dynamic `subagents` tool, `agent.workers`, tracking, depth and spending caps
+- [Scheduled actions](guides/scheduled-actions.md): `agent.scheduled`, the `DD:HH:MM` time format, lifecycle, missed runs
+- [Sessions](guides/sessions.md): `persist`, the home folder, crash resume, the per-session lock, what is saved
+- [Media input](guides/media-input.md): images, audio, video and files in a prompt, per-provider rules
+- [Usage and cost](guides/usage-and-cost.md): `res.usage`, cost rules, `SessionTelemetry`, `agent.usageReport()`
+- [Limits and retries](guides/limits-and-retries.md): `maxTurns`, `limits`, `budget`, `usageLimit`, network timeouts, `retry`, `runRetries`, the `concurrency` setting
+- [Settings](guides/settings.md): `setConfigs`, `getConfigs`, `setConfig`, `editable`, the user's `configs.json`
+- [Errors and telemetry](guides/errors-and-telemetry.md): the error classes, `telemetryBus`, `telemetry: { persist: true }`
+- [Security](guides/security.md): what the SDK protects, a hardening checklist, known limitations
 - [Prompts](guides/prompts.md): the SDK's own prompts, `DEFAULT_PROMPTS`, `AgentConfig.prompts`, placeholders
-- [Scheduled action files](scheduled-action-files.md): stable on-disk format of scheduled actions (task.json, delivery.json, run file header), reading, editing rules, changelog
-- [Reference](reference.md): all AgentConfig keys, run options, response fields, stream events, telemetry codes, errors, env vars
+- [Testing](guides/testing.md): `fauxProvider(steps)`, scripted text, thinking, tool calls, usage, errors and delays
+- [Images](guides/images.md): `generateImage`, `listImageModels`, options checked per model, `image.edit`, `imageTool`
+- [Videos](guides/videos.md): `generateVideo`, `listVideoModels`, options checked per model, `video.edit`, `resumeVideo`
+- [Embeddings](guides/embeddings.md): `generateEmbedding`, `listEmbeddingModels`, one `task` option, `cosineSimilarity`
+- [Decisions](guides/decisions.md): `generateDecision`, typed `noul`, `choice` and `score` questions, probabilities and `confidence`
+- [Reference](reference.md): all AgentConfig keys, run options, response fields, stream events, telemetry codes, errors, environment variables
+- [Scheduled action files](scheduled-action-files.md): the stable on-disk format of scheduled actions, reading, editing rules, changelog
+- [Migration](migration.md): what changed in 0.9.0, what was removed or renamed, and the old environment variables
