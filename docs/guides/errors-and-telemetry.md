@@ -38,7 +38,7 @@ Every SDK error extends `AgentAccelError`, which has a `code`, a `retryable` fla
 | Class | When |
 |---|---|
 | `ConfigError` | Missing key or address, a bad model, invalid config. `ModelNotAllowedError`, `SettingNotEditableError`, `ThinkingLevelError` and `SubAgentModelError` are kinds of `ConfigError`. |
-| `ProviderError` | The provider API failed. |
+| `ProviderError` | The provider API failed, or sent a reply that cannot be used. |
 | `TimeoutError` | A request, first-byte or idle timeout. Retryable. |
 | `BudgetExceededError` | A budget or limit was exceeded. Partial usage is attached. |
 | `ToolError` | A tool failed in a way that reaches the caller. |

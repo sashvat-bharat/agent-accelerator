@@ -6,6 +6,8 @@
  * here touches the network unless a refresh is asked for or a copy is missing or stale.
  */
 import * as fs from "node:fs";
+import { isRecord } from "../utils/guards.ts";
+import { readTextCapped } from "../utils/body.ts";
 import * as path from "node:path";
 import { getSetting } from "../config/settings.ts";
 import { telemetryBus } from "../telemetry.ts";
@@ -61,18 +63,16 @@ interface Saved<T> {
   models: T[];
 }
 
-// True for a plain object; in: the reader below, out: a type guard.
-function isObject(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-/** Builds the reader, refresher and "ensure" functions of one OpenRouter list; each list module calls it once. */
-export function createOpenRouterList<T>(spec: OpenRouterListSpec<T>): {
+/** What `createOpenRouterList` gives a list module: read the saved list, refresh it, make sure it is fresh, forget it (tests). */
+export interface OpenRouterList<T> {
   read(): readonly T[];
   refresh(options?: RefreshOpenRouterListOptions): Promise<readonly T[]>;
   ensure(options?: RefreshOpenRouterListOptions): Promise<readonly T[]>;
   reset(): void;
-} {
+}
+
+/** Builds the reader, refresher and "ensure" functions of one OpenRouter list; each list module calls it once. */
+export function createOpenRouterList<T>(spec: OpenRouterListSpec<T>): OpenRouterList<T> {
   // Path of the saved list in the current cache folder (follows `setHome` and `catalog_cache_dir`); in: every function here, out: a path.
   const filePath = (): string => path.join(getCacheDir(), spec.file);
 
@@ -81,12 +81,13 @@ export function createOpenRouterList<T>(spec: OpenRouterListSpec<T>): {
     try {
       const raw: unknown = JSON.parse(fs.readFileSync(filePath(), "utf8"));
       if (
-        isObject(raw) &&
+        isRecord(raw) &&
         raw["version"] === 1 &&
         typeof raw["fetchedAt"] === "number" &&
         typeof raw["ttlMs"] === "number" &&
         Array.isArray(raw["models"])
       )
+        // why: `raw` is the saved list; its envelope was just checked, and each model is checked when the list is used.
         return raw as unknown as Saved<T>;
     } catch {
       // why: no file or a damaged one: the list is simply not known yet.
@@ -134,7 +135,7 @@ export function createOpenRouterList<T>(spec: OpenRouterListSpec<T>): {
         signal: controller.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`.trim());
-      const text = await res.text();
+      const text = await readTextCapped(res, MAX_LIST_BYTES);
       if (text.length > MAX_LIST_BYTES) throw new Error("the reply is too large to be the model list");
       const now = Date.now();
       const models = spec.parse(JSON.parse(text), now);

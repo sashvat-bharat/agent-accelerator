@@ -19,6 +19,9 @@ Small shared helpers. Each file has one job.
 | `mp4.ts`                            | `mp4DurationSeconds`: the length of an MP4 or MOV file from its `moov/mvhd` header (no decoding); anything else is `undefined`.                                                                                                                                                                                  |
 | `serialization.ts`                  | `toJsonSafe`, `safeStringify`, `escapeXml`.                                                                                                                                                                                                                                                                      |
 | `base64.ts`, `thought-signature.ts` | Runtime-agnostic base64; Gemini thought-signature helpers.                                                                                                                                                                                                                                                       |
+| `body.ts`                           | `readTextCapped` / `readBytesCapped`: read a response body with a byte cap (chat 64 MB, bulk replies 256 MB, error bodies 1 MB, downloads 512 MB), cancelling the connection at the cap; over it is a non-retryable `ProviderError`.                                                                             |
+| `guards.ts`, `text.ts`, `noop.ts`   | `isRecord` (the one plain-object guard), `beforeFirst` (text before a separator), `noop` (a named do-nothing callback, for `promise.catch(noop)`).                                                                                                                                                               |
+| `media-part.ts`                     | Typed access to a media part: `MEDIA_KEYS`, `mediaKeyOf` (safe on untrusted data), `mediaValueOf`, `makeMediaPart`. Replaces casts that reached the payload by key.                                                                                                                                              |
 
 ## Invariants
 
@@ -27,3 +30,4 @@ Small shared helpers. Each file has one job.
 - Redaction is central (`cache.ts`); adapters must not keep their own deny-lists.
 - The home is set in code only (`setHome()` or an Agent's `home`; there is no env var). `setHome()` after import relies on the catalog reload hook.
 - The environment is read for API keys only (`env.ts`); every other option is a setting (`config/settings.ts`).
+- A response body is never read whole without a cap (`body.ts`), and every empty `catch` says why it is empty.

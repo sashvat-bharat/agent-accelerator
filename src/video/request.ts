@@ -53,8 +53,9 @@ export function resolveVideoRequest(
 ): { request: ResolvedVideoRequest; warnings: VideoWarning[] } {
   const problems: string[] = [];
   const warnings: VideoWarning[] = [];
-  const drop = (capability: string, requested: string, reason: string): void =>
-    void warnings.push({ capability, requested, reason, fallback: "the model's default (the option is not sent)" });
+  const drop = (capability: string, requested: string, reason: string): void => {
+    warnings.push({ capability, requested, reason, fallback: "the model's default (the option is not sent)" });
+  };
 
   const hasFirstFrame = opts.firstFrame !== undefined;
   const hasLastFrame = opts.lastFrame !== undefined;

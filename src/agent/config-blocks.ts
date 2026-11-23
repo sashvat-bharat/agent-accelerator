@@ -85,7 +85,10 @@ export function applyEditable(editable: EditableAgentConfig, base: AgentConfig):
       );
     }
     const picked: Record<string, ToolDefinition> = {};
-    for (const n of e.tools as string[]) picked[n] = pool[n]!;
+    for (const n of e.tools as string[]) {
+      const def = pool[n]; // every name was checked against the pool above
+      if (def) picked[n] = def;
+    }
     out.tools = picked;
   }
   return out; // the model list (`setModels`) is enforced by the Agent constructor

@@ -35,5 +35,6 @@ The SDK is before version 1.0. Be aware of these:
 - **`thinking.budgetTokens`** is accepted but not forwarded to any provider.
 - **History is sent again each turn.** Providers other than Google need the whole history on every call. With `persist.file` the whole snapshot is rewritten at each step. With `persist.dir` a journal is appended instead.
 - **Memory.** An idle process that imported the SDK uses about 40 MB: Bun about 17 MB, `zod` about 10 MB and the SDK about 15 MB. The model catalog is read lazily and is small. 100 parallel streaming runs add about 17 MB at their peak. `bun run bench` measures both. The SDK is not yet tuned for very small hosts.
+- **Reply size.** The SDK stops reading a provider reply that is too large and cancels the connection: 64 MB for a chat reply, 256 MB for pictures, vectors and decision answers, 1 MB for an error body and 512 MB for a downloaded video. A reply over its cap is a `ProviderError` that is not retried. A misconfigured or hostile endpoint cannot fill the memory of a small host.
 - **The address check** resolves DNS before it calls `fetch`, so a small DNS-rebinding window remains.
 - **Local disk only.** Network drives are not supported.

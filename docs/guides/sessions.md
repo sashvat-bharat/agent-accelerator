@@ -101,10 +101,12 @@ Loading checks the shape of the messages. A corrupt file is renamed `*.corrupt-<
 |---|---|
 | `findLatestSessionDir(root)` | Finds the most recently changed session folder. |
 | `loadSessionDir(dir)` | Reads a session folder. Returns `{ session, ... }` or `null`. |
-| `saveSessionDir(root, agent, telemetry?)` | Saves a session into the folder layout. |
-| `loadSessionFile(file)`, `saveSessionFile(file, agent, telemetry?)` | The same, for one JSON file. |
+| `saveSessionDir(root, agent, telemetry?)` | Saves a session into the folder layout. Throws when it cannot write. |
+| `loadSessionFile(file)`, `saveSessionFile(file, agent, telemetry?)` | The same, for one JSON file. `saveSessionFile` throws when it cannot write. |
 | `sessionDirFor(root, sessionId)` | The folder path for a session id. Refuses `../`. |
 | `agent.exportSession()`, `agent.importSession(saved)` | The snapshot of an agent, and restoring it. |
+
+The two save functions throw when the file cannot be written, so a failed save is never silent. An agent that saves by itself (`persist`) catches that for you and calls `persist.onPersistError`. `saveSessionDir` writes in a crash-safe order: media files first (a file that has not changed is left alone), then the new `session.json`, then it removes media that the new snapshot no longer uses. A media file that cannot be written stays inside `session.json`, and a `session.media_write_failed` warning goes to the telemetry bus.
 
 A `sessionId` you pass must match `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`. Otherwise saving to a folder throws `ValidationError`. Generated ids are shortened to 64 characters.
 

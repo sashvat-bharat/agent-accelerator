@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { noop } from "../utils/noop.ts";
+import { readTextCapped } from "../utils/body.ts";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { getSetting, onSettingsChange } from "../config/settings.ts";
@@ -8,10 +10,10 @@ import { writeFileDurable } from "../utils/durable.ts";
 import { buildShards, isShard, CATALOG_PROVIDERS, type CatalogProvider, type SlimModel } from "./catalog-shards.ts";
 
 /** Default TTL: 12 Hours (in milliseconds). */
-export const DEFAULT_CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
+export const DEFAULT_CATALOG_TTL_MS: number = 12 * 60 * 60 * 1000;
 
 /** Max accepted models.dev payload size: 15MB. Larger payloads are rejected before parse. */
-export const MAX_CATALOG_PAYLOAD_BYTES = 15 * 1024 * 1024;
+export const MAX_CATALOG_PAYLOAD_BYTES: number = 15 * 1024 * 1024;
 
 let globalCatalogTtlMs = DEFAULT_CATALOG_TTL_MS;
 
@@ -78,7 +80,9 @@ function notifyUpdateListeners(): void {
   for (const listener of updateListeners) {
     try {
       listener();
-    } catch {}
+    } catch {
+      // why: a callback or listener of yours must never break the run.
+    }
   }
 }
 
@@ -128,7 +132,7 @@ export function verifyCatalogSha256(text: string): boolean {
 /** Wall-clock of the last failed network refresh (0 = none); drives the retry backoff. */
 let lastRefreshFailureAt = 0;
 /** After a failed refresh, `ensureModelCatalogFresh` stays quiet this long (10 min). */
-export const REFRESH_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
+export const REFRESH_FAILURE_BACKOFF_MS: number = 10 * 60 * 1000;
 /** Network timeout for a background refresh when a usable catalog is already loaded. */
 const BACKGROUND_REFRESH_TIMEOUT_MS = 8_000;
 
@@ -292,7 +296,7 @@ export async function refreshModelCatalog(options: RefreshCatalogOptions = {}): 
     }
 
     // Size-cap before parse (check text length, reject >15MB).
-    const text = await res.text();
+    const text = await readTextCapped(res, MAX_CATALOG_PAYLOAD_BYTES);
     if (text.length > MAX_CATALOG_PAYLOAD_BYTES) {
       clearTimeout(timer);
       fallbackToDiskCache();
@@ -409,7 +413,7 @@ export async function ensureModelCatalogFresh(options: RefreshCatalogOptions = {
   };
 
   if (current.loaded && !options.force) {
-    start().catch(() => {}); // background revalidation; failures are non-fatal
+    start().catch(noop); // background revalidation; failures are non-fatal
     return current;
   }
   return start();

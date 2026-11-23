@@ -7,6 +7,7 @@
  * the provider's own error says when an input is too long.
  */
 import { ValidationError } from "../types/errors.ts";
+import { mediaValueOf } from "../utils/media-part.ts";
 import type { EmbeddingInputKind, EmbeddingModelInfo } from "../models/embedding-models.ts";
 import { EMBEDDING_TASKS, type EmbeddingOptions, type EmbeddingPart, type EmbeddingTask } from "../types/embedding.ts";
 
@@ -46,7 +47,7 @@ function kindOf(part: { type?: unknown }): EmbeddingInputKind | undefined {
 
 // The media value of a part (`image`, `audio`, `video` or `file`), or undefined when it has none; in: item normalization, out: the value.
 function mediaOf(part: EmbeddingPart): unknown {
-  return part.type === "text" ? undefined : (part as unknown as Record<string, unknown>)[part.type];
+  return part.type === "text" ? undefined : mediaValueOf(part);
 }
 
 /**
@@ -59,8 +60,9 @@ export function resolveEmbeddingRequest(
 ): { request: ResolvedEmbeddingRequest; warnings: EmbeddingWarning[] } {
   const problems: string[] = [];
   const warnings: EmbeddingWarning[] = [];
-  const drop = (capability: string, requested: string, reason: string): void =>
-    void warnings.push({ capability, requested, reason, fallback: "the model's default (the option is not sent)" });
+  const drop = (capability: string, requested: string, reason: string): void => {
+    warnings.push({ capability, requested, reason, fallback: "the model's default (the option is not sent)" });
+  };
 
   // Items: one item or a list; a string, one part or `{ parts }`; each ends as a list of parts.
   const list = Array.isArray(opts.input) ? opts.input : opts.input === undefined ? undefined : [opts.input];

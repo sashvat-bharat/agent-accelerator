@@ -82,7 +82,9 @@ function readProviderMessage(error: unknown): string {
       const parsed: unknown = JSON.parse(body);
       const fromBody = text(dig(parsed, "error", "message")) ?? text(dig(parsed, "message"));
       if (fromBody) return fromBody;
-    } catch {}
+    } catch {
+      // why: the body is not JSON, so the raw text is used instead.
+    }
     if (body.length <= 300) return body.trim();
   }
   return String(dig(error, "message") ?? error).slice(0, 300);
@@ -148,6 +150,12 @@ export function toConciseProviderError(error: unknown, providerId: string, model
       : {}),
   });
   return concise;
+}
+
+/** Marks an error as worth retrying: the retry layers read its `retryable` and `transient` flags. */
+export function markRetryable(error: Error): void {
+  Reflect.set(error, "retryable", true);
+  Reflect.set(error, "transient", true);
 }
 
 const PART_TO_MODALITY: Record<string, "image" | "audio" | "video" | "pdf"> = {
@@ -226,7 +234,9 @@ export function assertNoVideoPartsOnResponses(context: ProviderContext, provider
     // Responses wire cannot carry it (listing it as "supported" would
     // contradict the rejection).
     if (known && known.length > 0) supported = known.filter((m) => m !== "video").join(", ") || "text";
-  } catch {}
+  } catch {
+    // why: a catalog problem makes the model "unknown", and this call goes ahead.
+  }
   throw new ValidationError(
     `[${displayModel(providerId, modelId)}] unsupported video input (the Responses API accepts text/image/file only; supports: ${supported}). Use a video-capable model (e.g. google/gemini-*) or drop the video part.`,
     { provider: providerId, model: modelId }

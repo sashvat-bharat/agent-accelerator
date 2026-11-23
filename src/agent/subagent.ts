@@ -3,22 +3,13 @@ import type { AgentConfig } from "../types/agent.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import { agentToTool } from "./delegation.ts";
 import { resolveSubAgentModel } from "./worker.ts";
-import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 
 /** AgentConfig alias for a delegated worker agent. */
 export interface SubAgentConfig extends AgentConfig {}
 
-/**
- * Builds an `Agent` whose model is the saved choice or the program's default (see `setModels` / `setModel`) when the
- * caller names none. Explicit config always wins. The static
- * `Agent.fromEnv()` (attached below without touching `agent.ts`, owned by
- * another audit lane) delegates here.
- */
+/** Builds an `Agent` whose model is the saved choice or the program's default when the caller names none; the same as `Agent.fromEnv`. */
 export function agentFromEnv(config?: Omit<AgentConfig, "model"> & { model?: AgentConfig["model"] }): Agent {
-  return new Agent({
-    ...config,
-    model: config?.model ?? chosenModel() ?? chosenSubAgentModel(),
-  } as AgentConfig);
+  return Agent.fromEnv(config);
 }
 
 /**
@@ -97,32 +88,4 @@ export class SubAgent extends Agent {
   toTool(nameOverride?: string, descriptionOverride?: string): ToolDefinition {
     return this.asTool(nameOverride, descriptionOverride);
   }
-}
-
-// `Agent.fromEnv()` static without touching `agent.ts` (owned by
-// another lane). Wired at module load; typed via the declaration below so
-// `Agent.fromEnv({...})` typechecks wherever this module is imported.
-declare module "./agent.ts" {
-  namespace Agent {
-    /**
-     * Builds an `Agent` with the saved or default model (`setModels` / `setModel`) for omitted
-     * fields. Explicit config always wins. See `agentFromEnv`.
-     */
-    function fromEnv(
-      config?: Omit<import("../types/agent.ts").AgentConfig, "model"> & {
-        model?: import("../types/agent.ts").AgentConfig["model"];
-      }
-    ): Agent;
-  }
-}
-
-try {
-  const Ctor = Agent as unknown as {
-    fromEnv?: (config?: SubAgentConfig) => Agent;
-  };
-  if (typeof Ctor.fromEnv !== "function") {
-    Ctor.fromEnv = (config?: SubAgentConfig) => agentFromEnv(config);
-  }
-} catch {
-  // why: static attachment must never break module load (host may freeze Agent).
 }

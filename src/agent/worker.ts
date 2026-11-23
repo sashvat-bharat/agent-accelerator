@@ -1,4 +1,7 @@
 import type { ToolDefinition } from "../types/tool.ts";
+import { isModelSpec } from "../utils/session.ts";
+import type { StreamEvent } from "../types/response.ts";
+import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import type { SubAgentStep } from "../types/response.ts";
 import type { AgentConfig } from "../types/agent.ts";
 import type { ModelSpec } from "../types/model.ts";
@@ -83,13 +86,8 @@ export function resolveMainModel(configModel: AgentConfig["model"]): {
   let modelStringOrSpec: string | ModelSpec | undefined;
   if (rawModel && typeof rawModel === "object" && "model" in (rawModel as Record<string, unknown>)) {
     modelStringOrSpec = (rawModel as { model: string }).model as string;
-  } else if (
-    rawModel &&
-    typeof rawModel === "object" &&
-    "id" in (rawModel as Record<string, unknown>) &&
-    "provider" in (rawModel as Record<string, unknown>)
-  ) {
-    modelStringOrSpec = rawModel as unknown as ModelSpec;
+  } else if (isModelSpec(rawModel)) {
+    modelStringOrSpec = rawModel;
   } else {
     modelStringOrSpec = (rawModel as string | undefined) || chosenModel();
   }
@@ -106,13 +104,8 @@ export function resolveDynamicWorkerModel(dynModelRawInput: unknown): string | M
   let dynModel: string | ModelSpec | undefined;
   if (dynModelRaw && typeof dynModelRaw === "object" && "model" in (dynModelRaw as Record<string, unknown>)) {
     dynModel = (dynModelRaw as { model: string }).model;
-  } else if (
-    dynModelRaw &&
-    typeof dynModelRaw === "object" &&
-    "id" in (dynModelRaw as Record<string, unknown>) &&
-    "provider" in (dynModelRaw as Record<string, unknown>)
-  ) {
-    dynModel = dynModelRaw as unknown as ModelSpec;
+  } else if (isModelSpec(dynModelRaw)) {
+    dynModel = dynModelRaw;
   } else {
     dynModel = (dynModelRaw as string | undefined) || chosenSubAgentModel();
   }
@@ -256,7 +249,7 @@ export function isWorkerConfig(config: object): boolean {
 }
 
 /** How many levels of workers may exist below an agent unless `dynamicSubagents.maxDepth` says otherwise: unlimited. */
-export const DEFAULT_MAX_DEPTH = Infinity;
+export const DEFAULT_MAX_DEPTH: number = Infinity;
 
 /**
  * Config of a dynamic worker (scheduled actions, the worker registry): the developer's fixed worker
@@ -368,10 +361,7 @@ export function createLiveWorker(
   hooks: LiveWorkerHooks = {}
 ): {
   onWorkerTurn: (turn: LiveWorkerTurn) => void;
-  attachToStream: (workerStream: {
-    on: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
-    off: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
-  }) => () => void;
+  attachToStream: (workerStream: Pick<AssistantMessageEventStream, "on" | "off">) => () => void;
 } {
   let liveTurn = 1;
   let partialText = "";
@@ -406,17 +396,27 @@ export function createLiveWorker(
       trace.turns = Math.max(trace.turns, turn.turns);
       try {
         hooks.trim?.(trace);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.touch?.(trace.trackingId);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.notify?.(trackingId);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.persist?.();
-      } catch {}
-    } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
+    } catch {
+      // why: a callback or listener of yours must never break the run.
+    }
   };
 
   const onWorkerDelta = (delta?: string, thinkingDelta?: string): void => {
@@ -443,10 +443,14 @@ export function createLiveWorker(
       }
       try {
         hooks.trim?.(trace);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.notify?.(trackingId);
-      } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
       try {
         hooks.emit?.({
           trackingId: displayId,
@@ -455,29 +459,38 @@ export function createLiveWorker(
           partialText: partialText || undefined,
           partialThinking: partialThinking || undefined,
         });
-      } catch {}
-    } catch {}
+      } catch {
+        // why: a callback or listener of yours must never break the run.
+      }
+    } catch {
+      // why: a callback or listener of yours must never break the run.
+    }
   };
 
-  const attachToStream = (workerStream: {
-    on: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
-    off: (event: string, listener: (e: { delta?: string; thinkingDelta?: string }) => void) => void;
-  }): (() => void) => {
-    const textListener = (e: { delta?: string }): void => onWorkerDelta(e.delta, undefined);
-    const thinkingListener = (e: { thinkingDelta?: string }): void => onWorkerDelta(undefined, e.thinkingDelta);
+  const attachToStream = (workerStream: Pick<AssistantMessageEventStream, "on" | "off">): (() => void) => {
+    const textListener = (e: StreamEvent): void => onWorkerDelta(e.delta, undefined);
+    const thinkingListener = (e: StreamEvent): void => onWorkerDelta(undefined, e.thinkingDelta);
     try {
-      workerStream.on("text_delta", textListener as (e: { delta?: string; thinkingDelta?: string }) => void);
-    } catch {}
+      workerStream.on("text_delta", textListener);
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     try {
-      workerStream.on("thinking_delta", thinkingListener as (e: { delta?: string; thinkingDelta?: string }) => void);
-    } catch {}
+      workerStream.on("thinking_delta", thinkingListener);
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
     return () => {
       try {
-        workerStream.off("text_delta", textListener as (e: { delta?: string; thinkingDelta?: string }) => void);
-      } catch {}
+        workerStream.off("text_delta", textListener);
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
       try {
-        workerStream.off("thinking_delta", thinkingListener as (e: { delta?: string; thinkingDelta?: string }) => void);
-      } catch {}
+        workerStream.off("thinking_delta", thinkingListener);
+      } catch {
+        // why: cancelling or releasing something that is already closed is harmless.
+      }
     };
   };
 

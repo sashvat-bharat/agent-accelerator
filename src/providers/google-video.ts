@@ -13,6 +13,8 @@
  * core turns it into an error. Checked against Google's Gemini Omni guide only (mock-verified, no paid key).
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { BULK_REPLY_LIMIT, DOWNLOAD_LIMIT, ERROR_BODY_LIMIT, readBytesCapped, readTextCapped } from "../utils/body.ts";
 import type { ProviderVideoRequest, ProviderVideoResult } from "../types/video.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { NormalizedMedia } from "../utils/media.ts";
@@ -231,7 +233,7 @@ export async function googleGenerateVideo(
     headers: Record<string, string>;
   }> => {
     const r = await call(url, { method: "POST", headers, body: JSON.stringify(body) }, "The Google video request");
-    const text = await r.res.text();
+    const text = await readTextCapped(r.res, BULK_REPLY_LIMIT);
     throwGoogleHttpError(r.status, url, text, modelId, r.headers);
     try {
       return {
@@ -299,7 +301,7 @@ export async function googleGenerateVideo(
         const r = await withRetries(
           async () => {
             const got = await call(fileUrl, { method: "GET", headers: fileHeaders }, "The Google file check");
-            const text = await got.res.text();
+            const text = await readTextCapped(got.res, BULK_REPLY_LIMIT);
             throwGoogleHttpError(got.status, fileUrl, text, modelId, got.headers);
             return text;
           },
@@ -322,13 +324,19 @@ export async function googleGenerateVideo(
       async () => {
         const got = await call(downloadUrl, { method: "GET", headers: fileHeaders }, "The Google video download");
         if (got.status < 200 || got.status >= 300)
-          throwGoogleHttpError(got.status, downloadUrl, await got.res.text(), modelId, got.headers);
-        return { buffer: new Uint8Array(await got.res.arrayBuffer()), type: got.headers["content-type"] };
+          throwGoogleHttpError(
+            got.status,
+            downloadUrl,
+            await readTextCapped(got.res, ERROR_BODY_LIMIT),
+            modelId,
+            got.headers
+          );
+        return { buffer: await readBytesCapped(got.res, DOWNLOAD_LIMIT), type: got.headers["content-type"] };
       },
       { ...retryOptionsFrom(options), signal: options?.signal, label: { providerId: "google", modelId } }
     );
     bytes = dl.buffer;
-    if (dl.type && dl.type.startsWith("video/")) mimeType = dl.type.split(";")[0]!.trim();
+    if (dl.type && dl.type.startsWith("video/")) mimeType = beforeFirst(dl.type, ";").trim();
   }
 
   const finishReason = reply.status === "incomplete" ? "length" : bytes.byteLength > 0 ? "stop" : undefined;

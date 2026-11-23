@@ -144,7 +144,7 @@ export class VideoResult {
 
   /** JSON without the clip bytes. */
   toJSON(): Omit<VideoResultData, "video"> & { video: ReturnType<GeneratedVideo["toJSON"]> } {
-    const { video, ...rest } = this;
-    return { ...(rest as unknown as Omit<VideoResultData, "video">), video: video.toJSON() };
+    const { video, text, usage, model, provider, finishReason, responseId, jobId, raw, durationMs } = this;
+    return { text, usage, model, provider, finishReason, responseId, jobId, raw, durationMs, video: video.toJSON() };
   }
 }

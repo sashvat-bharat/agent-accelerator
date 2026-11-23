@@ -4,6 +4,7 @@
  * several usages.
  */
 import { TimeoutError, ValidationError } from "../types/errors.ts";
+import { mediaValueOf } from "./media-part.ts";
 import type { TokenUsage } from "../types/core.ts";
 import type { RetryPolicyConfig } from "../types/agent.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
@@ -103,7 +104,7 @@ export type InputPartData =
 /** Reads the media of one part (local paths must be inside `fileAccess.roots` when set) and checks it is the kind the part says; in: the one-call functions, out: the part's data. */
 export async function readInputPart(part: InputPart, fileAccess?: { roots?: string[] }): Promise<InputPartData> {
   if (part.type === "text") return { kind: "text", text: part.text };
-  const value = (part as unknown as Record<string, string | Uint8Array | ArrayBuffer>)[part.type]!;
+  const value = mediaValueOf(part);
   if (fileAccess?.roots && isLocalPathInput(value)) await assertPathAllowed(value, fileAccess.roots);
   const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType);
   const kind = part.type === "file" ? "pdf" : part.type;

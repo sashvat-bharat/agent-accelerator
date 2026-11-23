@@ -6,6 +6,8 @@
  * `A-Z a-z 0-9 _ -`, option names Google accepts), so the same request keeps working on every model.
  */
 import { ValidationError } from "../types/errors.ts";
+import { isRecord } from "../utils/guards.ts";
+import { mediaKeyOf } from "../utils/media-part.ts";
 import type { DecisionInputKind, DecisionModelInfo } from "../models/decision-models.ts";
 import {
   DECISION_QUESTION_TYPES,
@@ -116,7 +118,8 @@ export function resolveDecisionRequest(opts: DecisionOptions, def: DecisionModel
       const text = (part as { text?: unknown }).text;
       if (typeof text !== "string" || !text.trim()) return void problems.push(`${at}: text is empty.`);
     } else {
-      const media = (part as unknown as Record<string, unknown>)[(part as { type: string }).type];
+      const key = mediaKeyOf(part);
+      const media: unknown = key ? Reflect.get(part, key) : undefined;
       if (!(typeof media === "string" && media) && !(media instanceof Uint8Array) && !(media instanceof ArrayBuffer))
         return void problems.push(`${at}: the ${kind} is missing (a path, a URL, a data URL, base64 or bytes).`);
     }
@@ -135,12 +138,12 @@ export function resolveDecisionRequest(opts: DecisionOptions, def: DecisionModel
     problems.push(`questions: ${names.length} questions; this model takes at most ${maxQuestions} per request.`);
   for (const name of names) {
     const at = `questions.${name}`;
-    const q = asked![name] as unknown as Record<string, unknown> | undefined;
+    const q: unknown = asked?.[name];
     if (!QUESTION_KEY.test(name)) {
       problems.push(`${at}: the name must be 1 to 64 characters of A-Z, a-z, 0-9, "_" or "-".`);
       continue;
     }
-    if (!q || typeof q !== "object") {
+    if (!isRecord(q)) {
       problems.push(`${at}: expected a question like { type: "noul", instructions }.`);
       continue;
     }

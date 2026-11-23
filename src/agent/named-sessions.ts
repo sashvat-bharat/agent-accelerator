@@ -26,10 +26,14 @@ export class NamedSessions {
   private forget(id: string): void {
     try {
       clearInteractionChains(id);
-    } catch {}
+    } catch {
+      // why: clearing provider state is best effort; what is left expires by itself.
+    }
     try {
       clearSessionRouting(id);
-    } catch {}
+    } catch {
+      // why: clearing provider state is best effort; what is left expires by itself.
+    }
   }
 
   /** The context for `sessionId` (the default session gives the Agent's own context); expired ones are dropped and the oldest is evicted past the limit. */
@@ -44,7 +48,9 @@ export class NamedSessions {
           this.forget(key);
         }
       }
-    } catch {}
+    } catch {
+      // why: eviction is best effort; an entry that stays is dropped by the next call.
+    }
     const existing = this.entries.get(sid);
     if (existing) {
       existing.lastAccess = now;
@@ -66,7 +72,9 @@ export class NamedSessions {
         this.entries.delete(oldest);
         this.forget(oldest);
       }
-    } catch {}
+    } catch {
+      // why: eviction is best effort; an entry that stays is dropped by the next call.
+    }
     return fresh;
   }
 
@@ -74,7 +82,9 @@ export class NamedSessions {
   dispose(id: string): void {
     try {
       this.entries.delete(id);
-    } catch {}
+    } catch {
+      // why: eviction is best effort; an entry that stays is dropped by the next call.
+    }
     this.forget(id);
   }
 
@@ -83,7 +93,9 @@ export class NamedSessions {
     try {
       for (const id of [...this.entries.keys()]) this.forget(id);
       this.entries.clear();
-    } catch {}
+    } catch {
+      // why: eviction is best effort; an entry that stays is dropped by the next call.
+    }
   }
 
   /** The ids of the named sessions held now. */

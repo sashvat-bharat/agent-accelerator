@@ -29,7 +29,9 @@ export function getPackageVersion(): string {
     const v = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
       ?.npm_package_version;
     if (typeof v === "string" && v) return v;
-  } catch {}
+  } catch {
+    // why: there is no `process` here (a browser), so the value is treated as unavailable.
+  }
   return "0.8.9";
 }
 
@@ -47,12 +49,14 @@ function getAgentAccelUserAgent(): string {
     if (os) {
       return `agent-accel/${version} (${os.platform()} ${os.release()}; ${os.arch()})`;
     }
-  } catch {}
+  } catch {
+    // why: there is no `process` here (a browser), so the value is treated as unavailable.
+  }
   return `agent-accel/${version} (linux; x64)`;
 }
 
 // Re-exported for tests/diagnostics (unused by wire headers directly).
-export const AGENT_ACCEL_USER_AGENT = getAgentAccelUserAgent;
+export const AGENT_ACCEL_USER_AGENT: typeof getAgentAccelUserAgent = getAgentAccelUserAgent;
 
 // ---------------------------------------------------------------------------
 // Attribution: configurable, default none except OpenRouter legacy.

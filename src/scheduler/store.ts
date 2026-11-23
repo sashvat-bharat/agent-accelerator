@@ -24,7 +24,7 @@ import type { ScheduledActionRecord, ScheduledRunStatus } from "../types/schedul
 import { durationMs, runFileName } from "./time.ts";
 
 /** Lowercase kebab-case. */
-export const TASK_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const TASK_ID_PATTERN: RegExp = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** 48-char slug + `-` + 6 random chars. */
 export const MAX_TASK_ID_LENGTH = 55;
 
@@ -259,6 +259,7 @@ export function readTask(home: string, id: string): ScheduledActionRecord | unde
     return undefined;
   }
   const raw = readShard(taskFile(dir), parseTask);
+  // why: `raw` is the parsed task.json; its shape is checked by validateRecord before this line is reached.
   return raw && inOwnFolder(taskFile(dir), id, raw["id"]) ? (raw as unknown as ScheduledActionRecord) : undefined;
 }
 
@@ -362,6 +363,7 @@ export function readDeliveries(home: string): PendingDelivery[] {
   for (const folder of actionFolders(home)) {
     if (!TASK_ID_PATTERN.test(folder) || folder.length > MAX_TASK_ID_LENGTH) continue;
     const file = deliveryFile(taskDir(home, folder));
+    // why: the entry is stored JSON whose shape validateDelivery has already checked.
     for (const entry of readShard(file, parsePending) ?? [])
       if (inOwnFolder(file, folder, entry["id"])) out.push(entry as unknown as PendingDelivery);
   }
@@ -377,6 +379,7 @@ export function updateDeliveries<T>(home: string, id: string, fn: (pending: Pend
       return withFileMutex(mutexFile(dir), () => {
         sweepShardTemps(dir);
         const file = deliveryFile(dir);
+        // why: parsePending keeps only entries that validateDelivery accepted.
         const pending = (readShard(file, parsePending) ?? []) as unknown as PendingDelivery[];
         const result = fn(pending);
         if (pending.length === 0) {
@@ -482,6 +485,7 @@ export function readDeliveriesIndexed(home: string): Array<{ entry: PendingDeliv
       hit = {
         sig: version.sig,
         value: entries.map((e) => ({
+          // why: the entry is stored JSON whose shape validateDelivery has already checked.
           entry: e as unknown as PendingDelivery,
           problem: validateDelivery(e),
         })),

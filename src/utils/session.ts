@@ -47,11 +47,9 @@ export function hashSessionPart(value: string): string {
  * so `agent.track(id)` can address one worker among many concurrent ones.
  */
 export function createTrackingId(): string {
-  try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
-    }
-  } catch {}
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+  }
   let out = "";
   while (out.length < 32) out += Math.random().toString(16).slice(2);
   return out.slice(0, 32);
@@ -65,21 +63,17 @@ export function createTrackingId(): string {
  * @example `const start = nowMs(); ...; const durationMs = nowMs() - start;`
  */
 export function nowMs(): number {
-  try {
-    if (typeof performance !== "undefined" && typeof performance.now === "function") {
-      return performance.now();
-    }
-  } catch {}
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
   return Date.now();
 }
 
 // 32 random lowercase hex characters; in: newRunId/newTurnId, out: a string.
 function random32Hex(): string {
-  try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
-    }
-  } catch {}
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+  }
   let out = "";
   while (out.length < 32) out += Math.random().toString(16).slice(2);
   return out.slice(0, 32);
@@ -87,7 +81,7 @@ function random32Hex(): string {
 
 /**
  * New stable run id: 32 lowercase hex chars (crypto.randomUUID, no dashes).
- * Opaque lineage token attached via `(metadata as any).runId`.
+ * Opaque lineage token attached to sub-agent metadata as `runId`.
  */
 export function newRunId(): string {
   return random32Hex();
@@ -95,7 +89,7 @@ export function newRunId(): string {
 
 /**
  * New stable turn id: 32 lowercase hex chars (crypto.randomUUID, no dashes).
- * Opaque lineage token attached via `(metadata as any).turnId`.
+ * Opaque lineage token attached to sub-agent metadata as `turnId`.
  */
 export function newTurnId(): string {
   return random32Hex();
@@ -145,7 +139,7 @@ function isModelProviderInstance(v: unknown): v is ModelProviderInstance {
 }
 
 // Type guard for a catalog spec (`provider` and `id` strings); in: parseModelRef, out: a boolean.
-function isModelSpec(v: unknown): v is ModelSpec {
+export function isModelSpec(v: unknown): v is ModelSpec {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   const r = v as Record<string, unknown>;
   return typeof r["provider"] === "string" && typeof r["id"] === "string";

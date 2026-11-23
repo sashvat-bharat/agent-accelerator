@@ -196,10 +196,14 @@ export class AgentContext {
     if (sessionId) {
       try {
         clearInteractionChains(sessionId);
-      } catch {}
+      } catch {
+        // why: clearing provider state is best effort; what is left expires by itself.
+      }
       try {
         clearSessionRouting(sessionId);
-      } catch {}
+      } catch {
+        // why: clearing provider state is best effort; what is left expires by itself.
+      }
     }
   }
 }

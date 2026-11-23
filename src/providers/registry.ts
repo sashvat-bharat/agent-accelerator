@@ -88,7 +88,9 @@ export function ensureCustomProvider(
         `[Agent Accelerator] Provider "${id}" is first-class and cannot be replaced with custom baseUrl/apiKey. Pass baseUrl/apiKey per-Agent instead.`
       );
     }
-    return providerRegistry.get(id)!;
+    const existing = providerRegistry.get(id);
+    if (!existing) throw new ConfigError(`[Agent Accelerator] Provider "${id}" is not registered.`);
+    return existing;
   }
   const existing = providerRegistry.get(id);
   if (existing) {
@@ -184,7 +186,7 @@ export function resolveModelUnchecked(model: string | ModelSpec): ResolvedModel 
   // Explicit prefix with slash — deterministic
   if (modelStr.includes("/")) {
     const parts = modelStr.split("/");
-    const providerPrefix = parts[0]!.toLowerCase();
+    const providerPrefix = (parts[0] ?? "").toLowerCase();
     const remainingModel = parts.slice(1).join("/");
     assertProviderNotRemoved(providerPrefix);
 

@@ -394,7 +394,7 @@ export class WorkerRegistry {
         persistent: { dir: root },
       })
     );
-    (agent as unknown as { parentSessionId?: string }).parentSessionId = this.parent.sessionId;
+    agent.parentSessionId = this.parent.sessionId;
     agent.chat = this.parent.chat; // the worker's turns count into the chat-wide cap and are checked against it
     // A cut-off run was already loaded by the constructor; otherwise bring back what the worker said so far.
     const saved = entry.dir && agent.context.messages.length === 0 ? loadSessionDir(entry.dir)?.session : undefined;
@@ -437,7 +437,8 @@ export class WorkerRegistry {
         runId: newRunId(),
         turnId: newTurnId(),
       };
-      const replayed = this.isReplay(entry, key, text) && agent.runMarks.length > meta.last!.marks;
+      const replayed =
+        this.isReplay(entry, key, text) && meta.last !== undefined && agent.runMarks.length > meta.last.marks;
       if (!replayed) {
         if (key) meta.last = { key, text: hashSessionPart(text), marks: agent.runMarks.length };
         else delete meta.last;
@@ -460,7 +461,7 @@ export class WorkerRegistry {
             response = await agent.resume();
           } else {
             const stream = agent.stream(text, { onTurn: live.onWorkerTurn });
-            const detach = live.attachToStream(stream as unknown as Parameters<typeof live.attachToStream>[0]);
+            const detach = live.attachToStream(stream);
             try {
               response = await stream.result();
             } finally {

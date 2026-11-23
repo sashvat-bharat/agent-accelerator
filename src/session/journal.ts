@@ -226,10 +226,10 @@ export class SessionJournal {
         if (!fs.existsSync(dest)) writeFileDurable(dest, found.bytes, { backup: false });
         changed = true;
         return {
-          ...(part as unknown as Record<string, unknown>),
+          ...part,
           [found.key]: `media/${file}`,
           ...(found.mimeType ? { mimeType: found.mimeType } : {}),
-        } as unknown as ContentPart;
+        } as ContentPart;
       });
       if (changed) out = { ...slim, content };
     }

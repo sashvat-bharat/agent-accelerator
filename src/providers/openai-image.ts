@@ -5,6 +5,7 @@
  * wire, reads the reply and maps errors. Streaming (`partial_images`), masks, markup, SVG and GIF are never sent.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { base64ToBytes } from "../utils/base64.ts";
@@ -139,7 +140,7 @@ export async function openaiGenerateImage(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

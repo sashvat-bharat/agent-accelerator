@@ -8,6 +8,7 @@
  * default), so a later edit can continue from `responseId`.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { base64ToBytes } from "../utils/base64.ts";
@@ -30,7 +31,7 @@ import {
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 /** Image types Google reads as input (and the common spelling it is not given as). */
-export const GOOGLE_IMAGE_INPUT_MIME = [
+export const GOOGLE_IMAGE_INPUT_MIME: readonly string[] = [
   "image/png",
   "image/jpeg",
   "image/webp",
@@ -168,7 +169,7 @@ export async function googleGenerateImage(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

@@ -7,6 +7,7 @@
  * seed and markup are never sent. A failed generation is a 502 with no charge and is retried like any 5xx.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { openRouterSetting } from "../config/settings.ts";
@@ -128,7 +129,7 @@ export async function openrouterGenerateImage(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

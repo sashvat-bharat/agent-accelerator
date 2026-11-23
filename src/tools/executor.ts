@@ -1,4 +1,6 @@
 import type { ToolDefinition, ToolCallRecord, ToolResultRecord, ToolExecutionContext } from "../types/tool.ts";
+import { noop } from "../utils/noop.ts";
+import { makeMediaPart, mediaValueOf } from "../utils/media-part.ts";
 import { toJsonSafe } from "../utils/serialization.ts";
 import { ConfigError } from "../types/errors.ts";
 import { isTransientError } from "../utils/errors.ts";
@@ -254,12 +256,12 @@ export function shouldBlockRepeat(
 
 /**
  * Builds the synthetic blocked result for a repeat-guarded call. The
- * machine-readable code lives at `(result as any).errorCode` while the human
+ * machine-readable code lives in the result's `errorCode` while the human
  * prefix keeps plain-string consumers working.
  */
 export function makeRepeatBlockedResult(
   call: ToolCallRecord,
-  template = DEFAULT_PROMPTS.toolRepeatBlocked
+  template: string = DEFAULT_PROMPTS.toolRepeatBlocked
 ): ToolResultRecord {
   const message = fillPrompt(template, { tool: call.name });
   return {
@@ -337,7 +339,7 @@ interface ResolvedTool {
 
 // Finds the tool a call names (exact, then case/format-insensitive), else suggests the closest name; in: runSingle and findToolDefinition, out: ResolvedTool.
 function resolveTool(tools: Record<string, ToolDefinition>, requestedName: string): ResolvedTool {
-  const direct = tools[requestedName];
+  const direct = Object.hasOwn(tools, requestedName) ? tools[requestedName] : undefined; // not an inherited member such as `constructor`
   if (direct) return { definition: direct, name: direct.name || requestedName };
 
   const normalized = normalizeToolName(requestedName);
@@ -406,8 +408,7 @@ class Semaphore {
   // Frees a slot and hands it to the next live waiter, dropping aborted ones; in: the function acquire returned, out: the next waiter's grant.
   private release(): void {
     this.active = Math.max(0, this.active - 1);
-    while (this.waiters.length > 0) {
-      const waiter = this.waiters.shift()!;
+    for (let waiter = this.waiters.shift(); waiter; waiter = this.waiters.shift()) {
       if (waiter.signal?.aborted) {
         waiter.reject(new Error("Tool execution aborted"));
         continue;
@@ -446,7 +447,7 @@ function raceAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promis
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(new Error("Tool execution aborted"));
     if (signal.aborted) {
-      work.catch(() => {}); // the abandoned tool may still fail later: nobody listens
+      work.catch(noop); // the abandoned tool may still fail later: nobody listens
       onAbort();
       return;
     }
@@ -517,16 +518,11 @@ async function resolveToolContent(
       texts.push(part.text);
       continue;
     }
-    const value = (part as unknown as Record<string, string | Uint8Array | ArrayBuffer>)[part.type]!;
+    const value = mediaValueOf(part);
     const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType);
     const filename = (part as { filename?: string }).filename;
-    parts.push({
-      type: part.type,
-      [part.type]: media.dataUrl,
-      mimeType: media.mimeType,
-      ...(filename ? { filename } : {}),
-      ...((part.type === "image" || part.type === "video") && part.resolution ? { resolution: part.resolution } : {}),
-    } as unknown as ContentPart);
+    const resolution = part.type === "image" || part.type === "video" ? part.resolution : undefined;
+    parts.push(makeMediaPart(part.type, media.dataUrl, { mimeType: media.mimeType, filename, resolution }));
     kinds.push(media.mimeType);
   }
   const text = texts.join("\n") || (kinds.length > 0 ? `[media result: ${kinds.join(", ")}]` : "null");

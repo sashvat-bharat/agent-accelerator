@@ -10,6 +10,7 @@
  * from the API reference.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type {
   ProviderDecisionAnswer,
   ProviderDecisionRequest,
@@ -204,7 +205,7 @@ export async function openaiDecide(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

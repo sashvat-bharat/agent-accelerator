@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { GoogleInteractionsProvider, clearInteractionChains } from "../src/providers/google.ts";
+import { telemetryBus } from "../src/telemetry.ts";
 import {
   parseStreamedToolArguments,
   mapThinkingLevelToGoogle,
@@ -663,7 +664,6 @@ describe("GoogleInteractionsProvider chain expiry & self-heal (mocked)", () => {
     globalThis.fetch = ORIGINAL_FETCH;
     clearInteractionChains();
     clearSessionRouting();
-    try { delete (globalThis as any).__agentAccelAnomaly; } catch {}
   });
 
   const HISTORY = {
@@ -821,7 +821,7 @@ describe("GoogleInteractionsProvider chain expiry & self-heal (mocked)", () => {
 
   it("alerts when input tokens shrink turn-over-turn (dropped chain without rehydration)", async () => {
     const seen: unknown[] = [];
-    (globalThis as any).__agentAccelAnomaly = (d: unknown) => void seen.push(d);
+    const off = telemetryBus.onEvent((e) => void seen.push(e.data));
     let calls = 0;
     (globalThis as any).fetch = async () => {
       calls++;
@@ -834,6 +834,7 @@ describe("GoogleInteractionsProvider chain expiry & self-heal (mocked)", () => {
     const provider = new GoogleInteractionsProvider();
     await provider.generate("m", { messages: [{ role: "user", content: "Hi" }] }, { apiKey: "k", sessionId: "s-tok" });
     await provider.generate("m", HISTORY, { apiKey: "k", sessionId: "s-tok" });
+    off();
     expect(seen.some((d: any) => d?.type === "interaction_history_shrink")).toBe(true);
   });
 });

@@ -10,6 +10,8 @@
  * another endpoint of the same model.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
 import type { InputPartData } from "../utils/provider-call.ts";
 import type { TokenUsage } from "../types/core.ts";
@@ -61,7 +63,7 @@ function toItem(part: InputPartData): string | Record<string, unknown> {
       image_url: { url: part.media.dataUrl, ...(part.resolution ? { detail: IMAGE_DETAIL[part.resolution] } : {}) },
     };
   if (part.kind === "audio") {
-    const subtype = part.media.mimeType.split(";")[0]!.split("/")[1] ?? "";
+    const subtype = beforeFirst(part.media.mimeType, ";").split("/")[1] ?? "";
     return {
       type: "input_audio",
       input_audio: { data: part.media.base64Data, format: AUDIO_FORMAT[subtype] ?? subtype },
@@ -127,7 +129,7 @@ export async function openrouterDecide(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

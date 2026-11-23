@@ -38,6 +38,10 @@ import type {
   VideoProcessing,
 } from "../types/message.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
+import { noop } from "../utils/noop.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { mediaValueOf } from "../utils/media-part.ts";
+import { CHAT_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
@@ -46,7 +50,8 @@ import { normalizeMediaInput, inferMimeType } from "../utils/media.ts";
 import { ConfigError, ValidationError, isAbortError } from "../types/errors.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { stripSchemaForGoogle } from "../tools/schema.ts";
-import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
+import { toConciseProviderError, assertModalitiesSupported, markRetryable } from "../utils/errors.ts";
+import { badReplyError, interactionReplyProblem } from "./reply-guard.ts";
 import { withRetries, sleep } from "../utils/retry.ts";
 import { setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import {
@@ -67,6 +72,7 @@ import {
   resolveProviderApiKey,
   resolveProviderBaseUrl,
   stripModelScope,
+  type StreamingResponse,
 } from "./shared.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { googleGenerateImage } from "./google-image.ts";
@@ -175,11 +181,11 @@ export const GOOGLE_INLINE_MIME_ALIASES: Readonly<Record<string, string>> = {
 // Documented size limits (file-input-methods.md). `assertGoogleInlineSizes` below checks them, but it is NOT called yet:
 // the owner is not sure how Files API uploads should be handled, so oversized inputs still get Google's own error for now.
 /** Max inline payload per request (bytes). */
-export const GOOGLE_MAX_INLINE_REQUEST_BYTES = 100 * 1024 * 1024;
+export const GOOGLE_MAX_INLINE_REQUEST_BYTES: number = 100 * 1024 * 1024;
 /** Max inline PDF size (bytes). */
-export const GOOGLE_MAX_INLINE_PDF_BYTES = 50 * 1024 * 1024;
+export const GOOGLE_MAX_INLINE_PDF_BYTES: number = 50 * 1024 * 1024;
 /** Max size of one file Google fetches by URL (bytes). */
-export const GOOGLE_MAX_URL_FILE_BYTES = 15 * 1024 * 1024;
+export const GOOGLE_MAX_URL_FILE_BYTES: number = 15 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Long decode (`docs/long-decode.md`, `docs/background-execution.md`)
@@ -214,7 +220,7 @@ async function readWithin(reader: StreamReader, ms: number) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const stalled = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      void reader.cancel().catch(() => {});
+      void reader.cancel().catch(noop);
       reject(new Error("Google background stream stalled"));
     }, ms);
   });
@@ -349,12 +355,9 @@ function chainTtlMs(options?: ProviderRequestOptions): number {
   return resolveInteractionTier(options) === "paid" ? PAID_CHAIN_TTL_MS : FREE_CHAIN_TTL_MS;
 }
 
-/** Emits a chain anomaly on the telemetry bus (+ legacy global hook). Never throws. */
+/** Emits a chain anomaly on the telemetry bus. The bus isolates listener errors, so this never throws. */
 function reportChainAnomaly(detail: { type: string; [k: string]: unknown }): void {
   telemetryBus.emitWarning(detail.type, `[Agent Accelerator] [google] ${String(detail.type)}`, detail);
-  try {
-    (globalThis as unknown as { __agentAccelAnomaly?: (d: unknown) => void }).__agentAccelAnomaly?.(detail);
-  } catch {}
 }
 
 // The saved interaction pointer of a session, if any; in: liveChainFor, out: a ChainEntry or undefined.
@@ -411,7 +414,9 @@ function checkTurnTokens(
         cacheHitRate: input > 0 ? (usage.cachedTokens ?? 0) / input : 0,
       });
     }
-  } catch {}
+  } catch {
+    // why: the anomaly check is a diagnostic; it must never fail a call.
+  }
 }
 
 /** Clears chained interaction state (mainly for tests). */
@@ -500,7 +505,7 @@ type MediaValue = string | Uint8Array | ArrayBuffer;
 
 // Lower-cases a MIME type and drops parameters (`text/csv; charset=utf-8` -> `text/csv`); in: part or response MIME, out: list checks.
 function bareMime(mime: string | undefined): string | undefined {
-  return mime ? mime.split(";")[0]!.trim().toLowerCase() || undefined : undefined;
+  return mime ? beforeFirst(mime, ";").trim().toLowerCase() || undefined : undefined;
 }
 
 // Returns the `uri` block for a link Google fetches itself (YouTube, Files API, `gs://`, https URL of a URL-supported type), else undefined; in: a media part's string value, out: contentPartsToBlocks.
@@ -540,7 +545,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionCo
     }
     if (part.type !== "image" && part.type !== "audio" && part.type !== "video" && part.type !== "file") continue;
     const type: MediaBlockType = part.type === "file" ? "document" : part.type;
-    const value = (part as unknown as Record<string, MediaValue>)[part.type]!;
+    const value = mediaValueOf(part);
     const uri = typeof value === "string" ? uriBlock(type, value, part.mimeType) : undefined;
     const block = uri ?? (await inlineBlock(type, value, part.mimeType));
     // Per-item detail level (image and video blocks only, api-ref `MediaResolution`).
@@ -986,7 +991,7 @@ export class GoogleInteractionsProvider implements Provider {
       if (outputSpec && !outputEmulated) {
         try {
           const mapped = mapOutputToGoogle(outputSpec);
-          if (mapped) (body as unknown as Record<string, unknown>)["response_format"] = mapped.responseFormat;
+          if (mapped) body.response_format = mapped.responseFormat;
         } catch {
           // why: invalid output shapes fail fast at Agent construction/loop validation.
         }
@@ -1013,7 +1018,7 @@ export class GoogleInteractionsProvider implements Provider {
         if (!body.background) body.store = false;
       } else if (continuing) {
         body.input = await latestTurnInput(context);
-        body.previous_interaction_id = chain!.interactionId;
+        body.previous_interaction_id = chain?.interactionId; // `continuing` means there is a chain
       } else if (context.messages.length > 1) {
         // No chain but multi-message history (restored session after a
         // restart, or the turn right after a provider switch): send the full
@@ -1056,7 +1061,7 @@ export class GoogleInteractionsProvider implements Provider {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(method, body, options, apiKey, effective));
-      const text = await res.text();
+      const text = await readTextCapped(res, CHAT_REPLY_LIMIT);
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => {
         headers[k] = v;
@@ -1151,13 +1156,9 @@ export class GoogleInteractionsProvider implements Provider {
   ): Promise<InteractionReply> {
     const res = await this.doFetch(url, method, body, options, apiKey, options?.signal);
     this.throwIfError(res.status, url, res.text, modelId, res.headers);
+    let parsed: unknown;
     try {
-      return {
-        status: res.status,
-        statusText: res.statusText,
-        headers: res.headers,
-        interaction: JSON.parse(res.text) as InteractionObject,
-      };
+      parsed = JSON.parse(res.text);
     } catch {
       throw toConciseProviderError(
         Object.assign(new Error("Invalid JSON response from Google Interactions API"), {
@@ -1169,6 +1170,15 @@ export class GoogleInteractionsProvider implements Provider {
         modelId
       );
     }
+    const problem = interactionReplyProblem(parsed);
+    if (problem) throw badReplyError("google", modelId, url, problem, res.text);
+    // The cast is justified by interactionReplyProblem above.
+    return {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+      interaction: parsed as InteractionObject,
+    };
   }
 
   // Fire-and-forget cancel so an aborted background run stops billing; in: an aborted generate/stream, out: POST {id}/cancel.
@@ -1178,7 +1188,7 @@ export class GoogleInteractionsProvider implements Provider {
     options: ProviderRequestOptions | undefined,
     apiKey: string
   ): void {
-    void this.doFetch(`${baseUrl}/interactions/${id}/cancel`, "POST", undefined, options, apiKey).catch(() => {});
+    void this.doFetch(`${baseUrl}/interactions/${id}/cancel`, "POST", undefined, options, apiKey).catch(noop);
   }
 
   // Non-streaming turn: creates the interaction (polling it when it runs in the background), records the chain and self-heals once on a lost chain; in: runAgentLoop, out: ProviderGenerateResult.
@@ -1304,7 +1314,7 @@ export class GoogleInteractionsProvider implements Provider {
       let evictSessionId: string | undefined;
       let usedChain = false;
       // Set once a background interaction id is known: an abort then cancels it server-side.
-      let cancelBackground = (): void => {};
+      let cancelBackground = noop;
       try {
         // Hard generation floor (mirrors generate): no network on legacy ids.
         assertSupportedGeneration(clean);
@@ -1329,7 +1339,7 @@ export class GoogleInteractionsProvider implements Provider {
         // Interactions API sends no session-affinity headers (implicit
         // caching + chaining instead), so none are recorded here either.
         const rawRequest = {
-          url: url.split("?")[0]!,
+          url: beforeFirst(url, "?"),
           method: "POST",
           headers: redactedHeaders({
             "Content-Type": "application/json",
@@ -1342,7 +1352,7 @@ export class GoogleInteractionsProvider implements Provider {
         const streamTimeoutMs = timeoutFor(options);
         // Opens one SSE connection (the create POST, or a background resume GET). Transient failures
         // (429/5xx/network) are retried before the first byte; a live stream is never retried.
-        const open = (target: string, method: "POST" | "GET"): Promise<Response> =>
+        const open = (target: string, method: "POST" | "GET"): Promise<StreamingResponse> =>
           openStreamResponse({
             fetchOnce: () =>
               withAbortTimer(linked, streamTimeoutMs, () =>
@@ -1392,8 +1402,10 @@ export class GoogleInteractionsProvider implements Provider {
           () => {
             aborted = true;
             try {
-              void reader?.cancel().catch(() => {}); // an aborted body is already errored: its cancel() rejects, and nobody else listens
-            } catch {}
+              void reader?.cancel().catch(noop); // an aborted body is already errored: its cancel() rejects, and nobody else listens
+            } catch {
+              // why: cancelling or releasing something that is already closed is harmless.
+            }
           },
           { once: true }
         );
@@ -1514,16 +1526,18 @@ export class GoogleInteractionsProvider implements Provider {
 
         // Reads one connection to its end. A background connection that drops or stalls just ends
         // (the caller reconnects); provider error events from handleMessage always throw.
-        const readAll = async (response: Response): Promise<void> => {
+        const readAll = async (response: StreamingResponse): Promise<void> => {
           const parser = new SSEParser();
           const decoder = new TextDecoder();
-          const current = (reader = response.body!.getReader()); // openStreamResponse guarantees a body
+          const current = (reader = response.body.getReader());
           try {
             while (true) {
               if (linked.signal.aborted || eventStream.isCancelled()) {
                 try {
                   await current.cancel();
-                } catch {}
+                } catch {
+                  // why: cancelling or releasing something that is already closed is harmless.
+                }
                 throw Object.assign(new Error("Stream aborted"), { name: "AbortError" });
               }
               let chunk: { done: boolean; value?: Uint8Array };
@@ -1541,7 +1555,9 @@ export class GoogleInteractionsProvider implements Provider {
           } finally {
             try {
               current.releaseLock();
-            } catch {}
+            } catch {
+              // why: cancelling or releasing something that is already closed is harmless.
+            }
           }
         };
 
@@ -1616,7 +1632,7 @@ export class GoogleInteractionsProvider implements Provider {
           provider: "google",
           raw: {
             request: rawRequest,
-            response: { ...responseMeta, body: completedBody, badFrames } as unknown as ProviderRawData["response"],
+            response: { ...responseMeta, body: completedBody, badFrames },
           },
           durationMs: Date.now() - startTime,
           providerSteps: replaySteps([...steps.entries()].sort(([a], [b]) => a - b).map(([, s]) => s)),
@@ -1639,8 +1655,7 @@ export class GoogleInteractionsProvider implements Provider {
           reportChainAnomaly({ type: "interaction_chain_evicted", sessionId: evictSessionId, model: clean });
           clearInteractionChains(evictSessionId);
           const retryable = toConciseProviderError(raw, "google", clean);
-          (retryable as unknown as Record<string, unknown>)["retryable"] = true;
-          (retryable as unknown as Record<string, unknown>)["transient"] = true;
+          markRetryable(retryable);
           eventStream.fail(retryable);
         } else {
           eventStream.fail(raw);

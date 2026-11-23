@@ -176,6 +176,7 @@ Subscribe with `telemetryBus.onEvent((e) => e.code)`. Each event has `level`, `c
 | `hook.error` | An `afterTool` hook threw. The original result was kept. |
 | `worker.invalid` | A saved `worker.json` is damaged. That worker is skipped. |
 | `session.local_media_paths` | An imported session points at local files and `fileAccess.roots` is not set. |
+| `session.media_write_failed` | `saveSessionDir` could not write a media file. The media stays inside the session file. |
 | `session.journal_corrupt` | `journal.ndjson` is damaged before its last line. Replay stopped there and kept what came before. |
 
 ### Tools
@@ -199,7 +200,7 @@ All extend `AgentAccelError`, which has `code`, `retryable` and `context`.
 | Class | Raised when |
 |---|---|
 | `ConfigError` | A missing key or address, no model or a bad model string, a removed provider, Gemini 1.x or 2.x, invalid config, or a `steer`, `queue` or `enqueue` call that `midSession` forbids (before any network call). |
-| `ProviderError` | The API failed. `code` is `"provider"` (`"incomplete_stream"` for a cut stream). `retryable` says whether a retry can help. Also `statusCode`, `provider`, `model`, `providerCode` (the provider's own code) and `retryAfterMs`, which are not enumerable. |
+| `ProviderError` | The API failed, or it answered HTTP 200 with something that is not a reply (an empty object, a list, no `choices`). That is treated like a 502 and is retryable. A reply over the size cap (64 MB for chat) is not retryable. `code` is `"provider"` (`"incomplete_stream"` for a cut stream). `retryable` says whether a retry can help. Also `statusCode`, `provider`, `model`, `providerCode` (the provider's own code) and `retryAfterMs`, which are not enumerable. |
 | `TimeoutError` | A request, first-byte or idle timeout. Retryable. |
 | `BudgetExceededError` | `budget`, or `limits.maxTotalTokens`, `deadlineMs` or `maxToolCallsPerRun`, was exceeded. Partial usage is attached. |
 | `ToolError` | A tool failed in a way that reaches the caller. |

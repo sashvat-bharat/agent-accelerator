@@ -257,9 +257,9 @@ function randomSuffix(): string {
 
 export class Scheduler {
   /** Live agents that may run actions, by name (latest registration wins). */
-  readonly agents = new Map<string, WeakRef<Agent>>();
+  readonly agents: Map<string, WeakRef<Agent>> = new Map();
   /** Runs in flight, by action id. */
-  readonly running = new Map<string, RunningEntry>();
+  readonly running: Map<string, RunningEntry> = new Map();
   /** Injectable for tests. */
   now: () => Date = () => new Date();
   tickMs = 1000;
@@ -282,7 +282,7 @@ export class Scheduler {
   ensureRunning(): void {
     if (this.timer || !this.hasPending()) return;
     this.timer = setInterval(() => this.tick(), this.tickMs);
-    (this.timer as { unref?: () => void }).unref?.();
+    this.timer.unref?.();
   }
 
   // Stops the clock's interval; in: tick when nothing is pending and resetSchedulers, out: no more ticks.
@@ -415,7 +415,8 @@ export class Scheduler {
 
   /** The process died mid-cook: rebuild the delivery if the run file was already written, else it is missed. */
   private recoverCooking(t: ScheduledActionRecord): void {
-    const current = t.current!;
+    const current = t.current;
+    if (!current) return; // only a cooking action is recovered, and a cooking action always has a current run
     const file = findRunFile(this.home, t.id, parseLocalIso(current.deliverAt), current.cookStartedAt);
     const run = file ? readRun(this.home, file) : undefined;
     if (!file || !run) {
@@ -602,12 +603,12 @@ export class Scheduler {
       );
     }
     this.invalidate(); // the record was rewritten above (cooking, or missed without an agent)
-    if (!started || !ctx.agent) return undefined;
+    if (!started?.current || !ctx.agent) return undefined;
     emit("started", `"${started.name}" (${id}) started cooking.`, {
       id,
       name: started.name,
-      cookStartedAt: started.current!.cookStartedAt,
-      deliverAt: started.current!.deliverAt,
+      cookStartedAt: started.current.cookStartedAt,
+      deliverAt: started.current.deliverAt,
     });
     this.launch(started, ctx.agent, manual, ctx.replacesMissed === true);
     return started;
@@ -676,10 +677,12 @@ export class Scheduler {
 
   // Runs one action to its outcome and writes the result unless the action was deleted meanwhile; in: launch, out: finish.
   private async runWorker(task: ScheduledActionRecord, agent: Agent, entry: RunningEntry): Promise<void> {
-    const deliverAt = parseLocalIso(task.current!.deliverAt);
+    const current = task.current;
+    if (!current) return; // a run starts only on a cooking action, which always has a current run
+    const deliverAt = parseLocalIso(current.deliverAt);
     const outcome = await this.execute(task, agent, entry, deliverAt);
     if (entry.deleted) return; // deleted: no run file, nothing delivered
-    this.finish(task, outcome, task.current!.cookStartedAt, deliverAt, entry);
+    this.finish(task, outcome, current.cookStartedAt, deliverAt, entry);
   }
 
   /** A fresh stateless worker built from the saved fields; retries only while there is time before delivery. */

@@ -32,5 +32,6 @@ The whole SDK. `index.ts` is the only public entry (`main`/`module`/`types`); ev
 - No `console.*`: warnings and traces go to `telemetryBus` (exceptions: the `update-models.ts` CLI and one compat `console.warn` in `providers.ts`).
 - All state is written under the one home folder (`utils/home.ts`). Files are replaced through `utils/durable.ts`; the append-only ones are the session journal and tool logs (fsynced per line) and the opt-in telemetry file (not fsynced).
 - Provider differences never leave `providers/` and `providers.ts`.
+- Every export has an explicit type: `tsconfig.src.json` checks `src/` with `isolatedDeclarations`, and `bun run typecheck` runs it. Every `as unknown as` cast and every empty `catch` has a reason line.
 - Every function has one comment line above it (how it works, where input comes from, where output goes).
 - Change a public option, export, env var or telemetry code: update `README.md` and `docs/` in the same change.

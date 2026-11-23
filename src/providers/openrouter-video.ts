@@ -11,6 +11,8 @@
  * Mock-verified only: written from OpenRouter's video guide and API reference, no paid key was used.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { BULK_REPLY_LIMIT, DOWNLOAD_LIMIT, ERROR_BODY_LIMIT, readBytesCapped, readTextCapped } from "../utils/body.ts";
 import type { ProviderVideoRequest, ProviderVideoResult, ProviderVideoResumeRequest } from "../types/video.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { openRouterSetting } from "../config/settings.ts";
@@ -123,7 +125,7 @@ function connect(modelId: string, options: ProviderRequestOptions | undefined) {
     what: string
   ): Promise<{ reply: JobReply; res: Response }> => {
     const res = await call(target, init, what);
-    const text = await res.text();
+    const text = await readTextCapped(res, BULK_REPLY_LIMIT);
     throwOpenRouterHttpError(res.status, target, text, modelId, headersToRecord(res.headers), "video");
     try {
       return { reply: JSON.parse(text) as JobReply, res };
@@ -205,18 +207,18 @@ async function finishJob(
       throwOpenRouterHttpError(
         res.status,
         fileTarget.url,
-        await res.text(),
+        await readTextCapped(res, ERROR_BODY_LIMIT),
         modelId,
         headersToRecord(res.headers),
         "video"
       );
-    return { bytes: new Uint8Array(await res.arrayBuffer()), type: res.headers.get("content-type") };
+    return { bytes: await readBytesCapped(res, DOWNLOAD_LIMIT), type: res.headers.get("content-type") };
   }, c.retry).catch((err: unknown) => {
     throw withJob(err, jobId);
   });
   const mimeType =
     file.type && file.type.startsWith("video/")
-      ? file.type.split(";")[0]!.trim()
+      ? beforeFirst(file.type, ";").trim()
       : (sniffMimeType(file.bytes) ?? "video/mp4");
 
   return {

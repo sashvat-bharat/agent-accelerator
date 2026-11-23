@@ -8,6 +8,7 @@
  * media travels inline as base64. `gemini-embedding-001` reports no usage, so its cost stays unknown.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { EmbeddingPartData, ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { getEmbeddingModel } from "../models/embedding-models.ts";
@@ -132,7 +133,7 @@ export async function googleEmbed(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

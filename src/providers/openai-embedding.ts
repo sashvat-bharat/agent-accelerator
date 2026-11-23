@@ -6,6 +6,7 @@
  * task control, so a task never reaches here. Vectors are asked as floats (the default); `base64` is never used.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
@@ -84,7 +85,7 @@ export async function openaiEmbed(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

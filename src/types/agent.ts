@@ -28,7 +28,7 @@ export type ModelRef = string | ModelSpec | ModelProviderInstance;
 /** Canonical reasoning option: bare level, or level + explicit token budget. */
 export type ThinkingOption = ThinkingLevel | { level?: ThinkingLevel; budgetTokens?: number };
 
-/** Canonical retry policy. Read by the loop via `(config as any).retry`. */
+/** Canonical retry policy. Read by the loop from `AgentConfig.retry`. */
 export interface RetryPolicyConfig {
   maxRetries?: number;
   baseDelayMs?: number;
@@ -193,7 +193,7 @@ export interface AgentConfig {
    * An explicit `persist.dir` / `persist.file` still wins for sessions.
    */
   home?: string;
-  // Additional options (all optional, additive; loop reads via `(config as any).*`).
+  // Additional options (all optional and additive).
   /**
    * Canonical tool-selection control (`"auto"` default). `"none"` applies to
    * every turn of a run; `"required"` and a pinned tool (`{ tool: "name" }`)
@@ -494,7 +494,7 @@ export interface BudgetState {
   startedAtMs: number;
 }
 
-/** Run/turn lineage attached to sub-agent metadata via `(metadata as any)`. */
+/** Run and turn lineage attached to sub-agent metadata. */
 export interface SubAgentRunIds {
   /** Stable id for this worker batch/run (`newRunId`). */
   runId?: string;

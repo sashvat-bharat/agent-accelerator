@@ -18,3 +18,5 @@ Saving a conversation, its spending and its tool logs.
 - Valid sessions over the load limits throw `SessionLoadError` and are never quarantined; only corrupt files are renamed `*.corrupt-<ts>`.
 - Pricing: a provider-reported cost wins and is never rescaled; unknown pricing stays unknown, never $0; cache reads and writes are subsets of input.
 - Never call `saveSessionDir` on a folder an Agent persists to.
+- `saveSessionDir` (the explicit snapshot helper, not the journal) is crash-safe in this order: media files first (an unchanged file is not rewritten, a changed one is replaced atomically, no `.bak`), then the atomic `session.json` swap, then `removeOrphanMedia`. Nothing is deleted before the swap. A media file that cannot be written stays inline in the session with a `session.media_write_failed` warning.
+- `saveSessionFile` and `saveSessionDir` throw when the file cannot be written; the Agent's own persistence catches that and calls `persist.onPersistError`. A failed save is never silent.

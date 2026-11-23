@@ -40,7 +40,7 @@
   },
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
     "lint": "biome lint src examples",
     "format": "biome format --write src examples",
     "test": "bun test test/",

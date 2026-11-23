@@ -219,6 +219,8 @@ export interface ProviderRawData {
     statusText: string;
     headers: Record<string, string>;
     body: unknown;
+    /** Streaming only: how many frames of the stream could not be read as JSON and were skipped. */
+    badFrames?: number;
   };
 }
 

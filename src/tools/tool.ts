@@ -10,7 +10,7 @@ import { ConfigError } from "../types/errors.ts";
  * Names are validated at registration in {@link tool} (record-key fallback
  * included); invalid names throw `ConfigError` with a fix.
  */
-export const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+export const TOOL_NAME_PATTERN: RegExp = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /**
  * Throws `ConfigError` when `name` is not a valid tool name.
@@ -18,9 +18,9 @@ export const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
  * @example `assertValidToolName("get_status");`
  */
 export function assertValidToolName(name: string): void {
-  if (!TOOL_NAME_PATTERN.test(name)) {
+  if (!TOOL_NAME_PATTERN.test(name) || name === "__proto__") {
     throw new ConfigError(
-      `[Agent Accelerator] Invalid tool name "${name}": expected 1-64 characters of letters, digits, "_" or "-". ` +
+      `[Agent Accelerator] Invalid tool name "${name}": expected 1-64 characters of letters, digits, "_" or "-" (and not "__proto__"). ` +
         `Fix: rename the tool (e.g. "get_status").`
     );
   }

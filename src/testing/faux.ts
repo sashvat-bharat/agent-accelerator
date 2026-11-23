@@ -5,6 +5,7 @@
  * model uses the next step of the script.
  */
 import { ConfigError } from "../types/errors.ts";
+import { noop } from "../utils/noop.ts";
 
 /** One tool call the scripted model makes. */
 export interface FauxToolCall {
@@ -223,33 +224,36 @@ export function fauxProvider(steps: FauxStep[], options: FauxProviderOptions = {
   const script: FauxStep[] = [...steps];
   const calls: FauxRequest[] = [];
   let used = 0;
-  const fakeFetch = (async (_input: unknown, init?: RequestInit): Promise<Response> => {
-    // biome-ignore lint/suspicious/noExplicitAny: the body is the provider's JSON
-    const body: any = JSON.parse(String(init?.body ?? "{}"));
-    const messages: Array<{ role?: string; content?: unknown }> = Array.isArray(body.messages) ? body.messages : [];
-    const request: FauxRequest = {
-      number: calls.length + 1,
-      stream: body.stream === true,
-      body,
-      lastUserText: textOf([...messages].reverse().find((m) => m.role === "user")?.content),
-      toolNames: Array.isArray(body.tools)
-        ? body.tools.map((t: { function?: { name?: string } }) => t.function?.name ?? "")
-        : [],
-    };
-    calls.push(request);
-    const index = used < script.length ? used++ : options.repeatLast && script.length > 0 ? script.length - 1 : -1;
-    if (index < 0)
-      return errorResponse({
-        status: 400,
-        message: `faux provider: no scripted reply left for call ${request.number} (the script has ${script.length}). Add a step or use repeatLast.`,
-      });
-    const step = script[index]!;
-    const resolved = typeof step === "function" ? await step(request) : step;
-    const reply: FauxReply = typeof resolved === "string" ? { text: resolved } : resolved;
-    if (reply.delayMs) await wait(reply.delayMs, init?.signal);
-    if (reply.error) return errorResponse(reply.error);
-    return request.stream ? sseResponse(reply, request) : jsonResponse(reply, request);
-  }) as unknown as typeof fetch;
+  const fakeFetch: typeof fetch = Object.assign(
+    async (_input: unknown, init?: RequestInit): Promise<Response> => {
+      // biome-ignore lint/suspicious/noExplicitAny: the body is the provider's JSON
+      const body: any = JSON.parse(String(init?.body ?? "{}"));
+      const messages: Array<{ role?: string; content?: unknown }> = Array.isArray(body.messages) ? body.messages : [];
+      const request: FauxRequest = {
+        number: calls.length + 1,
+        stream: body.stream === true,
+        body,
+        lastUserText: textOf([...messages].reverse().find((m) => m.role === "user")?.content),
+        toolNames: Array.isArray(body.tools)
+          ? body.tools.map((t: { function?: { name?: string } }) => t.function?.name ?? "")
+          : [],
+      };
+      calls.push(request);
+      const index = used < script.length ? used++ : options.repeatLast && script.length > 0 ? script.length - 1 : -1;
+      if (index < 0)
+        return errorResponse({
+          status: 400,
+          message: `faux provider: no scripted reply left for call ${request.number} (the script has ${script.length}). Add a step or use repeatLast.`,
+        });
+      const step = script[index]!;
+      const resolved = typeof step === "function" ? await step(request) : step;
+      const reply: FauxReply = typeof resolved === "string" ? { text: resolved } : resolved;
+      if (reply.delayMs) await wait(reply.delayMs, init?.signal);
+      if (reply.error) return errorResponse(reply.error);
+      return request.stream ? sseResponse(reply, request) : jsonResponse(reply, request);
+    },
+    { preconnect: noop }
+  );
   return {
     config: { model: `${prefix}/faux-model`, apiKey: "faux", baseUrl: "https://faux.test/v1", fetch: fakeFetch },
     fetch: fakeFetch,

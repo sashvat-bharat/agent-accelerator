@@ -8,6 +8,8 @@
  * in USD, which the SDK takes as the price (an explicit 0, a free model, counts). Vectors are asked as floats; `base64` is never used.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { beforeFirst } from "../utils/text.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { EmbeddingPartData, ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types/embedding.ts";
 import type { TokenUsage } from "../types/core.ts";
 import { openRouterSetting } from "../config/settings.ts";
@@ -53,7 +55,7 @@ interface EmbeddingsReply {
 function toContentPart(p: EmbeddingPartData): Record<string, unknown> {
   if (p.kind === "text") return { type: "text", text: p.text };
   if (p.kind === "image") return { type: "image_url", image_url: { url: p.media.dataUrl } };
-  const subtype = p.media.mimeType.split(";")[0]!.split("/")[1] ?? "";
+  const subtype = beforeFirst(p.media.mimeType, ";").split("/")[1] ?? "";
   const media = { data: p.media.dataUrl, format: p.kind === "pdf" ? "pdf" : (FORMAT_ALIASES[subtype] ?? subtype) };
   return p.kind === "audio"
     ? { type: "input_audio", input_audio: media }
@@ -138,7 +140,7 @@ export async function openrouterEmbed(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

@@ -33,6 +33,7 @@ import type {
   StructuredOutputSpec,
 } from "../types/model.ts";
 import type { ProviderContext, ContentPart, Message } from "../types/message.ts";
+import { CHAT_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { StandardToolDeclaration, ToolCallRecord } from "../types/tool.ts";
 import { TRUNCATED_ARGS_KEY } from "../types/tool.ts";
 import type { TokenUsage } from "../types/core.ts";
@@ -41,6 +42,7 @@ import { AgentResponse } from "../types/response.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { toConciseProviderError, assertModalitiesSupported } from "../utils/errors.ts";
+import { badReplyError, messageReplyProblem } from "./reply-guard.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import {
@@ -299,6 +301,7 @@ function replayBlocks(m: Message): RequestBlock[] | undefined {
   const out: RequestBlock[] = [];
   for (const raw of steps.steps) {
     const b = raw as ResponseBlock;
+    // why: a thinking block is sent back exactly as the API gave it, including fields this SDK does not model.
     if (b.type === "thinking" || b.type === "redacted_thinking") out.push({ ...b } as unknown as RequestBlock);
     else if (b.type === "text" && b.text) out.push({ type: "text", text: b.text });
     else if (b.type === "tool_use" && b.id && b.name) {
@@ -646,7 +649,7 @@ export class AnthropicMessagesProvider implements Provider {
     const { signal: effective, cleanup } = combinedSignal(signal, timeoutFor(options));
     try {
       const res = await (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, effective));
-      const text = await res.text();
+      const text = await readTextCapped(res, CHAT_REPLY_LIMIT);
       return { status: res.status, statusText: res.statusText, headers: headersToRecord(res.headers), text };
     } finally {
       cleanup();
@@ -728,9 +731,9 @@ export class AnthropicMessagesProvider implements Provider {
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, options?.signal);
       this.throwIfError(res.status, url, res.text, clean, res.headers);
-      let message: MessageObject;
+      let parsed: unknown;
       try {
-        message = JSON.parse(res.text) as MessageObject;
+        parsed = JSON.parse(res.text);
       } catch {
         throw toConciseProviderError(
           Object.assign(new Error("Invalid JSON response from Anthropic Messages API"), {
@@ -742,6 +745,9 @@ export class AnthropicMessagesProvider implements Provider {
           clean
         );
       }
+      const problem = messageReplyProblem(parsed);
+      if (problem) throw badReplyError("anthropic", clean, url, problem, res.text);
+      const message = parsed as MessageObject; // checked by messageReplyProblem above
       noteProviderTurn(sessionId, "anthropic");
       return parseMessage(message, clean, Date.now() - startTime, {
         request: rawRequest,
@@ -911,7 +917,7 @@ export class AnthropicMessagesProvider implements Provider {
           // ping and unknown event types are ignored
         };
 
-        await readSseData(res.body!, linked, eventStream, handleMessage); // openStreamResponse guarantees a body
+        await readSseData(res.body, linked, eventStream, handleMessage);
 
         const ordered = [...live.entries()].sort((a, b) => a[0] - b[0]).map(([, e]) => e);
         const toolCalls: ToolCallRecord[] = [];
@@ -987,7 +993,7 @@ export class AnthropicMessagesProvider implements Provider {
               headers: responseHeaders,
               body: completed,
               badFrames,
-            } as unknown as ProviderRawData["response"],
+            },
           },
           durationMs: Date.now() - startTime,
           providerSteps: stepsOf(blocks),

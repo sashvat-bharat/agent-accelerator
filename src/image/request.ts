@@ -89,8 +89,9 @@ export function resolveImageRequest(
 ): { request: ResolvedImageRequest; warnings: ImageWarning[] } {
   const problems: string[] = [];
   const warnings: ImageWarning[] = [];
-  const drop = (capability: string, requested: string, reason: string): void =>
-    void warnings.push({ capability, requested, reason, fallback: "the model's default (the option is not sent)" });
+  const drop = (capability: string, requested: string, reason: string): void => {
+    warnings.push({ capability, requested, reason, fallback: "the model's default (the option is not sent)" });
+  };
 
   const prompt = typeof opts.prompt === "string" ? opts.prompt.trim() : "";
   if (!prompt) problems.push("prompt: required, a non-empty string.");

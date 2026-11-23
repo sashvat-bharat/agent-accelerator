@@ -50,7 +50,7 @@ const realClock: GovernorClock = {
   now: () => Date.now(),
   later: (fn, ms) => {
     const timer = setTimeout(fn, ms);
-    (timer as { unref?: () => void }).unref?.(); // a pause never keeps the process alive
+    timer.unref?.(); // a pause never keeps the process alive
     return () => clearTimeout(timer);
   },
 };
@@ -157,7 +157,8 @@ export class Governor {
   // Grants slots to waiting calls in arrival order; a waiter blocked only by its own provider's limit does not hold back the others; in: every release, out: grants.
   private pump(): void {
     for (let i = 0; i < this.queue.length && this.active < this.max; ) {
-      const w = this.queue[i]!;
+      const w = this.queue[i];
+      if (!w) break;
       if (!this.fits(w.provider)) {
         i++;
         continue;
@@ -177,7 +178,7 @@ export class Governor {
       waiter.onAbort = () => {
         const i = this.queue.indexOf(waiter);
         if (i >= 0) this.queue.splice(i, 1);
-        reject(abortError(signal!));
+        if (signal) reject(abortError(signal)); // the listener exists only when there is a signal
         this.pump(); // a removed waiter may have been the one holding the line
       };
       signal?.addEventListener("abort", waiter.onAbort, { once: true });

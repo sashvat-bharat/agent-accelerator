@@ -31,21 +31,21 @@ export interface AgentRunLimits {
   streamIdleTimeoutMs: number;
 }
 
-/** Resolves `(config as any).limits` with defaults (timeouts tolerate reasoning). */
-export function resolveAgentLimits(config: { limits?: Record<string, unknown> }): AgentRunLimits {
-  const raw = (config as { limits?: Record<string, unknown> }).limits ?? {};
+/** Resolves `config.limits` with defaults (timeouts tolerate reasoning). */
+export function resolveAgentLimits(config: { limits?: object }): AgentRunLimits {
+  const raw: Record<string, unknown> = { ...config.limits };
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   // A network timeout: `0` or `Infinity` turns it off, any other number is milliseconds, anything else is unset (the default applies).
   const timeout = (v: unknown): number | undefined => (typeof v === "number" && !Number.isNaN(v) ? v : undefined);
+  const maxTurns = num(raw.maxTurns);
+  const deadlineMs = num(raw.deadlineMs);
+  const maxToolCallsPerRun = num(raw.maxToolCallsPerRun);
+  const maxTotalTokens = num(raw.maxTotalTokens);
   return {
-    ...(num(raw.maxTurns) !== undefined ? { maxTurns: Math.max(1, Math.floor(num(raw.maxTurns)!)) } : {}),
-    ...(num(raw.deadlineMs) !== undefined ? { deadlineMs: num(raw.deadlineMs)! } : {}),
-    ...(num(raw.maxToolCallsPerRun) !== undefined
-      ? { maxToolCallsPerRun: Math.max(1, Math.floor(num(raw.maxToolCallsPerRun)!)) }
-      : {}),
-    ...(num(raw.maxTotalTokens) !== undefined
-      ? { maxTotalTokens: Math.max(1, Math.floor(num(raw.maxTotalTokens)!)) }
-      : {}),
+    ...(maxTurns !== undefined ? { maxTurns: Math.max(1, Math.floor(maxTurns)) } : {}),
+    ...(deadlineMs !== undefined ? { deadlineMs } : {}),
+    ...(maxToolCallsPerRun !== undefined ? { maxToolCallsPerRun: Math.max(1, Math.floor(maxToolCallsPerRun)) } : {}),
+    ...(maxTotalTokens !== undefined ? { maxTotalTokens: Math.max(1, Math.floor(maxTotalTokens)) } : {}),
     requestTimeoutMs: timeout(raw.requestTimeoutMs) ?? 300_000,
     firstByteTimeoutMs: timeout(raw.firstByteTimeoutMs) ?? 120_000,
     streamIdleTimeoutMs: timeout(raw.streamIdleTimeoutMs) ?? 300_000,

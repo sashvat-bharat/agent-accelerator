@@ -1,4 +1,5 @@
 import type { StreamEvent, AgentResponse } from "../types/response.ts";
+import { noop } from "../utils/noop.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { ValidationError } from "../types/errors.ts";
 
@@ -41,16 +42,9 @@ function approxEventBytes(event: StreamEvent): number {
   return n;
 }
 
-// Reports a dropped or overflowing event on the bus and the legacy hook, never throwing; in: push/enqueueBounded, out: telemetryBus.
+// Reports a dropped or overflowing event on the telemetry bus; in: push/enqueueBounded, out: telemetryBus (never the console: streams are hot paths).
 function reportStreamAnomaly(detail: { type: string; [k: string]: unknown }): void {
-  // why: bus + hook only, never console — streams are hot paths and logging
-  // per-drop would spam and break no-console policy.
   telemetryBus.emitWarning(detail.type, `[Agent Accelerator] stream anomaly: ${detail.type}`, detail);
-  try {
-    (globalThis as unknown as { __agentAccelAnomaly?: (d: unknown) => void }).__agentAccelAnomaly?.(detail);
-  } catch {
-    // why: anomaly reporting must never break the stream itself.
-  }
 }
 
 /** Async-iterable event stream returned by Agent.stream and streaming Agent.run. */
@@ -102,7 +96,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
       this.rejectFinalResult = reject;
     });
     // Prevent unhandled rejection when no one awaits result()
-    this.finalResultPromise.catch(() => {});
+    this.finalResultPromise.catch(noop);
   }
 
   /** First listener exception, if any listener threw (stored, never logged). */
@@ -146,9 +140,8 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
         // why: rejecting an already-settled promise helper must not throw.
       }
       this.finished = true;
-      while (this.resolvers.length > 0) {
-        const r = this.resolvers.shift()!;
-        r.reject(this.error!);
+      for (let r = this.resolvers.shift(); r; r = this.resolvers.shift()) {
+        r.reject(this.error);
       }
       this.enqueueBounded(out);
       return;
@@ -157,8 +150,8 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     // Trigger registered event listener callbacks
     this.deliverToListeners(out);
 
-    if (this.resolvers.length > 0) {
-      const resolver = this.resolvers.shift()!;
+    const resolver = this.resolvers.shift();
+    if (resolver) {
       resolver.resolve({ value: out, done: false });
     } else {
       // No waiter right now (typical between `next()` polls of a burst):
@@ -234,9 +227,8 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
     this.resolveFinalResult(finalResponse);
 
     // Flush any waiting resolvers as done
-    while (this.resolvers.length > 0) {
-      const resolver = this.resolvers.shift()!;
-      resolver.resolve({ value: undefined as unknown as StreamEvent, done: true });
+    for (let resolver = this.resolvers.shift(); resolver; resolver = this.resolvers.shift()) {
+      resolver.resolve({ value: undefined, done: true });
     }
   }
 
@@ -260,7 +252,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
       } catch {
         // why: a throwing cancel handler must not break the canceller.
       }
-      return () => {};
+      return noop;
     }
     this.cancelHandlers.add(handler);
     return () => {
@@ -289,10 +281,12 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
 
   /** Registers a listener for an event type or `*`. */
   on(event: string, listener: StreamEventListener): this {
-    if (!this.listeners.has(event)) {
-      this.listeners.set(event, new Set());
+    let listeners = this.listeners.get(event);
+    if (!listeners) {
+      listeners = new Set();
+      this.listeners.set(event, listeners);
     }
-    this.listeners.get(event)!.add(listener);
+    listeners.add(listener);
     return this;
   }
 
@@ -316,7 +310,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
           iteratorDone = true;
           this.cancel();
         }
-        return Promise.resolve({ value: undefined as unknown as StreamEvent, done: true });
+        return Promise.resolve({ value: undefined, done: true });
       },
       throw: (err?: unknown): Promise<IteratorResult<StreamEvent>> => {
         if (!iteratorDone) {
@@ -326,21 +320,15 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
         return Promise.reject(err);
       },
       next: (): Promise<IteratorResult<StreamEvent>> => {
-        if (this.queue.length > 0) {
-          const value = this.queue.shift()!;
-          // If queued error, deliver the error event first; the NEXT next()
-          // call rejects so consumers observe the event before the failure.
-          if (value.type === "error" && this.error) {
-            return Promise.resolve({ value, done: false });
-          }
-          return Promise.resolve({ value, done: false });
-        }
+        // A queued error event is delivered first; the NEXT next() call rejects, so consumers see the event before the failure.
+        const value = this.queue.shift();
+        if (value !== undefined) return Promise.resolve({ value, done: false });
 
         if (this.finished) {
           if (this.error) {
             return Promise.reject(this.error);
           }
-          return Promise.resolve({ value: undefined as unknown as StreamEvent, done: true });
+          return Promise.resolve({ value: undefined, done: true });
         }
 
         return new Promise<IteratorResult<StreamEvent>>((resolve, reject) => {

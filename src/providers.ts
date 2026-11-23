@@ -10,6 +10,7 @@
  * redesigning this abstraction — only new per-provider mappers/adapters.
  */
 import type { CacheOption, ServiceTier, ThinkingLevel } from "./types/core.ts";
+import { isRecord } from "./utils/guards.ts";
 import type { StructuredOutputSpec } from "./types/model.ts";
 import type { Message } from "./types/message.ts";
 import type { EmbeddingTask } from "./types/embedding.ts";
@@ -64,7 +65,9 @@ export function emitProviderWarning(options: {
   });
   try {
     console.warn(msg);
-  } catch {}
+  } catch {
+    // why: a console that throws (some embedded runtimes) must not break the call.
+  }
 }
 
 /** Clears deduped-warning state (mainly for tests). */
@@ -372,10 +375,6 @@ export function normalizeToolChoice(
 }
 
 // True for a non-array object; in: the argument and schema helpers, out: a type guard.
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
 /**
  * Reconstructs tool arguments from streamed chunks.
  *
@@ -393,7 +392,7 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
   for (const candidate of candidates) {
     try {
       const parsed: unknown = JSON.parse(candidate);
-      if (isPlainObject(parsed)) return parsed;
+      if (isRecord(parsed)) return parsed;
     } catch {
       // try next candidate
     }
@@ -417,7 +416,7 @@ export function selectRawArguments(startText: string, deltaText: string): string
   for (const candidate of candidates) {
     try {
       const parsed: unknown = JSON.parse(candidate);
-      if (isPlainObject(parsed)) return candidate;
+      if (isRecord(parsed)) return candidate;
     } catch {
       // try next candidate
     }
@@ -471,17 +470,17 @@ function isZodLike(value: unknown): boolean {
 
 // True when a plain object has JSON Schema keywords; in: structured-output normalization, out: a boolean.
 function looksLikeJsonSchema(value: unknown): boolean {
-  if (!isPlainObject(value)) return false;
+  if (!isRecord(value)) return false;
   const v = value as Record<string, unknown>;
   return (
     typeof v["type"] === "string" ||
-    isPlainObject(v["properties"]) ||
+    isRecord(v["properties"]) ||
     Array.isArray(v["anyOf"]) ||
     Array.isArray(v["oneOf"]) ||
     Array.isArray(v["allOf"]) ||
     typeof v["$schema"] === "string" ||
-    isPlainObject(v["$defs"]) ||
-    isPlainObject(v["definitions"])
+    isRecord(v["$defs"]) ||
+    isRecord(v["definitions"])
   );
 }
 
@@ -497,12 +496,12 @@ function schemaToJsonSchema(schema: unknown, what: string): Record<string, unkno
   if (isZodLike(schema)) {
     try {
       const converted = zodToJsonSchema(schema);
-      if (isPlainObject(converted)) return converted;
+      if (isRecord(converted)) return converted;
     } catch {
       // fall through to error below
     }
   }
-  if (isPlainObject(schema)) return schema as Record<string, unknown>;
+  if (isRecord(schema)) return schema as Record<string, unknown>;
   throw new ValidationError(
     `[Agent Accelerator] Invalid structured output ${what}: expected a Zod schema, a JSON Schema object, or { name, schema, strict }.`
   );
@@ -519,7 +518,7 @@ function schemaToJsonSchema(schema: unknown, what: string): Record<string, unkno
  */
 export function normalizeStructuredOutput(output: unknown): StructuredOutputSpec | undefined {
   if (output === undefined || output === null) return undefined;
-  if (isPlainObject(output) && "schema" in (output as Record<string, unknown>)) {
+  if (isRecord(output) && "schema" in (output as Record<string, unknown>)) {
     const rec = output as Record<string, unknown>;
     const schema = schemaToJsonSchema(rec["schema"], "`output.schema`");
     return {
@@ -555,7 +554,7 @@ export function extractOutputValidator(
   if (isZodLike(output) && typeof (output as { safeParse?: unknown }).safeParse === "function") {
     return output as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } };
   }
-  if (isPlainObject(output) && isZodLike((output as Record<string, unknown>)["schema"])) {
+  if (isRecord(output) && isZodLike((output as Record<string, unknown>)["schema"])) {
     const inner = (output as Record<string, unknown>)["schema"] as { safeParse?: unknown };
     if (typeof inner.safeParse === "function") {
       return inner as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: { message: string } } };
@@ -700,7 +699,7 @@ export function mapOutputToCompatChat(
  */
 export function buildStructuredOutputInstruction(
   spec: StructuredOutputSpec,
-  template = DEFAULT_PROMPTS.structuredOutput
+  template: string = DEFAULT_PROMPTS.structuredOutput
 ): string {
   return fillPrompt(template, { schema: JSON.stringify(spec.schema) });
 }
@@ -848,7 +847,7 @@ const ANTHROPIC_DROPPED_KEYWORDS = [
 // Rewrites one JSON Schema node (and its children) into Anthropic's strict subset: objects closed with additionalProperties:false, unsupported constraints moved into the description; in: mapOutputToAnthropic and strict tool schemas, out: the cleaned copy.
 function cleanSchemaForAnthropic(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(cleanSchemaForAnthropic);
-  if (!isPlainObject(node)) return node;
+  if (!isRecord(node)) return node;
   const out: Record<string, unknown> = { ...node };
   delete out["$schema"];
   const notes: string[] = [];
@@ -870,10 +869,10 @@ function cleanSchemaForAnthropic(node: unknown): unknown {
     out["anyOf"] = out["oneOf"];
     delete out["oneOf"];
   }
-  if (out["type"] === "object" || isPlainObject(out["properties"])) out["additionalProperties"] = false;
+  if (out["type"] === "object" || isRecord(out["properties"])) out["additionalProperties"] = false;
   for (const key of ["properties", "$defs", "definitions"] as const) {
     const group = out[key];
-    if (isPlainObject(group)) {
+    if (isRecord(group)) {
       out[key] = Object.fromEntries(Object.entries(group).map(([k, v]) => [k, cleanSchemaForAnthropic(v)]));
     }
   }

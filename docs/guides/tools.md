@@ -32,7 +32,7 @@ const res = await agent.run("Where is order A-1001?");
 console.log(res.text, res.toolCalls.length);
 ```
 
-Tool names match `^[a-zA-Z0-9_-]{1,64}$`. You can also pass an array of tools and give each a `name`.
+Tool names match `^[a-zA-Z0-9_-]{1,64}$`, and `__proto__` is not allowed. You can also pass an array of tools and give each a `name`. The name a model asks for is looked up among your own tools only, so a call to `constructor` or `toString` is an unknown tool.
 
 ## Tool options
 

@@ -8,6 +8,7 @@
  * text, so there are no output tokens.
  */
 import type { ProviderRequestOptions } from "../types/model.ts";
+import { BULK_REPLY_LIMIT, readTextCapped } from "../utils/body.ts";
 import type { ProviderDecisionRequest, ProviderDecisionResult } from "../types/decision.ts";
 import type { InputPartData } from "../utils/provider-call.ts";
 import type { TokenUsage } from "../types/core.ts";
@@ -148,7 +149,7 @@ export async function googleDecide(
     let text: string;
     try {
       res = await (options?.fetch ?? fetch)(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-      text = await res.text();
+      text = await readTextCapped(res, BULK_REPLY_LIMIT);
     } finally {
       cleanup();
     }

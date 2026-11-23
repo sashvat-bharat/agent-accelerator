@@ -60,9 +60,9 @@ export function durationMs(value: unknown, field: string): number {
 export function formatDatetime(d: Date): string {
   const h12 = d.getHours() % 12 || 12;
   const ampm = d.getHours() < 12 ? "AM" : "PM";
-  const month = MONTHS[d.getMonth()]!;
+  const month = MONTHS[d.getMonth()] ?? "";
   return (
-    `${DAYS[d.getDay()]}, ${d.getDate()} ${month[0]!.toUpperCase()}${month.slice(1)}, ` +
+    `${DAYS[d.getDay()]}, ${d.getDate()} ${month.charAt(0).toUpperCase()}${month.slice(1)}, ` +
     `${pad2(h12)}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${ampm}, ${d.getFullYear()}`
   );
 }

@@ -40,6 +40,7 @@ export function zodToJsonSchema(schema: unknown): Json {
     try {
       // Use zod's native toJSONSchema if available (Zod 4+)
       if (typeof z.toJSONSchema === "function") {
+        // why: `schema` was already recognised as a Zod schema above; zod 4 only needs the narrower ZodType here.
         return cleanJsonSchema(z.toJSONSchema(schema as unknown as z.ZodType));
       }
       const own = call(schema, "toJSONSchema");
