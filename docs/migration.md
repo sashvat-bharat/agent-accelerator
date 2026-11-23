@@ -2,6 +2,25 @@
 
 > What was removed or renamed, and what to use now. Everything that still works but has a better name is marked.
 
+## Upgrading to 0.9.0
+
+0.9.0 removes the old worker class, makes the public API smaller and makes a few failures louder. If you use nothing listed here, you need no change.
+
+**Removed**
+
+- The `SubAgent` class, `SubAgentConfig`, `agentFromEnv()`, `Agent.fromEnv()`, `.asTool()` and `.toTool()`. A fixed worker is a plain `Agent`. See the first table below.
+- 92 names that were exported but are internal: session plumbing, provider classes and tables, schema and signature helpers, wire-level provider types and inner types. See [Names that are no longer exported](#names-that-are-no-longer-exported).
+- The callback `globalThis.__agentAccelAnomaly`. Warnings go to `telemetryBus`.
+
+**Behavior that changed**
+
+- `saveSessionDir` and `saveSessionFile` throw when they cannot write. An agent with `persist` still reports a failed save to `persist.onPersistError`, which now also works with `persist: { file }`.
+- A tool named `__proto__` is refused. The name a model asks for is looked up among your own tools only, so a call to `constructor` is an unknown tool.
+- A provider that answers HTTP 200 with something that is not a reply (an empty object, a list, no `choices`) now fails as a retryable 502 `ProviderError`, not as an empty answer.
+- A provider reply over its size cap is refused with a `ProviderError` that is not retried: 64 MB for chat, 256 MB for pictures, vectors and decisions, 1 MB for an error body and 512 MB for a downloaded video.
+- `agent.usageReport()` lists the workers that a fixed worker started, so its total matches the response. The session saves the spending of fixed workers as `fixedUsage`, so it survives a restart.
+- The `User-Agent` header names the SDK's own version, not the version of the app that runs it.
+
 ## Options and APIs
 
 | Was | Now | Since |

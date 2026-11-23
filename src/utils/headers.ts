@@ -1,5 +1,6 @@
 import type { ProviderId } from "../types/model.ts";
 import { clampCacheKey } from "./cache.ts";
+import { isRecord } from "./guards.ts";
 
 /** True in a browser, worker or React Native scope, where custom headers cause CORS preflights; in: header building, out: a boolean. */
 function isBrowserRuntime(): boolean {
@@ -23,16 +24,24 @@ function isBrowserRuntime(): boolean {
   }
 }
 
-/** Package version for User-Agent strings. Reads the npm-injected env first. */
-function getPackageVersion(): string {
+let cachedSdkVersion: string | undefined;
+
+// The SDK's own version from its package.json, read once on first use (importing the JSON would cost memory at startup; never the host app's `npm_package_version`); "unknown" when the file or `node:fs` is not there; in: buildSessionHeaders, out: a version string.
+function sdkVersion(): string {
+  if (cachedSdkVersion !== undefined) return cachedSdkVersion;
+  let version = "unknown";
   try {
-    const v = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-      ?.npm_package_version;
-    if (typeof v === "string" && v) return v;
+    const fs = typeof process !== "undefined" ? process.getBuiltinModule?.("node:fs") : undefined;
+    const parsed: unknown = fs
+      ? JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8"))
+      : undefined;
+    const found = isRecord(parsed) ? parsed["version"] : undefined;
+    if (typeof found === "string" && found) version = found;
   } catch {
-    // why: there is no `process` here (a browser), so the value is treated as unavailable.
+    // why: a missing file or a runtime without `node:fs` leaves the version "unknown"; the header is only a label.
   }
-  return "0.8.9";
+  cachedSdkVersion = version;
+  return version;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +158,7 @@ export function buildSessionHeaders(
   const attr = getAttribution();
   const headers: Record<string, string> = {};
   if (!browser) {
-    setHeaderCaseInsensitive(headers, "User-Agent", attr.userAgent ?? `Agent-Accelerator/${getPackageVersion()}`);
+    setHeaderCaseInsensitive(headers, "User-Agent", attr.userAgent ?? `Agent-Accelerator/${sdkVersion()}`);
   }
   for (const [k, v] of Object.entries(customHeaders ?? {})) {
     const existing = findHeaderKey(headers, k);

@@ -85,6 +85,8 @@ Do not generate code for these.
 
 | Do not use | Why, and what to use instead |
 |---|---|
+| Ignoring a failed `saveSessionDir` or `saveSessionFile` | They throw when they cannot write. Catch the error, or use `persist` with `onPersistError`. |
+| A tool named `__proto__` | Refused. Use a name that matches `^[a-zA-Z0-9_-]{1,64}$`. |
 | `needsApproval` | Removed. Ask inside `execute` and refuse with `ctx.stop(reason)`, or use the `beforeTool` hook. |
 | A `hooks` name other than `beforeTool`, `afterTool`, `beforeRequest`, `onYield` | It throws `ConfigError`. |
 | Tool `retry`, `tags`, `output` | Removed. They did nothing. |
