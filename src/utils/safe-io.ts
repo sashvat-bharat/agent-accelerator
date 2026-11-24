@@ -2,6 +2,7 @@
 // bundles. Everything Node-specific is loaded lazily inside the helpers.
 import type { Message } from "../types/message.ts";
 import { mediaKeyOf } from "./media-part.ts";
+import { isBrowserRuntime } from "./headers.ts";
 import { SecurityPolicyError } from "../types/errors.ts";
 
 /** Default cap for one remote media download (bytes). */
@@ -109,18 +110,48 @@ function ipv4Private(a: number, b: number): boolean {
   );
 }
 
-/** True for loopback, link-local, private, CGNAT and unique-local addresses. */
+// Reads an IPv6 address (no brackets, lower case, a trailing dotted IPv4 and a `%zone` allowed) into its 8 groups of 16 bits, or undefined when it is not one; in: isPrivateAddress, out: the groups.
+function ipv6Groups(address: string): number[] | undefined {
+  let text = address.split("%")[0] ?? "";
+  const dotted = text.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (dotted) {
+    const octets = dotted.slice(1, 5).map(Number);
+    if (octets.some((o) => o > 255)) return undefined;
+    const [a = 0, b = 0, c = 0, d = 0] = octets;
+    text = `${text.slice(0, dotted.index)}${(a * 256 + b).toString(16)}:${(c * 256 + d).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return undefined;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves[1] ? halves[1].split(":") : [];
+  const gap = 8 - head.length - tail.length;
+  if (halves.length === 1 ? gap !== 0 : gap < 1) return undefined;
+  const groups = [...head, ...Array.from({ length: halves.length === 1 ? 0 : gap }, () => "0"), ...tail].map((g) =>
+    /^[0-9a-f]{1,4}$/.test(g) ? Number.parseInt(g, 16) : Number.NaN
+  );
+  return groups.length === 8 && groups.every((g) => !Number.isNaN(g)) ? groups : undefined;
+}
+
+// True when the IPv4 address hidden in the last 32 bits of an IPv6 address is private; in: isPrivateAddress, out: a boolean.
+function embeddedIpv4Private(groups: number[]): boolean {
+  const hi = groups[6] ?? 0;
+  return ipv4Private(hi >> 8, hi & 255);
+}
+
+/** True for loopback, link-local, private, CGNAT and unique-local addresses, also an IPv4 hidden in an IPv6 one (mapped, compatible, NAT64, written in any form); an unreadable IPv6 address counts as private. */
 export function isPrivateAddress(address: string): boolean {
   const host = address.replace(/^\[|\]$/g, "").toLowerCase();
   const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
   if (v4) return ipv4Private(Number(v4[1]), Number(v4[2]));
-  if (host.includes(":")) {
-    if (host === "::" || host === "::1") return true;
-    const mapped = host.match(/^::ffff:(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (mapped) return ipv4Private(Number(mapped[1]), Number(mapped[2]));
-    return /^f[cd]/.test(host) || /^fe[89ab]/.test(host);
-  }
-  return false;
+  if (!host.includes(":")) return false;
+  const g = ipv6Groups(host);
+  if (!g) return true;
+  const first = g[0] ?? 0;
+  const zeroUpTo = (n: number): boolean => g.slice(0, n).every((x) => x === 0);
+  if (zeroUpTo(6)) return embeddedIpv4Private(g); // "::", "::1" and "::a.b.c.d"
+  if (zeroUpTo(5) && g[5] === 0xffff) return embeddedIpv4Private(g); // "::ffff:a.b.c.d"
+  if (first === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return embeddedIpv4Private(g); // NAT64
+  return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xffc0) === 0xfec0;
 }
 
 // True for localhost, .local/.internal names and private addresses; in: assertRemoteUrlAllowed, out: a boolean.
@@ -143,12 +174,12 @@ async function assertRemoteUrlAllowed(url: URL, allowPrivateNetwork: boolean): P
       url.href
     );
   }
-  if (allowPrivateNetwork) return;
+  if (allowPrivateNetwork || isBrowserRuntime()) return; // a browser fetches from the user's own machine: nothing to guard
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (isPrivateHostname(host)) {
     throw new RemoteFetchError(
       "blocked",
-      `[Agent Accelerator] Refusing to fetch private/internal host "${host}".`,
+      `[Agent Accelerator] Refusing to fetch private/internal host "${host}". Download the file yourself and pass its bytes, a data URL or base64.`,
       url.href
     );
   }
@@ -228,9 +259,10 @@ interface RemoteBytes {
 
 /**
  * Fetches a URL with redirect re-validation and a hard byte cap. Redirects
- * are followed manually (max 5) so every hop is checked. With
- * `allowPrivateNetwork: false` loopback/LAN/link-local/cloud-metadata hosts
- * (including DNS names that resolve to them) are refused.
+ * are followed manually (max 5) so every hop is checked. Unless
+ * `allowPrivateNetwork` is true (the default is false) loopback, LAN,
+ * link-local and cloud-metadata hosts (including DNS names that resolve to
+ * them) are refused; a browser runtime is never guarded.
  */
 export async function fetchRemoteBytes(
   input: string,
@@ -244,7 +276,7 @@ export async function fetchRemoteBytes(
     const res = await fetch(current.href, { signal: opts.signal, redirect: "manual" });
     if ((res as { type?: string }).type === "opaqueredirect") {
       // Browser runtimes hide the Location header: only trusted callers may follow blindly.
-      if (!allowPrivate) {
+      if (!allowPrivate && !isBrowserRuntime()) {
         throw new RemoteFetchError(
           "blocked",
           "[Agent Accelerator] Redirects cannot be validated in this runtime.",

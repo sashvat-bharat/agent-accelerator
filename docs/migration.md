@@ -2,6 +2,16 @@
 
 > What was removed or renamed, and what to use now. Everything that still works but has a better name is marked.
 
+## Upgrading to 0.9.1
+
+0.9.1 closes a gap in how the SDK downloads media links. If you pass public links, bytes, data URLs, base64 or local paths, you need no change.
+
+**Behavior that changed**
+
+- A media URL that the SDK downloads itself must now point to a public host. `localhost`, `127.x`, `10.x`, `172.16.x` to `172.31.x`, `192.168.x`, `169.254.x` (cloud metadata), `100.64.x` to `100.127.x`, `.local` and `.internal` names, a name that DNS resolves to one of them and a redirect to one all throw `SecurityPolicyError` (a `RemoteFetchError`). Before, they were downloaded. To use such a file, read it yourself and pass a `Uint8Array`, a data URL or base64. A link that a provider fetches itself (for example an image URL sent to OpenAI) was never downloaded by the SDK and is unchanged.
+- The check now sees an IPv4 address inside an IPv6 one (`[::ffff:127.0.0.1]`, `[::127.0.0.1]`, NAT64) and treats an IPv6 address it cannot read as private.
+- A browser runtime is not checked, because its requests start on the user's own machine.
+
 ## Upgrading to 0.9.0
 
 0.9.0 removes the old worker class, makes the public API smaller and makes a few failures louder. If you use nothing listed here, you need no change.

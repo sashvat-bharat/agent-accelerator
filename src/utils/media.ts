@@ -139,9 +139,9 @@ export async function normalizeMediaInput(
 
   // 3. If input is a remote HTTP URL (check before base64 to avoid misclassifying URL as base64)
   if (typeof input === "string" && (input.startsWith("http://") || input.startsWith("https://"))) {
-    // Developer-supplied URL: private hosts are allowed (intranet assets),
-    // but redirects are re-checked and the download is size-capped.
-    const response = await fetchRemoteBytes(input, { allowPrivateNetwork: true });
+    // Private, loopback and link-local hosts are refused (also by DNS and on every redirect hop) and the
+    // download is size-capped; an intranet file is read by the caller and passed in as bytes or base64.
+    const response = await fetchRemoteBytes(input);
     if (!response.ok) {
       throw new ValidationError(`Failed to fetch media from URL: ${input} (${response.statusText})`);
     }

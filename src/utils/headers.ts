@@ -2,8 +2,8 @@ import type { ProviderId } from "../types/model.ts";
 import { clampCacheKey } from "./cache.ts";
 import { isRecord } from "./guards.ts";
 
-/** True in a browser, worker or React Native scope, where custom headers cause CORS preflights; in: header building, out: a boolean. */
-function isBrowserRuntime(): boolean {
+/** True in a browser, worker or React Native scope, where custom headers cause CORS preflights and the remote-fetch guard has nothing to protect; in: header building and `safe-io.ts`, out: a boolean. */
+export function isBrowserRuntime(): boolean {
   try {
     const g = globalThis as {
       window?: { document?: unknown };
