@@ -137,8 +137,8 @@ const INTERNAL: Record<string, string[]> = {
     "DecisionInputKind",
   ],
 };
-// The most names the barrel may export (values and types). Lower it whenever names are removed.
-const MAX_NAMES = 233;
+// The most names the barrel may export (values and types). Lower it whenever names are removed. 234 since 0.9.2: `SubAgentSpec`, the documented data form of `subagents: [...]`.
+const MAX_NAMES = 234;
 
 describe("the public surface", () => {
   it("reads the barrel (the check itself works)", () => {

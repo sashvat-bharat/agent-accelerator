@@ -12,7 +12,7 @@
 - [Reasoning and caching](guides/reasoning-and-caching.md): `thinking` levels, `cache` per provider, `serviceTier`, session affinity
 - [Tools](guides/tools.md): `tool()`, how a call runs, `toolContent`, `toolChoice`, `ctx.stop` approval, `hooks` (beforeTool, afterTool, beforeRequest, onYield), crash replay
 - [Streaming and steering](guides/streaming-and-steering.md): streaming, `steer`/`queue`/`interrupt`, `requestId`, what an interrupt stops, provider cancel behavior
-- [Workers](guides/workers.md): fixed `subagents`, dynamic `subagents` tool, `agent.workers`, tracking, depth and spending caps
+- [Sub-agents](guides/workers.md): fixed `subagents` (an `Agent`, or data with `name`, `description`, `instructions`), dynamic `subagents` tool, `agent.workers`, tracking, depth and spending caps
 - [Scheduled actions](guides/scheduled-actions.md): `agent.scheduled`, the `DD:HH:MM` time format, lifecycle, missed runs
 - [Sessions](guides/sessions.md): `persist`, the home folder, crash resume, the per-session lock, what is saved
 - [Media input](guides/media-input.md): images, audio, video and files in a prompt, per-provider rules

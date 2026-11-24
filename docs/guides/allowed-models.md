@@ -37,7 +37,7 @@ for (const m of listModels()?.models ?? []) console.log(m.model);
 `setModel(id)` and `setSubAgentModel(id)` save the user's pick in `<home>/configs.json`. They are the only way the model is written. See [Settings](settings.md#the-users-saved-choices).
 
 - The id must be a full `provider/model` string that is on your list. Otherwise `ModelNotAllowedError` is thrown and nothing is saved. With no list, any non-empty id is accepted.
-- An `Agent` with no `model` uses the saved choice, then your `default.model`. A worker with no model uses the saved `sub_agent_model`, then `default.sub_agent_model`.
+- An `Agent` with no `model` uses the saved choice, then your `default.model`. A worker with no model uses the saved `sub_agent_model`, then `default.sub_agent_model`. This also covers a `subagents: [...]` entry written as data without a `model`; a plain `Agent` without one uses the main model.
 - A model you name in the `Agent` config always wins.
 - A saved model that is no longer on the list (you shipped a new list) is ignored, with a `config.saved_model_ignored` warning, and the default is used.
 

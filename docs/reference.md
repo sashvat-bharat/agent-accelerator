@@ -10,14 +10,14 @@ The exported type declarations in `src/types/` are the source of truth.
 
 | Key | Meaning | Guide |
 |---|---|---|
-| `name`, `description` | Identity. A parent sees `description` when this agent is a worker. | [Workers](guides/workers.md) |
+| `name`, `description` | Identity. A parent sees `description` when this agent is a worker. | [Sub-agents](guides/workers.md) |
 | `instructions` | The system prompt. Keep it stable. | [Agents](guides/agents.md) |
 | `model` | A model string, a `ModelSpec` or a `ModelProvider.*` value. Without it, the saved choice or the list default. | [Models and providers](guides/models-and-providers.md) |
 | `subagentModel` | Older name of `dynamicSubagents.model`. | [Migration](migration.md) |
 | `apiKey`, `baseUrl`, `headers` | Connection overrides for this agent. | [Models and providers](guides/models-and-providers.md) |
 | `tools` | A record `{ name: tool }`, or an array of tools (`ToolDefinition`). | [Tools](guides/tools.md) |
-| `subagents` | Fixed workers: `Agent`s, or `{ name, description, agent }`. | [Workers](guides/workers.md) |
-| `dynamicSubagents` | Workers the model starts, persistent workers, scheduled actions (`DynamicSubagentsConfig`). Keys below. | [Workers](guides/workers.md) |
+| `subagents` | Fixed sub-agents: an `Agent`, `{ name, description, agent }`, or data (`SubAgentSpec`: `{ name, description, instructions, model?, tools? }`, which runs on the worker model when it names none). | [Sub-agents](guides/workers.md) |
+| `dynamicSubagents` | Workers the model starts, persistent workers, scheduled actions (`DynamicSubagentsConfig`). Keys below. | [Sub-agents](guides/workers.md) |
 | `thinking` | The reasoning level, or `{ level, budgetTokens }` (`ThinkingOption`). `thinkingLevel` is the older name. | [Reasoning and caching](guides/reasoning-and-caching.md) |
 | `cache` | `"implicit"`, `"5m"`, `"30m"`, `"1h"` or `"12h"` (`CacheOption`), where the provider supports it. | [Reasoning and caching](guides/reasoning-and-caching.md) |
 | `serviceTier` | `"flex"` or `"priority"`. | [Reasoning and caching](guides/reasoning-and-caching.md) |

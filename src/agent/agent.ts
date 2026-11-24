@@ -28,9 +28,11 @@ import { AssistantMessageEventStream, type StreamEventListener } from "../stream
 import { AgentContext } from "./context.ts";
 import { resolveModel } from "../providers/registry.ts";
 import { buildAgentTools } from "./delegation.ts";
+import { isRecord } from "../utils/guards.ts";
 import { createSubagentsTool } from "./subagents-tool.ts";
 import { WorkerRegistry, savedSpend } from "./workers.ts";
 import {
+  buildSubAgentConfig,
   DEFAULT_MAX_DEPTH,
   isWorkerConfig,
   normalizeToolMap,
@@ -221,6 +223,8 @@ export class Agent {
   readonly captureRaw?: false | "redacted" | true;
   /** Constructor config, kept so {@link Agent.fork} can build isolated copies. */
   private readonly forkConfig: AgentConfig;
+  /** The `subagents: [...]` workers as Agents, each with the name it is listed under. */
+  private fixedList: Array<{ name: string; worker: Agent }> = [];
   /** The hooks of this agent (`AgentConfig.hooks`), checked at construction; workers inherit them. */
   readonly hooks?: AgentHooks;
   /** Opt-in per-run budget (tokens / cost / duration / sub-agent count), enforced by the loop. */
@@ -543,7 +547,17 @@ export class Agent {
     }
 
     if (Array.isArray(config.subagents)) {
-      const subagentTools = buildAgentTools(config.subagents, { chat: this.chat });
+      // An entry written as data becomes a plain Agent here, once: forks, the usage tree and the tools only ever see Agents.
+      const entries = config.subagents.map((entry, position) =>
+        entry instanceof Agent || (isRecord(entry) && "agent" in entry)
+          ? entry
+          : new Agent(buildSubAgentConfig(this, entry, position))
+      );
+      this.forkConfig.subagents = entries;
+      this.fixedList = entries.map((entry) =>
+        "agent" in entry ? { name: entry.name, worker: entry.agent } : { name: entry.name, worker: entry }
+      );
+      const subagentTools = buildAgentTools(entries, { chat: this.chat });
       for (const [toolName, toolDef] of Object.entries(subagentTools)) {
         this.tools[toolName] = toolDef;
       }
@@ -716,11 +730,9 @@ export class Agent {
     return nodes;
   }
 
-  // The `subagents: [...]` workers with the name each is listed under; in: the constructor config, out: fixedWorkerNodes, fixedUsageNodes and placeFixed.
+  // The `subagents: [...]` workers with the name each is listed under; in: the constructor (entries written as data are already Agents), out: fixedWorkerNodes, fixedUsageNodes and placeFixed.
   private fixedEntries(): Array<{ name: string; worker: Agent }> {
-    return (this.forkConfig.subagents ?? []).map((entry) =>
-      "agent" in entry ? { name: entry.name, worker: entry.agent } : { name: entry.name, worker: entry }
-    );
+    return this.fixedList;
   }
 
   // The `subagents: [...]` workers as usage nodes (their per-call copies' spending is added to them, and the workers those copies started hang below them), plus saved ones that no longer exist; in: the constructor config, out: workerNodes.

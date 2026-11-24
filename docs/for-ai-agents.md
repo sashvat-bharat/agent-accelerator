@@ -17,8 +17,8 @@
 | Live output | `agent.stream(prompt)`, then `await stream.result()` | [Streaming and steering](guides/streaming-and-steering.md) |
 | Call my code | `tool({ description, input: z.object(...), execute })` in `tools` | [Tools](guides/tools.md) |
 | JSON result | `output: zodSchema`, then read `res.parsed` | [Agents](guides/agents.md) |
-| Specialist helpers | `subagents: [agentA, agentB]` | [Workers](guides/workers.md) |
-| Helpers the model starts | `dynamicSubagents: { model, tools }` | [Workers](guides/workers.md) |
+| Specialist helpers | `subagents: [{ name, description, instructions }, agentB]` | [Sub-agents](guides/workers.md) |
+| Helpers the model starts | `dynamicSubagents: { model, tools }` | [Sub-agents](guides/workers.md) |
 | Work later or on repeat | `dynamicSubagents.allowScheduledActions` and `agent.scheduled.create(...)` | [Scheduled actions](guides/scheduled-actions.md) |
 | Redirect a busy agent | `steer()`, `queue()`, `interrupt()`, `interrupt(message)` | [Streaming and steering](guides/streaming-and-steering.md) |
 | Do not run a repeated message twice | `{ requestId }` on `run`, `queue`, `steer` or `ask` | [Streaming and steering](guides/streaming-and-steering.md#run-a-prompt-only-once) |
@@ -96,7 +96,7 @@ Do not generate code for these.
 | Gemini 1.x or 2.x | Rejected. The minimum is Gemini 3. |
 | `cache` values a provider lacks | They warn and fall back. See [Reasoning and caching](guides/reasoning-and-caching.md). |
 | Two processes on one saved session | The folder is locked. The second process gets a `ConfigError`. Use a different `sessionId` per process. They can share a `home`. |
-| The `SubAgent` class, `agentFromEnv()`, `Agent.fromEnv()`, `.asTool()`, `.toTool()` | Removed. Use `new Agent({ name, model, instructions })` in `subagents: [...]`, or `agentToTool({ name, agent })`. To use the saved or default model, leave out `model`. See [Migration](migration.md). |
+| The `SubAgent` class, `agentFromEnv()`, `Agent.fromEnv()`, `.asTool()`, `.toTool()` | Removed. Write the helper as data, `{ name, description, instructions }` in `subagents: [...]` (no `model` means the worker model), or use `new Agent({ name, model, instructions })`, or `agentToTool({ name, agent })`. For an `Agent` that should use the saved or default main model, leave out `model`. See [Migration](migration.md). |
 | The OpenRouter Responses transport | Gone. OpenRouter uses Chat Completions. |
 
 ## Error to fix
@@ -133,7 +133,7 @@ Do not generate code for these.
 - `steer`, `queue` and `interrupt` only make sense while `agent.isBusy`.
 
 **Workers and scheduling**
-- Fixed: `new Agent({ subagents: [a, b] })`. Dynamic: `dynamicSubagents: { model, tools, maxSpawn }`, and the model gets the `subagents` tool. Scheduling: `dynamicSubagents.allowScheduledActions: true` and a worker model, or you get `SubAgentModelError`.
+- Fixed: `new Agent({ subagents: [{ name, description, instructions }, agentB] })`; data entries run on the worker model unless they name one, and take only `name`, `description`, `instructions`, `model` and `tools`. Dynamic: `dynamicSubagents: { model, tools, maxSpawn }`, and the model gets the `subagents` tool. Scheduling: `dynamicSubagents.allowScheduledActions: true` and a worker model, or you get `SubAgentModelError`.
 - `agent.scheduled.create(input)` throws one `ValidationError` that lists every problem. `scheduled_action.id` must be lowercase kebab-case, at most 48 characters. `timeToDeliver` has `HH` from 01 to 12.
 - Workers that keep a conversation: `agent.workers.spawn`, `message`, `close` and `list`. Pass `callId` for exactly-once after a crash. They need a worker model, and `persist: { dir }` on the parent to survive a restart.
 - Track workers with `track`, `listTrackedSubAgents` and `subscribeToSubAgent`. Do not poll files.

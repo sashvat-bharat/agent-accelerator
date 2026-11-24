@@ -273,6 +273,7 @@ export type {
   AgentRunOptions,
   AgentTurnEvent,
   DynamicSubagentsConfig,
+  SubAgentSpec,
   MidSessionConfig,
   MidSessionMode,
   WhenBusyMode,

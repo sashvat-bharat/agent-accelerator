@@ -210,4 +210,4 @@ When a run is cut off, a tool call that already has a saved result is never run 
 - Mark read-only tools `idempotent`. Leave tools with side effects at one attempt, and make them safe with an id.
 - Always pass `ctx.signal` to `fetch` and database calls.
 - Return what the model needs, not huge payloads.
-- The SDK has three built-in tools: `subagents`, `scheduled_actions` and `get_datetime`. See [Workers](workers.md) and [Scheduled actions](scheduled-actions.md).
+- The SDK has three built-in tools: `subagents`, `scheduled_actions` and `get_datetime`. See [Sub-agents](workers.md) and [Scheduled actions](scheduled-actions.md).

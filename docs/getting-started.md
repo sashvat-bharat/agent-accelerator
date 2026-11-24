@@ -146,6 +146,6 @@ Every error the SDK throws is a typed class with a one-line message. See [Errors
 - Understand the pieces: [How it works](how-it-works.md)
 - Choose a model, set reasoning or caching: [Models and providers](guides/models-and-providers.md), [Reasoning and caching](guides/reasoning-and-caching.md)
 - Tools, streaming, steering a busy agent: [Tools](guides/tools.md), [Streaming and steering](guides/streaming-and-steering.md)
-- Helper agents and schedules: [Workers](guides/workers.md), [Scheduled actions](guides/scheduled-actions.md)
+- Helper agents and schedules: [Sub-agents](guides/workers.md), [Scheduled actions](guides/scheduled-actions.md)
 - Go to production: [Limits and retries](guides/limits-and-retries.md), [Security](guides/security.md)
 - Runnable demos: [`examples/`](../examples/)

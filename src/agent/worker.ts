@@ -3,12 +3,14 @@ import { isModelSpec } from "../utils/session.ts";
 import type { StreamEvent } from "../types/response.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import type { SubAgentStep } from "../types/response.ts";
-import type { AgentConfig } from "../types/agent.ts";
+import type { AgentConfig, SubAgentSpec } from "../types/agent.ts";
 import type { ModelSpec } from "../types/model.ts";
 import type { Agent } from "./agent.ts";
 import { normalizeToolName } from "../tools/executor.ts";
 import { chosenModel, chosenSubAgentModel } from "../config/models.ts";
 import { resolveModelUnchecked } from "../providers/registry.ts";
+import { ConfigError } from "../types/errors.ts";
+import { isRecord } from "../utils/guards.ts";
 
 /** Minimal live-trace shape shared by fixed + dynamic workers (structural subset of `SubAgentTrace`). */
 interface LiveWorkerTrace {
@@ -292,6 +294,55 @@ export function buildDynamicWorkerConfig(
     ...parent.inheritableConfig(),
   };
   workerConfigs.add(config);
+  return config;
+}
+
+// The keys a sub-agent written as data may carry; anything else belongs on a real `Agent`.
+const SUB_AGENT_SPEC_KEYS: readonly string[] = ["name", "description", "instructions", "model", "tools"];
+
+// A ConfigError for the `subagents` entry at `position`; in: buildSubAgentConfig, out: the error to throw.
+function badSpec(position: number, problem: string): ConfigError {
+  return new ConfigError(`[Agent Accelerator] subagents[${position}] ${problem}`);
+}
+
+/** Config of a fixed sub-agent written as data: its own model, else the parent's worker model (never the main one), the parent's limits, hooks and file policy, and credentials only for the parent's own provider; in: the Agent constructor, out: the config of a plain `Agent`. */
+export function buildSubAgentConfig(parent: Agent, spec: SubAgentSpec, position: number): AgentConfig {
+  if (!isRecord(spec)) {
+    throw badSpec(position, "must be an Agent, { name, description, agent } or { name, description, instructions }.");
+  }
+  const unknownKeys = Object.keys(spec).filter((key) => !SUB_AGENT_SPEC_KEYS.includes(key));
+  if (unknownKeys.length > 0) {
+    throw badSpec(
+      position,
+      `has unknown key ${unknownKeys.map((key) => `"${key}"`).join(", ")}: a sub-agent written as data takes name, description, instructions, model and tools. Build an Agent for anything else.`
+    );
+  }
+  for (const key of ["name", "description", "instructions"] as const) {
+    const value = spec[key];
+    if (typeof value !== "string" || !value.trim()) throw badSpec(position, `needs a non-empty ${key}.`);
+  }
+  if (typeof spec.model === "string" && !spec.model.trim()) {
+    throw badSpec(position, `("${spec.name}") has an empty model: leave it out to use the worker model.`);
+  }
+  const model = spec.model ?? parent.subagentModel;
+  if (!model) {
+    throw badSpec(
+      position,
+      `("${spec.name}") has no model and no worker model is set. Give it a model, pass dynamicSubagents.model, or set a default worker model with setModels() or setSubAgentModel().`
+    );
+  }
+  const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
+  const config: AgentConfig = {
+    name: spec.name,
+    description: spec.description,
+    instructions: spec.instructions,
+    model,
+    ...(spec.tools ? { tools: spec.tools } : {}),
+    apiKey: apiKeyToUse,
+    baseUrl: baseUrlToUse,
+    ...parent.inheritableConfig(),
+  };
+  workerConfigs.add(config); // SDK-built: never takes the spending-cap settings, like every other SDK-built worker
   return config;
 }
 
