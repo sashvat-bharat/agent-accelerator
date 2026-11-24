@@ -10,6 +10,8 @@ import {
   isLocalPathInput,
   RemoteFetchError,
 } from "../src/utils/safe-io.ts";
+import { normalizeMediaInput } from "../src/utils/media.ts";
+import { SecurityPolicyError } from "../src/types/errors.ts";
 import { Agent } from "../src/index.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -24,6 +26,35 @@ describe("private address detection", () => {
     }
     for (const a of ["8.8.8.8", "172.32.0.1", "1.1.1.1", "2606:4700::1111"]) {
       expect(isPrivateAddress(a)).toBe(false);
+    }
+  });
+
+  it("sees an IPv4 address hidden in an IPv6 one, in any written form", () => {
+    for (const a of [
+      "::ffff:7f00:1", // what new URL() writes for [::ffff:127.0.0.1]
+      "::ffff:a9fe:a9fe", // 169.254.169.254
+      "::ffff:0a00:0001",
+      "0:0:0:0:0:ffff:7f00:1",
+      "::127.0.0.1", // IPv4-compatible, dotted
+      "::7f00:1", // IPv4-compatible, hex
+      "::a9fe:a9fe",
+      "64:ff9b::7f00:1", // NAT64 of 127.0.0.1
+      "64:ff9b::10.0.0.1",
+      "fec0::1", // site-local
+      "FE80::1%eth0", // zone id, upper case
+      "fc00::1",
+      "[::ffff:c0a8:101]", // 192.168.1.1 in brackets
+    ]) {
+      expect(isPrivateAddress(a)).toBe(true);
+    }
+    for (const a of ["::ffff:808:808", "::808:808", "64:ff9b::808:808", "2001:4860:4860::8888", "::ffff:8.8.8.8"]) {
+      expect(isPrivateAddress(a)).toBe(false);
+    }
+  });
+
+  it("refuses an IPv6 address it cannot read", () => {
+    for (const a of ["1:2:3:4:5:6:7:8:9", "::1::2", "gggg::1", "1:2:3", "::ffff:300.1.1.1"]) {
+      expect(isPrivateAddress(a)).toBe(true);
     }
   });
 });
@@ -115,5 +146,65 @@ describe("fetchRemoteBytes", () => {
     expect(res.ok).toBe(true);
     expect(res.contentType).toBe("image/png");
     expect([...res.bytes]).toEqual([1, 2, 3]);
+  });
+});
+
+describe("media URLs read by the SDK (normalizeMediaInput)", () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+
+  it("refuses private, loopback, link-local and metadata hosts before any request, in any written form", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = async () => {
+      calls++;
+      return new Response(PNG, { status: 200 });
+    };
+    for (const url of [
+      "http://127.0.0.1/x.png",
+      "http://localhost:3000/x.png",
+      "http://2130706433/x.png", // 127.0.0.1 as one number
+      "http://169.254.169.254/latest/meta-data",
+      "http://[::1]/x.png",
+      "http://[::ffff:127.0.0.1]/x.png", // the URL parser writes this as [::ffff:7f00:1]
+      "http://[::ffff:169.254.169.254]/latest/meta-data",
+      "http://[::127.0.0.1]/x.png",
+      "http://[64:ff9b::7f00:1]/x.png",
+      "http://metadata.google.internal/computeMetadata/v1/",
+      "https://printer.local/scan.png",
+    ]) {
+      const err = await normalizeMediaInput(url).catch((e: unknown) => e);
+      expect(err, url).toBeInstanceOf(RemoteFetchError);
+      expect(err, url).toBeInstanceOf(SecurityPolicyError);
+      expect(String((err as Error).message), url).toMatch(/Download the file yourself/);
+    }
+    expect(calls).toBe(0);
+  });
+
+  it("refuses a public URL that redirects to a private host", async () => {
+    const seen: string[] = [];
+    (globalThis as any).fetch = async (url: string) => {
+      seen.push(url);
+      return new Response(null, { status: 302, headers: { location: "http://10.0.0.5/secret.png" } });
+    };
+    await expect(normalizeMediaInput("https://8.8.8.8/start.png")).rejects.toBeInstanceOf(RemoteFetchError);
+    expect(seen).toEqual(["https://8.8.8.8/start.png"]);
+  });
+
+  it("still downloads a public URL, and still takes bytes, a data URL or base64 for a private file", async () => {
+    (globalThis as any).fetch = async () => new Response(PNG, { status: 200, headers: { "content-type": "image/png" } });
+    expect((await normalizeMediaInput("https://8.8.8.8/ok.png")).mimeType).toBe("image/png");
+    const viaBytes = await normalizeMediaInput(PNG);
+    expect(viaBytes.mimeType).toBe("image/png");
+    expect((await normalizeMediaInput(viaBytes.dataUrl)).base64Data).toBe(viaBytes.base64Data);
+  });
+
+  it("does not guard a browser runtime, where the request comes from the user's own machine", async () => {
+    (globalThis as any).fetch = async () => new Response(PNG, { status: 200, headers: { "content-type": "image/png" } });
+    (globalThis as any).window = { document: {} };
+    try {
+      expect((await normalizeMediaInput("http://localhost:3000/x.png")).mimeType).toBe("image/png");
+    } finally {
+      delete (globalThis as any).window;
+    }
+    await expect(normalizeMediaInput("http://localhost:3000/x.png")).rejects.toBeInstanceOf(RemoteFetchError);
   });
 });
