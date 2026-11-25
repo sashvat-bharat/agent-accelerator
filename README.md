@@ -93,7 +93,7 @@ The full documentation is online at [agent-accelerator-sdk.vercel.app](https://a
 | Pick a model or provider | [Models and providers](docs/guides/models-and-providers.md) |
 | Let the model call my functions | [Tools](docs/guides/tools.md) |
 | Stream the answer or steer a busy agent | [Streaming and steering](docs/guides/streaming-and-steering.md) |
-| Hand work to helper agents | [Workers](docs/guides/workers.md) |
+| Hand work to helper agents | [Sub-agents](docs/guides/workers.md) |
 | Save and resume chats, survive a crash | [Sessions](docs/guides/sessions.md) |
 | Set limits and see what a run cost | [Limits and retries](docs/guides/limits-and-retries.md), [Usage and cost](docs/guides/usage-and-cost.md) |
 | Keep keys, files and URLs safe | [Security](docs/guides/security.md) |

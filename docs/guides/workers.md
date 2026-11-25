@@ -1,10 +1,47 @@
-# Workers
+# Sub-agents
 
 > Hand work to helper agents. Define them yourself, or let the model start them as it goes.
 
+A sub-agent is a helper agent that a parent hands a task to. While one runs, the SDK calls it a worker: that is the word in `agent.workers` and `WorkerReply`. The tool the model sees is named `subagents`.
+
 ## Fixed workers
 
-Define specialists once. Each one becomes a tool on the parent that takes `{ task: string }`.
+Define specialists once. Each one becomes a tool on the parent that takes `{ task: string }`. Write each as data (`name`, `description`, `instructions`), and the SDK builds the agent.
+
+```ts
+import { Agent, setModels } from "agent-accelerator";
+
+setModels({
+  default: { model: "google/gemini-3.5-flash", sub_agent_model: "google/gemini-3.5-flash-lite" },
+  providers: { google: { models: ["gemini-3.5-flash", "gemini-3.5-flash-lite"] } },
+});
+
+const lead = new Agent({
+  instructions: "Delegate research, have the critic review it, then answer.",
+  subagents: [
+    { name: "researcher", description: "Finds sourced facts.", instructions: "Return findings with sources." },
+    {
+      name: "critic",
+      description: "Finds weaknesses in a draft.",
+      instructions: "List the top 3 problems.",
+      model: "google/gemini-3.5-flash", // optional: a stronger model for this one
+    },
+  ],
+});
+
+const res = await lead.run("Should we adopt SQLite for a small SaaS?");
+console.log(res.text);
+console.log(res.subagents.map((s) => `${s.name}: ${s.usage.totalTokens} tokens`));
+```
+
+- **The model.** A sub-agent that names no `model` runs on the worker model: `dynamicSubagents.model`, else the saved or default `sub_agent_model` (see [Allowed models](allowed-models.md)). It never falls back to the main model, so a cheap helper model is set once. With no worker model at all, the constructor throws a `ConfigError` that names the entry.
+- **The keys.** `name`, `description` and `instructions` are required. `model` and `tools` are optional. Any other key throws a `ConfigError`, so a setting is never silently dropped. For anything else, build the `Agent` yourself (below).
+- **What it takes from the parent.** Run limits, retry policy, hooks, `fetch`, `env`, `fileAccess`, `captureRaw` and the prompt overrides, so a helper is never less restricted than its parent. The parent's `apiKey` goes only to a sub-agent on the same provider.
+- **Calls.** Each call runs on its own copy of the sub-agent (`fork`), so parallel calls to one sub-agent really run in parallel.
+
+### Build the Agent yourself
+
+When a sub-agent needs `thinking`, a `cache`, structured `output` or its own session settings, pass a plain `Agent`. There is no separate class. A plain `Agent` that names no model runs on the main model.
 
 ```ts
 import { Agent } from "agent-accelerator";
@@ -21,23 +58,18 @@ const critic = new Agent({
   name: "critic",
   description: "Finds weaknesses in a draft.",
   model,
+  thinking: "high",
   instructions: "List the top 3 problems.",
 });
 
 const lead = new Agent({
   model,
   instructions: "Delegate research, have the critic review it, then answer.",
-  subagents: [researcher, critic], // or { name, description, agent }
+  subagents: [researcher, critic], // or { name, description, agent }, or data as above
 });
-
-const res = await lead.run("Should we adopt SQLite for a small SaaS?");
-console.log(res.text);
-console.log(res.subagents.map((s) => `${s.name}: ${s.usage.totalTokens} tokens`));
 ```
 
-Each call runs on its own copy of the worker (`fork`), so parallel calls to one worker really run in parallel.
-
-A fixed worker is a plain `Agent`: there is no separate class. To choose the tool's name or description yourself, use `agentToTool`. `buildAgentTools([...])` does the same for a list.
+To choose the tool's name or description yourself, use `agentToTool`. `buildAgentTools([...])` does the same for a list.
 
 ```ts
 import { Agent, agentToTool } from "agent-accelerator";

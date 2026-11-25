@@ -2,6 +2,14 @@
 
 > What was removed or renamed, and what to use now. Everything that still works but has a better name is marked.
 
+## Upgrading to 0.9.2
+
+0.9.2 adds one thing and changes nothing that worked. No change is needed.
+
+**New**
+
+- A fixed sub-agent can be written as data in `subagents: [...]`: `{ name, description, instructions, model?, tools? }` (the type is `SubAgentSpec`). The SDK builds the `Agent`. Without `model` it runs on the worker model (`dynamicSubagents.model`, else `sub_agent_model` from `setModels` or `setSubAgentModel`), as the removed `SubAgent` class did. A plain `new Agent(...)` without `model` still uses the main model. See [Sub-agents](guides/workers.md#fixed-workers).
+
 ## Upgrading to 0.9.1
 
 0.9.1 closes a gap in how the SDK downloads media links. If you pass public links, bytes, data URLs, base64 or local paths, you need no change.
@@ -43,7 +51,7 @@
 | `needsApproval` | Ask inside `execute` and refuse with `ctx.stop(reason)`, or use the `beforeTool` hook. | earlier |
 | `dynamicSubagents.timeout`, `modelMaySetTimeout` | `dynamicSubagents.workerTimeoutMs` and the action's own `timeoutMs`. | 0.5.5 |
 | Event `scheduled_action.killed` | `scheduled_action.deleted` | 0.5.5 |
-| The `SubAgent` class, `SubAgentConfig`, `agentFromEnv()`, `Agent.fromEnv()`, `.asTool()` and `.toTool()` | Removed. A fixed worker is a plain `new Agent({ name, model, instructions })` in `subagents: [...]`, or `agentToTool({ name, agent })`. For `agentFromEnv()` and `Agent.fromEnv()`, leave out `model`: an `Agent` without one uses the saved choice, then the list default (see [Allowed models](guides/allowed-models.md)). `fromEnv` also fell back to the saved worker model when nothing else was set, so name the model in that case. Name the model of every worker: the old class used the saved worker model when you named none, but a plain `Agent` looks for the saved main model first. See [Workers](guides/workers.md#fixed-workers). | 0.9.0 |
+| The `SubAgent` class, `SubAgentConfig`, `agentFromEnv()`, `Agent.fromEnv()`, `.asTool()` and `.toTool()` | Removed. A fixed worker is a plain `new Agent({ name, model, instructions })` in `subagents: [...]`, or `agentToTool({ name, agent })`. For `agentFromEnv()` and `Agent.fromEnv()`, leave out `model`: an `Agent` without one uses the saved choice, then the list default (see [Allowed models](guides/allowed-models.md)). `fromEnv` also fell back to the saved worker model when nothing else was set, so name the model in that case. Name the model of every worker: the old class used the saved worker model when you named none, but a plain `Agent` looks for the saved main model first. From 0.9.2 an entry written as data, `{ name, description, instructions }`, uses the saved worker model when it names none. See [Sub-agents](guides/workers.md#fixed-workers). | 0.9.0 |
 | `hooks` (a placeholder that only warned) | A working option: `beforeTool`, `afterTool`, `beforeRequest`, `onYield`. An unknown hook name throws a `ConfigError`. | 0.8.9 |
 
 ## Names that still work

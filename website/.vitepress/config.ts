@@ -74,7 +74,7 @@ export default defineConfig({
           { text: "Reasoning and caching", link: "/guides/reasoning-and-caching" },
           { text: "Tools", link: "/guides/tools" },
           { text: "Streaming and steering", link: "/guides/streaming-and-steering" },
-          { text: "Workers", link: "/guides/workers" },
+          { text: "Sub-agents", link: "/guides/workers" },
           { text: "Scheduled actions", link: "/guides/scheduled-actions" },
         ],
       },

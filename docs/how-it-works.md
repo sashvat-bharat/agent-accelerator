@@ -32,7 +32,7 @@ An agent can hand work to other agents:
 - **Dynamic workers** are started by the model while it runs, with one built-in tool.
 - **Scheduled actions** are workers that run later and save their answer to a file.
 
-You decide the worker model, tools and limits. The model never chooses them. See [Workers](guides/workers.md) and [Scheduled actions](guides/scheduled-actions.md).
+You decide the worker model, tools and limits. The model never chooses them. See [Sub-agents](guides/workers.md) and [Scheduled actions](guides/scheduled-actions.md).
 
 ## The home folder
 

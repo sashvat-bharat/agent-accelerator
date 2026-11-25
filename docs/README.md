@@ -42,7 +42,7 @@ console.log(res.usage);
 | Set reasoning, prompt caching or a service tier | [Reasoning and caching](guides/reasoning-and-caching.md) |
 | Let the model call my functions, ask for approval, add hooks | [Tools](guides/tools.md) |
 | Stream the answer, steer a busy agent, make retries safe | [Streaming and steering](guides/streaming-and-steering.md) |
-| Hand work to helper agents | [Workers](guides/workers.md) |
+| Hand work to helper agents | [Sub-agents](guides/workers.md) |
 | Run work later, once or on repeat | [Scheduled actions](guides/scheduled-actions.md) |
 | Save and resume chats, survive a crash | [Sessions](guides/sessions.md) |
 | Send images, audio, video and PDFs | [Media input](guides/media-input.md) |

@@ -143,8 +143,8 @@ export interface AgentConfig {
    * (legacy `0` alias, normalized to `Infinity`; prefer omitting).
    */
   maxTurns?: number;
-  /** Fixed worker agents exposed as delegation tools. */
-  subagents?: (Agent | { name: string; description: string; agent: Agent })[];
+  /** Fixed sub-agents exposed as delegation tools: an `Agent`, `{ name, description, agent }`, or a `SubAgentSpec` written as data (the SDK builds the `Agent`). */
+  subagents?: (Agent | { name: string; description: string; agent: Agent } | SubAgentSpec)[];
   /** Clears conversation state before and after every run. */
   stateless?: boolean;
   /**
@@ -347,6 +347,20 @@ export interface MidSessionConfig {
   maxQueued?: number;
   /** Max steer prompts buffered for the active run. Extra `steer()` calls throw. Defaults to 20. */
   maxSteers?: number;
+}
+
+/** A fixed sub-agent written as data in `subagents: [...]`: the SDK builds a plain `Agent` from it. */
+export interface SubAgentSpec {
+  /** The name of the delegation tool the model calls (cleaned like any tool name). */
+  name: string;
+  /** What the model reads to decide when to call this sub-agent. */
+  description: string;
+  /** The sub-agent's system prompt. */
+  instructions: string;
+  /** Its model. Omitted: the worker model (`dynamicSubagents.model`, else the saved or default `sub_agent_model`), never the main model. */
+  model?: AgentConfig["model"];
+  /** Its own tools. Omitted: none. */
+  tools?: AgentConfig["tools"];
 }
 
 /** Developer-configured policy for LLM-spawned dynamic sub-agents. */
