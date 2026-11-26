@@ -184,22 +184,43 @@ describe("the architecture notes", () => {
   });
 });
 
+// Every .ts file under a folder, recursively; in: the reference checks, out: file paths.
+function sourceFiles(dir: string): string[] {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const full = path.join(dir, e.name);
+    return e.isDirectory() ? sourceFiles(full) : e.name.endsWith(".ts") ? [full] : [];
+  });
+}
+
 describe("the reference", () => {
+  const reference = text(path.join(root, "docs", "reference.md"));
+
   it("lists every telemetry code that the source can emit", () => {
     const codes = new Set<string>();
-    const walk = (dir: string): void => {
-      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, e.name);
-        if (e.isDirectory()) walk(full);
-        else if (e.name.endsWith(".ts")) {
-          const src = text(full);
-          for (const m of src.matchAll(/emitWarning\(\s*"([a-z_]+(?:\.[a-z_]+)*)"/g)) codes.add(m[1]!);
-          for (const m of src.matchAll(/code:\s*"([a-z_]+\.[a-z_.]+)"/g)) codes.add(m[1]!);
-        }
-      }
-    };
-    walk(path.join(root, "src"));
-    const reference = text(path.join(root, "docs", "reference.md"));
+    for (const file of sourceFiles(path.join(root, "src"))) {
+      const src = text(file);
+      for (const m of src.matchAll(/emitWarning\(\s*"([a-z_]+(?:\.[a-z_]+)*)"/g)) codes.add(m[1]!);
+      for (const m of src.matchAll(/code:\s*"([a-z_]+\.[a-z_.]+)"/g)) codes.add(m[1]!);
+    }
     expect([...codes].filter((c) => !reference.includes(`\`${c}\``)).sort()).toEqual([]);
+  });
+
+  it("lists exactly the stream events that the source sends", () => {
+    const types = text(path.join(root, "src", "types", "response.ts"));
+    const union = types.slice(types.indexOf("export type StreamEventType ="));
+    const declared = [...union.slice(0, union.indexOf(";")).matchAll(/\|\s*"([a-z_]+)"/g)].map((m) => m[1]!);
+    const sent = new Set<string>();
+    for (const file of sourceFiles(path.join(root, "src")))
+      for (const m of text(file).matchAll(/type:\s*"([a-z_]+)"/g)) sent.add(m[1]!);
+    const section = reference.slice(reference.indexOf("## Stream events"), reference.indexOf("## Tool definition"));
+    const table = section.slice(section.indexOf("|---")); // the rows below the header
+    const documented = new Set(
+      table
+        .split("\n")
+        .filter((line) => line.startsWith("| `"))
+        .flatMap((line) => [...(line.split("|")[1] ?? "").matchAll(/`([a-z_]+)`/g)].map((m) => m[1]!))
+    );
+    expect([...documented].filter((t) => !sent.has(t)).sort()).toEqual([]); // documented but never sent
+    expect(declared.filter((t) => sent.has(t) && !documented.has(t)).sort()).toEqual([]); // sent but not documented
   });
 });

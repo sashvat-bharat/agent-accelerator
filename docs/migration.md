@@ -2,6 +2,14 @@
 
 > What was removed or renamed, and what to use now. Everything that still works but has a better name is marked.
 
+## Upgrading to 0.9.3
+
+0.9.3 changes no API and no behavior. No change is needed.
+
+- The package no longer ships the folder `examples/prompts/` (three example prompt files that only the examples read). Copy them from 0.9.2 if you used them.
+- A 401 from Google now names the `base_urls.google` setting. It used to name `GOOGLE_BASE_URL`, an environment variable removed in 0.7.0.
+- The [reference](reference.md#stream-events) now lists only the stream events the SDK sends. `text_start`, `text_end`, `thinking_start`, `thinking_end`, `tool_call_start`, `tool_call_delta` and the `schemaVersion` field stay in the types as reserved names. They were never sent.
+
 ## Upgrading to 0.9.2
 
 0.9.2 adds one thing and changes nothing that worked. No change is needed.

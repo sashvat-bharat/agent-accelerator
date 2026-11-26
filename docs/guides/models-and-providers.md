@@ -84,7 +84,7 @@ The SDK handles these differences for you:
 An option a provider does not support is dropped, and a warning goes to the telemetry bus. It is never sent.
 
 - **Google conversations** are kept on Google's side for 23 hours (`googleTier: "free"`, the default) or 54 days (`"paid"`). After that the SDK sends the full history again.
-- **Long answers on Gemini 4.** A `maxOutputTokens` above 65,536 runs as a background job of up to 24 hours. `run()` waits for it, `stream()` reconnects after a dropped connection, and cancelling stops it on Google's side.
+- **Long answers on Gemini 4.** A `maxOutputTokens` above 65,536 runs as a background job, which Google lets run for up to 24 hours ([Google, Long decode](https://aistudio.google.com/docs/long-decode)). `run()` waits for it, `stream()` reconnects after a dropped connection, and cancelling stops it on Google's side. Any other Google model above 65,536 fails before the request.
 - **OpenRouter attribution** headers are opt-in: `setAttribution({ referer, title })`.
 - **Switching providers** in the middle of a conversation works. The history does not depend on the provider.
 

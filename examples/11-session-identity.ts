@@ -1,224 +1,46 @@
-/**
- * Agent Accelerator - Session Identity and Lineage (real run)
- *
- * Real scenario for the reported issue: once a few agents run at once,
- * identity gets harder than orchestration. Every worker gets a
- * system-generated 32-char TrackingID, displayed as
- * SUBAGENT-NAME-{TrackingID}, and every step it takes is logged into the
- * same session file — so agent.track(TrackingID) replays that worker live.
- *
- * What this runs for real:
- *  1. One main Agent with dynamic sub-agents spawns 2 workers concurrently.
- *  2. Lineage helpers run against the REAL parent session id and the REAL
- *     worker TrackingIDs returned in `res.subagents`.
- *  3. The REAL session is persisted by `persist: { dir }` (a step journal), reloaded with
- *     loadSessionDir, and resumed with sub-agent traces intact.
- *
- * Run: bun examples/11-session-identity.ts
- * Needs: a provider key (see .env.example); the models come from examples/models.json.
- */
+// Worker identity: every worker has a session id and a tracking id, agent.track(id) replays what it did,
+// and a saved session keeps those traces.
+// Run: bun run examples/11-session-identity.ts
+import * as path from "node:path";
+import { Agent, loadSessionDir, resolveHome, sessionDirFor } from "agent-accelerator";
+import { fail, MODEL, SUB_AGENT_MODEL } from "./_shared";
 
-import { Agent, sessionDirFor, loadSessionDir } from "agent-accelerator";
-import { fail, MODEL, SUB_AGENT_MODEL, formatCost } from "./_shared";
-
-// Colors: white is reserved for model answer text only. Thinking is grey,
-// everything else uses vibrant colors so streams are easy to tell apart.
-const RESET = "\x1b[0m";
-const CYAN = "\x1b[36m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const MAGENTA = "\x1b[35m";
-const GREY = "\x1b[90m";
-const BLUE = "\x1b[34m";
-
-// ---------------------------------------------------------------------------
-// Worker boxes: bordered regions, one per sub-agent, rendered whole from
-// the finished trace (final-output mode — no live streaming here).
-// ---------------------------------------------------------------------------
-const BOX_WIDTH = 64;
-const BOX_COLORS = [CYAN, GREEN, YELLOW, MAGENTA, BLUE];
-let boxColorIdx = 0;
-function nextBoxColor(): string {
-  const c = BOX_COLORS[boxColorIdx % BOX_COLORS.length]!;
-  boxColorIdx++;
-  return c;
-}
-interface WorkerBox {
-  label: string;
-  color: string;
-}
-function shortLabel(trackingId: string): string {
-  const name = trackingId.split("-").slice(0, -1).join("-") || trackingId;
-  return name.slice(0, 28);
-}
-/** Strips control chars that break terminal layout (`\r` repaints over the box border). */
-function sanitizeBoxText(text: string): string {
-  return text
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
-}
-function printBoxHeader(box: WorkerBox): void {
-  const title = ` ${box.label} `;
-  const fill = Math.max(0, BOX_WIDTH - title.length - 1);
-  process.stdout.write(box.color + "┌" + title + "─".repeat(fill) + RESET + "\n");
-}
-function flushBoxLines(box: WorkerBox, text: string, grey: boolean): void {
-  for (const rawLine of sanitizeBoxText(text).split("\n")) {
-    // Wrap (never cut): every visual row keeps its border.
-    let line = rawLine;
-    if (!line) {
-      process.stdout.write(box.color + "│ " + RESET + "\n");
-      continue;
-    }
-    while (line.length > 0) {
-      const body = line.slice(0, BOX_WIDTH - 2);
-      line = line.slice(BOX_WIDTH - 2);
-      process.stdout.write(box.color + "│ " + RESET + (grey ? GREY + body + RESET : box.color + body + RESET) + "\n");
-    }
-  }
-}
-function printBoxFooter(box: WorkerBox, note: string): void {
-  const tail = ` done ${note} `;
-  const fill = Math.max(2, Math.min(16, BOX_WIDTH - tail.length - 1));
-  process.stdout.write(box.color + "└" + tail + "─".repeat(fill) + RESET + "\n");
-}
-
-// ---------------------------------------------------------------------------
-// 1. Real main agent with 2 concurrent dynamic workers
-// ---------------------------------------------------------------------------
 const agent = new Agent({
   name: "Identity Lead",
-  instructions:
-    "You coordinate parallel research. Always delegate with the subagents tool, then synthesize. Name workers with short labels (e.g. research-analyst).",
+  instructions: "You coordinate parallel research. Always delegate with the subagents tool, then synthesize.",
   model: MODEL,
-  dynamicSubagents: {
-    enabled: true,
-    model: SUB_AGENT_MODEL,
-    maxSpawn: 2,
-    thinkingLevel: "medium",
-  },
-  thinking: "medium",
-  // Durable persistence: the session file is rewritten after every step,
-  // so a crash loses at most the in-flight step.
-  persist: { dir: "sessions" },
-  captureRaw: "redacted",
+  dynamicSubagents: { model: SUB_AGENT_MODEL, maxSpawn: 2 },
+  persist: {}, // every step is saved under .agent-accel/sessions/<id>/, so a crash loses at most the step in flight
 });
-
-console.log(CYAN + "parent session: " + agent.sessionId + RESET);
-console.log(GREY + "(working — output prints when the final response lands)" + RESET + "\n");
+console.log("parent session:", agent.sessionId);
 
 const res = await agent
   .run(
-    "Start 2 workers with two subagents spawn calls in the same turn: one researches battery pricing in one sentence, the other researches AI power demand in one sentence. Then merge both into a 3-line report."
+    "Start 2 workers in the same turn: one researches battery pricing in one sentence, the other AI power demand " +
+      "in one sentence. Then merge both into a 3-line report."
   )
   .catch(fail);
+console.log(res.text);
 
-if (res.thinking) {
-  console.log(GREY + "<think>" + RESET);
-  for (const line of res.thinking.split("\n")) console.log(GREY + line + RESET);
-  console.log(GREY + "</think>" + RESET + "\n");
-}
-process.stdout.write(res.text + "\n");
-
-// Worker boxes, rendered whole from finished traces (no live streaming here;
-// realtime consumers use `subagent_delta` events or track() subscriptions).
+console.log("\n--- workers ---");
 for (const s of res.subagents) {
-  const id = s.trackingId as string | undefined;
-  const trace = id ? agent.track(id) : undefined;
-  const box: WorkerBox = { label: shortLabel(id ?? s.name), color: nextBoxColor() };
-  printBoxHeader(box);
-  const thinking =
-    trace?.steps.map((st) => st.thinking).find((t) => t) ??
-    (trace as { thinking?: string } | undefined)?.thinking ??
-    s.thinking;
-  if (thinking) {
-    for (const line of String(thinking).split("\n")) flushBoxLines(box, "~ " + line, true);
-  }
-  const answer = trace?.text ?? s.text;
-  if (answer) flushBoxLines(box, answer, false);
-  printBoxFooter(box, `${s.usage.totalTokens}tok`);
-}
-
-console.log(MAGENTA + "\n\n--- workers (session id + TrackingID) ---" + RESET);
-for (const s of res.subagents) {
-  const ok = !s.isError ? GREEN + "ok" + RESET : YELLOW + "ERROR" + RESET;
+  console.log(`${s.name}: ${s.model}, ${s.usage.totalTokens} tokens`);
   console.log(
-    MAGENTA +
-      "- " +
-      s.name +
-      RESET +
-      " " +
-      ok +
-      " model=" +
-      CYAN +
-      s.model +
-      RESET +
-      " turns=" +
-      s.turns +
-      " tokens=" +
-      s.usage.totalTokens +
-      " cost=" +
-      GREEN +
-      formatCost(s.usage?.cost?.totalCost ?? 0) +
-      RESET
+    `  tracking id ${s.trackingId}, session ${s.sessionId}, child of this parent: ${s.parentSessionId === agent.sessionId}`
   );
-  console.log("  session: " + (s.sessionId ?? "(none)") + " TrackingID: " + (s.trackingId ?? "(none)"));
+  const trace = s.trackingId ? agent.track(s.trackingId) : undefined;
+  console.log(`  track(): ${trace?.status}, steps: ${trace?.steps.map((step) => step.type).join(", ")}`);
 }
 
-// ---------------------------------------------------------------------------
-// 2. Lineage binding against the REAL ids
-// ---------------------------------------------------------------------------
-console.log(CYAN + "\n--- lineage (real worker sessions) ---" + RESET);
-for (const s of res.subagents) {
-  const realChild = s.sessionId ?? "(none)";
-  const descendant = realChild !== "(none)" && s.parentSessionId === agent.sessionId;
-  console.log(CYAN + "- " + s.name + RESET);
-  console.log("  session:    " + realChild + " (" + realChild.length + " chars)");
-  console.log("  TrackingID: " + (s.trackingId ?? "(none)"));
-  console.log("  descendant of this parent: " + (descendant ? GREEN + "true" + RESET : YELLOW + "false" + RESET));
-}
-console.log(
-  MAGENTA +
-    "parent session total usage: " +
-    res.usage.totalTokens +
-    " tokens, cost " +
-    formatCost(res.usage?.cost?.totalCost ?? 0) +
-    RESET
-);
-
-// ---------------------------------------------------------------------------
-// 2b. Realtime tracking: agent.track(TrackingID) replays everything one worker did
-// ---------------------------------------------------------------------------
-console.log(CYAN + "\n--- track() (per-worker traces) ---" + RESET);
-console.log("tracked workers: " + agent.listTrackedSubAgents().join(", "));
-for (const s of res.subagents) {
-  const id = s.trackingId as string | undefined;
-  if (!id) continue;
-  const trace = agent.track(id);
-  console.log(GREEN + "- " + id + RESET + " status=" + trace?.status + " steps=" + (trace?.steps.length ?? 0));
-  for (const step of trace?.steps.slice(0, 6) ?? []) {
-    console.log("    turn " + step.turn + " " + step.type + (step.name ? " " + step.name : ""));
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 3. Real persistence: save, reload, resume with sub-agent traces intact
-// ---------------------------------------------------------------------------
-// `persist: { dir }` already wrote every step (snapshot + journal.ndjson); just make sure the last one landed.
+// Save, reload, resume: the worker traces come back with the session.
 agent.persistNow();
-await new Promise((resolve) => setTimeout(resolve, 0));
-const dir = sessionDirFor("sessions", agent.sessionId);
-console.log(GREEN + "\nsaved: " + dir + RESET);
-
+const dir = sessionDirFor(path.join(resolveHome(), "sessions"), agent.sessionId);
 const loaded = loadSessionDir(dir);
-if (!loaded) fail(new Error("Could not reload session dir " + dir));
-console.log(CYAN + "reloaded session: " + loaded!.session.sessionId + RESET);
-console.log(CYAN + "sub-agent traces: " + Object.keys(loaded!.session.subagents ?? {}).join(", ") + RESET);
+if (!loaded) fail(new Error(`Could not reload ${dir}`));
 
-const resumer = new Agent({ name: "Resumer", model: MODEL });
-resumer.importSession(loaded!.session);
-console.log(GREEN + "resumed messages: " + resumer.context.messages.length + RESET);
-console.log(GREEN + "resumed worker traces: " + resumer.listTrackedSubAgents().join(", ") + RESET);
-
-console.log(GREEN + "\nDone - real workers, real lineage, realtime track()." + RESET);
+const resumed = new Agent({ name: "Resumer", model: MODEL });
+resumed.importSession(loaded!.session);
+console.log(`\nreloaded ${dir}`);
+console.log(
+  `resumed: ${resumed.context.messages.length} messages, traces: ${resumed.listTrackedSubAgents().join(", ")}`
+);

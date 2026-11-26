@@ -1,99 +1,44 @@
-/**
- * Agent Accelerator - Which instructions produced this result?
- *
- * A scheduled action keeps its `id` when you edit its instructions. So when two results of the same action differ, the
- * id alone cannot say why. Each run file therefore records a `definition` fingerprint, taken when the run STARTS (a
- * failed run records it too), and the exact text it stands for is saved once under `<id>/definitions/<hash>.json`.
- * This script shows it with the same action id and changed instructions:
- *
- *   1. Run the action: the run file names definition A.
- *   2. Run it again, nothing changed: a second run file, the same definition, still one definition file.
- *   3. Change the instructions (same id) and run it: a new definition B; the file of A is still there.
- *   4. A run that fails still records the definition it started with.
- *   5. Compare two results: read the `definition` of each run file, then diff the two definition files.
- *
- * It also works as a smoke check: it asserts the contracts above and exits with code 1 (one line on stderr) if any
- * of them stops holding. Run 2 is the control: its hash must equal run 1's.
- *
- * Run:  bun run examples/16-definition-history.ts
- * Needs: nothing. The model is a scripted stand-in (no network, no key, no cost) that answers one line or three bullets
- * depending on the instructions it receives. Files go to ./.agent-accel/demo-definitions/ (gitignored; wiped at the
- * start): `scheduled/<id>/` holds `task.json`, one `.md` per run and `definitions/`.
- *
- * Note: this example does not import `_shared.ts`, because that file sets the model list for the live examples.
- */
-
+// Which instructions produced this result? A scheduled action keeps its id when you edit its instructions, so the id alone
+// cannot say why two results differ. Each run file records a `definition` fingerprint, taken when the run STARTS (a failed
+// run records it too), and the exact text it stands for is saved once under `<id>/definitions/<hash>.json`.
+//
+//   1. Run the action: the run file names definition A.
+//   2. Run it again, nothing changed: a second run file, the same definition, still one definition file.
+//   3. Change the instructions (same id) and run it: a new definition B; the file of A is still there.
+//   4. A run that fails still records the definition it started with.
+//   5. Compare two results: read the `definition` of each run file, then diff the two definition files.
+//
+// It also works as a smoke check: it asserts these contracts and exits with code 1 if one stops holding.
+//
+// Run: bun run examples/16-definition-history.ts
+// Offline: the model is a scripted stand-in (no network, no key, no cost) that answers one line or three bullets depending on
+// the instructions it receives. Files go to .agent-accel/demo-definitions/ (gitignored, wiped at the start).
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Agent, telemetryBus, resolveHome } from "agent-accelerator";
-
-const C = "\x1b[36m";
-const G = "\x1b[32m";
-const Y = "\x1b[33m";
-const DIM = "\x1b[90m";
-const R = "\x1b[0m";
-const head = (t: string) => console.log(`\n${C}━━━ ${t} ━━━${R}`);
+import { Agent, resolveHome } from "agent-accelerator";
+import { check, nextDelivery } from "./_helpers";
 
 const HOME = path.join(resolveHome(), "demo-definitions");
-const ID = "daily-ai-brief";
-
-// One-line failure report, like `fail` in _shared.ts (which this example does not import).
-const fail = (err: unknown): never => {
-  console.error(`\n\u2716 ${(err as { message?: string } | undefined)?.message ?? err}\n`);
-  process.exit(1);
-};
+const HASH = /^[0-9a-f]{12}$/;
 
 // A stand-in for the model: it reads the instructions the worker was given and answers in the style they ask for.
 const scriptedFetch = (async (_url: string, init: { body: string }) => {
-  const request = init.body;
-  if (request.includes("FAIL-ON-PURPOSE")) {
+  if (init.body.includes("FAIL-ON-PURPOSE")) {
     return new Response(JSON.stringify({ error: { message: "the provider is down (scripted)" } }), { status: 400 });
   }
-  const bullets = request.includes("three bullets");
-  const text = bullets
+  const text = init.body.includes("three bullets")
     ? "- Open-weight models close the gap\n- Agent frameworks stay small\n- Prompt caching cuts long-session costs"
     : "Open-weight models close the gap on frontier benchmarks.";
-  return new Response(
-    JSON.stringify({
-      id: "demo",
-      choices: [{ message: { role: "assistant", content: text }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 40, completion_tokens: 12, total_tokens: 52 },
-    }),
-    { status: 200 }
-  );
+  const message = { role: "assistant", content: text };
+  const usage = { prompt_tokens: 40, completion_tokens: 12, total_tokens: 52 };
+  return new Response(JSON.stringify({ id: "demo", choices: [{ message, finish_reason: "stop" }], usage }), {
+    status: 200,
+  });
 }) as unknown as typeof fetch;
 
-// Throws when `ok` is false, so a regression ends the demo with exit code 1 (via `fail`); in: each contract below, out: a printed check mark.
-function check(ok: boolean, what: string): void {
-  if (!ok) throw new Error(`contract broken: ${what}`);
-  console.log(`  ${G}✔${R} ${DIM}${what}${R}`);
-}
-
-const DEFINITION_HASH = /^[0-9a-f]{12}$/;
-
-type Delivery = { id: string; file: string; status: string };
-
-// Resolves with the next `scheduled_action.delivered` event of `id` (rejects after `ms`); in: a run-now, out: where the run file is.
-function nextDelivery(id: string, ms = 30_000): Promise<Delivery> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      off();
-      reject(new Error(`timed out waiting for the delivery of ${id}`));
-    }, ms);
-    const off = telemetryBus.onEvent((e) => {
-      const data = e.data as Delivery | undefined;
-      if (e.code !== "scheduled_action.delivered" || data?.id !== id) return;
-      clearTimeout(timer);
-      off();
-      resolve(data);
-    });
-  });
-}
-
-// A run file: a header between two "---" lines, then the result (the same few lines as in docs/scheduled-action-files.md).
+// A run file is a header between two "---" lines, then the result (see docs/scheduled-action-files.md).
 function readRun(file: string): { header: Record<string, string>; body: string } {
-  const text = fs.readFileSync(file, "utf8");
-  const m = /^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/.exec(text);
+  const m = /^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/.exec(fs.readFileSync(file, "utf8"));
   if (!m) throw new Error(`${file} is not a run file`);
   const header = Object.fromEntries(
     m[1]!.split("\n").map((l) => [l.slice(0, l.indexOf(": ")), l.slice(l.indexOf(": ") + 2)])
@@ -101,94 +46,82 @@ function readRun(file: string): { header: Record<string, string>; body: string }
   return { header, body: m[2]!.trimEnd() };
 }
 
-// The folder of definition files of the action; the SDK appended random characters to its id.
-let actionId = "";
-const definitionsDir = () => path.join(HOME, "scheduled", actionId, "definitions");
+fs.rmSync(HOME, { recursive: true, force: true }); // the demo owns this folder
+
+const agent = new Agent({
+  name: "Planner",
+  model: "demo/planner",
+  apiKey: "demo",
+  baseUrl: "http://localhost/v1",
+  fetch: scriptedFetch,
+  home: HOME,
+  dynamicSubagents: { enabled: false, model: "demo/worker", allowScheduledActions: true },
+});
+
+// The action delivers tomorrow, so only our `run` calls start it.
+const action = agent.scheduled.create({
+  instructions: "You write a one-line AI news brief.",
+  task: "Write today's brief.",
+  scheduled_action: {
+    name: "Daily AI Brief",
+    id: "daily-ai-brief",
+    timeToDeliver: "01:09:00",
+    meridiem: "AM",
+    retries: 0,
+  },
+});
+const definitionsDir = path.join(HOME, "scheduled", action.id, "definitions");
+const definitionFiles = () => fs.readdirSync(definitionsDir).sort();
 const readDefinition = (hash: string): Record<string, unknown> =>
-  JSON.parse(fs.readFileSync(path.join(definitionsDir(), `${hash}.json`), "utf8"));
+  JSON.parse(fs.readFileSync(path.join(definitionsDir, `${hash}.json`), "utf8"));
 
-async function main(): Promise<void> {
-  fs.rmSync(HOME, { recursive: true, force: true }); // the demo owns this folder
-
-  const agent = new Agent({
-    name: "Planner",
-    model: "demo/planner",
-    apiKey: "demo",
-    baseUrl: "http://localhost/v1",
-    fetch: scriptedFetch,
-    home: HOME,
-    dynamicSubagents: { enabled: false, model: "demo/worker", allowScheduledActions: true },
-  });
-
-  // The action: delivers tomorrow, so only our `run` calls start it.
-  const action = agent.scheduled.create({
-    instructions: "You write a one-line AI news brief.",
-    task: "Write today's brief.",
-    scheduled_action: { name: "Daily AI Brief", id: ID, timeToDeliver: "01:09:00", meridiem: "AM", retries: 0 },
-  });
-  actionId = action.id;
-  console.log(`${G}Created ${action.id}${R} ${DIM}(delivers tomorrow; we start it by hand with run)${R}`);
-
-  // Runs the action now, waits for its run file, prints what the header says; out: the run file's header and body.
-  const runOnce = async (label: string) => {
-    const delivery = nextDelivery(action.id);
-    agent.scheduled.run(action.id);
-    const { file, status } = await delivery;
-    const run = readRun(file);
-    console.log(
-      `${Y}${label}${R} status=${status}  definition=${run.header["definition"]}  ${DIM}${path.basename(file)}${R}`
-    );
-    console.log(`${DIM}${run.body.replace(/^/gm, "    │ ")}${R}`);
-    return run;
-  };
-  const definitionFiles = () => fs.readdirSync(definitionsDir()).sort();
-
-  head("1. First run");
-  const a = await runOnce("run 1");
-  console.log(`  definition files: ${definitionFiles().join(", ")}`);
-  check(DEFINITION_HASH.test(a.header["definition"] ?? ""), "run 1 names a definition");
-  check(definitionFiles().length === 1, "one definition file after run 1");
-
-  head("2. Same action, nothing changed");
-  const again = await runOnce("run 2");
-  console.log(`  definition files: ${definitionFiles().join(", ")}`);
-  check(
-    again.header["definition"] === a.header["definition"],
-    "run 2 (nothing changed) has the same definition as run 1"
+// Runs the action now, waits for its run file and prints the definition its header names.
+async function runOnce(label: string) {
+  const delivery = nextDelivery(action.id);
+  agent.scheduled.run(action.id);
+  const run = readRun((await delivery).file);
+  console.log(
+    `${label}: status=${run.header["status"]}, definition=${run.header["definition"]}, files=${definitionFiles().length}`
   );
-  check(definitionFiles().length === 1, "still one definition file after run 2");
-
-  head("3. Change the instructions (the id stays the same)");
-  agent.scheduled.update(action.id, { instructions: "You write a brief in exactly three bullets." });
-  const b = await runOnce("run 3");
-  console.log(`  definition files: ${definitionFiles().join(", ")}  (the old one is kept)`);
-  check(b.header["definition"] !== a.header["definition"], "changed instructions give run 3 a new definition");
-  check(definitionFiles().length === 2, "two definition files, the first one kept");
-  check(b.body !== a.body, "the two runs produced different results");
-
-  head("4. A failing run still records its definition");
-  agent.scheduled.update(action.id, { task: "Write today's brief. FAIL-ON-PURPOSE" });
-  const failed = await runOnce("run 4");
-  console.log(`  ${DIM}the run started with a third definition: ${failed.header["definition"]}${R}`);
-  check(failed.header["status"] === "failed", "run 4 failed");
-  check(DEFINITION_HASH.test(failed.header["definition"] ?? ""), "the failed run still names its definition");
-  check(definitionFiles().includes(`${failed.header["definition"]}.json`), "and its definition file exists");
-
-  head("5. Why do run 1 and run 3 differ?");
-  const hashA = a.header["definition"]!;
-  const hashB = b.header["definition"]!;
-  console.log(`  run 1 used ${hashA}, run 3 used ${hashB}. Comparing the two definition files:`);
-  const defA = readDefinition(hashA);
-  const defB = readDefinition(hashB);
-  for (const key of Object.keys({ ...defA, ...defB })) {
-    if (key === "hash" || JSON.stringify(defA[key]) === JSON.stringify(defB[key])) continue;
-    console.log(`  ${key}:`);
-    console.log(`    ${DIM}- ${JSON.stringify(defA[key])}${R}`);
-    console.log(`    ${G}+ ${JSON.stringify(defB[key])}${R}`);
-  }
-
-  console.log(`\n${G}All contracts hold.${R}`);
-  console.log(`${DIM}Look at the files in ${path.join(HOME, "scheduled", actionId)} (wiped at the next start).${R}`);
+  console.log(run.body.replace(/^/gm, "    | "));
+  return run;
 }
 
-main().catch(fail);
+console.log("1. First run");
+const a = await runOnce("run 1");
+check(HASH.test(a.header["definition"] ?? ""), "run 1 names a definition");
+check(definitionFiles().length === 1, "one definition file after run 1");
+
+console.log("\n2. Same action, nothing changed");
+const again = await runOnce("run 2");
+check(
+  again.header["definition"] === a.header["definition"],
+  "run 2 (nothing changed) has the same definition as run 1"
+);
+check(definitionFiles().length === 1, "still one definition file after run 2");
+
+console.log("\n3. Change the instructions (the id stays the same)");
+agent.scheduled.update(action.id, { instructions: "You write a brief in exactly three bullets." });
+const b = await runOnce("run 3");
+check(b.header["definition"] !== a.header["definition"], "changed instructions give run 3 a new definition");
+check(definitionFiles().length === 2, "two definition files, the first one kept");
+check(b.body !== a.body, "the two runs produced different results");
+
+console.log("\n4. A failing run still records its definition");
+agent.scheduled.update(action.id, { task: "Write today's brief. FAIL-ON-PURPOSE" });
+const failed = await runOnce("run 4");
+check(failed.header["status"] === "failed", "run 4 failed");
+check(HASH.test(failed.header["definition"] ?? ""), "the failed run still names its definition");
+check(definitionFiles().includes(`${failed.header["definition"]}.json`), "and its definition file exists");
+
+console.log("\n5. Why do run 1 and run 3 differ? Diff the two definition files");
+const defA = readDefinition(a.header["definition"]!);
+const defB = readDefinition(b.header["definition"]!);
+for (const key of Object.keys({ ...defA, ...defB })) {
+  if (key === "hash" || JSON.stringify(defA[key]) === JSON.stringify(defB[key])) continue;
+  console.log(`  ${key}:\n    - ${JSON.stringify(defA[key])}\n    + ${JSON.stringify(defB[key])}`);
+}
+
+console.log(
+  `\nAll contracts hold. Look at the files in ${path.join(HOME, "scheduled", action.id)} (wiped at the next start).`
+);

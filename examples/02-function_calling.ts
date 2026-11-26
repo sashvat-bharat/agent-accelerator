@@ -1,13 +1,10 @@
+// A function tool the model can call.
+// Run: bun run examples/02-function_calling.ts
 import { Agent, tool } from "agent-accelerator";
 import { z } from "zod";
 import { fail, MODEL } from "./_shared";
 
-const get_status = tool({
-  timeoutMs: 5_000,
-  maxAttempts: 2,
-  idempotent: true,
-  repeatable: true,
-  maxResultChars: 20_000,
+const getStatus = tool({
   name: "get_status",
   description: "Check user authentication status.",
   input: z.object({ username: z.string() }),
@@ -15,40 +12,12 @@ const get_status = tool({
 });
 
 const agent = new Agent({
-  name: "Auth Agent",
-  instructions: "Verify users via get_status. Be concise.",
   model: MODEL,
-  tools: { get_status },
-  thinking: "medium",
-  retry: { maxRetries: 2 },
+  instructions: "Verify users via get_status. Be concise.",
+  tools: { get_status: getStatus },
 });
 
-console.log("→ Checking alice...\n");
+const res = await agent.run("Check status for username: alice").catch(fail);
 
-const response = await agent
-  .run("Check status for username: alice", {
-    stream: true,
-    onThinkingDelta: (d) => process.stdout.write(`\x1b[90m${d}\x1b[0m`),
-    onDelta: (d) => process.stdout.write(d),
-    onEvent: (event) => {
-      if (event.type === "tool_result" && event.toolResult) {
-        process.stdout.write(`\n[tool] ${event.toolResult.name} completed in ${event.toolResult.durationMs ?? 0}ms\n`);
-      }
-    },
-  })
-  .catch(fail);
-
-console.log("\n" + "─".repeat(40));
-const toolResults = response.toolResults ?? [];
-for (const result of toolResults) {
-  console.log(
-    `Tool: ${result.name} → ${JSON.stringify(result.result)} ` +
-      `(${result.durationMs ?? 0}ms${result.isError ? ", error" : ""})`
-  );
-}
-
-const totalToolTime = toolResults.reduce((total, result) => total + (result.durationMs ?? 0), 0);
-console.log(`Total tool execution time: ${totalToolTime}ms`);
-console.log(
-  `Agent round-trip duration: ${response.durationMs}ms • Tokens: ↑${response.usage.inputTokens} ↓${response.usage.outputTokens}`
-);
+console.log(res.text);
+for (const r of res.toolResults) console.log(`tool ${r.name} -> ${JSON.stringify(r.result)} (${r.durationMs ?? 0} ms)`);

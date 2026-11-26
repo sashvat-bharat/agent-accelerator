@@ -126,21 +126,24 @@ A `SubAgentStep` is `{ turn, type, name?, text?, thinking?, thoughtSignature?, i
 
 ## Stream events
 
-Every event (a `StreamEvent`) has a `type` and a `schemaVersion`.
+Every event (a `StreamEvent`) has a `type`. The other fields depend on it.
 
 | `type` | When | Fields used |
 |---|---|---|
 | `start` | The request begins. | `raw` |
-| `text_start`, `text_delta`, `text_end` | Answer text. | `delta`, `partialText` |
-| `thinking_start`, `thinking_delta`, `thinking_end` | Reasoning. | `thinkingDelta`, `partialThinking` |
-| `tool_call_start`, `tool_call_delta`, `tool_call_complete` | The model builds a tool call. | `toolCall` |
-| `tool_start`, `tool_result`, `tool_end` | Your tool runs. | `toolCall`, `toolResult`, `toolCalls`, `toolResults` |
-| `subagent_delta`, `subagent_complete` | A worker streams or finishes. | `subagent`, `subagentTrackingId` |
+| `text_delta` | Answer text. | `delta`, `partialText` |
+| `thinking_delta` | Reasoning. | `thinkingDelta`, `partialThinking` |
+| `tool_call_complete` | The model finished a tool call. | `toolCall` |
+| `tool_start`, `tool_result`, `tool_end` | Your tools run: the batch starts, one result, the batch ends. | `toolCalls`, `toolResult`, `toolResults` |
+| `subagent_delta` | A worker streams. | `subagentTrackingId`, `delta`, `thinkingDelta`, `partialText`, `partialThinking` |
+| `subagent_complete` | A worker finished. | `subagent` |
 | `steer_injected` | A `steer()` was applied. | `injectedPrompt` |
 | `queued` | A follow-up was queued. | `queuedPrompt`, `queueLength` |
 | `usage` | Token counts. | `usage` |
 | `done` | The end. | `finishReason`, `rawFinishReason`, `responseId`, `usage` |
-| `error` | The run failed. | `error`, `partialText` |
+| `error` | The run failed. | `error` |
+
+The `StreamEventType` type also lists `text_start`, `text_end`, `thinking_start`, `thinking_end`, `tool_call_start` and `tool_call_delta`, and `StreamEvent` has a `schemaVersion` field. They are reserved: the SDK does not send them today.
 
 ## Tool definition
 
@@ -167,6 +170,8 @@ A `Message` is `{ role, content, name?, thoughtSignature?, providerSteps? }`. `r
 
 A `ProviderContext` is `{ systemPrompt?, messages, tools? }`.
 
+An agent's conversation is `agent.context.messages` (for a named session, `agent.session(id).context.messages`), and its system prompt is `agent.context.systemPrompt`. Read them, but do not edit them: change a conversation with `importSession`, `reset()` or a new run.
+
 | Part | Fields |
 |---|---|
 | `text` (`TextPart`) | `text`, `thoughtSignature?` |
@@ -188,7 +193,7 @@ A `ModelSpec` describes one model: `id`, `provider`, `name`, `contextWindow` and
 
 `ModelCapabilities` has these optional flags: `supportsThinking`, `supportsThinkingBudget`, `supportsThinkingLevel`, `supportsImplicitCaching`, `supportsExplicitCaching`, `supportsLongCacheRetention`, `supportsParallelToolCalls`, `supportsStreaming`, `supportsStructuredOutput`, `supportsReasoningToggle`, `supportsReasoningEffort` and `modalities` (a list of `"text"`, `"image"`, `"audio"`, `"video"` and `"pdf"`).
 
-Look a model up with `getModelFromCatalog`, and add your own with `registerModel`. See [Models and providers](guides/models-and-providers.md#the-model-catalog).
+Look a model up with `getModelFromCatalog`, and add your own with `registerModel`. `getModelFromCatalog` returns `undefined` for a model the catalog does not know. `resolveModel(model).modelSpec` never does: for an unknown model it is a permissive placeholder (`createGenericModelSpec`: a 128,000-token context, 8,192 output tokens, every thinking level allowed), not the model's real limits. See [Models and providers](guides/models-and-providers.md#the-model-catalog).
 
 ## Helper functions
 

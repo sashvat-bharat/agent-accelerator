@@ -283,7 +283,7 @@ export class SessionTelemetry {
   }
 
   /**
-   * One-line status bar with BOTH turn and session hit rates (03-multi_agent style).
+   * One-line status bar with BOTH turn and session hit rates (a chat status line).
    * Shows per-turn tokens + `turn-CH%`, session totals + `total-CH%`, cost, context %.
    * `thinkingLevel` defaults to the agent's level when omitted.
    */
