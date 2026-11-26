@@ -101,7 +101,9 @@ export async function generateEmbedding(opts: EmbeddingOptions): Promise<Embeddi
     throw new ValidationError("[Agent Accelerator] budget.maxCostUsd must be a number greater than 0.");
 
   const items: EmbeddingPartData[][] = [];
-  for (const parts of request.items) items.push(await Promise.all(parts.map((p) => readInputPart(p, opts.fileAccess))));
+  const download = { signal: opts.signal, fetch: opts.fetch };
+  for (const parts of request.items)
+    items.push(await Promise.all(parts.map((p) => readInputPart(p, opts.fileAccess, download))));
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const providerOptions = providerOptionsFrom(opts, timeoutMs);

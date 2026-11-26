@@ -47,6 +47,7 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import { AgentResponse } from "../types/response.ts";
 import { normalizeMediaInput, inferMimeType } from "../utils/media.ts";
+import type { MediaDownload } from "../utils/media.ts";
 import { ConfigError, ValidationError, isAbortError, abortError } from "../types/errors.ts";
 import { safeStringify } from "../utils/serialization.ts";
 import { stripSchemaForGoogle } from "../tools/schema.ts";
@@ -518,8 +519,13 @@ function uriBlock(type: MediaBlockType, value: string, mimeType?: string): Media
 }
 
 // Inlines a media part as base64 under Google's MIME name, failing before the network on an unsupported type; in: any media value (bytes, data URL, path, http URL), out: contentPartsToBlocks.
-async function inlineBlock(type: MediaBlockType, value: MediaValue, mimeType?: string): Promise<MediaBlock> {
-  const norm = await normalizeMediaInput(value, mimeType);
+async function inlineBlock(
+  type: MediaBlockType,
+  value: MediaValue,
+  mimeType: string | undefined,
+  download: MediaDownload | undefined
+): Promise<MediaBlock> {
+  const norm = await normalizeMediaInput(value, mimeType, download);
   const raw = bareMime(norm.mimeType) ?? "";
   const mime = GOOGLE_INLINE_MIME_ALIASES[raw] ?? raw;
   if (!INLINE_MIME[type].includes(mime)) {
@@ -533,7 +539,10 @@ async function inlineBlock(type: MediaBlockType, value: MediaValue, mimeType?: s
 }
 
 // Maps canonical text and media parts to Interactions content blocks (one builder for chained and full-history input); in: a message's parts, out: request `input`.
-async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionContentBlock[]> {
+async function contentPartsToBlocks(
+  parts: ContentPart[],
+  download?: MediaDownload
+): Promise<InteractionContentBlock[]> {
   const blocks: InteractionContentBlock[] = [];
   for (const part of parts) {
     if (part.type === "text") {
@@ -544,7 +553,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<InteractionCo
     const type: MediaBlockType = part.type === "file" ? "document" : part.type;
     const value = mediaValueOf(part);
     const uri = typeof value === "string" ? uriBlock(type, value, part.mimeType) : undefined;
-    const block = uri ?? (await inlineBlock(type, value, part.mimeType));
+    const block = uri ?? (await inlineBlock(type, value, part.mimeType, download));
     // Per-item detail level (image and video blocks only, api-ref `MediaResolution`).
     const resolution = part.type === "image" || part.type === "video" ? part.resolution : undefined;
     // Per-video processing mode (`static` | `agentic`, api-ref `MediaProcessing`): the model may then add `processing_call` / `processing_result` steps, which the raw-steps replay keeps like any other step.
@@ -640,8 +649,8 @@ function resultToText(result: unknown): string {
 }
 
 // Builds the documented `function_result` step (`is_error` only when the tool failed); text first, then the media the tool returned with `toolContent` (Gemini 3 accepts image and document blocks in `result`); in: a canonical tool_result part, out: chained or full-history `input`.
-async function functionResultStep(part: ToolResultPart): Promise<InteractionInputStep> {
-  const media = part.parts && part.parts.length > 0 ? await contentPartsToBlocks(part.parts) : [];
+async function functionResultStep(part: ToolResultPart, download?: MediaDownload): Promise<InteractionInputStep> {
+  const media = part.parts && part.parts.length > 0 ? await contentPartsToBlocks(part.parts, download) : [];
   return {
     type: "function_result",
     name: part.name,
@@ -660,7 +669,8 @@ async function functionResultStep(part: ToolResultPart): Promise<InteractionInpu
  * leave the chained interaction waiting on its function calls.
  */
 async function latestTurnInput(
-  context: ProviderContext
+  context: ProviderContext,
+  download?: MediaDownload
 ): Promise<string | InteractionContentBlock[] | InteractionInputStep[]> {
   const messages = context.messages;
   let lastAssistant = -1;
@@ -677,7 +687,7 @@ async function latestTurnInput(
   if (!hasToolResults && tail.length === 1) {
     const only = tail[0]!;
     if (typeof only.content === "string") return only.content;
-    const blocks = await contentPartsToBlocks(only.content);
+    const blocks = await contentPartsToBlocks(only.content, download);
     if (blocks.length === 1 && blocks[0]!.type === "text") {
       return (blocks[0] as { type: "text"; text: string }).text;
     }
@@ -690,14 +700,14 @@ async function latestTurnInput(
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push(await functionResultStep(part));
+          steps.push(await functionResultStep(part, download));
         }
       }
     } else if (m.role === "user") {
       if (typeof m.content === "string") {
         steps.push({ type: "user_input", content: [{ type: "text", text: m.content }] });
       } else {
-        const blocks = await contentPartsToBlocks(m.content);
+        const blocks = await contentPartsToBlocks(m.content, download);
         if (blocks.length > 0) steps.push({ type: "user_input", content: blocks });
       }
     }
@@ -706,7 +716,7 @@ async function latestTurnInput(
 }
 
 // Rebuilds the whole conversation as Interactions steps; Google turns replay their stored raw steps verbatim, others are reconstructed; in: AgentContext messages, out: request `input` on reseed/switch turns.
-async function fullHistorySteps(context: ProviderContext): Promise<InteractionInputStep[]> {
+async function fullHistorySteps(context: ProviderContext, download?: MediaDownload): Promise<InteractionInputStep[]> {
   const steps: InteractionInputStep[] = [];
   for (const m of context.messages) {
     if (m.role === "system") continue;
@@ -714,7 +724,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       if (typeof m.content === "string") {
         steps.push({ type: "user_input", content: [{ type: "text", text: m.content }] });
       } else {
-        const blocks = await contentPartsToBlocks(m.content);
+        const blocks = await contentPartsToBlocks(m.content, download);
         if (blocks.length > 0) steps.push({ type: "user_input", content: blocks });
       }
     } else if (m.role === "assistant") {
@@ -780,7 +790,7 @@ async function fullHistorySteps(context: ProviderContext): Promise<InteractionIn
       if (!Array.isArray(m.content)) continue;
       for (const part of m.content) {
         if (part.type === "tool_result") {
-          steps.push(await functionResultStep(part));
+          steps.push(await functionResultStep(part, download));
         }
       }
     }
@@ -925,6 +935,7 @@ export class GoogleInteractionsProvider implements Provider {
     stream: boolean
   ): Promise<InteractionRequestBody> {
     return (async () => {
+      const download: MediaDownload = { signal: options?.signal, fetch: options?.fetch };
       const { thinkingLevel } = mapThinkingLevelToGoogle(options?.thinking?.level);
       const serviceTier = mapServiceTierToGoogle(options?.serviceTier);
       // The Interactions API caches implicitly only (docs: caching.md).
@@ -1010,20 +1021,20 @@ export class GoogleInteractionsProvider implements Provider {
         // Cross-provider turn: the Google server never saw the other
         // provider's turns, so send the full canonical history explicitly and
         // statelessly, then resume chaining fresh on the next turn.
-        body.input = await fullHistorySteps(context);
+        body.input = await fullHistorySteps(context, download);
         // Background runs need storage (`store: false` is a 400); this turn then simply starts a fresh chain.
         if (!body.background) body.store = false;
       } else if (continuing) {
-        body.input = await latestTurnInput(context);
+        body.input = await latestTurnInput(context, download);
         body.previous_interaction_id = chain?.interactionId; // `continuing` means there is a chain
       } else if (context.messages.length > 1) {
         // No chain but multi-message history (restored session after a
         // restart, or the turn right after a provider switch): send the full
         // history once with default store so the response establishes a fresh
         // chain and the next turn resumes stateful chaining.
-        body.input = await fullHistorySteps(context);
+        body.input = await fullHistorySteps(context, download);
       } else {
-        body.input = await latestTurnInput(context);
+        body.input = await latestTurnInput(context, download);
       }
       return body;
     })();

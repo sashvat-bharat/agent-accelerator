@@ -35,7 +35,7 @@ The exported type declarations in `src/types/` are the source of truth.
 | `retry` | How one provider call is retried. | [Limits and retries](guides/limits-and-retries.md) |
 | `runRetries` | How often a whole run that failed for a transient reason is tried again. Default 3, `0` is off. | [Limits and retries](guides/limits-and-retries.md) |
 | `onFailure` | `"auto"`, `"rollback"` or `"keep"`. | [Limits and retries](guides/limits-and-retries.md) |
-| `fetch`, `env` | A custom `fetch`, and per-agent environment overrides for keys. | [Models and providers](guides/models-and-providers.md) |
+| `fetch`, `env` | A custom `fetch` (for provider calls and for the media URLs the SDK downloads), and per-agent environment overrides for keys. | [Models and providers](guides/models-and-providers.md) |
 | `fileAccess` | `{ roots }`. Where local files may be read. | [Security](guides/security.md) |
 | `captureRaw` | `"redacted"` (default), `true` or `false`. What `res.raw` keeps. | [Security](guides/security.md) |
 | `budget`, `limits`, `usageLimit` | Caps. Keys below. | [Limits and retries](guides/limits-and-retries.md) |
@@ -202,7 +202,7 @@ Look a model up with `getModelFromCatalog`, and add your own with `registerModel
 | `createSessionId(prefix?)` | A random session id (`<prefix>-<uuid>` with a prefix), at most 64 characters. |
 | `withRetries(fn, options?)` | Runs `fn` again after a transient failure. Defaults: 2 retries, a 5 second delay cap, a 30 second retry budget. A `Retry-After` header is honored inside that budget. An abort is never retried. Options: `maxRetries`, `maxRetryDelayMs`, `retryBudgetMs`, `baseDelayMs`, `signal`, `label`. |
 | `isTransientError(error)` | `true` for the failures `withRetries` retries. |
-| `normalizeMediaInput(input, mimeType?)` | Resolves a media input to `{ mimeType, base64Data, dataUrl }`. |
+| `normalizeMediaInput(input, mimeType?, { signal?, fetch? }?)` | Resolves a media input to `{ mimeType, base64Data, dataUrl }`. A URL is downloaded with `fetch` (the global one when unset) and stops when `signal` aborts. |
 | `inferMimeType(path, fallback?)`, `sniffMimeType(bytes)` | The MIME type from a file name, or from the first bytes. |
 | `ensureCustomProvider(prefix, options?)`, `getProvider(id)`, `normalizeProviderPrefix(prefix)` | Create or fetch the provider for a prefix. See [Provider notes](guides/provider-notes.md#openai-compatible-services). |
 

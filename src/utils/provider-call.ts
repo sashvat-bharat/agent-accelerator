@@ -9,7 +9,7 @@ import type { TokenUsage } from "../types/core.ts";
 import type { RetryPolicyConfig } from "../types/agent.ts";
 import type { ProviderRequestOptions } from "../types/model.ts";
 import type { AudioPart, FilePart, ImagePart, MediaResolution, TextPart, VideoPart } from "../types/message.ts";
-import { normalizeMediaInput, type NormalizedMedia } from "./media.ts";
+import { normalizeMediaInput, type MediaDownload, type NormalizedMedia } from "./media.ts";
 import { assertPathAllowed, isLocalPathInput } from "./safe-io.ts";
 
 /** Runs `task`, rejecting with a `TimeoutError` after `ms` or an `AbortError` as soon as `signal` aborts, even when the adapter ignores its signal; in: each provider request, out: the task's result. */
@@ -95,12 +95,16 @@ export type InputPartData =
   | { kind: "text"; text: string }
   | { kind: "image" | "audio" | "video" | "pdf"; media: NormalizedMedia; resolution?: MediaResolution };
 
-/** Reads the media of one part (local paths must be inside `fileAccess.roots` when set) and checks it is the kind the part says; in: the one-call functions, out: the part's data. */
-export async function readInputPart(part: InputPart, fileAccess?: { roots?: string[] }): Promise<InputPartData> {
+/** Reads the media of one part (local paths must be inside `fileAccess.roots` when set; a URL is downloaded with the caller's `fetch` and signal) and checks it is the kind the part says; in: the one-call functions, out: the part's data. */
+export async function readInputPart(
+  part: InputPart,
+  fileAccess?: { roots?: string[] },
+  download?: MediaDownload
+): Promise<InputPartData> {
   if (part.type === "text") return { kind: "text", text: part.text };
   const value = mediaValueOf(part);
   if (fileAccess?.roots && isLocalPathInput(value)) await assertPathAllowed(value, fileAccess.roots);
-  const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType);
+  const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType, download);
   const kind = part.type === "file" ? "pdf" : part.type;
   const ok = kind === "pdf" ? media.mimeType === "application/pdf" : media.mimeType.startsWith(`${kind}/`);
   if (!ok)

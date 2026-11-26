@@ -11,7 +11,7 @@ import { getProvider } from "../providers/registry.ts";
 import { emitProviderWarning } from "../providers.ts";
 import { withProviderSlot } from "../agent/governor.ts";
 import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
-import { normalizeMediaInput } from "../utils/media.ts";
+import { normalizeMediaInput, type MediaDownload } from "../utils/media.ts";
 import { mp4DurationSeconds } from "../utils/mp4.ts";
 import { base64ToBytes } from "../utils/base64.ts";
 import { providerOptionsFrom } from "../utils/provider-call.ts";
@@ -51,8 +51,12 @@ function withAbortGrace<T>(task: () => Promise<T>, signal: AbortSignal): Promise
   });
 }
 
-// Reads one clip: a video the SDK made goes in as its bytes, anything else through the media normalizer (a local path must be inside `fileAccess.roots` when set); its length is read from the file when it is an MP4 or MOV; in: generateVideo, out: the media and its seconds.
-async function readClip(input: VideoInput, fileAccess?: { roots?: string[] }): Promise<ReadClip> {
+// Reads one clip: a video the SDK made goes in as its bytes, anything else through the media normalizer (a local path must be inside `fileAccess.roots` when set); its length is read from the file when it is an MP4 or MOV; a URL is downloaded with the caller's `fetch` and signal; in: generateVideo, out: the media and its seconds.
+async function readClip(
+  input: VideoInput,
+  fileAccess: { roots?: string[] } | undefined,
+  download: MediaDownload
+): Promise<ReadClip> {
   if (input instanceof GeneratedVideo) {
     return {
       media: { mimeType: input.mimeType, base64Data: input.base64, dataUrl: input.dataUrl },
@@ -60,7 +64,7 @@ async function readClip(input: VideoInput, fileAccess?: { roots?: string[] }): P
     };
   }
   if (fileAccess?.roots && isLocalPathInput(input)) await assertPathAllowed(input, fileAccess.roots);
-  const media = await normalizeMediaInput(input);
+  const media = await normalizeMediaInput(input, undefined, download);
   if (!media.mimeType.startsWith("video/"))
     throw new ValidationError(
       `[Agent Accelerator] A reference video has the type "${media.mimeType}", which is not a video.`
@@ -145,10 +149,13 @@ export async function generateVideo(opts: VideoOptions): Promise<VideoResult> {
 
   // Read every picture and clip, then check the clip lengths the provider states.
   const roots = opts.fileAccess;
-  const firstFrame = opts.firstFrame !== undefined ? await readImageInput(opts.firstFrame, roots) : undefined;
-  const lastFrame = opts.lastFrame !== undefined ? await readImageInput(opts.lastFrame, roots) : undefined;
-  const referenceImages = await Promise.all((opts.referenceImages ?? []).map((i) => readImageInput(i, roots)));
-  const referenceVideos = await Promise.all((opts.referenceVideos ?? []).map((v) => readClip(v, roots)));
+  const download = { signal: opts.signal, fetch: opts.fetch };
+  const firstFrame = opts.firstFrame !== undefined ? await readImageInput(opts.firstFrame, roots, download) : undefined;
+  const lastFrame = opts.lastFrame !== undefined ? await readImageInput(opts.lastFrame, roots, download) : undefined;
+  const referenceImages = await Promise.all(
+    (opts.referenceImages ?? []).map((i) => readImageInput(i, roots, download))
+  );
+  const referenceVideos = await Promise.all((opts.referenceVideos ?? []).map((v) => readClip(v, roots, download)));
   const clips = def.references.videos;
   if (typeof clips === "object") {
     const problems = referenceVideos.flatMap((c, i) =>

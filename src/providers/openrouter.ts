@@ -53,6 +53,7 @@ import type { ProviderEmbeddingRequest, ProviderEmbeddingResult } from "../types
 import type { ProviderImageRequest, ProviderImageResult } from "../types/image.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
+import type { MediaDownload } from "../utils/media.ts";
 import { toConciseProviderError, markRetryable } from "../utils/errors.ts";
 import { assertModalitiesSupported } from "./modalities.ts";
 import { ConfigError, isAbortError, abortError } from "../types/errors.ts";
@@ -281,7 +282,7 @@ function hasRemoteMedia(messages: ChatMessage[]): boolean {
 }
 
 // Maps canonical text and media parts to Chat Completions content blocks; in: a user message's parts, out: fullHistoryMessages.
-async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPart[]> {
+async function contentPartsToBlocks(parts: ContentPart[], download?: MediaDownload): Promise<ChatContentPart[]> {
   const blocks: ChatContentPart[] = [];
   for (const part of parts) {
     if (part.type === "text" && part.text) {
@@ -297,7 +298,8 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
       }
       const norm = await normalizeMediaInput(
         raw as string | Uint8Array | ArrayBuffer,
-        (part as { mimeType?: string }).mimeType
+        (part as { mimeType?: string }).mimeType,
+        download
       );
       blocks.push({ type: "image_url", image_url: { url: norm.dataUrl, ...(detail ? { detail } : {}) } });
     } else if (part.type === "video") {
@@ -311,7 +313,8 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
       }
       const norm = await normalizeMediaInput(
         raw as string | Uint8Array | ArrayBuffer,
-        (part as { mimeType?: string }).mimeType
+        (part as { mimeType?: string }).mimeType,
+        download
       );
       // video-inputs.md names the QuickTime type `video/mov`.
       const url = norm.mimeType === "video/quicktime" ? `data:video/mov;base64,${norm.base64Data}` : norm.dataUrl;
@@ -321,7 +324,7 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
       const mimeType = (part as { mimeType?: string }).mimeType;
       // OpenAI chat audio shape (router parsed it live; capability routing
       // decides per model). Always inline — `input_audio` carries data only.
-      const norm = await normalizeMediaInput(raw as string | Uint8Array | ArrayBuffer, mimeType);
+      const norm = await normalizeMediaInput(raw as string | Uint8Array | ArrayBuffer, mimeType, download);
       blocks.push({
         type: "input_audio",
         input_audio: { data: norm.base64Data, format: audioFormatFor(norm.mimeType) },
@@ -336,7 +339,8 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
           : (
               await normalizeMediaInput(
                 raw as string | Uint8Array | ArrayBuffer,
-                (part as { mimeType?: string }).mimeType
+                (part as { mimeType?: string }).mimeType,
+                download
               )
             ).dataUrl;
       blocks.push({
@@ -398,7 +402,8 @@ function storedReplay(m: { providerSteps?: { provider: string; steps: unknown[] 
  */
 async function fullHistoryMessages(
   context: ProviderContext,
-  bridge = DEFAULT_PROMPTS.toolBridge
+  bridge = DEFAULT_PROMPTS.toolBridge,
+  download?: MediaDownload
 ): Promise<ChatMessage[]> {
   // Map assistant tool_call ids so tool results pair even though the
   // executor keys results by the call id.
@@ -438,7 +443,7 @@ async function fullHistoryMessages(
           lastRole = "user";
         }
       } else {
-        const blocks = await contentPartsToBlocks(m.content);
+        const blocks = await contentPartsToBlocks(m.content, download);
         if (blocks.length > 0) {
           messages.push({ role: "user", content: blocks });
           lastRole = "user";
@@ -677,7 +682,10 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         fallback: "emulated JSON instruction + client validation (no response_format is sent)",
       });
     }
-    const messages = await fullHistoryMessages(effectiveContext, options?.prompts?.toolBridge);
+    const messages = await fullHistoryMessages(effectiveContext, options?.prompts?.toolBridge, {
+      signal: options?.signal,
+      fetch: options?.fetch,
+    });
     const body: ChatRequestBody = {
       model: modelId,
       messages,

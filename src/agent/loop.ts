@@ -752,6 +752,7 @@ async function executeToolCallsWithRepeatGuard(options: {
   prompts?: Prompts;
   hooks?: AgentHooks;
   fileRoots?: readonly string[];
+  fetch?: typeof fetch;
   agentName?: string;
   signal?: AbortSignal;
   sessionId?: string;
@@ -808,6 +809,7 @@ async function executeToolCallsWithRepeatGuard(options: {
           prompts: options.prompts,
           hooks: options.hooks,
           fileRoots: options.fileRoots,
+          fetch: options.fetch,
         })
       : [];
   const byId = new Map<string, ToolResultRecord[]>();
@@ -920,6 +922,7 @@ async function finishInterruptedTools(
         prompts: config.prompts,
         hooks: config.hooks,
         fileRoots: config.fileAccess?.roots,
+        fetch: config.options?.fetch,
       })
     : [];
   const ran = new Map([...skipped, ...executed.map((r): [string, ToolResultRecord] => [r.id, r])]);
@@ -1111,6 +1114,7 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         prompts: config.prompts,
         hooks: config.hooks,
         fileRoots: config.fileAccess?.roots,
+        fetch: config.options?.fetch,
       });
       const results = guarded.results;
       previousToolCallFingerprints = guarded.fingerprints;
@@ -1523,6 +1527,7 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           prompts: config.prompts,
           hooks: config.hooks,
           fileRoots: config.fileAccess?.roots,
+          fetch: config.options?.fetch,
           onSubagentEvent: (ev) => {
             try {
               outerStream.push({

@@ -128,7 +128,8 @@ export async function generateDecision(opts: DecisionOptions): Promise<DecisionR
   if (maxCost !== undefined && !(typeof maxCost === "number" && Number.isFinite(maxCost) && maxCost > 0))
     throw new ValidationError("[Agent Accelerator] budget.maxCostUsd must be a number greater than 0.");
 
-  const input = await Promise.all(request.input.map((p) => readInputPart(p, opts.fileAccess)));
+  const download = { signal: opts.signal, fetch: opts.fetch };
+  const input = await Promise.all(request.input.map((p) => readInputPart(p, opts.fileAccess, download)));
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const providerOptions = providerOptionsFrom(opts, timeoutMs);
   const signal = opts.signal ?? new AbortController().signal;

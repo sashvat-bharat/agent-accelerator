@@ -291,14 +291,15 @@ interface RemoteBytes {
  */
 export async function fetchRemoteBytes(
   input: string,
-  opts: { signal?: AbortSignal; maxBytes?: number; allowPrivateNetwork?: boolean } = {}
+  opts: { signal?: AbortSignal; maxBytes?: number; allowPrivateNetwork?: boolean; fetch?: typeof fetch } = {}
 ): Promise<RemoteBytes> {
+  const doFetch = opts.fetch ?? fetch;
   const maxBytes = opts.maxBytes ?? MAX_REMOTE_FETCH_BYTES;
   const allowPrivate = opts.allowPrivateNetwork ?? false;
   let current = new URL(input);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     await assertRemoteUrlAllowed(current, allowPrivate);
-    const res = await fetch(current.href, { signal: opts.signal, redirect: "manual" });
+    const res = await doFetch(current.href, { signal: opts.signal, redirect: "manual" });
     if ((res as { type?: string }).type === "opaqueredirect") {
       // Browser runtimes hide the Location header: only trusted callers may follow blindly.
       if (!allowPrivate && !isBrowserRuntime()) {
@@ -308,7 +309,7 @@ export async function fetchRemoteBytes(
           current.href
         );
       }
-      const followed = await fetch(current.href, { signal: opts.signal });
+      const followed = await doFetch(current.href, { signal: opts.signal });
       return {
         ok: followed.ok,
         status: followed.status,

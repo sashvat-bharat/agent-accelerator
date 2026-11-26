@@ -10,7 +10,7 @@ import { getProvider } from "../providers/registry.ts";
 import { emitProviderWarning } from "../providers.ts";
 import { withProviderSlot } from "../agent/governor.ts";
 import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
-import { normalizeMediaInput, type NormalizedMedia } from "../utils/media.ts";
+import { normalizeMediaInput, type MediaDownload, type NormalizedMedia } from "../utils/media.ts";
 import { applyCaptureRaw } from "../utils/raw-capture.ts";
 import { BudgetExceededError, ConfigError, ProviderError, ValidationError, abortErrorFor } from "../types/errors.ts";
 import { addUsage, bounded, providerOptionsFrom } from "../utils/provider-call.ts";
@@ -29,12 +29,16 @@ import { GeneratedImage, ImageResult, attachOrigin, originOf } from "./result.ts
 /** Default time one provider request may take (image models can think for a while). */
 const DEFAULT_TIMEOUT_MS = 300_000;
 
-// Reads one picture: one the SDK made goes in as its bytes, anything else through the media normalizer (a local path must be inside `fileAccess.roots` when set); in: generateImage and generateVideo, out: the normalized media.
-export async function readImageInput(input: ImageInput, fileAccess?: { roots?: string[] }): Promise<NormalizedMedia> {
+// Reads one picture: one the SDK made goes in as its bytes, anything else through the media normalizer (a local path must be inside `fileAccess.roots` when set; a URL is downloaded with the caller's `fetch` and signal); in: generateImage and generateVideo, out: the normalized media.
+export async function readImageInput(
+  input: ImageInput,
+  fileAccess?: { roots?: string[] },
+  download?: MediaDownload
+): Promise<NormalizedMedia> {
   if (input instanceof GeneratedImage)
     return { mimeType: input.mimeType, base64Data: input.base64, dataUrl: input.dataUrl };
   if (fileAccess?.roots && isLocalPathInput(input)) await assertPathAllowed(input, fileAccess.roots);
-  const media = await normalizeMediaInput(input);
+  const media = await normalizeMediaInput(input, undefined, download);
   if (!media.mimeType.startsWith("image/"))
     throw new ValidationError(
       `[Agent Accelerator] A reference image has the type "${media.mimeType}", which is not an image.`
@@ -45,7 +49,8 @@ export async function readImageInput(input: ImageInput, fileAccess?: { roots?: s
 // Reads every reference image; in: generateImage, out: the normalized media.
 async function readReferences(opts: ImageOptions): Promise<NormalizedMedia[]> {
   const out: NormalizedMedia[] = [];
-  for (const input of opts.images ?? []) out.push(await readImageInput(input, opts.fileAccess));
+  const download = { signal: opts.signal, fetch: opts.fetch };
+  for (const input of opts.images ?? []) out.push(await readImageInput(input, opts.fileAccess, download));
   return out;
 }
 
