@@ -150,6 +150,7 @@ export function isPrivateAddress(address: string): boolean {
   const zeroUpTo = (n: number): boolean => g.slice(0, n).every((x) => x === 0);
   if (zeroUpTo(6)) return embeddedIpv4Private(g); // "::", "::1" and "::a.b.c.d"
   if (zeroUpTo(5) && g[5] === 0xffff) return embeddedIpv4Private(g); // "::ffff:a.b.c.d"
+  if (zeroUpTo(4) && g[4] === 0xffff && g[5] === 0) return embeddedIpv4Private(g); // "::ffff:0:a.b.c.d" (IPv4-translated)
   if (first === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return embeddedIpv4Private(g); // NAT64
   return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xffc0) === 0xfec0;
 }
@@ -165,7 +166,24 @@ function isPrivateHostname(host: string): boolean {
   );
 }
 
-// Throws RemoteFetchError for a non-http(s) URL or, unless private hosts are allowed, a private host (also by DNS result); in: fetchRemoteBytes on every hop, out: nothing or a thrown error.
+/** Looks up every address of a host name (the private-host check's DNS step). */
+export type HostLookup = (host: string) => Promise<string[]>;
+
+// Every address of `host` from `node:dns` (throws when the name cannot be resolved, or when the runtime has no `node:dns`); in: assertRemoteUrlAllowed, out: the addresses.
+async function dnsLookup(host: string): Promise<string[]> {
+  const dns = await import("node:dns");
+  const addresses = await dns.promises.lookup(host, { all: true });
+  return addresses.map((a) => a.address);
+}
+
+let hostLookup: HostLookup = dnsLookup;
+
+/** Replaces the DNS step of the private-host check, so tests never touch the network; no argument restores `node:dns`. Internal: not exported from the package. */
+export function setHostLookup(lookup?: HostLookup): void {
+  hostLookup = lookup ?? dnsLookup;
+}
+
+// Throws RemoteFetchError for a non-http(s) URL or, unless private hosts are allowed, a private host (also by DNS result); a name whose addresses cannot be looked up is refused too, because `fetch` would then resolve it unchecked; in: fetchRemoteBytes on every hop, out: nothing or a thrown error.
 async function assertRemoteUrlAllowed(url: URL, allowPrivateNetwork: boolean): Promise<void> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new RemoteFetchError(
@@ -184,19 +202,26 @@ async function assertRemoteUrlAllowed(url: URL, allowPrivateNetwork: boolean): P
     );
   }
   if (/^[\d.]+$/.test(host) || host.includes(":")) return; // IP literal already checked
+  let addresses: string[] = [];
+  let failure = "";
   try {
-    const dns = await import("node:dns");
-    const addrs = await dns.promises.lookup(host, { all: true });
-    if (addrs.some((a) => isPrivateAddress(a.address))) {
-      throw new RemoteFetchError(
-        "blocked",
-        `[Agent Accelerator] Host "${host}" resolves to a private/internal address.`,
-        url.href
-      );
-    }
+    addresses = await hostLookup(host);
   } catch (err) {
-    if (err instanceof RemoteFetchError) throw err;
-    // Resolution failed (or non-Node runtime): fetch will surface its own error.
+    failure = ` (${err instanceof Error ? err.message : String(err)})`;
+  }
+  if (addresses.length === 0) {
+    throw new RemoteFetchError(
+      "blocked",
+      `[Agent Accelerator] Cannot check host "${host}": its address could not be looked up${failure}. Download the file yourself and pass its bytes, a data URL or base64.`,
+      url.href
+    );
+  }
+  if (addresses.some((address) => isPrivateAddress(address))) {
+    throw new RemoteFetchError(
+      "blocked",
+      `[Agent Accelerator] Host "${host}" resolves to a private/internal address.`,
+      url.href
+    );
   }
 }
 
