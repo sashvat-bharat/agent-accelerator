@@ -88,7 +88,7 @@ const chart = tool({
 ```
 
 - Text parts become the call's result. Every provider sees them.
-- Media can be bytes, a data URL, a path or a URL. It is read once and kept as inline data. A URL must point to a public host, see [Media input](media-input.md).
+- Media can be bytes, a data URL, a path or a URL. It is read once and kept as inline data. A URL must point to a public host, see [Media input](media-input.md). A path must be inside `fileAccess.roots` when you set it; a path outside makes the call an error result with a `SecurityPolicyError` message, and the run goes on.
 - **Google** (Gemini 3 and later) receives the media inside the result. Other providers get the text only, with one `provider_warning`.
 - Only a value made by `toolContent` counts. JSON that a tool fetched from the web can never become media.
 - The media is saved with the session, counts toward Google's inline size limit, and is not cut by `maxResultChars`.

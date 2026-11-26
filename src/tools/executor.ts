@@ -7,6 +7,7 @@ import { isTransientError } from "../utils/errors.ts";
 import { isSubagentResult, makeSubagentResult } from "./subagent-result.ts";
 import { isToolContent, type ToolContent } from "./tool-content.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
+import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
 import type { ContentPart } from "../types/message.ts";
 import { DEFAULT_PROMPTS, fillPrompt, type Prompts } from "../prompts/prompts.ts";
 import { isTruncatedArguments } from "../types/tool.ts";
@@ -25,6 +26,8 @@ export interface ExecuteToolsOptions {
   prompts?: Pick<Prompts, "toolTruncatedArguments" | "toolNotFound" | "toolSchemaError">;
   /** The agent's `beforeTool` / `afterTool` hooks (see `AgentConfig.hooks`). */
   hooks?: Pick<AgentHooks, "beforeTool" | "afterTool">;
+  /** `AgentConfig.fileAccess.roots`: a local path in media a tool returns with `toolContent` must be inside one of them (unset: no check). */
+  fileRoots?: readonly string[];
   /** Called the moment EACH call finishes (before the whole batch does), so a caller can save a result before the next tool is done. Never throws into the run. */
   onResult?: (result: ToolResultRecord) => void;
   /** Opens the log file of one call (only when the Agent persists to a folder); the executor writes its steps into it and `ctx.log` writes through it. */
@@ -504,10 +507,11 @@ async function executeAttempt(
   }
 }
 
-// Turns a `toolContent` result into its text (what every provider sees) and its media as inline data URLs (what Google also sends); in: runSingle for a branded tool result, out: the result record's `result` and `parts`.
+// Turns a `toolContent` result into its text (what every provider sees) and its media as inline data URLs (what Google also sends); a local path is read only inside `fileRoots` when the agent sets them (a refused path throws, and the call becomes an error result); in: runSingle for a branded tool result, out: the result record's `result` and `parts`.
 async function resolveToolContent(
   content: ToolContent,
-  charLimit: number
+  charLimit: number,
+  fileRoots: readonly string[] | undefined
 ): Promise<{ text: string; parts: ContentPart[] }> {
   const texts: string[] = [];
   const parts: ContentPart[] = [];
@@ -519,6 +523,7 @@ async function resolveToolContent(
       continue;
     }
     const value = mediaValueOf(part);
+    if (fileRoots && isLocalPathInput(value)) await assertPathAllowed(value, fileRoots);
     const media = await normalizeMediaInput(value, (part as { mimeType?: string }).mimeType);
     const filename = (part as { filename?: string }).filename;
     const resolution = part.type === "image" || part.type === "video" ? part.resolution : undefined;
@@ -581,6 +586,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
     openToolLog,
     prompts = DEFAULT_PROMPTS,
     hooks,
+    fileRoots,
   } = options;
   assertNoToolCollisions(tools);
   const globalSemaphore = new Semaphore(DEFAULT_TOOL_CONCURRENCY);
@@ -817,7 +823,7 @@ export async function executeToolCalls(options: ExecuteToolsOptions): Promise<To
         trace("call_succeeded", "info", { attempts: attempt, durationMs: elapsedMs(executionStartTime), resultChars });
       // Text and media from `toolContent`: the text is the result, the media rides in `parts` (inline data, set only here).
       if (isToolContent(rawResult)) {
-        const { text, parts } = await resolveToolContent(rawResult, resultCharLimit(toolDef));
+        const { text, parts } = await resolveToolContent(rawResult, resultCharLimit(toolDef), fileRoots);
         finishOk(text.length);
         return {
           id: call.id,

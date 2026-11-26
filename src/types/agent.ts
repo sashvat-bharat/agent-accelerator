@@ -238,8 +238,8 @@ export interface AgentConfig {
   telemetry?: { persist?: boolean };
   /**
    * Local file policy. With `roots` set, every local-path media part must
-   * resolve inside them (`[]` denies all local paths). Without it, local
-   * paths in message parts are unrestricted.
+   * resolve inside them (`[]` denies all local paths), including media a tool
+   * returns with `toolContent`. Without it, local paths are unrestricted.
    */
   fileAccess?: { roots?: string[] };
   /**

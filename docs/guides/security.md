@@ -8,7 +8,7 @@
 |---|---|---|
 | API keys | A key is never sent to another vendor. A custom prefix needs its own key and address. Keys are not enumerable on errors. | `apiKey`, `env` |
 | Request audit | Header names with key, token, secret, cookie or authorization, and values that look like credentials, are redacted. | `captureRaw`: `"redacted"` (default, no bodies), `true` (full bodies, for debugging), `false` |
-| Local files | A local media path must resolve inside `roots`. `[]` denies all. Unset means unrestricted. | `fileAccess: { roots }` |
+| Local files | A local media path must resolve inside `roots`: in a prompt, in a loaded session, and in media a tool returns with `toolContent`. `[]` denies all. Unset means unrestricted. | `fileAccess: { roots }` |
 | URLs | A media URL that the SDK downloads itself (for example audio, a picture a tool returns, or an input of `generateImage`, `generateVideo`, `generateEmbedding` or `generateDecision`) may not point to a private, loopback or link-local host, however it is written (an IPv4 address inside an IPv6 one too), including what DNS returns. Redirects are re-checked and the size is capped. A link the provider fetches itself is sent as it is. For a file on your intranet, read it yourself and pass the bytes or base64. | Automatic |
 | Tool errors | Stack frames are dropped. Absolute paths and URL credentials are removed. | `redactError` |
 | Worker traces | Visible only to the agent that started the worker. Results are branded, so a tool cannot forge them. | Automatic |
