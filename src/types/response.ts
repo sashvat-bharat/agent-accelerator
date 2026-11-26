@@ -221,7 +221,7 @@ export class AgentResponse {
   }
 }
 
-/** Event names emitted by AssistantMessageEventStream. */
+/** Event names of AssistantMessageEventStream; `text_start`, `text_end`, `thinking_start`, `thinking_end`, `tool_call_start` and `tool_call_delta` are reserved and never sent today. */
 export type StreamEventType =
   | "start"
   | "text_start"
@@ -247,7 +247,7 @@ export type StreamEventType =
 /** Payload for one streaming text, thinking, tool, usage, or lifecycle event. */
 export interface StreamEvent {
   type: StreamEventType;
-  /** Schema version for typed consumers. Currently always 1 when present. */
+  /** Reserved for typed consumers: the SDK does not set it today. */
   schemaVersion?: 1;
   delta?: string;
   thinkingDelta?: string;
