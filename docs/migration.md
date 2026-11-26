@@ -9,6 +9,7 @@
 **Behavior that changed**
 
 - `Agent.fromConfig` keeps the `apiKey`, `baseUrl` and `headers` of `base` only when the new model names the same provider as `base.model` (`gemini/` and `google/` count as one). This now covers the top-level ones too, not only a key inside a model helper. For another provider, or a model written without a provider, they are dropped and the key comes from that provider's environment variable. Before, the top-level key, address and headers went to the new provider. If an edited agent may switch providers, set each provider's key in its environment variable.
+- A worker gets the parent's `apiKey`, `baseUrl` and `headers` only when both models name the same provider. A model object (`{ provider, id }`) now counts by its `provider`: before, `{ provider: "openrouter", id: "openai/gpt-5.5" }` counted as OpenAI and got an OpenAI parent's key. When either model is written without a provider, the worker now gets none of them. A dynamic worker on another provider no longer gets the parent's `headers`. Give such a worker its provider's key in the environment.
 - `Agent.fromConfig` also finds a tool by the name the model sees (the tool's `name`), not only by its key in `base.tools`.
 
 ## Upgrading to 0.9.3

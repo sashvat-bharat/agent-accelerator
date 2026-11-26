@@ -36,7 +36,7 @@ console.log(res.subagents.map((s) => `${s.name}: ${s.usage.totalTokens} tokens`)
 
 - **The model.** A sub-agent that names no `model` runs on the worker model: `dynamicSubagents.model`, else the saved or default `sub_agent_model` (see [Allowed models](allowed-models.md)). It never falls back to the main model, so a cheap helper model is set once. With no worker model at all, the constructor throws a `ConfigError` that names the entry.
 - **The keys.** `name`, `description` and `instructions` are required. `model` and `tools` are optional. Any other key throws a `ConfigError`, so a setting is never silently dropped. For anything else, build the `Agent` yourself (below).
-- **What it takes from the parent.** Run limits, retry policy, hooks, `fetch`, `env`, `fileAccess`, `captureRaw` and the prompt overrides, so a helper is never less restricted than its parent. The parent's `apiKey` goes only to a sub-agent on the same provider.
+- **What it takes from the parent.** Run limits, retry policy, hooks, `fetch`, `env`, `fileAccess`, `captureRaw` and the prompt overrides, so a helper is never less restricted than its parent. The parent's `apiKey` and `baseUrl` go only to a sub-agent whose model names the same provider (a model object counts by its `provider`). A model written without a provider gets neither, and a sub-agent written as data never gets the parent's `headers`.
 - **Calls.** Each call runs on its own copy of the sub-agent (`fork`), so parallel calls to one sub-agent really run in parallel.
 
 ### Build the Agent yourself
@@ -138,7 +138,7 @@ for (const id of lead.listTrackedSubAgents()) console.log(id, lead.track(id)?.st
 **Other limits.**
 - `maxSpawn` caps the workers open at once. Close one to open another.
 - `budget.maxTotalSubagents` counts the spawns in one run.
-- Workers use the parent's key only when the provider is the same. They inherit limits, retry, env, fetch, `googleTier`, `fileAccess`, `captureRaw` and `hooks`.
+- Workers use the parent's key, `baseUrl` and `headers` only when both models name the same provider (`gemini/` and `google/` count as one, and a model object counts by its `provider`). A model written without a provider gets none of them. They inherit limits, retry, env, fetch, `googleTier`, `fileAccess`, `captureRaw` and `hooks`.
 - Workers started with the `subagents` tool and `agent.workers` have no timeouts.
 - A missing worker model throws `SubAgentModelError`. Set `dynamicSubagents.model`, or a default worker model with `setModels` and `setSubAgentModel`.
 

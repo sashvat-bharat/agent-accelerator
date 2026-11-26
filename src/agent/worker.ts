@@ -183,43 +183,31 @@ export function grantWorkerTools(
   return grantedTools;
 }
 
-// The provider id a model string resolves to, or undefined when it cannot be resolved; in: resolveWorkerCredentials, out: the provider match check.
-function providerOf(modelStr: string | unknown | undefined): string | undefined {
-  if (!modelStr) return undefined;
+/** The provider a model goes to, only when the model names it: a `ModelSpec` by its own `provider`, a string or model helper by its `provider/` prefix (`gemini/` and `google/` both give "google"). A bare id is found through the catalog, which can change before the run, so it gives undefined, as does a model that cannot be resolved; in: `Agent.fromConfig` and the worker builders, out: their same-provider checks. */
+export function namedProviderOf(model: unknown): string | undefined {
   try {
-    const m =
-      typeof modelStr === "string"
-        ? modelStr
-        : ((modelStr as { model?: unknown; id?: unknown })?.model ??
-          (modelStr as { id?: unknown })?.id ??
-          String(modelStr));
-    return resolveModelUnchecked(m as string).provider.id;
+    if (isModelSpec(model)) return resolveModelUnchecked(model).provider.id;
+    const named = typeof model === "string" ? model : (model as { model?: unknown } | null | undefined)?.model;
+    if (typeof named !== "string" || !named.includes("/")) return undefined;
+    return resolveModelUnchecked(named).provider.id;
   } catch {
     return undefined;
   }
 }
 
-/**
- * Resolves worker credentials: reuses parent `apiKey`/`baseUrl` ONLY when the
- * worker provider matches the parent provider (otherwise env resolves).
- */
+// The parent's key, base URL and headers for a worker, only when both models name the same provider (otherwise none, and the worker's provider reads its own environment variable); in: the parent Agent and the worker's model, out: buildDynamicWorkerConfig, buildSubAgentConfig.
 function resolveWorkerCredentials(
-  parentAgent: { modelStringOrSpec?: unknown; apiKey?: string; baseUrl?: string },
-  chosenModel: unknown
-): { apiKeyToUse: string | undefined; baseUrlToUse: string | undefined; attemptedProvider: string | undefined } {
-  const chosenModelStrForProvider =
-    typeof chosenModel === "string"
-      ? chosenModel
-      : ((chosenModel as { model?: unknown; id?: unknown })?.model ??
-        (chosenModel as { id?: unknown })?.id ??
-        String(chosenModel));
-  const attemptedProvider = providerOf(chosenModelStrForProvider);
-  const parentProvider = providerOf(parentAgent.modelStringOrSpec as string);
-  const targetProviderFinal = providerOf(chosenModelStrForProvider);
-  if (targetProviderFinal === parentProvider) {
-    return { apiKeyToUse: parentAgent.apiKey, baseUrlToUse: parentAgent.baseUrl, attemptedProvider };
-  }
-  return { apiKeyToUse: undefined, baseUrlToUse: undefined, attemptedProvider };
+  parentAgent: {
+    modelStringOrSpec?: unknown;
+    apiKey?: string;
+    baseUrl?: string;
+    customHeaders?: Record<string, string>;
+  },
+  workerModel: unknown
+): { apiKey?: string; baseUrl?: string; headers?: Record<string, string> } {
+  const parentProvider = namedProviderOf(parentAgent.modelStringOrSpec);
+  if (parentProvider === undefined || parentProvider !== namedProviderOf(workerModel)) return {};
+  return { apiKey: parentAgent.apiKey, baseUrl: parentAgent.baseUrl, headers: parentAgent.customHeaders };
 }
 
 // Configs built by `buildDynamicWorkerConfig`: the Agent constructor checks it so SDK-built workers never take the spending-cap settings.
@@ -255,7 +243,7 @@ export function buildDynamicWorkerConfig(
   }
 ): AgentConfig {
   const model = parent.subagentModel;
-  const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
+  const credentials = resolveWorkerCredentials(parent, model);
   const dyn = parent.dynamicSubagents;
   const levelsBelow = (dyn?.maxDepth ?? DEFAULT_MAX_DEPTH) - 1;
   const config: AgentConfig = {
@@ -263,8 +251,8 @@ export function buildDynamicWorkerConfig(
     description: worker.role || `Sub-agent ${worker.name}`,
     instructions: worker.instructions,
     model,
-    apiKey: apiKeyToUse,
-    baseUrl: baseUrlToUse,
+    apiKey: credentials.apiKey,
+    baseUrl: credentials.baseUrl,
     thinkingLevel: parent.dynamicSubagents?.thinkingLevel ?? parent.thinkingConfig?.level,
     sessionId: worker.sessionId,
     tools: worker.tools,
@@ -289,7 +277,7 @@ export function buildDynamicWorkerConfig(
         }
       : {}),
     serviceTier: parent.serviceTier,
-    headers: parent.customHeaders,
+    headers: credentials.headers,
     maxTurns: parent.maxTurns,
     ...parent.inheritableConfig(),
   };
@@ -331,15 +319,15 @@ export function buildSubAgentConfig(parent: Agent, spec: SubAgentSpec, position:
       `("${spec.name}") has no model and no worker model is set. Give it a model, pass dynamicSubagents.model, or set a default worker model with setModels() or setSubAgentModel().`
     );
   }
-  const { apiKeyToUse, baseUrlToUse } = resolveWorkerCredentials(parent, model);
+  const credentials = resolveWorkerCredentials(parent, model);
   const config: AgentConfig = {
     name: spec.name,
     description: spec.description,
     instructions: spec.instructions,
     model,
     ...(spec.tools ? { tools: spec.tools } : {}),
-    apiKey: apiKeyToUse,
-    baseUrl: baseUrlToUse,
+    apiKey: credentials.apiKey,
+    baseUrl: credentials.baseUrl,
     ...parent.inheritableConfig(),
   };
   workerConfigs.add(config); // SDK-built: never takes the spending-cap settings, like every other SDK-built worker

@@ -1,10 +1,8 @@
 import type { AgentConfig, EditableAgentConfig } from "../types/agent.ts";
-import type { ModelSpec } from "../types/model.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import { ConfigError } from "../types/errors.ts";
 import { telemetryBus } from "../session/store.ts";
-import { resolveModelUnchecked } from "../providers/registry.ts";
-import { normalizeToolMap, resolveMainModel } from "./worker.ts";
+import { namedProviderOf, normalizeToolMap, resolveMainModel } from "./worker.ts";
 
 // The building blocks for self-improving agents (RSI): an agent may edit ONLY `model`, `instructions` and `tools`;
 // everything else (limits, budgets, cache, thinking, keys, ...) stays with the developer who wrote `base`.
@@ -18,16 +16,6 @@ function modelKey(model: unknown): string | undefined {
   if (m && typeof m.model === "string") return m.model.trim() || undefined;
   if (m && typeof m.id === "string" && typeof m.provider === "string") return `${m.provider}/${m.id}`;
   return undefined;
-}
-
-// The provider a model is sent to (`gemini/` and `google/` both give "google"), only when the model names it: a bare id is found through the catalog, which can change before the run, so it gives undefined, as does a model that cannot be resolved; in: applyEditable (the base model and the edited one), out: the same-provider check.
-function namedProviderId(model: string | ModelSpec | undefined): string | undefined {
-  if (!model || (typeof model === "string" && !model.includes("/"))) return undefined;
-  try {
-    return resolveModelUnchecked(model).provider.id;
-  } catch {
-    return undefined;
-  }
 }
 
 // The editable part of an agent as plain JSON; in: the Agent's model, instructions and the developer's tool list (not the built-in delegation/scheduler tools), out: Agent.toConfig.
@@ -67,8 +55,8 @@ export function applyEditable(editable: EditableAgentConfig, base: AgentConfig):
     // A key, base URL and headers belong to the provider they were written for (the model helper's own, and the
     // top-level ones the Agent falls back to): they are never sent to another provider, nor to an unknown one.
     const prev = base.model as { model?: unknown; apiKey?: string; baseUrl?: string } | string | undefined;
-    const prevProvider = namedProviderId(resolveMainModel(base.model).modelStringOrSpec);
-    const sameProvider = prevProvider !== undefined && prevProvider === namedProviderId(next);
+    const prevProvider = namedProviderOf(resolveMainModel(base.model).modelStringOrSpec);
+    const sameProvider = prevProvider !== undefined && prevProvider === namedProviderOf(next);
     out.model =
       prev && typeof prev === "object" && typeof prev.model === "string"
         ? { ...prev, model: next, ...(sameProvider ? {} : { apiKey: undefined, baseUrl: undefined }) }
