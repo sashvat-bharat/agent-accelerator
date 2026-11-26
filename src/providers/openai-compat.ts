@@ -225,7 +225,7 @@ function resolveBaseUrl(
   return resolved.replace(/\/+$/, "");
 }
 
-// Key from the option, the provider's configuration or {PREFIX}_API_KEY, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
+// Key from the option, the provider's configuration, {PREFIX}_API_KEY or {PREFIX}_BASE_API_KEY, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
 function resolveApiKey(
   prefix: string,
   configuredApiKey: string | undefined,
@@ -239,14 +239,8 @@ function resolveApiKey(
       .trim();
     return t || undefined;
   };
-  const envPrefix = envPrefixOf(prefix);
-  const key =
-    clean(options?.apiKey) ||
-    clean(configuredApiKey) ||
-    clean(options?.env?.[`${envPrefix}_API_KEY`]) ||
-    clean(options?.env?.[`${envPrefix}_BASE_API_KEY`]) ||
-    getApiKey(prefix, undefined, options?.env) ||
-    undefined;
+  // {PREFIX}_API_KEY, then {PREFIX}_BASE_API_KEY: in a per-call `env` first, then in `process.env`.
+  const key = clean(options?.apiKey) || clean(configuredApiKey) || getApiKey(prefix, undefined, options?.env);
   if (key) return key;
   if (hasAuthHeader(options?.headers)) return "unused";
   return undefined;

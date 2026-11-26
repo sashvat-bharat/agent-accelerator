@@ -286,12 +286,12 @@ The environment holds API keys and nothing else. Every other option is a setting
 | Variable | Purpose |
 |---|---|
 | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY` | The Google key. Checked in this order. |
-| `OPENAI_API_KEY`, `OPENAI_BASE_API_KEY` | The OpenAI key. |
+| `OPENAI_BASE_API_KEY`, `OPENAI_API_KEY` | The OpenAI key. Checked in this order. |
 | `ANTHROPIC_API_KEY` | The Anthropic key. |
 | `OPENROUTER_API_KEY` | The OpenRouter key. |
-| `<PREFIX>_API_KEY`, `<PREFIX>_BASE_API_KEY` | The key of any OpenAI-compatible service (for `PREFIX/model`), such as `GROQ_API_KEY`. Local services may have none. |
+| `<PREFIX>_API_KEY`, `<PREFIX>_BASE_API_KEY` | The key of any OpenAI-compatible service (for `PREFIX/model`), such as `GROQ_API_KEY`. Checked in this order. Local services may have none. |
 
-The library reads `process.env` only for keys. Pass `env: { ... }` in the config or a run option to override a key for one agent.
+The library reads `process.env` only for keys. Pass `env: { ... }` in the config or a run option to override a key for one agent. It is read first, with the same names in the same order. The Google names count only for `google/` and `gemini/` models, never for a custom prefix such as `googleproxy/`.
 
 ## Generators
 
