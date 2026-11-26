@@ -99,7 +99,7 @@ export function throwGoogleHttpError(
   const { message, code, errorType, raw } = readErrorPayload(bodyText);
   const hint =
     status === 401
-      ? " Check GEMINI_API_KEY/GOOGLE_API_KEY (no quotes/spaces, correct provider), GOOGLE_BASE_URL, and that the key is loaded (bun --env-file=.env.local)."
+      ? " Check GEMINI_API_KEY/GOOGLE_API_KEY (no quotes/spaces, correct provider), the base_urls.google setting, and that the key is loaded (bun --env-file=.env.local)."
       : "";
   const full = `${message}${hint}`;
   const err: Record<string, unknown> & Error = new Error(full) as Record<string, unknown> & Error;

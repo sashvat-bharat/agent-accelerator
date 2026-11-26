@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { GoogleInteractionsProvider, clearInteractionChains } from "../src/providers/google.ts";
+import { throwGoogleHttpError } from "../src/providers/google-image.ts";
 import { telemetryBus } from "../src/telemetry.ts";
 import {
   parseStreamedToolArguments,
@@ -385,6 +386,25 @@ describe("GoogleInteractionsProvider (REST, mocked)", () => {
     expect(err).toBeInstanceOf(Error);
     expect(String(err.message)).toContain("[google/x]");
     expect(String(err.message)).toContain("bad level");
+  });
+
+  it("points a 401 at the base_urls.google setting, not the removed GOOGLE_BASE_URL variable (chat and image calls)", async () => {
+    mockFetchOnce({ error: { message: "API key not valid", code: "unauthenticated" } }, { status: 401 });
+    const chat = await new GoogleInteractionsProvider()
+      .generate("x", { messages: [{ role: "user", content: "x" }] }, { apiKey: "k" })
+      .then(() => null)
+      .catch((e) => e);
+    let image: unknown;
+    try {
+      const body = '{"error":{"message":"API key not valid"}}';
+      throwGoogleHttpError(401, "https://g.test/v1beta/interactions", body, "x", {});
+    } catch (e) {
+      image = e;
+    }
+    for (const err of [chat, image]) {
+      expect(String((err as Error).message)).toContain("the base_urls.google setting");
+      expect(String((err as Error).message)).not.toContain("GOOGLE_BASE_URL");
+    }
   });
 
   it("requires an API key instead of failing opaquely", async () => {

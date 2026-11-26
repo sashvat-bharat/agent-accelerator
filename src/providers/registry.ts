@@ -108,11 +108,6 @@ export function ensureCustomProvider(
 }
 
 /**
- * Retrieves a provider by ID.
- * Unknown ids auto-create a native OpenAI-compatible provider (unified layer),
- * so `getProvider("groq")` works after setting `GROQ_API_KEY`/`GROQ_BASE_URL`.
- */
-/**
  * Retrieves a first-class provider or lazily creates a custom compatible provider.
  *
  * @example `const provider = getProvider("google");`
