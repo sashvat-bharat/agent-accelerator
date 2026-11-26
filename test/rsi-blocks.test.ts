@@ -134,6 +134,41 @@ describe("Agent.fromConfig(editable, base)", () => {
     expect(other.baseUrl).toBeUndefined();
     expect(JSON.stringify(other.toConfig())).not.toContain("sk-openai");
   });
+
+  it("drops the developer's top-level key, base URL and headers when the model moves to another provider", () => {
+    const conn = { apiKey: "sk-openai", baseUrl: "https://example.test/v1", headers: { "x-gateway-key": "g-1" } };
+    const top = base({ model: "openai/gpt-5.5", ...conn });
+    const same = Agent.fromConfig({ model: "openai/gpt-5.5-mini" }, top);
+    expect([same.apiKey, same.baseUrl, same.customHeaders]).toEqual([conn.apiKey, conn.baseUrl, conn.headers]);
+    for (const model of ["openrouter/openai/gpt-5.5", "groq/llama-3.3-70b-versatile"]) {
+      const other = Agent.fromConfig({ model }, top);
+      expect([other.apiKey, other.baseUrl, other.customHeaders]).toEqual([undefined, undefined, undefined]);
+    }
+    // A model helper's own key is dropped too, and the top-level one is no longer there to fall back to.
+    const both = base({ ...conn, model: { model: "openai/gpt-5.5", apiKey: "sk-helper" } });
+    const moved = Agent.fromConfig({ model: "google/gemini-3.5-flash" }, both);
+    expect([moved.apiKey, moved.baseUrl, moved.customHeaders]).toEqual([undefined, undefined, undefined]);
+    expect((top as { apiKey?: string }).apiKey).toBe("sk-openai"); // the developer's config is not changed
+  });
+
+  it("counts gemini/ and google/ as one provider, and a bare model id as an unknown one", () => {
+    const google = base({ model: "google/gemini-3.5-flash", apiKey: "g-key" });
+    expect(Agent.fromConfig({ model: "gemini/gemini-3.5-flash-lite" }, google).apiKey).toBe("g-key");
+    expect(Agent.fromConfig({ model: "gemini/gemini-3.5-flash" }, base({ model: "google/x", apiKey: "g" })).apiKey).toBe("g");
+    // Where a bare id goes depends on the catalog, which can change before the run: the key is not risked.
+    expect(Agent.fromConfig({ model: "gpt-5.5-mini" }, base({ model: "openai/gpt-5.5", apiKey: "k" })).apiKey).toBeUndefined();
+    expect(Agent.fromConfig({ model: "openai/gpt-5.5" }, base({ model: "gpt-5.5", apiKey: "k" })).apiKey).toBeUndefined();
+  });
+
+  it("finds a tool by its key or by the name the model sees", () => {
+    const tools = { lookup: mk("search_docs"), a: mk("b"), b: mk("c") };
+    const byName = Agent.fromConfig({ tools: ["search_docs"] }, base({ tools }));
+    expect(Object.keys(byName.tools)).toEqual(["lookup"]);
+    expect(byName.toConfig().tools).toEqual(["lookup"]); // the round trip still uses the keys
+    expect(Object.keys(Agent.fromConfig({ tools: ["lookup", "search_docs"] }, base({ tools })).tools)).toEqual(["lookup"]);
+    expect(Object.keys(Agent.fromConfig({ tools: ["b"] }, base({ tools })).tools)).toEqual(["b"]); // a key wins over a name
+    expect(Object.keys(Agent.fromConfig({ tools: ["c"] }, base({ tools })).tools)).toEqual(["b"]);
+  });
 });
 
 describe("the program's model list (setModels)", () => {
@@ -168,6 +203,13 @@ describe("the program's model list (setModels)", () => {
     setModels(list(allowed));
     expect(() => new Agent({ ...base(), model: ModelProvider.OpenAI("gpt-5.5") })).not.toThrow();
     expect(() => new Agent({ ...base(), model: ModelProvider.OpenAI("gpt-6") })).toThrow(ModelNotAllowedError);
+  });
+
+  it("a base with no model counts the program's default model when it keeps or drops the key", () => {
+    setModels(list(allowed));
+    const noModel = { ...base({ apiKey: "groq-key" }), model: undefined };
+    expect(Agent.fromConfig({ model: "groq/openai/gpt-oss-20b" }, noModel).apiKey).toBe("groq-key");
+    expect(Agent.fromConfig({ model: "openai/gpt-5.5" }, noModel).apiKey).toBeUndefined();
   });
 
   it("allowedModels was removed and says what to use instead", () => {

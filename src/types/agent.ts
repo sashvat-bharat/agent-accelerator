@@ -295,7 +295,7 @@ export interface EditableAgentConfig {
   model?: string;
   /** System instructions. */
   instructions?: string;
-  /** Names of tools, picked from the developer's tool pool (`base.tools` of `fromConfig`). */
+  /** Names of tools, picked from the developer's tool pool (`base.tools` of `fromConfig`): a key there or a tool's `name`. */
   tools?: string[];
 }
 

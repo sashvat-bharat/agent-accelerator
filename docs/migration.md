@@ -2,6 +2,15 @@
 
 > What was removed or renamed, and what to use now. Everything that still works but has a better name is marked.
 
+## Upgrading to 0.9.4
+
+0.9.4 keeps each key, address and header with the provider it was written for.
+
+**Behavior that changed**
+
+- `Agent.fromConfig` keeps the `apiKey`, `baseUrl` and `headers` of `base` only when the new model names the same provider as `base.model` (`gemini/` and `google/` count as one). This now covers the top-level ones too, not only a key inside a model helper. For another provider, or a model written without a provider, they are dropped and the key comes from that provider's environment variable. Before, the top-level key, address and headers went to the new provider. If an edited agent may switch providers, set each provider's key in its environment variable.
+- `Agent.fromConfig` also finds a tool by the name the model sees (the tool's `name`), not only by its key in `base.tools`.
+
 ## Upgrading to 0.9.3
 
 0.9.3 changes no API and no behavior. No change is needed.

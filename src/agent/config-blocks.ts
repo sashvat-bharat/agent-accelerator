@@ -1,8 +1,10 @@
 import type { AgentConfig, EditableAgentConfig } from "../types/agent.ts";
+import type { ModelSpec } from "../types/model.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import { ConfigError } from "../types/errors.ts";
 import { telemetryBus } from "../session/store.ts";
-import { normalizeToolMap } from "./worker.ts";
+import { resolveModelUnchecked } from "../providers/registry.ts";
+import { normalizeToolMap, resolveMainModel } from "./worker.ts";
 
 // The building blocks for self-improving agents (RSI): an agent may edit ONLY `model`, `instructions` and `tools`;
 // everything else (limits, budgets, cache, thinking, keys, ...) stays with the developer who wrote `base`.
@@ -18,6 +20,16 @@ function modelKey(model: unknown): string | undefined {
   return undefined;
 }
 
+// The provider a model is sent to (`gemini/` and `google/` both give "google"), only when the model names it: a bare id is found through the catalog, which can change before the run, so it gives undefined, as does a model that cannot be resolved; in: applyEditable (the base model and the edited one), out: the same-provider check.
+function namedProviderId(model: string | ModelSpec | undefined): string | undefined {
+  if (!model || (typeof model === "string" && !model.includes("/"))) return undefined;
+  try {
+    return resolveModelUnchecked(model).provider.id;
+  } catch {
+    return undefined;
+  }
+}
+
 // The editable part of an agent as plain JSON; in: the Agent's model, instructions and the developer's tool list (not the built-in delegation/scheduler tools), out: Agent.toConfig.
 export function toEditableConfig(
   model: unknown,
@@ -27,7 +39,7 @@ export function toEditableConfig(
   return { model: modelKey(model) ?? "", instructions, tools: Object.keys(normalizeToolMap(tools)) };
 }
 
-// Merges what an agent edited into the developer's config: only model/instructions/tools can change; tools are names picked from base.tools; the model is checked against allowedModels when the Agent is built; in: Agent.fromConfig args, out: the AgentConfig for `new Agent`.
+// Merges what an agent edited into the developer's config: only model/instructions/tools can change; tools are names picked from base.tools; a new model keeps the developer's key, base URL and headers only when both models name the same provider; the model list is checked when the Agent is built; in: Agent.fromConfig args, out: the AgentConfig for `new Agent`.
 export function applyEditable(editable: EditableAgentConfig, base: AgentConfig): AgentConfig {
   if (!editable || typeof editable !== "object" || Array.isArray(editable)) {
     throw new ConfigError(
@@ -52,13 +64,20 @@ export function applyEditable(editable: EditableAgentConfig, base: AgentConfig):
       throw new ConfigError(
         `[Agent Accelerator] Invalid editable model ${JSON.stringify(e.model)}: expected a "provider/model" string.`
       );
-    // A model helper's key and base URL belong to its own provider: they are never sent to another one.
+    // A key, base URL and headers belong to the provider they were written for (the model helper's own, and the
+    // top-level ones the Agent falls back to): they are never sent to another provider, nor to an unknown one.
     const prev = base.model as { model?: unknown; apiKey?: string; baseUrl?: string } | string | undefined;
-    const sameProvider = next.includes("/") && next.split("/")[0] === modelKey(prev)?.split("/")[0];
+    const prevProvider = namedProviderId(resolveMainModel(base.model).modelStringOrSpec);
+    const sameProvider = prevProvider !== undefined && prevProvider === namedProviderId(next);
     out.model =
       prev && typeof prev === "object" && typeof prev.model === "string"
         ? { ...prev, model: next, ...(sameProvider ? {} : { apiKey: undefined, baseUrl: undefined }) }
         : next;
+    if (!sameProvider) {
+      out.apiKey = undefined;
+      out.baseUrl = undefined;
+      out.headers = undefined;
+    }
   }
   if (e.instructions !== undefined) {
     if (typeof e.instructions !== "string")
@@ -73,8 +92,12 @@ export function applyEditable(editable: EditableAgentConfig, base: AgentConfig):
         `[Agent Accelerator] Invalid editable tools ${JSON.stringify(e.tools)}: expected a list of tool names from the developer's tool pool.`
       );
     }
+    // A tool is found by its key in base.tools (what toConfig lists) or by the name the model sees (`def.name`).
     const pool = normalizeToolMap(base.tools);
-    const unknown = (e.tools as string[]).filter((n) => !Object.hasOwn(pool, n));
+    const keyOf = new Map<string, string>();
+    for (const [key, def] of Object.entries(pool)) if (def.name) keyOf.set(def.name, key);
+    for (const key of Object.keys(pool)) keyOf.set(key, key); // a key wins over another tool's name
+    const unknown = (e.tools as string[]).filter((n) => !keyOf.has(n));
     if (unknown.length > 0) {
       throw new ConfigError(
         `[Agent Accelerator] Unknown tool ${unknown.map((n) => JSON.stringify(n)).join(", ")} in the editable config. Available: ${
@@ -86,8 +109,9 @@ export function applyEditable(editable: EditableAgentConfig, base: AgentConfig):
     }
     const picked: Record<string, ToolDefinition> = {};
     for (const n of e.tools as string[]) {
-      const def = pool[n]; // every name was checked against the pool above
-      if (def) picked[n] = def;
+      const key = keyOf.get(n); // every name was checked above
+      const def = key === undefined ? undefined : pool[key];
+      if (key !== undefined && def) picked[key] = def;
     }
     out.tools = picked;
   }

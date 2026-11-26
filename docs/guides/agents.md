@@ -124,10 +124,10 @@ const next = Agent.fromConfig(
 );
 ```
 
-- **Tools are names.** They are picked from `base.tools`. A name that is not in the pool throws a `ConfigError` that lists the names that are. Leave `tools` out to keep all of them.
+- **Tools are names.** They are picked from `base.tools`, by their key or by the name the model sees (the tool's `name`). A name that is not in the pool throws a `ConfigError` that lists the names that are. Leave `tools` out to keep all of them.
 - **Any other key is ignored** and reported once as `config.not_editable` on the telemetry bus.
 - **The model list limits the model.** A model outside your `setModels` list throws `ModelNotAllowedError` when the agent is built. See [Allowed models](allowed-models.md).
-- **Keys never travel.** `toConfig()` has no keys. If `base.model` holds its own key, the new agent keeps it only for the same provider.
+- **Keys stay with their provider.** `toConfig()` has no keys. A new model keeps the `apiKey`, `baseUrl` and `headers` of `base` (top-level or inside a model helper) only when it names the same provider as `base.model`. `gemini/` and `google/` count as one. For another provider, or a model written without a provider, they are dropped, and the key comes from that provider's environment variable.
 - **You get a new agent.** `fromConfig` never changes the old one. Give `base` the same `sessionId` and `persist` to continue the saved conversation with the new settings.
 - **Tool code is yours.** To let a program edit a tool's code, keep each tool in its own file. Loading the edited file again is up to you.
 

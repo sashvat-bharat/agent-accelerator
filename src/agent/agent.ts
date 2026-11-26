@@ -1297,7 +1297,8 @@ export class Agent {
   /**
    * Builds an Agent from your full `base` config with an agent's edits applied. Only `model`, `instructions` and
    * `tools` of `editable` count (other keys are ignored with a `config.not_editable` warning); `tools` are names picked
-   * from `base.tools`, an unknown name throws; the model must be on the program's list (`setModels`). Keys and limits always come from `base`.
+   * from `base.tools` (a key or a tool's `name`), an unknown name throws; the model must be on the program's list (`setModels`).
+   * Limits always come from `base`; its key, base URL and headers only when the new model names the same provider.
    */
   static fromConfig(editable: EditableAgentConfig, base: AgentConfig): Agent {
     return new Agent(applyEditable(editable, base));
