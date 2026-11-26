@@ -1,16 +1,10 @@
+// Video in a prompt. Needs a video-capable model (a Gemini model, or an OpenRouter model with video support).
+// Any other model fails before the request with a one-line error.
+// Run: bun run examples/08-multimodal_video.ts
 import { Agent } from "agent-accelerator";
 import { fail, MODEL } from "./_shared";
 
-// Video input needs a video-capable model: a Gemini model, or an OpenRouter
-// model with video support (Chat Completions `video_url`; free routes may
-// gate video behind a funded key). Anything else fails
-// fast with a one-line provider error instead of a dump.
-const agent = new Agent({
-  name: "Watcher",
-  instructions: "Describe what you see concisely.",
-  model: MODEL,
-  fileAccess: { roots: ["./examples/files"] },
-});
+const agent = new Agent({ model: MODEL, instructions: "Describe what you see concisely." });
 
 const res = await agent
   .run([
@@ -20,4 +14,4 @@ const res = await agent
   .catch(fail);
 
 console.log(res.text);
-console.log(`[${res.usage.totalTokens} tok]`);
+console.log(`[${res.usage.totalTokens} tokens]`);

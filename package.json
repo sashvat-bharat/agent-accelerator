@@ -23,9 +23,6 @@
   ],
   "files": [
     "src",
-    "examples/prompts/SYSTEM_PROMPT.md",
-    "examples/prompts/SYSTEM_PROMPT_AGENT.md",
-    "examples/prompts/SYSTEM_PROMPT_TOOLS.md",
     "tsconfig.json",
     "bunfig.toml",
     "bun.lock",

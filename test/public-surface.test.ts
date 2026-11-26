@@ -89,7 +89,7 @@ const INTERNAL: Record<string, string[]> = {
     "DEFAULT_CATALOG_TTL_MS",
     "CATALOG_PROVIDERS",
   ],
-  "chat display helpers (copies live in examples/_shared.ts)": [
+  "chat display helpers (the examples now print plain lines)": [
     "formatSessionBanner",
     "formatSessionTokens",
     "formatSessionCost",

@@ -55,7 +55,7 @@ describe("session telemetry", () => {
     expect(getSessionContextWindow("definitely/not-a-model-xyz")).toBe(1_048_576);
   });
 
-  it("tracks turn vs total cache-hit rates like 03-multi_agent", () => {
+  it("tracks turn vs total cache-hit rates", () => {
     const t = new SessionTelemetry();
     t.add({ inputTokens: 100, outputTokens: 10, totalTokens: 110, cachedTokens: 80 }, "m");
     expect(t.turnHitRate({ inputTokens: 100, totalTokens: 100, cachedTokens: 80 } as any).toFixed(1)).toBe("80.0");
