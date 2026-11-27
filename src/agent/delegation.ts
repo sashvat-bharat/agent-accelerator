@@ -18,7 +18,7 @@ import { newTurnId } from "../utils/session.ts";
 import { sanitizeToolName, createLiveWorker } from "./worker.ts";
 import type { UsageLimit } from "./usage-limit.ts";
 
-/** Builds a random child session id that fits the 64-char provider limit, embedding a hash of the parent when it must be cut; in: a parent id + tag from scheduled runs, out: the worker's session id. */
+/** Builds a random child session id that fits the 64-char provider limit, embedding a hash of the parent when it must be cut; in: a parent id + tag from scheduled runs and from each call of a fixed worker, out: the worker's session id. */
 export function createChildSessionId(parentId: string, tag: string): string {
   let rand: string;
   try {
@@ -43,7 +43,7 @@ export function createChildSessionId(parentId: string, tag: string): string {
   return `${parentId.slice(0, baseLen)}-${parentHash}${suffix}`;
 }
 
-/** Builds a deterministic fixed-subagent session id that fits 64 chars. */
+/** Builds a deterministic child session id that fits 64 chars: the same parent and name always give the same id (a registry worker is found again by it); in: the worker registry, out: the worker's session id. */
 export function createFixedChildSessionId(parentId: string, name: string): string {
   const suffix = `-sub-${name}`;
   if ((parentId + suffix).length <= 64) return parentId + suffix;
@@ -57,21 +57,6 @@ export function createFixedChildSessionId(parentId: string, name: string): strin
   }
   if (maxParent > 0) return parentId.slice(0, maxParent) + suffix;
   return `${parentId}-sub-${name}`.slice(0, 64);
-}
-
-/**
- * True when `child` was derived from `parent` via the child-session helpers:
- * either an untruncated `parent + suffix` prefix, or the embedded parent hash
- * used when truncation was required. Used to validate lineage before pairing
- * provider state across concurrent agents.
- */
-export function isSessionDescendant(child: string, parent: string): boolean {
-  if (!child || !parent) return false;
-  if (child === parent) return true;
-  if (child.startsWith(parent + "-")) return true;
-  // Hash includes() is collision-prone; require delimited match to reduce spoofing. Explicit {rootSessionId,parentSessionId} lineage is future work.
-  const h = hashSessionPart(parent);
-  return child.includes(`-${h}-`) || child.endsWith(`-${h}`);
 }
 
 /** Live trace for one spawned worker, keyed by its TrackingID. */
@@ -660,7 +645,8 @@ export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: Us
       const callRunId = newRunId();
       const callTurnId = newTurnId();
       const parentSessionId = ctx?.sessionId || agentInstance.sessionId || "session";
-      const subSessionId = createFixedChildSessionId(parentSessionId, sanitizeToolName(name));
+      // Its own id per call: two parallel calls of one worker must not share a provider chain or routing state.
+      const subSessionId = createChildSessionId(parentSessionId, sanitizeToolName(name));
       const live = openWorkerTrace({
         name,
         sessionId: subSessionId,

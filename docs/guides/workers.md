@@ -37,7 +37,7 @@ console.log(res.subagents.map((s) => `${s.name}: ${s.usage.totalTokens} tokens`)
 - **The model.** A sub-agent that names no `model` runs on the worker model: `dynamicSubagents.model`, else the saved or default `sub_agent_model` (see [Allowed models](allowed-models.md)). It never falls back to the main model, so a cheap helper model is set once. With no worker model at all, the constructor throws a `ConfigError` that names the entry.
 - **The keys.** `name`, `description` and `instructions` are required. `model` and `tools` are optional. Any other key throws a `ConfigError`, so a setting is never silently dropped. For anything else, build the `Agent` yourself (below).
 - **What it takes from the parent.** Run limits, retry policy, hooks, `fetch`, `env`, `fileAccess`, `captureRaw` and the prompt overrides, so a helper is never less restricted than its parent. The parent's `apiKey` and `baseUrl` go only to a sub-agent whose model names the same provider (a model object counts by its `provider`). A model written without a provider gets neither, and a sub-agent written as data never gets the parent's `headers`.
-- **Calls.** Each call runs on its own copy of the sub-agent (`fork`), so parallel calls to one sub-agent really run in parallel.
+- **Calls.** Each call runs on its own copy of the sub-agent (`fork`) with its own session id (`<parent>-sub-<name>-<random>`, in the result's metadata), so parallel calls to one sub-agent really run in parallel and never share a Google conversation.
 
 ### Build the Agent yourself
 
