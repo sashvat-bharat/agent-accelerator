@@ -16,6 +16,7 @@
 - A media URL that the SDK downloads itself is refused (`RemoteFetchError`, a `SecurityPolicyError`) when the address of its host cannot be looked up. Before, the check let it through and `fetch` resolved the name unchecked. This matters on a network where only a proxy resolves names: read such a file yourself and pass the bytes, a data URL or base64. An IPv6 address of the form `::ffff:0:a.b.c.d` (IPv4-translated) now counts by the IPv4 address in it, like the other forms.
 - A media URL that the SDK downloads itself now goes through the `fetch` of the agent or the call (it used the global `fetch`) and stops when the run is aborted or interrupted (it kept downloading, up to 512 MB). `normalizeMediaInput` takes the same as an optional third argument, `{ signal, fetch }`.
 - With `resume: "explicit"`, a new `run()` after a crash (instead of `resume()`) gives the model the saved result of every tool call that finished before the crash. Before, every open call was answered "interrupted", so the model could repeat work that was already done.
+- A streamed tool call whose arguments were cut off (for example at `maxOutputTokens`) after the provider opened it with `{}` (Google, and OpenAI when it sends `{}`) is now a cut-off call that never runs. Before, it ran with empty arguments, so a tool whose fields are all optional ran with nothing.
 - `Agent.fromConfig` also finds a tool by the name the model sees (the tool's `name`), not only by its key in `base.tools`.
 
 ## Upgrading to 0.9.3

@@ -371,7 +371,11 @@ export function normalizeToolChoice(
   return { mode: "any" };
 }
 
-// True for a non-array object; in: the argument and schema helpers, out: a type guard.
+// The argument texts to try, in order: start + delta (a genuine partial start), then the delta alone (a `{}` start with the full JSON in the delta). The start alone is never tried: with nothing streamed it equals start + delta, and with streamed text that never parses the call was cut off, so its `{}` start must not stand in for the arguments; in: parseStreamedToolArguments, selectRawArguments, out: the candidates.
+function argumentCandidates(startText: string, deltaText: string): string[] {
+  return [startText + deltaText, deltaText].filter((c) => c.trim());
+}
+
 /**
  * Reconstructs tool arguments from streamed chunks.
  *
@@ -379,14 +383,14 @@ export function normalizeToolChoice(
  * single delta after an empty initial payload, others genuinely split
  * partials across start + deltas. Concatenating blindly can yield
  * `"{}{...}"` (unparseable), so candidates are tried in order and the first
- * chunk that parses to a plain object wins.
+ * chunk that parses to a plain object wins. Streamed text that never parses is
+ * a cut-off call (`{ __truncated_raw }`, never executed), even after a `{}` start.
  *
  * @example `parseStreamedToolArguments("{}", '{"location":"Paris"}')`
  */
 export function parseStreamedToolArguments(startText: string, deltaText: string): Record<string, unknown> {
   if (!startText.trim() && !deltaText.trim()) return {}; // no argument text at all is a call that takes none
-  const candidates = [startText + deltaText, deltaText, startText].filter((c) => c && c.trim());
-  for (const candidate of candidates) {
+  for (const candidate of argumentCandidates(startText, deltaText)) {
     try {
       const parsed: unknown = JSON.parse(candidate);
       if (isRecord(parsed)) return parsed;
@@ -409,8 +413,7 @@ export function parseStreamedToolArguments(startText: string, deltaText: string)
  */
 export function selectRawArguments(startText: string, deltaText: string): string {
   if (!startText.trim() && !deltaText.trim()) return "{}";
-  const candidates = [startText + deltaText, deltaText, startText].filter((c) => c && c.trim());
-  for (const candidate of candidates) {
+  for (const candidate of argumentCandidates(startText, deltaText)) {
     try {
       const parsed: unknown = JSON.parse(candidate);
       if (isRecord(parsed)) return candidate;
