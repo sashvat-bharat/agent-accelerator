@@ -52,7 +52,7 @@ import { clampCacheKey } from "../utils/cache.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { toConciseProviderError } from "../utils/errors.ts";
 import { assertModalitiesSupported, assertNoVideoPartsOnResponses } from "./modalities.ts";
-import { badReplyError, responsesReplyProblem } from "./reply-guard.ts";
+import { badReplyError, carriesError, responsesReplyProblem } from "./reply-guard.ts";
 import { ConfigError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { openaiGenerateImage } from "./openai-image.ts";
@@ -318,6 +318,20 @@ function errorCodeStatus(code: unknown): number | undefined {
   return undefined;
 }
 
+// The error a failed or error-carrying reply stands for: the provider's message (or the error's own text), code and type, and the HTTP status the code maps to; in: parseResponse and the stream's final event, out: the thrown ProviderError.
+function responseFailure(error: unknown, modelId: string): Error {
+  const fields = (error !== null && typeof error === "object" ? error : {}) as Record<string, unknown>;
+  const own = typeof error === "string" ? error.trim() : fields["message"];
+  const failure: Record<string, unknown> & Error = new Error(
+    typeof own === "string" && own ? own : "OpenAI response failed"
+  ) as Record<string, unknown> & Error;
+  if (fields["code"] !== undefined) failure["code"] = fields["code"];
+  if (typeof fields["type"] === "string") failure["errorType"] = fields["type"];
+  const status = errorCodeStatus(fields["code"]);
+  if (status !== undefined) failure["statusCode"] = status;
+  return toConciseProviderError(failure, "openai", modelId);
+}
+
 // The output items of a turn worth replaying (reasoning, function calls, messages), kept exactly as received, only for a turn that has reasoning and no cut-off tool call (a cut call is replayed as `{}`, never verbatim); in: parseResponse and the stream, out: providerSteps.
 function replayItems(
   output: ResponsesOutputItem[] | undefined,
@@ -491,18 +505,7 @@ function parseResponse(
   durationMs: number,
   raw: ProviderRawData
 ): ProviderGenerateResult {
-  if (response.status === "failed") {
-    const message =
-      response.error && typeof response.error.message === "string" && response.error.message
-        ? response.error.message
-        : "OpenAI response failed";
-    const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
-    if (response.error?.code !== undefined) failure["code"] = response.error.code;
-    if (typeof response.error?.type === "string") failure["errorType"] = response.error.type;
-    const status = errorCodeStatus(response.error?.code);
-    if (status !== undefined) failure["statusCode"] = status;
-    throw toConciseProviderError(failure, "openai", modelId);
-  }
+  if (response.status === "failed" || carriesError(response.error)) throw responseFailure(response.error, modelId);
 
   let text = "";
   let refusalText = "";
@@ -1096,16 +1099,8 @@ export class OpenAIResponsesProvider implements Provider {
               sawUsage = true;
             }
             sawFinishReason = true;
-            if (type === "response.failed" || response.status === "failed") {
-              const message =
-                (response.error && typeof response.error.message === "string" && response.error.message) ||
-                "OpenAI response failed";
-              const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
-              if (response.error?.code !== undefined) failure["code"] = response.error.code;
-              if (typeof response.error?.type === "string") failure["errorType"] = response.error.type;
-              const status = errorCodeStatus(response.error?.code);
-              if (status !== undefined) failure["statusCode"] = status;
-              throw toConciseProviderError(failure, "openai", clean);
+            if (type === "response.failed" || response.status === "failed" || carriesError(response.error)) {
+              throw responseFailure(response.error, clean);
             }
             // Non-streaming maps `incomplete` → `length` (max tokens). Streaming
             // must do the same — otherwise truncated turns misreport `stop`.

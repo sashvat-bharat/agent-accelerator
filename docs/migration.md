@@ -2,6 +2,14 @@
 
 > What was removed or renamed, and what to use now. Everything that still works but has a better name is marked.
 
+## Upgrading to 0.9.5
+
+0.9.5 reports provider failures that used to come back as an empty answer. Nothing was removed. If you catch errors from an OpenAI model behind a proxy, read the list below.
+
+**Behavior that changed**
+
+- On OpenAI, a reply that carries an `error` now fails with a `ProviderError` that has the provider's message and code, also when it came with HTTP 200 (some proxies do that) and in the last event of a stream. Before, the run ended with an empty answer (`text: ""`, `finishReason: "stop"`), as if it had worked. Like other OpenAI errors, it is retried when its code is `server_error` or `rate_limit_exceeded`. An `error` that holds nothing (`null`, `""` or `{}`) next to a real answer is still ignored.
+
 ## Upgrading to 0.9.4
 
 0.9.4 closes safety gaps. Keys, addresses and headers stay with the provider they were written for. Local files and media URLs obey their guards. A crash, a cut stream, parallel calls of one worker and several sessions on one agent no longer mix up results. Pictures count toward the spending caps. Nothing was removed. If you rely on one key for several providers, steer prompts across sessions, or download media on a network where only a proxy resolves names, read the list below.

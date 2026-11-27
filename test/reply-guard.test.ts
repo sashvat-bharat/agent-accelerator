@@ -90,6 +90,10 @@ describe("the reply checks", () => {
     expect(responsesReplyProblem({ status: "completed", output: [] })).toBeUndefined(); // legitimately empty
     expect(responsesReplyProblem({ status: "failed" })).toBeUndefined();
     expect(responsesReplyProblem({ error: { message: "x" } })).toBeUndefined();
+    expect(responsesReplyProblem({ error: "Unauthorized" })).toBeUndefined(); // an error given as plain text
+    expect(responsesReplyProblem({ error: {} })).toContain("no `output`"); // an empty error says nothing
+    expect(responsesReplyProblem({ error: null })).toContain("no `output`");
+    expect(responsesReplyProblem({ error: "  " })).toContain("no `output`");
     expect(responsesReplyProblem({ status: "completed" })).toContain("no `output`");
     expect(responsesReplyProblem({ output: "text" })).toContain("no `output`");
     expect(responsesReplyProblem(null)).toContain("null");
@@ -176,6 +180,68 @@ describe("a real reply still works", () => {
     expect(err).toBeInstanceOf(ProviderError);
     expect(err.message).toContain("model overloaded");
     expect(err.message).not.toContain("cannot be used");
+  });
+});
+
+describe("an error sent with HTTP 200 (Responses)", () => {
+  it("is the provider's own error, not an empty answer, and an unknown code is not retried", async () => {
+    const { fn, calls } = answer({ error: { message: "upstream exploded", code: "proxy_error", type: "proxy" } });
+    const err = (await agentFor("responses", fn, 2)
+      .run("hi")
+      .catch((e: unknown) => e)) as ProviderError & { providerCode?: unknown; errorType?: unknown };
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err.message).toContain("upstream exploded");
+    expect(err.message).not.toContain("cannot be used");
+    expect([err.retryable, err.providerCode, err.errorType]).toEqual([false, "proxy_error", "proxy"]);
+    expect(calls.n).toBe(1);
+  });
+
+  it("a server error is retried, and a good second reply recovers the run", async () => {
+    let n = 0;
+    const fn = (async () => {
+      n++;
+      const body = n === 1 ? { error: { message: "busy", code: "server_error" } } : GOOD.responses;
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as unknown as typeof fetch;
+    expect((await agentFor("responses", fn, 1).run("hi")).text).toBe("hi");
+    expect(n).toBe(2);
+  });
+
+  it("an error given as plain text is reported with its text", async () => {
+    const err = (await agentFor("responses", answer({ error: "Unauthorized" }).fn)
+      .run("hi")
+      .catch((e: unknown) => e)) as ProviderError;
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err.message).toContain("Unauthorized");
+  });
+
+  it("an empty error next to a real answer is still the answer, and with no answer it is retried like a 502", async () => {
+    for (const error of [null, {}]) {
+      expect((await agentFor("responses", answer({ ...(GOOD.responses as object), error }).fn).run("hi")).text).toBe("hi");
+    }
+    const err = (await agentFor("responses", answer({ error: {} }).fn)
+      .run("hi")
+      .catch((e: unknown) => e)) as ProviderError;
+    expect([err.retryable, err.status]).toEqual([true, 502]);
+    expect(err.message).toContain("cannot be used");
+  });
+
+  it("a streamed final reply that carries an error fails the stream", async () => {
+    const final = { id: "r1", status: "completed", error: { message: "late failure" }, output: [] };
+    const sse = [
+      `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "partial" })}`,
+      `data: ${JSON.stringify({ type: "response.completed", response: final })}`,
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+    const fn = (async () =>
+      new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+    const err = (await agentFor("responses", fn)
+      .stream("hi")
+      .result()
+      .catch((e: unknown) => e)) as ProviderError;
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err.message).toContain("late failure");
   });
 });
 
