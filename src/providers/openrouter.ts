@@ -83,6 +83,8 @@ import {
   resultToOutput,
   OPENROUTER_ROUTING_KEYS,
 } from "./shared.ts";
+import type { StreamingResponse } from "./shared.ts";
+import { badReplyError, chatReplyProblem } from "./reply-guard.ts";
 import { createGenericModelSpec } from "../models/catalog.ts";
 import { getModelFromCatalog, getModelsForProvider, modelSupportsStructuredOutput } from "../models/catalog.ts";
 import {
@@ -203,6 +205,60 @@ const RETRYABLE_ERROR_TYPE_STATUS: Record<string, number> = {
 function midStreamStatus(code: unknown, errorType: unknown): number | undefined {
   if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) return code;
   return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
+}
+
+// The ProviderError a top-level `error` of a stream chunk or a whole reply stands for (the HTTP status stays 200): its message (or its own text), code and error type, and the status that makes it retryable; in: the stream's chunks and plainReplyAsStream, out: the error to throw, or undefined when the field holds none.
+function chunkError(error: unknown, url: string, modelId: string): Error | undefined {
+  const text = typeof error === "string" ? error.trim() : "";
+  if (!text && (!error || typeof error !== "object")) return undefined;
+  const top = (typeof error === "object" ? error : {}) as {
+    message?: unknown;
+    code?: string | number;
+    metadata?: { error_type?: unknown };
+  };
+  const message = text || (typeof top.message === "string" && top.message ? top.message : "OpenRouter streaming error");
+  const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
+  if (top.code !== undefined) failure["code"] = top.code;
+  if (typeof top.metadata?.error_type === "string") failure["errorType"] = top.metadata.error_type;
+  const status = midStreamStatus(top.code, top.metadata?.error_type);
+  if (status !== undefined) failure["statusCode"] = status; // lets the retry logic and the message treat it like an HTTP error
+  failure["url"] = url;
+  return toConciseProviderError(failure, "openrouter", modelId);
+}
+
+// A stream request answered with one whole Chat Completions reply, as a stream of the one chunk that carries all of it (the message as the delta, each tool call with its index), so the stream code reads its reasoning, notes and cost as usual; an error or a reply that cannot be used throws (retried by openStreamResponse); in: streamInto's readPlainReply, out: the response it reads.
+function plainReplyAsStream(res: Response, text: string, url: string, modelId: string): StreamingResponse {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw toConciseProviderError(
+      Object.assign(new Error("Invalid JSON response from OpenRouter"), {
+        statusCode: res.status,
+        responseBody: text.slice(0, 500),
+        url,
+      }),
+      "openrouter",
+      modelId
+    );
+  }
+  const problem = chatReplyProblem(parsed);
+  if (problem) throw badReplyError("openrouter", modelId, url, problem, text);
+  const { choices, ...reply } = parsed as Record<string, unknown>;
+  const failure = chunkError(reply["error"], url, modelId);
+  if (failure) throw failure;
+  const first = (Array.isArray(choices) ? choices[0] : undefined) as Record<string, unknown> | undefined;
+  const message = (first?.["message"] ?? {}) as Record<string, unknown>;
+  const calls = message["tool_calls"];
+  const delta = Array.isArray(calls)
+    ? { ...message, tool_calls: calls.map((call, index) => ({ index, ...(call as object) })) }
+    : message;
+  const chunk = { ...reply, choices: [{ index: 0, delta, finish_reason: first?.["finish_reason"] ?? null }] };
+  return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  }) as StreamingResponse;
 }
 
 // The OpenRouter request options from the `openrouter` setting (provider routing, `parallel_tool_calls`, `reasoning.exclude`, `user`), already checked by the settings layer; nothing is sent for a key that is not set. NOT supported on purpose (the owner does not want them for now): `reasoning.max_tokens` and `trace`; in: buildBody, out: the extra body fields.
@@ -875,7 +931,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
-        const res = await openStreamResponse({
+        const opened = await openStreamResponse({
           fetchOnce: () =>
             withAbortTimer(linked, streamTimeoutMs, () =>
               (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))
@@ -884,10 +940,12 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers), hasRemoteMedia(body.messages)),
           noBodyError: () =>
             toConciseProviderError(new Error("OpenRouter streaming response had no body"), "openrouter", clean),
+          readPlainReply: (r, text) => plainReplyAsStream(r, text, url, clean),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
           label: { providerId: "openrouter", modelId: clean },
         });
+        const res = "plain" in opened ? opened.plain : opened;
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -916,7 +974,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         let sawUsage = false;
         let refusalSeen = false;
         let badFrames = 0;
-        let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
         const handleMessage = (data: string): void => {
@@ -928,29 +985,14 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
-            framesSeen += 1;
           } catch {
             badFrames += 1;
             return;
           }
           // Mid-stream provider error: top-level `error`, HTTP stays 200.
           // Must surface — resolving empty success hides it.
-          const topError = msg["error"] as
-            | { message?: string; code?: string | number; metadata?: { error_type?: string } }
-            | undefined;
-          if (topError && typeof topError === "object") {
-            const message =
-              typeof topError.message === "string" && topError.message
-                ? topError.message
-                : "OpenRouter streaming error";
-            const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
-            if (topError.code !== undefined) failure["code"] = topError.code;
-            if (typeof topError.metadata?.error_type === "string") failure["errorType"] = topError.metadata.error_type;
-            const status = midStreamStatus(topError.code, topError.metadata?.error_type);
-            if (status !== undefined) failure["statusCode"] = status; // lets the retry logic and the message treat it like an HTTP error
-            failure["url"] = url;
-            throw toConciseProviderError(failure, "openrouter", clean);
-          }
+          const failure = chunkError(msg["error"], url, clean);
+          if (failure) throw failure;
           if (typeof msg["id"] === "string" && !responseId) {
             responseId = msg["id"] as string;
           }
@@ -1075,8 +1117,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         }
 
         // Terminal-state guard — fail `incomplete_stream` (retryable)
-        // instead of resolving empty success. Skipped for non-SSE payloads
-        // (JSON mocks) where no SSE frames were ever seen.
+        // instead of resolving empty success, whatever the content type.
         const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
         const incomplete = incompleteStreamCheck({
           provider: "openrouter",
@@ -1084,9 +1125,6 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           hasTerminal,
           empty: !text && !cleanThinking && toolCalls.length === 0,
           unfinishedCall: hasUnfinishedToolCall(calls.values(), toolCalls),
-          responseHeaders,
-          framesSeen,
-          badFrames,
         });
         if (incomplete) {
           eventStream.fail(incomplete);

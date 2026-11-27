@@ -4,11 +4,13 @@
 
 ## Upgrading to 0.9.5
 
-0.9.5 reports provider failures that used to come back as an empty answer. Nothing was removed. If you catch errors from an OpenAI model behind a proxy, read the list below.
+0.9.5 reports provider failures that used to come back as an empty answer. Nothing was removed. If you use a model behind a proxy, read the list below.
 
 **Behavior that changed**
 
 - On OpenAI, a reply that carries an `error` now fails with a `ProviderError` that has the provider's message and code, also when it came with HTTP 200 (some proxies do that) and in the last event of a stream. Before, the run ended with an empty answer (`text: ""`, `finishReason: "stop"`), as if it had worked. Like other OpenAI errors, it is retried when its code is `server_error` or `rate_limit_exceeded`. An `error` that holds nothing (`null`, `""` or `{}`) next to a real answer is still ignored.
+- A stream request answered with one whole JSON reply instead of a stream is now read as `run()` reads it, on every provider. An error in it fails the stream with the same `ProviderError` as `run()`, and a temporary one is retried before the stream starts. A real answer gives its text, thinking and tool calls (the text arrives as one `text_delta`). Before, the stream ended with an empty answer. On OpenRouter this also covers `run()`, which streams.
+- A stream that ends with no answer and no end event now fails as a retryable `incomplete_stream` whatever its content type. Before, it passed as an empty answer when the body was not labelled as a stream or as text.
 
 ## Upgrading to 0.9.4
 

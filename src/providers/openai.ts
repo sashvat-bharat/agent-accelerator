@@ -72,6 +72,7 @@ import {
   withAbortTimer,
   readSseData,
   incompleteStreamCheck,
+  endWithPlainReply,
   failStream,
   toolArgumentsJson,
   toolTurnFinishReason,
@@ -330,6 +331,40 @@ function responseFailure(error: unknown, modelId: string): Error {
   const status = errorCodeStatus(fields["code"]);
   if (status !== undefined) failure["statusCode"] = status;
   return toConciseProviderError(failure, "openai", modelId);
+}
+
+// Reads a whole Responses reply: parses the JSON, checks it (an error or a reply that cannot be used throws), records the turn and maps it; in: generate, and a stream request answered in one piece, out: ProviderGenerateResult.
+function readWholeReply(
+  reply: { status: number; statusText: string; headers: Record<string, string>; text: string },
+  modelId: string,
+  sessionId: string | undefined,
+  startTime: number,
+  request: ProviderRawData["request"]
+): ProviderGenerateResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reply.text);
+  } catch {
+    throw toConciseProviderError(
+      Object.assign(new Error("Invalid JSON response from OpenAI Responses API"), {
+        statusCode: reply.status,
+        responseBody: reply.text.slice(0, 500),
+        url: request.url,
+      }),
+      "openai",
+      modelId
+    );
+  }
+  const problem = responsesReplyProblem(parsed);
+  if (problem) throw badReplyError("openai", modelId, request.url, problem, reply.text);
+  const response = parsed as ResponsesObject; // checked by responsesReplyProblem above
+  // Stateless turns never establish chains, but the session store still
+  // records the turn so other providers' switch detection keeps working.
+  noteProviderTurn(sessionId, "openai");
+  return parseResponse(response, modelId, Date.now() - startTime, {
+    request,
+    response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: response },
+  });
 }
 
 // The output items of a turn worth replaying (reasoning, function calls, messages), kept exactly as received, only for a turn that has reasoning and no cut-off tool call (a cut call is replayed as `{}`, never verbatim); in: parseResponse and the stream, out: providerSteps.
@@ -868,30 +903,7 @@ export class OpenAIResponsesProvider implements Provider {
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, sessionId, options?.signal);
       this.throwIfError(res.status, url, res.text, clean, res.headers);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(res.text);
-      } catch {
-        throw toConciseProviderError(
-          Object.assign(new Error("Invalid JSON response from OpenAI Responses API"), {
-            statusCode: res.status,
-            responseBody: res.text.slice(0, 500),
-            url,
-          }),
-          "openai",
-          clean
-        );
-      }
-      const problem = responsesReplyProblem(parsed);
-      if (problem) throw badReplyError("openai", clean, url, problem, res.text);
-      const response = parsed as ResponsesObject; // checked by responsesReplyProblem above
-      // Stateless turns never establish chains, but the session store still
-      // records the turn so other providers' switch detection keeps working.
-      noteProviderTurn(sessionId, "openai");
-      return parseResponse(response, clean, Date.now() - startTime, {
-        request: rawRequest,
-        response: { status: res.status, statusText: res.statusText, headers: res.headers, body: response },
-      });
+      return readWholeReply(res, clean, sessionId, startTime, rawRequest);
     };
 
     try {
@@ -950,7 +962,7 @@ export class OpenAIResponsesProvider implements Provider {
         const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
-        const res = await openStreamResponse({
+        const opened = await openStreamResponse({
           fetchOnce: () =>
             withAbortTimer(linked, streamTimeoutMs, () =>
               (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))
@@ -958,10 +970,24 @@ export class OpenAIResponsesProvider implements Provider {
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
           noBodyError: () =>
             toConciseProviderError(new Error("OpenAI streaming response had no body"), "openai", clean),
+          readPlainReply: (r, text) =>
+            readWholeReply(
+              { status: r.status, statusText: r.statusText, headers: headersToRecord(r.headers), text },
+              clean,
+              sessionId,
+              startTime,
+              rawRequest
+            ),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
           label: { providerId: "openai", modelId: clean },
         });
+        if ("plain" in opened) {
+          eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
+          endWithPlainReply(eventStream, opened.plain);
+          return;
+        }
+        const res = opened;
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -986,7 +1012,6 @@ export class OpenAIResponsesProvider implements Provider {
         let sawUsage = false;
         let refusalSeen = false;
         let badFrames = 0;
-        let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
         let completedOutput: ResponsesOutputItem[] | undefined;
@@ -998,7 +1023,6 @@ export class OpenAIResponsesProvider implements Provider {
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
-            framesSeen += 1;
           } catch {
             badFrames += 1;
             return;
@@ -1192,10 +1216,8 @@ export class OpenAIResponsesProvider implements Provider {
 
         // Terminal-state guard. Loops ending with no completed body, no
         // finish_reason, and no usage while carrying no content must fail as
-        // `incomplete_stream` (retryable) instead of resolving empty success.
-        // Skipped for non-SSE payloads (e.g. JSON mocks in delegation tests)
-        // where no SSE frames were ever seen — those preserve legacy empty
-        // success rather than failing the caller on a mock artifact.
+        // `incomplete_stream` (retryable) instead of resolving empty success,
+        // whatever the content type (a JSON body was read whole at open).
         const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
         const incomplete = incompleteStreamCheck({
           provider: "openai",
@@ -1203,9 +1225,6 @@ export class OpenAIResponsesProvider implements Provider {
           hasTerminal,
           empty: !text && !cleanThinking && toolCalls.length === 0,
           unfinishedCall: hasUnfinishedToolCall(calls.values(), toolCalls),
-          responseHeaders,
-          framesSeen,
-          badFrames,
         });
         if (incomplete) {
           eventStream.fail(incomplete);

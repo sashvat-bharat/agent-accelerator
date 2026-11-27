@@ -7,16 +7,17 @@
  */
 import { toConciseProviderError } from "../utils/errors.ts";
 import { noop } from "../utils/noop.ts";
-import { ERROR_BODY_LIMIT, readTextCapped } from "../utils/body.ts";
+import { CHAT_REPLY_LIMIT, ERROR_BODY_LIMIT, readTextCapped } from "../utils/body.ts";
 import { getApiKey } from "../utils/env.ts";
 import { baseUrlSetting } from "../config/settings.ts";
 import { safeStringify } from "../utils/serialization.ts";
-import type { ModelSpec, ProviderRequestOptions } from "../types/model.ts";
+import type { ModelSpec, ProviderGenerateResult, ProviderRequestOptions } from "../types/model.ts";
 import { withRetries } from "../utils/retry.ts";
 import { redactHeadersCentral } from "../utils/cache.ts";
 import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
+import { AgentResponse } from "../types/response.ts";
 import { abortError } from "../types/errors.ts";
 import { DEFAULT_BASE_URLS } from "./base-urls.ts";
 
@@ -318,32 +319,60 @@ function hasBody(res: Response): res is StreamingResponse {
   return res.body !== null;
 }
 
+/** A stream request answered in one piece (a JSON body, not an event stream), as the adapter's `readPlainReply` read it. */
+export interface PlainReply<T> {
+  plain: T;
+}
+
+// True when a successful response is a JSON body rather than an event stream (a server or proxy that ignored `stream: true`, or answered with an error object); in: openStreamResponse, out: whether readPlainReply reads it.
+function isPlainJsonReply(res: Response): boolean {
+  const type = (res.headers.get("content-type") ?? "").toLowerCase();
+  return type.includes("json") && !type.includes("event-stream");
+}
+
 /**
  * Opens an SSE response, retrying transient failures (429/5xx/network) BEFORE
  * any byte is consumed, so a streaming caller gets the same resilience as
  * `generate()`. Once this resolves the stream is live and never retried.
  * `onHttpError` must throw (usually the adapter's concise `throwIfError`).
+ * A JSON body is read whole (with the chat reply cap) and handed to `readPlainReply`, which reads it the way the
+ * adapter's `generate()` does and throws for an error or a reply that cannot be used, so those are retried here too.
  */
-export function openStreamResponse(args: {
+export function openStreamResponse<T>(args: {
   fetchOnce: () => Promise<Response>;
   onHttpError: (res: Response, bodyText: string) => void;
   noBodyError: () => Error;
+  readPlainReply: (res: Response, bodyText: string) => T;
   retry: ReturnType<typeof retryOptionsFrom>;
   signal: AbortSignal;
   label: { providerId: string; modelId: string };
-}): Promise<StreamingResponse> {
+}): Promise<StreamingResponse | PlainReply<T>> {
   return withRetries(
-    async () => {
+    async (): Promise<StreamingResponse | PlainReply<T>> => {
       const res = await args.fetchOnce();
       if (!res.ok) {
         const text = await readTextCapped(res, ERROR_BODY_LIMIT).catch(() => "");
         args.onHttpError(res, text);
       }
       if (!hasBody(res)) throw args.noBodyError();
+      if (isPlainJsonReply(res))
+        return { plain: args.readPlainReply(res, await readTextCapped(res, CHAT_REPLY_LIMIT)) };
       return res;
     },
     { ...args.retry, signal: args.signal, label: args.label }
   );
+}
+
+/** Ends a stream with a reply that came in one piece: its thinking and text as one delta each, each tool call and the end event, then the response. */
+export function endWithPlainReply(eventStream: AssistantMessageEventStream, result: ProviderGenerateResult): void {
+  if (result.thinking) {
+    eventStream.push({ type: "thinking_delta", thinkingDelta: result.thinking, partialThinking: result.thinking });
+  }
+  if (result.text) eventStream.push({ type: "text_delta", delta: result.text, partialText: result.text });
+  for (const toolCall of result.toolCalls ?? []) eventStream.push({ type: "tool_call_complete", toolCall });
+  const { usage, finishReason, responseId } = result;
+  eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
+  eventStream.end(new AgentResponse(result));
 }
 
 /** Retry knobs from provider request options, in the shape `withRetries` expects. */
@@ -469,24 +498,16 @@ export async function readSseData(
   if (linked.signal.aborted || eventStream.isCancelled()) throw abort();
 }
 
-// The error to fail with when an SSE stream ended without its final event while carrying no content or an unfinished tool call (checked only for real SSE payloads, not JSON mocks); in: the adapter's state after reading, out: `eventStream.fail`, else undefined.
+// The error to fail with when a stream ended without its final event while carrying no content or an unfinished tool call, whatever the body's content type (a JSON body never gets here: openStreamResponse reads it whole); in: the adapter's state after reading, out: `eventStream.fail`, else undefined.
 export function incompleteStreamCheck(a: {
   provider: string;
   modelId: string;
   hasTerminal: boolean;
   empty: boolean;
   unfinishedCall: boolean;
-  responseHeaders: Record<string, string>;
-  framesSeen: number;
-  badFrames: number;
 }): Error | undefined {
   if (a.hasTerminal || !(a.empty || a.unfinishedCall)) return undefined;
-  const contentType = Object.entries(a.responseHeaders).find(([k]) => k.toLowerCase() === "content-type")?.[1];
-  const isSSEPayload =
-    (typeof contentType === "string" && (contentType.includes("event-stream") || contentType.startsWith("text/"))) ||
-    a.framesSeen > 0 ||
-    a.badFrames > 0;
-  return isSSEPayload ? incompleteStreamError(a.provider, a.modelId) : undefined;
+  return incompleteStreamError(a.provider, a.modelId);
 }
 
 // Fails a stream with the right error: an abort (the signal, the stream's cancel, or an AbortError) becomes the plain `AbortError`, anything else passes through; in: an adapter's catch block, out: the stream's result() rejection.
