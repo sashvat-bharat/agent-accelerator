@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { Agent, tool, getProvider, type ProviderContext } from "../src/index.ts";
+import { Agent, tool, getProvider, ValidationError, type ProviderContext } from "../src/index.ts";
+import { sseFrame } from "./helpers.ts";
 import { type ProviderGenerateResult } from "../src/types/model.ts";
 import { z } from "zod";
 
@@ -171,5 +172,102 @@ describe("steer / queue / interrupt", () => {
     const callIdx = roles.indexOf("assistant");
     expect(roles.slice(callIdx, callIdx + 3)).toEqual(["assistant", "tool", "user"]);
     expect(((sent[callIdx + 1] as any).content[0] as any).id).toBe("c1");
+  });
+});
+
+describe("a busy agent keeps each session's prompts in that session", () => {
+  const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 };
+  // A chat reply (streamed when asked): a tool call while the run's first turn has no tool result yet, then its answer.
+  const reply = (body: any, message: Record<string, unknown>, finish: string): Response =>
+    body.stream
+      ? new Response(
+          sseFrame({ id: "r", choices: [{ delta: message.tool_calls ? { tool_calls: (message.tool_calls as any[]).map((c, index) => ({ index, ...c })) } : { content: message.content } }] }) +
+            sseFrame({ id: "r", choices: [{ delta: {}, finish_reason: finish }], usage }) +
+            "data: [DONE]\n\n",
+          { status: 200, headers: { "content-type": "text/event-stream" } }
+        )
+      : new Response(JSON.stringify({ id: "r", choices: [{ message: { role: "assistant", ...message }, finish_reason: finish }], usage }), { status: 200 });
+  // Session A's run waits in its tool until `open()`; session B just answers. Every request's user prompts are recorded.
+  const setup = (midSession?: Record<string, unknown>) => {
+    const prompts: string[][] = [];
+    const g = gate();
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      const users = body.messages.filter((m: any) => m.role === "user").map((m: any) => m.content);
+      prompts.push(users);
+      if (users[0] === "start A" && !body.messages.some((m: any) => m.role === "tool"))
+        return reply(body, { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "slow", arguments: "{}" } }] }, "tool_calls");
+      return reply(body, { content: users[0] === "start A" ? "answer A" : `answer to ${users.at(-1)}` }, "stop");
+    }) as unknown as typeof fetch;
+    const slow = tool({ name: "slow", description: "slow", input: z.object({}), execute: async () => (await g.promise, "done") });
+    const agent = new Agent({ model: "groq/m", apiKey: "k", baseUrl: "https://x/v1", fetch: fetchImpl, tools: { slow }, runRetries: 0, ...(midSession ? { midSession } : {}) });
+    return { agent, prompts, open: g.open };
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  it("run() for another session waits for its own run instead of being steered in (midSession steer)", async () => {
+    const { agent, prompts, open } = setup({ mode: "steer" });
+    const a = agent.run("start A", { sessionId: "A" });
+    await settle(); // A's tool is running
+    const b = agent.run("B's question", { sessionId: "B" });
+    open();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra.text).toBe("answer A");
+    expect(rb.text).toBe("answer to B's question");
+    expect(rb).not.toBe(ra);
+    expect(prompts).toEqual([["start A"], ["start A"], ["B's question"]]); // A never saw B's text, B never saw A's
+    // A prompt for A itself is still steered into A's run.
+    const again = setup({ mode: "steer" });
+    const a2 = again.agent.run("start A", { sessionId: "A" });
+    await settle();
+    const same = again.agent.run("more for A", { sessionId: "A" });
+    again.open();
+    expect(await same).toBe(await a2);
+    expect(again.prompts.at(-1)).toEqual(["start A", "more for A"]);
+  });
+
+  it("stream() for another session gets its own run and its own answer", async () => {
+    const { agent, prompts, open } = setup({ mode: "steer" });
+    const a = agent.stream("start A", { sessionId: "A" }).result();
+    await settle();
+    const b = agent.stream("B's question", { sessionId: "B", enqueue: "steer" }).result();
+    open();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra.text).toBe("answer A");
+    expect(rb.text).toBe("answer to B's question");
+    expect(prompts).toEqual([["start A"], ["start A"], ["B's question"]]);
+    // A streamed steer for A itself still joins the streamed run of A.
+    const again = setup({ mode: "steer" });
+    const a2 = again.agent.stream("start A", { sessionId: "A" });
+    await settle();
+    const same = again.agent.stream("more for A", { sessionId: "A", enqueue: "steer" });
+    again.open();
+    expect(same).toBe(a2); // the active stream itself
+    await a2.result();
+    expect(again.prompts.at(-1)).toEqual(["start A", "more for A"]);
+  });
+
+  it("steer() for another session throws, and an enqueue: steer for another session is queued", async () => {
+    const { agent, prompts, open } = setup();
+    const a = agent.run("start A", { sessionId: "A" });
+    await settle();
+    // The error a call throws (a returned promise is caught, so a wrong answer fails fast instead of hanging).
+    const thrown = (call: () => Promise<unknown>): unknown => {
+      try {
+        call().catch(() => {});
+        return undefined;
+      } catch (err) {
+        return err;
+      }
+    };
+    const other = thrown(() => agent.steer("B's question", { sessionId: "B" }));
+    const unnamed = thrown(() => agent.steer("no session given")); // the agent's own session is another one
+    const b = agent.run("B's question", { sessionId: "B", enqueue: "steer" });
+    open();
+    expect(other).toBeInstanceOf(ValidationError);
+    expect(String((unnamed as Error | undefined)?.message)).toMatch(/session "A".*this prompt is for session/);
+    expect((await b).text).toBe("answer to B's question");
+    expect((await a).text).toBe("answer A");
+    expect(prompts).toEqual([["start A"], ["start A"], ["B's question"]]);
   });
 });

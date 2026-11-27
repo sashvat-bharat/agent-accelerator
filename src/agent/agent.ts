@@ -1094,6 +1094,12 @@ export class Agent {
       return this.submitOnce(options.requestId, prompt, () => this.steer(prompt, { ...options, requestId: undefined }));
     const active = this.rc.current;
     if (!active) return this.run(prompt, options) as Promise<AgentResponse>;
+    const session = options?.sessionId || this.sessionId;
+    if (session !== active.sessionId) {
+      throw new ValidationError(
+        `[Agent Accelerator] steer() adds to the running conversation (session "${active.sessionId}"), but this prompt is for session "${session}". Use run() or queue() for another session: it then runs after the active run.`
+      );
+    }
     return this.rc.steerInto(active, prompt, options);
   }
 
@@ -1137,6 +1143,11 @@ export class Agent {
         `[Agent Accelerator] enqueue "${requested}" is disabled by midSession.mode "${enforced}". Use ${enforced}() or set mode to "auto"/"${requested}".`
       );
     }
+  }
+
+  // True when a call is for the session of the active run (its `sessionId`, else the agent's); in: run() and stream() while busy, out: whether a steer may join the running conversation.
+  private isActiveSession(options: AgentRunOptions | undefined): boolean {
+    return (options?.sessionId || this.sessionId) === this.rc.current?.sessionId;
   }
 
   // Throws when the follow-up queue is at `midSession.maxQueued`; in: every queueing path except interrupt, out: nothing or a ValidationError.
@@ -1457,7 +1468,12 @@ export class Agent {
       return res;
     })();
 
-    this.rc.current = { steerInbox, abortController: runController, runPromise: task };
+    this.rc.current = {
+      sessionId: runOptions?.sessionId || this.sessionId,
+      steerInbox,
+      abortController: runController,
+      runPromise: task,
+    };
     task.then(
       (res) => this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done"),
       (err) => this.endRun(mark, isAbortError(err) ? "aborted" : "failed")
@@ -1521,7 +1537,12 @@ export class Agent {
     };
 
     const s = streamAgentLoop(loopConfig);
-    this.rc.current = { steerInbox, outerStream: s, abortController: runController };
+    this.rc.current = {
+      sessionId: options?.sessionId || this.sessionId,
+      steerInbox,
+      outerStream: s,
+      abortController: runController,
+    };
     s.result().then(
       (res) => {
         this.endRun(mark, res.finishReason === "stopped" ? "stopped" : "done");
@@ -1749,6 +1770,11 @@ export class Agent {
           this.rc.queueUrgent({ prompt, options, isStream: false, resolve, reject })
         );
       }
+      // A prompt for another session never joins the running conversation: it waits for its own run.
+      if (!this.isActiveSession(options)) {
+        this.assertPromptValid(prompt);
+        return this.enqueueFollowUp(prompt, options);
+      }
       this.assertEnqueueAllowed(options?.enqueue);
       const mode = this.rc.resolveEnqueueMode(options?.enqueue);
       if (mode === "steer") {
@@ -1841,8 +1867,9 @@ export class Agent {
     if (this.rc.current) {
       const urgent = options?.enqueue === "interrupt"; // stops the active run and goes first, in every mode and whatever the queue holds
       const requestedStream = options?.enqueue === "interrupt" ? undefined : options?.enqueue;
-      this.assertEnqueueAllowed(requestedStream);
-      const mode = urgent ? "queue" : this.rc.resolveEnqueueMode(requestedStream);
+      const otherSession = !this.isActiveSession(options); // never joins the running conversation: it waits for its own run
+      if (!otherSession) this.assertEnqueueAllowed(requestedStream);
+      const mode = urgent || otherSession ? "queue" : this.rc.resolveEnqueueMode(requestedStream);
       if (mode === "steer") {
         this.assertPromptValid(prompt);
         this.rc.assertSteerRoom(this.rc.current.steerInbox);
@@ -1895,7 +1922,7 @@ export class Agent {
         }
         return stub;
       }
-      if (!urgent && this.midSessionConfig.mode === "steer") {
+      if (!urgent && !otherSession && this.midSessionConfig.mode === "steer") {
         throw new ConfigError(
           '[Agent Accelerator] enqueue "queue" is disabled by midSession.mode "steer". Use steer() or set mode to "auto"/"queue".'
         );

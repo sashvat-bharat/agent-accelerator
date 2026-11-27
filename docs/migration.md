@@ -18,6 +18,7 @@
 - With `resume: "explicit"`, a new `run()` after a crash (instead of `resume()`) gives the model the saved result of every tool call that finished before the crash. Before, every open call was answered "interrupted", so the model could repeat work that was already done.
 - A streamed tool call whose arguments were cut off (for example at `maxOutputTokens`) after the provider opened it with `{}` (Google, and OpenAI when it sends `{}`) is now a cut-off call that never runs. Before, it ran with empty arguments, so a tool whose fields are all optional ran with nothing.
 - Each call of a fixed sub-agent now gets its own session id (`<parent>-sub-<name>-<random>`), so two calls in one model turn no longer share one. On Google the copies used to continue each other's conversation, and the first to finish cleared the other's. If you matched the old id `<parent>-sub-<name>` in your telemetry, match the prefix.
+- A busy agent no longer steers a prompt for another session into the running conversation. `run()` and `stream()` with a different `sessionId` now wait for their own run (also with `midSession.whenBusy: "steer"` or `enqueue: "steer"`), and `steer()` for another session throws a `ValidationError`. Before, user B's text went into user A's conversation and B got A's answer.
 - `Agent.fromConfig` also finds a tool by the name the model sees (the tool's `name`), not only by its key in `base.tools`.
 
 ## Upgrading to 0.9.3

@@ -269,7 +269,7 @@ All extend `AgentAccelError`, which has `code`, `retryable` and `context`.
 | `TimeoutError` | A request, first-byte or idle timeout. Retryable. |
 | `BudgetExceededError` | `budget`, or `limits.maxTotalTokens`, `deadlineMs` or `maxToolCallsPerRun`, was exceeded. Partial usage is attached. |
 | `ToolError` | A tool failed in a way that reaches the caller. |
-| `ValidationError` | Structured output or scheduled-action input did not validate. An input the model cannot take, before any network call. An empty prompt. A call made the wrong way: a streaming option on `steer`, `queue` or `interrupt(message)`, `resume()` while busy, or a full queue. A bad session id, `registerModel` spec or media input. |
+| `ValidationError` | Structured output or scheduled-action input did not validate. An input the model cannot take, before any network call. An empty prompt. A call made the wrong way: a streaming option on `steer`, `queue` or `interrupt(message)`, `steer` for a session other than the running one, `resume()` while busy, or a full queue. A bad session id, `registerModel` spec or media input. |
 | `SettingNotEditableError` | `setConfig` on a hidden setting. A `ConfigError`, never retried. `key` names it. |
 | `ModelNotAllowedError` | A model outside your `setModels` list. A `ConfigError`, never retried. `model` and `allowed` say what was asked and what is available. |
 | `ThinkingLevelError` | A level the model does not support. A `ConfigError`. `allowedLevels` lists the valid ones. |
