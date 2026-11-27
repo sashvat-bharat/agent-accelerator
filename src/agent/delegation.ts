@@ -691,6 +691,7 @@ export function agentToTool(input: Agent | AgentAsToolTarget, opts?: { chat?: Us
             try {
               agentInstance.absorbUsage(worker.usageTotals);
               agentInstance.absorbWorkers(worker.startedWorkerNodes()); // and the workers the copy started: they die with it
+              agentInstance.absorbImageUsage(worker); // and what its image tools spent
             } catch {
               // why: bookkeeping must never fail a run; the run result is what counts.
             } // the template keeps what its copies spent

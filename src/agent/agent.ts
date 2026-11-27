@@ -13,7 +13,7 @@ import type {
 import type { TokenUsage } from "../types/core.ts";
 import { noop } from "../utils/noop.ts";
 import { normalizeThinkingV2, resolveWhenBusy } from "../tools/tool.ts";
-import type { ToolDefinition, ToolResultRecord } from "../types/tool.ts";
+import type { ToolDefinition, ToolExecutionContext, ToolResultRecord } from "../types/tool.ts";
 import { isSubagentResult } from "../tools/subagent-result.ts";
 import {
   CACHE_OPTIONS,
@@ -78,7 +78,9 @@ import {
 import { isRetryableRun, readRetryAfterMs, sleep } from "../utils/retry.ts";
 import { createSessionId, nowMs, newRunId, previewPrompt } from "../utils/session.ts";
 import { chargeBudgetUsage, checkBudget, subscribeToSubAgentForSessions, type SubAgentTrace } from "./delegation.ts";
+import { reportImageCallsTo, type ImagePriceSource } from "../image/spend.ts";
 import {
+  addImageCall,
   addTurn,
   buildUsageReport,
   emptyUsage,
@@ -309,6 +311,8 @@ export class Agent {
   private readonly copiedUsage: UsageTotals = emptyUsage();
   /** Saved fixed-worker spending whose worker is no longer in `subagents` (renamed or removed); kept so the total stays exact. */
   private readonly orphanFixed: UsageNode[] = [];
+  /** What this agent's `imageTool`s spent, one node per tool name (saved in the fixed tree as role "image"). */
+  private readonly imageUsage = new Map<string, UsageNode>();
   /** The spending of this agent's fixed workers as a usage tree, for the snapshot and the journal; an own property so a `{ ...agent }` copy keeps it. @internal */
   readonly fixedUsage: () => UsageNode[] = () => this.fixedUsageNodes();
   /** The chat-wide spending cap this agent counts into and checks against: its own (`usageLimit`) or the root's, handed down to workers. @internal */
@@ -545,6 +549,8 @@ export class Agent {
     // Tools registration (unified normalization shared with dynamic pool).
     if (config.tools) {
       Object.assign(this.tools, normalizeToolMap(config.tools));
+      for (const [key, def] of Object.entries(this.tools))
+        if (def.imageSpend) this.tools[key] = this.countedImageTool(def.name || key, def);
     }
 
     if (Array.isArray(config.subagents)) {
@@ -688,6 +694,50 @@ export class Agent {
     foldOldNodes(this.copiedWorkers, MAX_COPIED_WORKER_NODES);
   }
 
+  // This agent's copy of an `imageTool`: it refuses a picture once `usageLimit` or `budget` is spent, and registers where the call reports what it spent (the shared tool object is never changed); in: the constructor, out: this.tools.
+  private countedImageTool(name: string, def: ToolDefinition): ToolDefinition {
+    const model = def.imageSpend?.model ?? "unknown";
+    return {
+      ...def,
+      execute: async (input: unknown, ctx: ToolExecutionContext) => {
+        this.enforceBudget(); // throws BudgetExceededError: the model is told, and the run ends before its next turn
+        reportImageCallsTo(ctx, (usage, source) => this.recordImageCall(name, model, usage, source));
+        return def.execute(input, ctx);
+      },
+    };
+  }
+
+  // The usage node of one image tool of this agent, created empty on first use; in: recordImageCall, imageUsageNodes, placeFixed, out: the node.
+  private imageNode(name: string, model: string): UsageNode {
+    let node = this.imageUsage.get(name);
+    if (!node) {
+      node = { id: name, name, role: "image", model, status: "fixed", totals: emptyUsage(), workers: [] };
+      this.imageUsage.set(name, node);
+    }
+    return node;
+  }
+
+  // Records one picture call of THIS agent: into its image totals, the chat-wide cap and the run budget (saved by the next persist); in: the image tool's report, out: imageUsage, chat, budgetState.
+  private recordImageCall(name: string, model: string, usage: TokenUsage, source: ImagePriceSource | undefined): void {
+    addImageCall(this.imageNode(name, model).totals, usage, source);
+    const microUSD = Math.round((usage.cost?.totalCost ?? 0) * 1_000_000);
+    this.chat?.add((usage.inputTokens || 0) + (usage.outputTokens || 0), microUSD);
+    if (this.budget) chargeBudgetUsage(this, usage);
+  }
+
+  /** What this agent's `imageTool`s spent, one usage node per tool (status "fixed", role "image"), unused tools included. @internal */
+  imageUsageNodes(): UsageNode[] {
+    for (const [key, def] of Object.entries(this.tools))
+      if (def.imageSpend) this.imageNode(def.name || key, def.imageSpend.model);
+    return [...this.imageUsage.values()];
+  }
+
+  /** Adds what one per-call copy of this agent (as a fixed worker) spent on pictures to this agent's image totals. @internal */
+  absorbImageUsage(copy: Agent): void {
+    for (const node of copy.imageUsageNodes())
+      if (node.totals.turns > 0) mergeUsage(this.imageNode(node.id, node.model).totals, node.totals);
+  }
+
   /** The usage nodes of the workers this agent started (none, without creating the registry, when it never started one). @internal */
   startedWorkerNodes(): UsageNode[] {
     return this.workerRegistry?.usageNodes() ?? [];
@@ -703,32 +753,13 @@ export class Agent {
   usageReport(): UsageReport {
     return buildUsageReport(
       { id: this.sessionId, name: this.name, model: modelName(this.modelStringOrSpec), totals: this.usageTotals },
-      [...this.workerNodes(), ...this.imageToolNodes()]
+      this.workerNodes()
     );
   }
 
-  // Everything below this agent as usage nodes: the workers it started, its fixed workers (each with what lies below it) and the workers its fixed workers' copies started; in: usageReport and fixedWorkerNodes, out: UsageNode[].
+  // Everything below this agent as usage nodes: the workers it started, its fixed workers (each with what lies below it), the workers its fixed workers' copies started and its image tools; in: usageReport and fixedWorkerNodes, out: UsageNode[].
   private workerNodes(): UsageNode[] {
-    return [...this.workers.usageNodes(), ...this.fixedWorkerNodes(), ...this.copiedWorkers];
-  }
-
-  // The picture spending of this agent's `imageTool`s as usage nodes (status "fixed"); in: this.tools, out: usageReport.
-  private imageToolNodes(): UsageNode[] {
-    const nodes: UsageNode[] = [];
-    for (const [key, def] of Object.entries(this.tools)) {
-      if (!def.imageSpend) continue;
-      const name = def.name || key;
-      nodes.push({
-        id: name,
-        name,
-        role: "image",
-        model: def.imageSpend.model,
-        status: "fixed",
-        totals: def.imageSpend.totals,
-        workers: [],
-      });
-    }
-    return nodes;
+    return [...this.workers.usageNodes(), ...this.fixedWorkerNodes(), ...this.copiedWorkers, ...this.imageUsageNodes()];
   }
 
   // The `subagents: [...]` workers with the name each is listed under; in: the constructor (entries written as data are already Agents), out: fixedWorkerNodes, fixedUsageNodes and placeFixed.
@@ -754,7 +785,7 @@ export class Agent {
     return [...nodes, ...this.orphanFixed];
   }
 
-  // What the copies of this agent's fixed workers spent, as the tree the session saves (a worker with nothing to save is left out); in: `fixedUsage`, out: the snapshot and the `fixed` journal record.
+  // What the copies of this agent's fixed workers and its image tools spent, as the tree the session saves (a node with nothing to save is left out); in: `fixedUsage`, out: the snapshot and the `fixed` journal record.
   private fixedUsageNodes(): UsageNode[] {
     const nodes: UsageNode[] = [];
     for (const { name, worker } of this.fixedEntries()) {
@@ -769,12 +800,14 @@ export class Agent {
         workers: below,
       });
     }
-    return [...nodes, ...this.orphanFixed];
+    const pictures = this.imageUsageNodes().filter((node) => node.totals.turns > 0);
+    return [...nodes, ...pictures, ...this.orphanFixed];
   }
 
   // Forgets what the copies of this agent's fixed workers spent, all the way down; in: restoreUsage, out: empty copied spending.
   private clearFixed(): void {
     this.orphanFixed.length = 0;
+    this.imageUsage.clear();
     for (const { worker } of this.fixedEntries()) {
       Object.assign(worker.copiedUsage, emptyUsage());
       worker.copiedWorkers.length = 0;
@@ -782,10 +815,15 @@ export class Agent {
     }
   }
 
-  // Puts a saved fixed-worker tree back: each node goes to the fixed worker of the same name, and one with no such worker is kept as it is; in: restoreUsage, out: copied spending and workers.
+  // Puts a saved fixed-worker tree back: an image node goes to this agent's image tool of the same name, any other node to the fixed worker of the same name, and one with neither is kept as it is; in: restoreUsage, out: copied spending, workers and image totals.
   private placeFixed(nodes: UsageNode[]): void {
     const entries = this.fixedEntries();
+    const pictureTools = new Set(this.imageUsageNodes().map((node) => node.id));
     for (const node of nodes) {
+      if (node.role === "image" && pictureTools.has(node.id)) {
+        Object.assign(this.imageNode(node.id, node.model).totals, node.totals); // an image tool of this agent: its saved spending
+        continue;
+      }
       const found = entries.find((e) => e.name === node.id);
       if (!found) {
         this.orphanFixed.push(node);

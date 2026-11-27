@@ -4,7 +4,7 @@
 
 ## Upgrading to 0.9.4
 
-0.9.4 keeps each key, address and header with the provider it was written for.
+0.9.4 closes safety gaps. Keys, addresses and headers stay with the provider they were written for. Local files and media URLs obey their guards. A crash, a cut stream, parallel calls of one worker and several sessions on one agent no longer mix up results. Pictures count toward the spending caps. Nothing was removed. If you rely on one key for several providers, steer prompts across sessions, or download media on a network where only a proxy resolves names, read the list below.
 
 **Behavior that changed**
 
@@ -19,6 +19,8 @@
 - A streamed tool call whose arguments were cut off (for example at `maxOutputTokens`) after the provider opened it with `{}` (Google, and OpenAI when it sends `{}`) is now a cut-off call that never runs. Before, it ran with empty arguments, so a tool whose fields are all optional ran with nothing.
 - Each call of a fixed sub-agent now gets its own session id (`<parent>-sub-<name>-<random>`), so two calls in one model turn no longer share one. On Google the copies used to continue each other's conversation, and the first to finish cleared the other's. If you matched the old id `<parent>-sub-<name>` in your telemetry, match the prefix.
 - A busy agent no longer steers a prompt for another session into the running conversation. `run()` and `stream()` with a different `sessionId` now wait for their own run (also with `midSession.whenBusy: "steer"` or `enqueue: "steer"`), and `steer()` for another session throws a `ValidationError`. Before, user B's text went into user A's conversation and B got A's answer.
+- The spending of an `imageTool` now belongs to the agent that runs it. It counts toward `usageLimit` and `budget`: once a cap is reached, the next picture is refused and the run ends with `BudgetExceededError`. Before, pictures were listed in `usageReport()` but no cap saw them. It is also saved with the session (in `fixedUsage`, as a node with `role: "image"`) and comes back after a restart. One tool object given to two agents no longer adds their pictures together. `maxImages` still counts per tool object in one process.
+- After a restart, the starting point of `usageLimit` now includes what the copies of fixed workers spent. Before, it counted only the agent and its `agent.workers` workers.
 - `Agent.fromConfig` also finds a tool by the name the model sees (the tool's `name`), not only by its key in `base.tools`.
 
 ## Upgrading to 0.9.3

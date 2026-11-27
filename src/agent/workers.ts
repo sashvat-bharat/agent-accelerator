@@ -23,7 +23,7 @@ import {
   type WorkerRunResult,
 } from "./delegation.ts";
 import { finishedTurns, historyUpTo, type Turn } from "./turns.ts";
-import { mergeUsage, modelName, readUsage, type UsageNode } from "../session/usage.ts";
+import { mergeUsage, modelName, readFixedUsage, readUsage, type UsageNode } from "../session/usage.ts";
 
 /** What `spawn` needs to start a worker. */
 export interface WorkerSpec {
@@ -154,6 +154,8 @@ function readSavedWorker(dir: string | undefined): {
       // a damaged worker.json is skipped, as in load()
     }
   }
+  // What its fixed workers' copies and its image tools spent is saved in its own tree.
+  workers.push(...readFixedUsage(session?.session.fixedUsage));
   return { model: session?.session.model || "unknown", totals: readUsage(session?.session.usage), workers };
 }
 
@@ -268,7 +270,7 @@ export class WorkerRegistry {
       entry.kept = {
         model: modelName(entry.agent.modelStringOrSpec),
         totals: readUsage(entry.agent.usageTotals),
-        workers: entry.agent.workers.usageNodes(),
+        workers: [...entry.agent.workers.usageNodes(), ...entry.agent.imageUsageNodes()],
       };
     entry.agent?.disposeSession(entry.meta.sessionId); // frees its provider chain; never reset(): that could rewrite the saved history
     entry.agent = undefined;
@@ -295,7 +297,7 @@ export class WorkerRegistry {
           ...base,
           model: modelName(entry.agent.modelStringOrSpec),
           totals: entry.agent.usageTotals,
-          workers: entry.agent.workers.usageNodes(),
+          workers: [...entry.agent.workers.usageNodes(), ...entry.agent.imageUsageNodes()],
         };
       return { ...base, ...(entry.kept ?? readSavedWorker(entry.dir)) };
     });
