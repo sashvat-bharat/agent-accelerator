@@ -107,8 +107,8 @@ const designer = new Agent({
       // Fixed values. They also take apiKey, fetch, retry and more.
       defaults: { aspectRatio: "1:1", quality: "medium" },
       allow: ["aspectRatio"], // what the LLM may set besides the prompt (default: none)
-      // A cap for the life of this tool object (default 8).
-      // Every picture costs money.
+      // A cap for the life of this tool object in this process (default 8).
+      // Every picture costs money: usageLimit and budget count it too.
       maxImages: 4,
     }),
   },
@@ -120,7 +120,10 @@ const designer = new Agent({
 - A wrong setup (an unsupported model, an `allow` entry the model lacks, `defaults` it cannot take) throws when the tool is created.
 - Past `maxImages`, the model is told the limit is used up, and nothing more is requested.
 - With `show: true`, the model also sees the pictures. This works for Google agents. Other providers get the text only, with one warning.
-- The spend is a worker line (`role: "image"`) in `agent.usageReport()` and in its total.
+- The spend belongs to the agent that ran the tool, even when one tool object is given to several agents. It is a worker line (`role: "image"`) in `agent.usageReport()` and in its total, and it is saved with the session.
+- Pictures count toward the agent's `usageLimit` and `budget`. Once a cap is reached, the next picture is refused before it is requested, and the run ends with `BudgetExceededError` before its next model turn.
+- `maxImages` counts the pictures of this tool object in this process and starts again after a restart. For a cap that survives a restart, use `usageLimit`.
+- A worker's pictures count toward its own `budget` (for example `workerBudget`) and the shared `usageLimit`, not toward the parent's per-run `budget`.
 
 ## Cost
 

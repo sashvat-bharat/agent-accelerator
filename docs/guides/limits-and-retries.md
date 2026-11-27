@@ -67,10 +67,10 @@ The only other default cap is the buffer of waiting messages: `midSession.maxQue
 
 ### Cap a whole chat with `usageLimit`
 
-`usageLimit: { maxCostUsd?, maxTotalTokens? }` is the spending cap of a chat. It adds up every model call of the agent and of all its workers (the `subagents` tool, `agent.workers` at any depth, fixed `subagents`), and it never resets. Use it for "this conversation may cost at most $5".
+`usageLimit: { maxCostUsd?, maxTotalTokens? }` is the spending cap of a chat. It adds up every model call of the agent and of all its workers (the `subagents` tool, `agent.workers` at any depth, fixed `subagents`), and every picture their `imageTool`s make, and it never resets. Use it for "this conversation may cost at most $5".
 
 - When the total reaches a cap, the next model call anywhere in the chat throws `BudgetExceededError` ("Usage limit reached"). A worker asked to run after that answers with the same message and never reaches the provider.
-- A saved chat starts from what its saved sessions already spent. Continue it the usual way (`importSession(loadSessionDir(...).session)`) and the count carries on.
+- A saved chat starts from what its saved sessions already spent, pictures and the copies of fixed workers included. Continue it the usual way (`importSession(loadSessionDir(...).session)`) and the count carries on.
 - A model with an unknown price adds tokens but $0 to the cost.
 - Scheduled actions are not part of the chat and never count. A scheduled run is capped by `scheduledActionBudget` only. It never borrows the agent's `budget`, the workers' `workerBudget` or the chat's `usageLimit`.
 

@@ -259,6 +259,29 @@ describe("truncated-argument marker vs. a real `raw` parameter", () => {
     expect(String(bad[0]!.result)).toContain("truncated");
     expect(ran).toBe("ls -la"); // not executed again
   });
+
+  it("streamed arguments that never parse are cut off, even after a `{}` start, and the tool does not run", async () => {
+    const { tool } = await import("../src/index.ts");
+    const { parseStreamedToolArguments, selectRawArguments } = await import("../src/providers.ts");
+    const { isTruncatedToolCall } = await import("../src/tools/executor.ts");
+    const cut = parseStreamedToolArguments("{}", '{"to":"a@b.c"');
+    expect(cut).toEqual({ __truncated_raw: '{}{"to":"a@b.c"' });
+    expect(selectRawArguments("{}", '{"to":"a@b.c"')).toBe('{}{"to":"a@b.c"');
+    // What still parses is unchanged: nothing streamed, the full JSON in the delta, a partial start, a full start.
+    expect(parseStreamedToolArguments("{}", "")).toEqual({});
+    expect(parseStreamedToolArguments("", "")).toEqual({});
+    expect(parseStreamedToolArguments("{}", '{"a":1}')).toEqual({ a: 1 });
+    expect(selectRawArguments("{}", '{"a":1}')).toBe('{"a":1}');
+    expect(parseStreamedToolArguments('{"a":', "1}")).toEqual({ a: 1 });
+    expect(parseStreamedToolArguments('{"a":1}', "")).toEqual({ a: 1 });
+    // A tool whose fields are all optional would have run with nothing.
+    let runs = 0;
+    const send = tool({ description: "send", input: z.object({ to: z.string().optional() }), execute: async () => (runs++, "sent") });
+    expect(isTruncatedToolCall({ id: "c3", name: "send", arguments: cut })).toBe(true);
+    const [r] = await executeToolCalls({ tools: { send }, toolCalls: [{ id: "c3", name: "send", arguments: cut }] });
+    expect(r!.isError).toBe(true);
+    expect(runs).toBe(0);
+  });
 });
 
 describe("tool result hygiene", () => {

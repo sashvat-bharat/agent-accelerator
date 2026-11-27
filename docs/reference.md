@@ -35,7 +35,7 @@ The exported type declarations in `src/types/` are the source of truth.
 | `retry` | How one provider call is retried. | [Limits and retries](guides/limits-and-retries.md) |
 | `runRetries` | How often a whole run that failed for a transient reason is tried again. Default 3, `0` is off. | [Limits and retries](guides/limits-and-retries.md) |
 | `onFailure` | `"auto"`, `"rollback"` or `"keep"`. | [Limits and retries](guides/limits-and-retries.md) |
-| `fetch`, `env` | A custom `fetch`, and per-agent environment overrides for keys. | [Models and providers](guides/models-and-providers.md) |
+| `fetch`, `env` | A custom `fetch` (for provider calls and for the media URLs the SDK downloads), and per-agent environment overrides for keys. | [Models and providers](guides/models-and-providers.md) |
 | `fileAccess` | `{ roots }`. Where local files may be read. | [Security](guides/security.md) |
 | `captureRaw` | `"redacted"` (default), `true` or `false`. What `res.raw` keeps. | [Security](guides/security.md) |
 | `budget`, `limits`, `usageLimit` | Caps. Keys below. | [Limits and retries](guides/limits-and-retries.md) |
@@ -202,7 +202,7 @@ Look a model up with `getModelFromCatalog`, and add your own with `registerModel
 | `createSessionId(prefix?)` | A random session id (`<prefix>-<uuid>` with a prefix), at most 64 characters. |
 | `withRetries(fn, options?)` | Runs `fn` again after a transient failure. Defaults: 2 retries, a 5 second delay cap, a 30 second retry budget. A `Retry-After` header is honored inside that budget. An abort is never retried. Options: `maxRetries`, `maxRetryDelayMs`, `retryBudgetMs`, `baseDelayMs`, `signal`, `label`. |
 | `isTransientError(error)` | `true` for the failures `withRetries` retries. |
-| `normalizeMediaInput(input, mimeType?)` | Resolves a media input to `{ mimeType, base64Data, dataUrl }`. |
+| `normalizeMediaInput(input, mimeType?, { signal?, fetch? }?)` | Resolves a media input to `{ mimeType, base64Data, dataUrl }`. A URL is downloaded with `fetch` (the global one when unset) and stops when `signal` aborts. |
 | `inferMimeType(path, fallback?)`, `sniffMimeType(bytes)` | The MIME type from a file name, or from the first bytes. |
 | `ensureCustomProvider(prefix, options?)`, `getProvider(id)`, `normalizeProviderPrefix(prefix)` | Create or fetch the provider for a prefix. See [Provider notes](guides/provider-notes.md#openai-compatible-services). |
 
@@ -269,7 +269,7 @@ All extend `AgentAccelError`, which has `code`, `retryable` and `context`.
 | `TimeoutError` | A request, first-byte or idle timeout. Retryable. |
 | `BudgetExceededError` | `budget`, or `limits.maxTotalTokens`, `deadlineMs` or `maxToolCallsPerRun`, was exceeded. Partial usage is attached. |
 | `ToolError` | A tool failed in a way that reaches the caller. |
-| `ValidationError` | Structured output or scheduled-action input did not validate. An input the model cannot take, before any network call. An empty prompt. A call made the wrong way: a streaming option on `steer`, `queue` or `interrupt(message)`, `resume()` while busy, or a full queue. A bad session id, `registerModel` spec or media input. |
+| `ValidationError` | Structured output or scheduled-action input did not validate. An input the model cannot take, before any network call. An empty prompt. A call made the wrong way: a streaming option on `steer`, `queue` or `interrupt(message)`, `steer` for a session other than the running one, `resume()` while busy, or a full queue. A bad session id, `registerModel` spec or media input. |
 | `SettingNotEditableError` | `setConfig` on a hidden setting. A `ConfigError`, never retried. `key` names it. |
 | `ModelNotAllowedError` | A model outside your `setModels` list. A `ConfigError`, never retried. `model` and `allowed` say what was asked and what is available. |
 | `ThinkingLevelError` | A level the model does not support. A `ConfigError`. `allowedLevels` lists the valid ones. |
@@ -286,12 +286,12 @@ The environment holds API keys and nothing else. Every other option is a setting
 | Variable | Purpose |
 |---|---|
 | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY` | The Google key. Checked in this order. |
-| `OPENAI_API_KEY`, `OPENAI_BASE_API_KEY` | The OpenAI key. |
+| `OPENAI_BASE_API_KEY`, `OPENAI_API_KEY` | The OpenAI key. Checked in this order. |
 | `ANTHROPIC_API_KEY` | The Anthropic key. |
 | `OPENROUTER_API_KEY` | The OpenRouter key. |
-| `<PREFIX>_API_KEY`, `<PREFIX>_BASE_API_KEY` | The key of any OpenAI-compatible service (for `PREFIX/model`), such as `GROQ_API_KEY`. Local services may have none. |
+| `<PREFIX>_API_KEY`, `<PREFIX>_BASE_API_KEY` | The key of any OpenAI-compatible service (for `PREFIX/model`), such as `GROQ_API_KEY`. Checked in this order. Local services may have none. |
 
-The library reads `process.env` only for keys. Pass `env: { ... }` in the config or a run option to override a key for one agent.
+The library reads `process.env` only for keys. Pass `env: { ... }` in the config or a run option to override a key for one agent. It is read first, with the same names in the same order. The Google names count only for `google/` and `gemini/` models, never for a custom prefix such as `googleproxy/`.
 
 ## Generators
 

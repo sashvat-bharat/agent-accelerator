@@ -41,6 +41,7 @@ import { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
+import type { MediaDownload } from "../utils/media.ts";
 import { toConciseProviderError } from "../utils/errors.ts";
 import { assertModalitiesSupported } from "./modalities.ts";
 import { badReplyError, messageReplyProblem } from "./reply-guard.ts";
@@ -242,7 +243,11 @@ function unsupportedInput(what: string, modelId: string, remedy: string): Valida
 }
 
 // Text and media parts as Anthropic text, image and document blocks; web links go as url sources, the rest is inlined as base64; in: a user message's parts, out: the message content.
-async function contentPartsToBlocks(parts: ContentPart[], modelId: string): Promise<RequestBlock[]> {
+async function contentPartsToBlocks(
+  parts: ContentPart[],
+  modelId: string,
+  download?: MediaDownload
+): Promise<RequestBlock[]> {
   const blocks: RequestBlock[] = [];
   for (const part of parts) {
     if (part.type === "text") {
@@ -259,7 +264,7 @@ async function contentPartsToBlocks(parts: ContentPart[], modelId: string): Prom
         blocks.push({ type: "image", source: { type: "url", url: raw } });
         continue;
       }
-      const norm = await normalizeMediaInput(raw, part.mimeType);
+      const norm = await normalizeMediaInput(raw, part.mimeType, download);
       if (!IMAGE_MEDIA_TYPES.has(norm.mimeType)) {
         throw unsupportedInput(`image type ${norm.mimeType}`, modelId, "Use JPEG, PNG, GIF or WebP.");
       }
@@ -272,7 +277,7 @@ async function contentPartsToBlocks(parts: ContentPart[], modelId: string): Prom
         blocks.push({ type: "document", source: { type: "url", url: raw }, ...title });
         continue;
       }
-      const norm = await normalizeMediaInput(raw, part.mimeType);
+      const norm = await normalizeMediaInput(raw, part.mimeType, download);
       if (norm.mimeType === "application/pdf") {
         blocks.push({
           type: "document",
@@ -329,7 +334,11 @@ function pushBlocks(messages: AnthropicMessage[], role: "user" | "assistant", bl
  * message ahead of any text, assistant turns of the current tool loop replay their stored thinking blocks, and every other
  * turn is rebuilt from the canonical text and tool calls (thinking of finished turns is never resent).
  */
-async function fullHistoryMessages(context: ProviderContext, modelId: string): Promise<AnthropicMessage[]> {
+async function fullHistoryMessages(
+  context: ProviderContext,
+  modelId: string,
+  download?: MediaDownload
+): Promise<AnthropicMessage[]> {
   const idsByName = new Map<string, string[]>();
   for (const m of context.messages) {
     if (m.role === "assistant" && Array.isArray(m.content)) {
@@ -362,7 +371,7 @@ async function fullHistoryMessages(context: ProviderContext, modelId: string): P
           ? m.content
             ? [{ type: "text", text: m.content }]
             : []
-          : await contentPartsToBlocks(m.content, modelId);
+          : await contentPartsToBlocks(m.content, modelId, download);
       pushBlocks(messages, "user", blocks);
     } else if (m.role === "assistant") {
       const replay = i > lastUser ? replayBlocks(m) : undefined;
@@ -593,7 +602,7 @@ export class AnthropicMessagesProvider implements Provider {
     const body: MessagesRequestBody = {
       model: modelId,
       max_tokens: maxTokens,
-      messages: await fullHistoryMessages(context, modelId),
+      messages: await fullHistoryMessages(context, modelId, { signal: options?.signal, fetch: options?.fetch }),
       ...(stream ? { stream: true } : {}),
     };
     if (system) body.system = system;

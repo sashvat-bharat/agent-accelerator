@@ -7,6 +7,7 @@ import { Agent, tool, toolContent, telemetryBus, loadSessionDir } from "../src/i
 import { clearInteractionChains } from "../src/providers/google.ts";
 import { executeToolCalls } from "../src/tools/executor.ts";
 import { clearSessionRouting, clearEmittedWarnings } from "../src/providers.ts";
+import { sseFrame } from "./helpers.ts";
 
 afterEach(() => {
   clearInteractionChains();
@@ -138,5 +139,112 @@ describe("toolContent: media in tool results", () => {
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("toolContent: a local path obeys fileAccess.roots", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  });
+  // An allowed folder and one outside it, each with the same picture.
+  const folders = () => {
+    const allowed = fs.mkdtempSync(path.join(os.tmpdir(), "aa-roots-in-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "aa-roots-out-"));
+    dirs.push(allowed, outside);
+    for (const d of [allowed, outside]) fs.writeFileSync(path.join(d, "pic.png"), PNG);
+    return { allowed, inside: path.join(allowed, "pic.png"), outsideFile: path.join(outside, "pic.png") };
+  };
+  // A tool that shows the model the picture at a path the model chose.
+  const show = tool({
+    name: "show",
+    description: "show a picture",
+    input: z.object({ path: z.string() }),
+    replay: "safe",
+    execute: async ({ path: p }) => toolContent([`picture ${p}`, { type: "image", image: p, mimeType: "image/png" }]),
+  });
+  const call = (id: string, p: string) => ({ id, name: "show", arguments: { path: p } });
+
+  it("the executor reads a path inside the roots, and refuses one outside as an error result", async () => {
+    const { allowed, inside, outsideFile } = folders();
+    const [ok, refused, scheme] = await executeToolCalls({
+      tools: { show },
+      toolCalls: [call("c1", inside), call("c2", outsideFile), call("c3", `file://${outsideFile}`)],
+      fileRoots: [allowed],
+    });
+    expect(ok!.isError).toBe(false);
+    expect(ok!.parts).toEqual([{ type: "image", image: `data:image/png;base64,${PNG_B64}`, mimeType: "image/png" }]);
+    for (const r of [refused!, scheme!]) {
+      expect(r.isError).toBe(true);
+      expect(r.parts).toBeUndefined();
+      expect(JSON.stringify(r.result)).not.toContain(PNG_B64);
+    }
+    expect(JSON.stringify(refused!.result)).toContain("outside the allowed fileAccess roots");
+    // [] denies every local path; no roots at all keeps the old behavior (no check).
+    const [denied] = await executeToolCalls({ tools: { show }, toolCalls: [call("c4", inside)], fileRoots: [] });
+    expect(denied!.isError).toBe(true);
+    const [free] = await executeToolCalls({ tools: { show }, toolCalls: [call("c5", outsideFile)] });
+    expect(free!.isError).toBe(false);
+  });
+
+  // A groq agent whose model asks for `show` on `target` once, then answers; returns what each request sent.
+  const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 };
+  const scripted = (target: string) => {
+    const bodies: any[] = [];
+    const fn = (async (_u: string, init: any) => {
+      const body = JSON.parse(init.body);
+      bodies.push(body);
+      const first = bodies.length === 1;
+      const toolCall = { id: "call_1", type: "function", function: { name: "show", arguments: JSON.stringify({ path: target }) } };
+      if (body.stream) {
+        const delta = first ? { tool_calls: [{ index: 0, ...toolCall }] } : { content: "done" };
+        return new Response(
+          sseFrame({ id: "r", choices: [{ delta }] }) + sseFrame({ id: "r", choices: [{ delta: {}, finish_reason: first ? "tool_calls" : "stop" }], usage }) + "data: [DONE]\n\n",
+          { status: 200, headers: { "content-type": "text/event-stream" } }
+        );
+      }
+      const message = first ? { role: "assistant", content: null, tool_calls: [toolCall] } : { role: "assistant", content: "done" };
+      return new Response(JSON.stringify({ id: "r", choices: [{ message, finish_reason: first ? "tool_calls" : "stop" }], usage }), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { fn, bodies };
+  };
+  const toolText = (body: any): string => body.messages.find((m: any) => m.role === "tool").content;
+
+  it("an agent with roots applies them in run() and in stream()", async () => {
+    const { allowed, outsideFile } = folders();
+    for (const mode of ["run", "stream"] as const) {
+      const { fn, bodies } = scripted(outsideFile);
+      const agent = new Agent({ model: "groq/m", apiKey: "k", baseUrl: "https://x/v1", fetch: fn, tools: { show }, runRetries: 0, fileAccess: { roots: [allowed] } });
+      const res = mode === "run" ? await agent.run("show it") : await agent.stream("show it").result();
+      expect(res.text).toBe("done");
+      expect(res.toolResults[0]!.isError).toBe(true);
+      expect(toolText(bodies[1])).toContain("outside the allowed fileAccess roots");
+      expect(JSON.stringify(bodies[1])).not.toContain(PNG_B64);
+    }
+  });
+
+  it("a cut-off call finished by resume() obeys the roots too", async () => {
+    const { allowed, outsideFile } = folders();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "aa-roots-resume-"));
+    dirs.push(root);
+    let hang = true;
+    const slowShow = tool({
+      name: "show",
+      description: "show a picture",
+      input: z.object({ path: z.string() }),
+      replay: "safe",
+      execute: async ({ path: p }) => (hang ? new Promise<never>(() => {}) : toolContent([{ type: "image", image: p, mimeType: "image/png" }])),
+    });
+    const config = (fn: typeof fetch) => ({ model: "groq/m", apiKey: "k", baseUrl: "https://x/v1", sessionId: "r1", persist: { dir: root }, resume: "explicit" as const, fetch: fn, tools: { show: slowShow }, fileAccess: { roots: [allowed] } });
+    void new Agent(config(scripted(outsideFile).fn)).run("show it"); // the tool hangs: the run is cut off
+    await new Promise((r) => setTimeout(r, 60));
+    hang = false;
+    const second = scripted(outsideFile);
+    second.bodies.push({}); // the resumed run's first request is the answer turn
+    const agent = new Agent(config(second.fn));
+    const res = await agent.resume();
+    expect(res!.toolResults[0]!.isError).toBe(true);
+    expect(toolText(second.bodies[1])).toContain("outside the allowed fileAccess roots");
+    expect(JSON.stringify(second.bodies[1])).not.toContain(PNG_B64);
   });
 });

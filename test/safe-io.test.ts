@@ -9,6 +9,7 @@ import {
   isPrivateAddress,
   isLocalPathInput,
   RemoteFetchError,
+  setHostLookup,
 } from "../src/utils/safe-io.ts";
 import { normalizeMediaInput } from "../src/utils/media.ts";
 import { SecurityPolicyError } from "../src/types/errors.ts";
@@ -44,10 +45,13 @@ describe("private address detection", () => {
       "FE80::1%eth0", // zone id, upper case
       "fc00::1",
       "[::ffff:c0a8:101]", // 192.168.1.1 in brackets
+      "::ffff:0:7f00:1", // IPv4-translated 127.0.0.1
+      "::ffff:0:127.0.0.1",
+      "0:0:0:0:ffff:0:a9fe:a9fe", // IPv4-translated 169.254.169.254
     ]) {
       expect(isPrivateAddress(a)).toBe(true);
     }
-    for (const a of ["::ffff:808:808", "::808:808", "64:ff9b::808:808", "2001:4860:4860::8888", "::ffff:8.8.8.8"]) {
+    for (const a of ["::ffff:808:808", "::808:808", "64:ff9b::808:808", "2001:4860:4860::8888", "::ffff:8.8.8.8", "::ffff:0:808:808"]) {
       expect(isPrivateAddress(a)).toBe(false);
     }
   });
@@ -170,6 +174,7 @@ describe("media URLs read by the SDK (normalizeMediaInput)", () => {
       "http://[64:ff9b::7f00:1]/x.png",
       "http://metadata.google.internal/computeMetadata/v1/",
       "https://printer.local/scan.png",
+      "http://[::ffff:0:127.0.0.1]/x.png", // IPv4-translated
     ]) {
       const err = await normalizeMediaInput(url).catch((e: unknown) => e);
       expect(err, url).toBeInstanceOf(RemoteFetchError);
@@ -195,6 +200,37 @@ describe("media URLs read by the SDK (normalizeMediaInput)", () => {
     const viaBytes = await normalizeMediaInput(PNG);
     expect(viaBytes.mimeType).toBe("image/png");
     expect((await normalizeMediaInput(viaBytes.dataUrl)).base64Data).toBe(viaBytes.base64Data);
+  });
+
+  it("refuses a name whose addresses cannot be looked up, before any request and on a redirect hop", async () => {
+    const seen: string[] = [];
+    (globalThis as any).fetch = async (url: string) => {
+      seen.push(url);
+      return url.includes("8.8.8.8")
+        ? new Response(null, { status: 302, headers: { location: "https://nowhere.example/x.png" } })
+        : new Response(PNG, { status: 200, headers: { "content-type": "image/png" } });
+    };
+    setHostLookup(async (host) => {
+      throw new Error(`getaddrinfo ENOTFOUND ${host}`);
+    });
+    const err = await normalizeMediaInput("https://nowhere.example/x.png").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RemoteFetchError);
+    expect(String((err as Error).message)).toMatch(/Cannot check host "nowhere\.example".*ENOTFOUND.*Download the file yourself/);
+    await expect(normalizeMediaInput("https://8.8.8.8/start.png")).rejects.toThrow(/Cannot check host "nowhere\.example"/);
+    expect(seen).toEqual(["https://8.8.8.8/start.png"]); // the unchecked name was never fetched
+    setHostLookup(async () => []); // an empty answer cannot be checked either
+    await expect(normalizeMediaInput("https://nowhere.example/x.png")).rejects.toThrow(/Cannot check host/);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("refuses a name when any of its addresses is private, and downloads it when all are public", async () => {
+    (globalThis as any).fetch = async () => new Response(PNG, { status: 200, headers: { "content-type": "image/png" } });
+    setHostLookup(async () => ["203.0.113.10", "10.0.0.5"]);
+    await expect(normalizeMediaInput("https://mixed.example/x.png")).rejects.toThrow(/resolves to a private\/internal address/);
+    setHostLookup(async () => ["203.0.113.10", "::ffff:0:7f00:1"]);
+    await expect(normalizeMediaInput("https://mixed.example/x.png")).rejects.toThrow(/resolves to a private\/internal address/);
+    setHostLookup(async () => ["203.0.113.10", "2001:db8::1"]);
+    expect((await normalizeMediaInput("https://public.example/x.png")).mimeType).toBe("image/png");
   });
 
   it("does not guard a browser runtime, where the request comes from the user's own machine", async () => {

@@ -70,7 +70,7 @@ The report is `{ agent, workers, total }`. Each line has:
 - `agent` is the agent's own calls. `workers` is a tree. Each worker has a `status` of `open`, `closed` or `fixed` and its own `workers`. `total` is everything.
 - A fixed worker (`subagents: [...]`) lists the workers it started below it, however many calls it handled. Only the newest 1,000 of them are listed one by one. The older ones are added up into one line called `older-workers`, so the total stays exact.
 - Each agent records only the calls it made itself, priced per turn. Nothing is counted twice, and `total` matches the tokens in the responses of the same run.
-- Everything in the report is saved with the session, so it comes back after a restart (load the session with `importSession`): the agent's own calls, its workers from `agent.workers`, and its fixed workers with the workers their copies started. If you rename or remove a fixed worker between runs, its saved spending stays in the report under the old name, so the total never shrinks.
+- Everything in the report is saved with the session, so it comes back after a restart (load the session with `importSession`): the agent's own calls, its workers from `agent.workers`, its fixed workers with the workers their copies started, and the pictures of its `imageTool`s (a line with `role: "image"`). If you rename or remove a fixed worker between runs, its saved spending stays in the report under the old name, so the total never shrinks.
 - An unknown price shows as `totalUsd: null`, never 0. When `unpricedTurns` is above 0, the total is a lower bound. `source` says where the cost came from: `provider`, `catalog` or `mixed`.
 - Not included: one-shot scheduled-action workers. Their exact spending is in the header of each run file.
 

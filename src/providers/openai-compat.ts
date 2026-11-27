@@ -58,6 +58,7 @@ import { getApiKey } from "../utils/env.ts";
 import { baseUrlSetting, compatSetting } from "../config/settings.ts";
 import { buildSessionHeaders, setHeaderCaseInsensitive, shouldEchoSignature } from "../utils/headers.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
+import type { MediaDownload } from "../utils/media.ts";
 import { toConciseProviderError } from "../utils/errors.ts";
 import { assertModalitiesSupported } from "./modalities.ts";
 import { badReplyError, chatReplyProblem } from "./reply-guard.ts";
@@ -225,7 +226,7 @@ function resolveBaseUrl(
   return resolved.replace(/\/+$/, "");
 }
 
-// Key from the option, the provider's configuration or {PREFIX}_API_KEY, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
+// Key from the option, the provider's configuration, {PREFIX}_API_KEY or {PREFIX}_BASE_API_KEY, or `unused` when custom headers carry the auth; in: each request, out: the key or undefined.
 function resolveApiKey(
   prefix: string,
   configuredApiKey: string | undefined,
@@ -239,14 +240,8 @@ function resolveApiKey(
       .trim();
     return t || undefined;
   };
-  const envPrefix = envPrefixOf(prefix);
-  const key =
-    clean(options?.apiKey) ||
-    clean(configuredApiKey) ||
-    clean(options?.env?.[`${envPrefix}_API_KEY`]) ||
-    clean(options?.env?.[`${envPrefix}_BASE_API_KEY`]) ||
-    getApiKey(prefix, undefined, options?.env) ||
-    undefined;
+  // {PREFIX}_API_KEY, then {PREFIX}_BASE_API_KEY: in a per-call `env` first, then in `process.env`.
+  const key = clean(options?.apiKey) || clean(configuredApiKey) || getApiKey(prefix, undefined, options?.env);
   if (key) return key;
   if (hasAuthHeader(options?.headers)) return "unused";
   return undefined;
@@ -355,7 +350,7 @@ function assertNoVideoOrFileParts(context: ProviderContext, prefix: string, mode
 }
 
 // Text, image (link or data URL) and audio parts as Chat content blocks; in: a user message's parts, out: fullHistoryMessages.
-async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPart[]> {
+async function contentPartsToBlocks(parts: ContentPart[], download?: MediaDownload): Promise<ChatContentPart[]> {
   const blocks: ChatContentPart[] = [];
   for (const part of parts) {
     if (part.type === "text" && part.text) {
@@ -368,14 +363,15 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
       }
       const norm = await normalizeMediaInput(
         raw as string | Uint8Array | ArrayBuffer,
-        (part as { mimeType?: string }).mimeType
+        (part as { mimeType?: string }).mimeType,
+        download
       );
       blocks.push({ type: "image_url", image_url: { url: norm.dataUrl } });
     } else if (part.type === "audio") {
       const raw = (part as { audio?: unknown }).audio;
       const mimeType = (part as { mimeType?: string }).mimeType;
       // The OpenAI chat audio shape carries data only — always inline.
-      const norm = await normalizeMediaInput(raw as string | Uint8Array | ArrayBuffer, mimeType);
+      const norm = await normalizeMediaInput(raw as string | Uint8Array | ArrayBuffer, mimeType, download);
       blocks.push({
         type: "input_audio",
         input_audio: { data: norm.base64Data, format: audioFormatFor(norm.mimeType) },
@@ -398,7 +394,8 @@ async function contentPartsToBlocks(parts: ContentPart[]): Promise<ChatContentPa
  */
 async function fullHistoryMessages(
   context: ProviderContext,
-  bridge = DEFAULT_PROMPTS.toolBridge
+  bridge = DEFAULT_PROMPTS.toolBridge,
+  download?: MediaDownload
 ): Promise<ChatMessage[]> {
   const pairing = new Map<string, string>();
   for (const m of context.messages) {
@@ -428,7 +425,7 @@ async function fullHistoryMessages(
           lastRole = "user";
         }
       } else {
-        const blocks = await contentPartsToBlocks(m.content);
+        const blocks = await contentPartsToBlocks(m.content, download);
         if (blocks.length > 0) {
           messages.push({ role: "user", content: blocks });
           lastRole = "user";
@@ -755,7 +752,10 @@ export class OpenAICompatibleChatProvider implements Provider {
         fallback: "emulated JSON instruction + client validation (no response_format is sent)",
       });
     }
-    const messages = await fullHistoryMessages(effectiveContext, options?.prompts?.toolBridge);
+    const messages = await fullHistoryMessages(effectiveContext, options?.prompts?.toolBridge, {
+      signal: options?.signal,
+      fetch: options?.fetch,
+    });
     const body: ChatRequestBody = {
       model: modelId,
       messages,

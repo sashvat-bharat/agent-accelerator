@@ -3,9 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
-import { Agent, tool, ValidationError, ConfigError } from "../src/index.ts";
+import { Agent, tool, ValidationError, ConfigError, createGenericModelSpec } from "../src/index.ts";
 import { sessionDirFor } from "../src/session/store.ts";
-import { buildDynamicWorkerConfig } from "../src/agent/worker.ts";
+import { buildDynamicWorkerConfig, buildSubAgentConfig } from "../src/agent/worker.ts";
 import { sseFrame } from "./helpers.ts";
 
 const roots: string[] = [];
@@ -548,5 +548,39 @@ describe("workerBudget: each worker's own spending cap", () => {
       expect(() => capped({ maxCostUsd: bad })).toThrow("dynamicSubagents.workerBudget.maxCostUsd");
       expect(() => capped({ maxTotalTokens: bad })).toThrow("dynamicSubagents.workerBudget.maxTotalTokens");
     }
+  });
+});
+
+describe("a worker gets the parent's key, address and headers only for the same provider", () => {
+  const conn = { apiKey: "sk-openai", baseUrl: "https://openai.test/v1", headers: { "x-gateway-key": "g-1" } };
+  const common = { name: "w", instructions: "", sessionId: "s", tools: {} };
+  // A model object that names its provider, as a program may write it (no catalog lookup).
+  const spec = (provider: string, id: string) => ({ ...createGenericModelSpec(provider, "x"), id });
+  const parentOn = (model: unknown, worker: unknown) =>
+    new Agent({ model: model as string, ...conn, dynamicSubagents: { model: worker as string } });
+  const sent = (config: { apiKey?: string; baseUrl?: string; headers?: Record<string, string> }) => [config.apiKey, config.baseUrl, config.headers];
+  const none = [undefined, undefined, undefined];
+
+  it("reads a model object by its own provider, on either side", () => {
+    // The worker calls OpenRouter: the parent's OpenAI key must not go there, although the id starts with "openai/".
+    expect(sent(buildDynamicWorkerConfig(parentOn("openai/gpt-5.5", spec("openrouter", "openai/gpt-5.5")), common))).toEqual(none);
+    expect(sent(buildDynamicWorkerConfig(parentOn(spec("openrouter", "openai/gpt-5.5"), "openai/gpt-5.5-mini"), common))).toEqual(none);
+    expect(sent(buildDynamicWorkerConfig(parentOn("openai/gpt-5.5", spec("openai", "gpt-5.5-mini")), common))).toEqual([conn.apiKey, conn.baseUrl, conn.headers]);
+    expect(sent(buildDynamicWorkerConfig(parentOn(spec("openai", "gpt-5.5"), "openai/gpt-5.5-mini"), common))).toEqual([conn.apiKey, conn.baseUrl, conn.headers]);
+  });
+
+  it("sends the headers only with the key, and nothing to a model written without a provider", () => {
+    expect(sent(buildDynamicWorkerConfig(parentOn("openai/gpt-5.5", "groq/llama-3.3-70b-versatile"), common))).toEqual(none);
+    // Where a bare id goes depends on the catalog, which can change before the worker runs.
+    expect(sent(buildDynamicWorkerConfig(parentOn("openai/gpt-5.5", "gpt-5.5-mini"), common))).toEqual(none);
+    expect(sent(buildDynamicWorkerConfig(parentOn("gpt-5.5", "openai/gpt-5.5-mini"), common))).toEqual(none);
+    expect(sent(buildDynamicWorkerConfig(parentOn("gpt-5.5", "gpt-5.5-mini"), common))).toEqual(none);
+  });
+
+  it("a sub-agent written as data follows the same rule, and never takes the headers", () => {
+    const parent = new Agent({ model: "openai/gpt-5.5", ...conn });
+    const data = { name: "helper", description: "Helps.", instructions: "Help." };
+    expect(sent(buildSubAgentConfig(parent, { ...data, model: spec("openrouter", "openai/gpt-5.5") }, 0))).toEqual(none);
+    expect(sent(buildSubAgentConfig(parent, { ...data, model: "openai/gpt-5.5-mini" }, 0))).toEqual([conn.apiKey, conn.baseUrl, undefined]);
   });
 });

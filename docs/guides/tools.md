@@ -56,7 +56,7 @@ Every option is in the [Reference](../reference.md#tool-definition). Your functi
 ## What happens when a tool is called
 
 1. **The name** is matched exactly, then ignoring case and format. A near miss tells the model "Did you mean…?".
-2. **The arguments** are checked against your schema. A failure goes back to the model so it can fix the call. A call whose streamed JSON was cut off never runs.
+2. **The arguments** are checked against your schema. A failure goes back to the model so it can fix the call. A call whose streamed JSON was cut off never runs, also when the provider opened it with empty arguments (`{}`).
 3. **Concurrency.** Up to 8 tools run at once, plus your `maxConcurrency` per tool.
 4. **Attempts.** One attempt by default. `idempotent: true` allows up to 3 for transient failures, and an explicit `maxAttempts` wins. Timeouts are not retried unless you set `maxAttempts`.
 5. **The result** is made JSON-safe and capped. Secrets and file paths are removed from errors. A failure becomes `Error executing <name>: …` plus a short JSON block (error code, attempts, the last progress, a "do not repeat" hint), so the model fixes only what is left. Every result has a `durationMs`, and every call emits `tool.*` events on the telemetry bus.
@@ -88,7 +88,7 @@ const chart = tool({
 ```
 
 - Text parts become the call's result. Every provider sees them.
-- Media can be bytes, a data URL, a path or a URL. It is read once and kept as inline data. A URL must point to a public host, see [Media input](media-input.md).
+- Media can be bytes, a data URL, a path or a URL. It is read once and kept as inline data. A URL must point to a public host, see [Media input](media-input.md). A path must be inside `fileAccess.roots` when you set it; a path outside makes the call an error result with a `SecurityPolicyError` message, and the run goes on.
 - **Google** (Gemini 3 and later) receives the media inside the result. Other providers get the text only, with one `provider_warning`.
 - Only a value made by `toolContent` counts. JSON that a tool fetched from the web can never become media.
 - The media is saved with the session, counts toward Google's inline size limit, and is not cut by `maxResultChars`.

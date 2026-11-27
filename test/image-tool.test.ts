@@ -2,7 +2,10 @@ import { describe, it, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, imageTool, ConfigError, ValidationError } from "../src/index.ts";
+import { Agent, imageTool, ConfigError, ValidationError, BudgetExceededError, loadSessionDir } from "../src/index.ts";
+import { sessionDirFor } from "../src/session/store.ts";
+import { generateImage, imagePriceSource } from "../src/image/generate.ts";
+import { sseFrame } from "./helpers.ts";
 import { toolContent } from "../src/tools/tool-content.ts";
 
 const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
@@ -87,5 +90,144 @@ describe("imageTool", () => {
     expect(() => imageTool({ model: "google/gemini-3.1-flash-lite-image", allow: ["quality"] })).toThrow(/no quality/);
     expect(() => imageTool({ model: OR, defaults: { aspectRatio: "9:1" } })).toThrow(ValidationError);
     expect(() => imageTool({ model: OR, maxImages: 0 })).toThrow(ConfigError);
+  });
+});
+
+describe("imageTool: the pictures are the agent's spending", () => {
+  // A chat model that asks for all these pictures in ONE turn, then answers; it answers "Done." once it has tool results.
+  const batchChat = (argsList: unknown[]) =>
+    (async (_u: string, init: any) => {
+      const body = JSON.parse(init.body);
+      const asked = body.messages.some((m: any) => m.role === "tool");
+      const calls = argsList.map((a, i) => ({ id: `call_${i}`, type: "function", function: { name: "make_image", arguments: JSON.stringify(a) } }));
+      const done = asked || argsList.length === 0;
+      const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 };
+      if (body.stream) {
+        const delta = done ? { content: "Done." } : { tool_calls: calls.map((c, index) => ({ index, ...c })) };
+        return new Response(
+          sseFrame({ id: "r", choices: [{ delta }] }) + sseFrame({ id: "r", choices: [{ delta: {}, finish_reason: done ? "stop" : "tool_calls" }], usage }) + "data: [DONE]\n\n",
+          { status: 200, headers: { "content-type": "text/event-stream" } }
+        );
+      }
+      const choice = done
+        ? { finish_reason: "stop", message: { role: "assistant", content: "Done." } }
+        : { finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: calls } };
+      return new Response(JSON.stringify({ id: "r", choices: [choice], usage }), { status: 200 });
+    }) as unknown as typeof fetch;
+  // Two pictures asked in one turn, made one after the other ($0.25 each, reported by the provider).
+  const twoInOneTurn = (calls: any[], extra: Record<string, unknown>) => {
+    const make = imageTool({ model: OR, dir: tmp(), defaults: { apiKey: "k", fetch: imageFetch(calls) } });
+    make.maxConcurrency = 1;
+    return new Agent({ model: "groq/p", apiKey: "k", baseUrl: "https://chat.test/v1", fetch: batchChat([{ prompt: "a" }, { prompt: "b" }]), tools: { make_image: make }, stateless: true, runRetries: 0, ...extra });
+  };
+
+  it("counts toward usageLimit: the next picture is refused and the run ends", async () => {
+    const calls: any[] = [];
+    const agent = twoInOneTurn(calls, { usageLimit: { maxCostUsd: 0.2 } });
+    const err = await agent.run("draw two").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BudgetExceededError);
+    expect(calls).toHaveLength(1); // the second picture was never requested
+    expect(agent.usageReport().workers[0]!.cost.totalUsd).toBeCloseTo(0.25, 6);
+  });
+
+  it("counts toward the run budget the same way", async () => {
+    const calls: any[] = [];
+    const agent = twoInOneTurn(calls, { budget: { maxCostUsd: 0.2 } });
+    expect(await agent.run("draw two").catch((e: unknown) => e)).toBeInstanceOf(BudgetExceededError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("is saved with the session, comes back on import, and starts the chat cap after a restart", async () => {
+    const root = tmp();
+    const config = (extra: Record<string, unknown> = {}) => ({
+      model: "groq/p",
+      apiKey: "k",
+      baseUrl: "https://chat.test/v1",
+      sessionId: "s1",
+      persist: { dir: root },
+      runRetries: 0,
+      tools: { make_image: imageTool({ model: OR, dir: tmp(), defaults: { apiKey: "k", fetch: imageFetch([]) } }) },
+      fetch: batchChat([{ prompt: "a" }]),
+      ...extra,
+    });
+    await new Agent(config()).run("draw");
+    const saved = loadSessionDir(sessionDirFor(root, "s1"))!.session;
+    expect(saved.fixedUsage).toEqual([expect.objectContaining({ id: "make_image", role: "image", status: "fixed" })]);
+    const restored = new Agent(config());
+    restored.importSession(saved);
+    const lines = restored.usageReport().workers.filter((w) => w.role === "image");
+    expect(lines).toHaveLength(1); // back on the tool's own line, not a second one beside it
+    const line = lines[0]!;
+    expect(line.cost.totalUsd).toBeCloseTo(0.25, 6);
+    expect(line.cost.source).toBe("provider");
+    // A cap below what the saved session already spent stops the next run before any request.
+    let requests = 0;
+    const capped = new Agent(config({ usageLimit: { maxCostUsd: 0.2 }, fetch: (async () => (requests++, new Response("{}"))) as unknown as typeof fetch }));
+    expect(await capped.run("again").catch((e: unknown) => e)).toBeInstanceOf(BudgetExceededError);
+    expect(requests).toBe(0);
+  });
+
+  it("one tool object given to two agents: each counts only its own pictures", async () => {
+    const make = imageTool({ model: OR, dir: tmp(), defaults: { apiKey: "k", fetch: imageFetch([]) } });
+    const a = agentWith(make, [{ prompt: "a" }]);
+    const b = agentWith(make, []);
+    await a.run("draw");
+    await b.run("nothing");
+    expect(a.usageReport().workers[0]!.cost.totalUsd).toBeCloseTo(0.25, 6);
+    expect(b.usageReport().workers[0]!.turns).toBe(0);
+  });
+
+  it("a fixed worker's pictures are listed and saved under it", async () => {
+    const root = tmp();
+    const helper = new Agent({
+      name: "artist",
+      description: "Draws.",
+      instructions: "Draw.",
+      model: "groq/h",
+      apiKey: "k",
+      baseUrl: "https://helper.test/v1",
+      fetch: batchChat([{ prompt: "a" }]),
+      tools: { make_image: imageTool({ model: OR, dir: tmp(), defaults: { apiKey: "k", fetch: imageFetch([]) } }) },
+    });
+    const leadFetch = (async (_u: string, init: any) => {
+      const body = JSON.parse(init.body);
+      const asked = body.messages.some((m: any) => m.role === "tool");
+      const choice = asked
+        ? { finish_reason: "stop", message: { role: "assistant", content: "ok" } }
+        : { finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "artist", arguments: JSON.stringify({ task: "draw" }) } }] } };
+      return new Response(JSON.stringify({ id: "r", choices: [choice], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const lead = new Agent({ model: "groq/p", apiKey: "k", baseUrl: "https://lead.test/v1", fetch: leadFetch, subagents: [helper], sessionId: "lead", persist: { dir: root }, runRetries: 0 });
+    await lead.run("ask the artist");
+    const artist = lead.usageReport().workers.find((w) => w.name === "artist")!;
+    expect(artist.workers.find((w) => w.role === "image")!.cost.totalUsd).toBeCloseTo(0.25, 6);
+    expect(lead.usageReport().total.cost.totalUsd).toBeCloseTo(0.25, 6); // the chat models are unpriced
+    const saved = loadSessionDir(sessionDirFor(root, "lead"))!.session.fixedUsage!;
+    expect(saved[0]!.workers).toEqual([expect.objectContaining({ id: "make_image", role: "image" })]);
+  });
+
+  it("a worker started with agent.workers lists its pictures, live, closed and after a restart", async () => {
+    const root = tmp();
+    const make = imageTool({ model: OR, dir: tmp(), defaults: { apiKey: "k", fetch: imageFetch([]) } });
+    const config = { model: "groq/p", apiKey: "k", baseUrl: "https://chat.test/v1", fetch: batchChat([{ prompt: "a" }]), sessionId: "boss", persist: { dir: root }, runRetries: 0, dynamicSubagents: { model: "groq/w", tools: { make_image: make } } };
+    const boss = new Agent(config);
+    const info = await boss.workers.spawn({ name: "painter", instructions: "Paint.", task: "paint", tools: ["make_image"] });
+    const pictures = (agent: Agent) => agent.usageReport().workers.find((w) => w.name === "painter")!.workers.find((w) => w.role === "image");
+    expect(pictures(boss)!.cost.totalUsd).toBeCloseTo(0.25, 6);
+    boss.workers.close(info.id);
+    expect(pictures(boss)!.cost.totalUsd).toBeCloseTo(0.25, 6);
+    const later = new Agent(config); // a restart: the closed worker is read from its saved session
+    expect(pictures(later)!.cost.totalUsd).toBeCloseTo(0.25, 6);
+    expect(later.usageReport().total.cost.totalUsd).toBeCloseTo(0.25, 6);
+  });
+
+  it("says where a picture's price came from: the provider's reported cost or the price table", async () => {
+    const reported = await generateImage({ model: OR, prompt: "x", apiKey: "k", fetch: imageFetch([]) });
+    expect(imagePriceSource(reported)).toBe("provider");
+    const unreported = (async () =>
+      new Response(JSON.stringify({ data: [{ b64_json: Buffer.from(PNG).toString("base64"), media_type: "image/png" }], usage: { prompt_tokens: 5, completion_tokens: 100, total_tokens: 105 } }), { status: 200 })) as unknown as typeof fetch;
+    const tabled = await generateImage({ model: OR, prompt: "x", apiKey: "k", fetch: unreported });
+    expect(tabled.usage.cost?.totalCost).toBeGreaterThan(0);
+    expect(imagePriceSource(tabled)).toBe("catalog");
   });
 });

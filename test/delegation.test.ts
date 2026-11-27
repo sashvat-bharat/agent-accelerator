@@ -1,9 +1,11 @@
 import { describe, it, expect } from "bun:test";
+import { z } from "zod";
 import {
   Agent,
   agentToTool,
   buildAgentTools,
   AgentResponse,
+  tool,
 } from "../src/index.ts";
 
 describe("Multi-Agent Dynamic Delegation & Metadata", () => {
@@ -413,5 +415,68 @@ describe("Multi-Agent Dynamic Delegation & Metadata", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe("parallel calls of one fixed worker", () => {
+  // One Google SSE reply: a function call `call_<copy>` (turn 1) or a text answer (turn 2), saved as interaction `id`.
+  const googleSse = (id: string, step: object, delta: object | undefined, status: string): Response => {
+    const lines = [
+      "event: step.start",
+      `data: ${JSON.stringify({ index: 0, step, event_type: "step.start" })}`,
+      "",
+      ...(delta ? ["event: step.delta", `data: ${JSON.stringify({ index: 0, delta, event_type: "step.delta" })}`, ""] : []),
+      "event: step.stop",
+      `data: ${JSON.stringify({ index: 0, event_type: "step.stop" })}`,
+      "",
+      "event: interaction.completed",
+      `data: ${JSON.stringify({ interaction: { id, status, usage: { total_tokens: 2, total_input_tokens: 1, total_output_tokens: 1 } }, event_type: "interaction.completed" })}`,
+      "",
+      "event: done",
+      "data: [DONE]",
+      "",
+    ];
+    return new Response(lines.join("\n"), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  };
+  const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 };
+
+  it("each call runs in its own session, so on Google each copy chains onto its own interaction", async () => {
+    const chained: Array<{ copy: string; previous: string | undefined }> = [];
+    let parentTurns = 0;
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (url.includes("groq.test")) {
+        // The parent asks the same worker twice in one turn, then answers.
+        const first = parentTurns++ === 0;
+        const calls = ["A", "B"].map((copy) => ({ id: `p_${copy}`, type: "function", function: { name: "helper", arguments: JSON.stringify({ task: `copy ${copy}` }) } }));
+        const message = first ? { role: "assistant", content: null, tool_calls: calls } : { role: "assistant", content: "both done" };
+        return new Response(JSON.stringify({ id: "r", choices: [{ message, finish_reason: first ? "tool_calls" : "stop" }], usage }), { status: 200 });
+      }
+      // Google: turn 1 of a copy names it in the task; turn 2 answers its own call id.
+      const input = JSON.stringify(body.input);
+      const copy = /copy ([AB])/.exec(input)?.[1] ?? /call_([AB])/.exec(input)?.[1] ?? "?";
+      if (!body.previous_interaction_id && /copy [AB]/.test(input)) {
+        await new Promise((r) => setTimeout(r, copy === "A" ? 5 : 25)); // A first; B's turn 1 ends while A's tool runs
+        return googleSse(`v1_${copy}`, { id: `call_${copy}`, type: "function_call", name: "look", arguments: {} }, undefined, "requires_action");
+      }
+      chained.push({ copy, previous: body.previous_interaction_id });
+      return googleSse(`v2_${copy}`, { type: "model_output" }, { text: `done ${copy}`, type: "text" }, "completed");
+    }) as unknown as typeof fetch;
+
+    // A slow tool: copy B saves its first interaction while copy A is still in its tool, as in real parallel runs.
+    const look = tool({ name: "look", description: "look", input: z.object({}), execute: async () => (await new Promise((r) => setTimeout(r, 40)), "seen") });
+    const helper = new Agent({ name: "helper", description: "Helps.", instructions: "Help.", model: "google/gemini-3.5-flash-lite", apiKey: "k", tools: { look }, fetch: fetchImpl });
+    const parent = new Agent({ model: "groq/m", apiKey: "k", baseUrl: "https://groq.test/v1", sessionId: "p1", subagents: [helper], fetch: fetchImpl, runRetries: 0 });
+    const res = await parent.run("ask twice");
+    expect(res.text).toBe("both done");
+    expect(res.toolResults.map((r) => String(r.result))).toEqual(["done A", "done B"]);
+    // Each copy's second turn continues its OWN first interaction (a shared session chained onto the other's).
+    expect(chained.sort((x, y) => x.copy.localeCompare(y.copy))).toEqual([
+      { copy: "A", previous: "v1_A" },
+      { copy: "B", previous: "v1_B" },
+    ]);
+    const ids = res.subagents.map((s) => s.sessionId);
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) expect(String(id).startsWith("p1-sub-helper-")).toBe(true);
   });
 });

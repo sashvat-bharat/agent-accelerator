@@ -1,8 +1,9 @@
 /**
  * `imageTool`: the image function as a normal tool, so a text agent can make pictures. The developer fixes the image model,
  * the defaults, which options the LLM may set (`allow`) and a cap on pictures; the tool checks the setup at creation, saves
- * every picture under `dir` (default `<home>/images`) and tells the model the file paths. Its spending is kept in the tool and
- * listed by `agent.usageReport()` as a worker line. With `show: true` the model also SEES the pictures (Google agents only).
+ * every picture under `dir` (default `<home>/images`) and tells the model the file paths. Each call's spending goes to the
+ * Agent that runs it (`spend.ts`): it counts toward that agent's `usageLimit` and `budget`, is saved with its session and is
+ * listed by `agent.usageReport()` as an `image` line. With `show: true` the model also SEES the pictures (Google agents only).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -10,12 +11,12 @@ import { z } from "zod";
 import { getImageModel, unsupportedImageModelReason } from "../models/image-models.ts";
 import { resolveHome } from "../utils/home.ts";
 import { ConfigError, ValidationError } from "../types/errors.ts";
-import { emptyUsage, addImageCall } from "../session/usage.ts";
 import { toolContent } from "../tools/tool-content.ts";
 import { tool } from "../tools/tool.ts";
 import type { ToolDefinition } from "../types/tool.ts";
 import type { ImageOptions } from "../types/image.ts";
-import { generateImage } from "./generate.ts";
+import { generateImage, imagePriceSource } from "./generate.ts";
+import { reportImageCall } from "./spend.ts";
 import { resolveImageRequest } from "./request.ts";
 
 /** The options the LLM may be given (`allow`); `prompt` is always given. */
@@ -35,7 +36,7 @@ export interface ImageToolOptions {
   defaults?: Omit<ImageOptions, "model" | "prompt" | "images" | "continueFrom" | "signal" | "n">;
   /** Which options the LLM may set besides the prompt. Default: none. */
   allow?: ImageToolOption[];
-  /** At most this many pictures over the life of this tool object; later calls fail with a message to the model. Default 8. */
+  /** At most this many pictures over the life of this tool object (in this process); later calls fail with a message to the model. Default 8. For a cap that survives a restart, use the agent's `usageLimit` or `budget`. */
   maxImages?: number;
   /** Also show the pictures to the model (Google agents see them; other providers get the text only with one warning). Default false. */
   show?: boolean;
@@ -110,7 +111,6 @@ export function imageTool(options: ImageToolOptions): ToolDefinition {
   if (lacks.length > 0)
     throw new ConfigError(`[Agent Accelerator] imageTool: ${def.model} has no ${lacks.join(", ")} to allow.`);
 
-  const totals = emptyUsage();
   let made = 0;
   const defn = tool({
     name: options.name ?? "make_image",
@@ -131,7 +131,7 @@ export function imageTool(options: ImageToolOptions): ToolDefinition {
         prompt,
         ...(ctx.signal ? { signal: ctx.signal } : {}),
       });
-      addImageCall(totals, result.usage);
+      reportImageCall(ctx, result.usage, imagePriceSource(result)); // to the Agent running this call, if any
       const dir = path.resolve(options.dir ?? path.join(resolveHome(), "images"));
       const stem = slug(prompt);
       const files: string[] = [];
@@ -140,5 +140,5 @@ export function imageTool(options: ImageToolOptions): ToolDefinition {
       return options.show ? toolContent([text, ...result.images.map((i) => i.toPart())]) : text;
     },
   });
-  return Object.assign(defn, { imageSpend: { model: def.model, totals } });
+  return Object.assign(defn, { imageSpend: { model: def.model } });
 }

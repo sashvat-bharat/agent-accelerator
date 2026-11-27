@@ -101,17 +101,22 @@ function sniffBase64(b64: string): string | undefined {
   }
 }
 
+/** How the SDK downloads a media URL: the caller's abort signal and `fetch` (an Agent's own, a proxy or a test mock; the global `fetch` when unset). */
+export interface MediaDownload {
+  signal?: AbortSignal;
+  fetch?: typeof fetch;
+}
+
 /**
- * Normalizes an image, audio, or video input into raw base64 and data URL
- */
-/**
- * Normalizes a path, URL, data URL, base64 string, or binary value into media payloads.
+ * Normalizes a path, URL, data URL, base64 string, or binary value into media payloads. A URL is downloaded with
+ * `download.fetch` and stops when `download.signal` aborts.
  *
  * @example `const image = await normalizeMediaInput("https://example.com/photo.png");`
  */
 export async function normalizeMediaInput(
   input: string | Uint8Array | ArrayBuffer,
-  explicitMimeType?: string
+  explicitMimeType?: string,
+  download?: MediaDownload
 ): Promise<NormalizedMedia> {
   // 1. If input is ArrayBuffer or Uint8Array
   if (input instanceof Uint8Array || input instanceof ArrayBuffer) {
@@ -141,7 +146,7 @@ export async function normalizeMediaInput(
   if (typeof input === "string" && (input.startsWith("http://") || input.startsWith("https://"))) {
     // Private, loopback and link-local hosts are refused (also by DNS and on every redirect hop) and the
     // download is size-capped; an intranet file is read by the caller and passed in as bytes or base64.
-    const response = await fetchRemoteBytes(input);
+    const response = await fetchRemoteBytes(input, { signal: download?.signal, fetch: download?.fetch });
     if (!response.ok) {
       throw new ValidationError(`Failed to fetch media from URL: ${input} (${response.statusText})`);
     }

@@ -10,7 +10,7 @@ import { getProvider } from "../providers/registry.ts";
 import { emitProviderWarning } from "../providers.ts";
 import { withProviderSlot } from "../agent/governor.ts";
 import { assertPathAllowed, isLocalPathInput } from "../utils/safe-io.ts";
-import { normalizeMediaInput, type NormalizedMedia } from "../utils/media.ts";
+import { normalizeMediaInput, type MediaDownload, type NormalizedMedia } from "../utils/media.ts";
 import { applyCaptureRaw } from "../utils/raw-capture.ts";
 import { BudgetExceededError, ConfigError, ProviderError, ValidationError, abortErrorFor } from "../types/errors.ts";
 import { addUsage, bounded, providerOptionsFrom } from "../utils/provider-call.ts";
@@ -25,16 +25,21 @@ import type {
 import { estimateImageCostUsd, resolveImageRequest } from "./request.ts";
 import { priceImageUsage, sumCosts } from "./pricing.ts";
 import { GeneratedImage, ImageResult, attachOrigin, originOf } from "./result.ts";
+import type { ImagePriceSource } from "./spend.ts";
 
 /** Default time one provider request may take (image models can think for a while). */
 const DEFAULT_TIMEOUT_MS = 300_000;
 
-// Reads one picture: one the SDK made goes in as its bytes, anything else through the media normalizer (a local path must be inside `fileAccess.roots` when set); in: generateImage and generateVideo, out: the normalized media.
-export async function readImageInput(input: ImageInput, fileAccess?: { roots?: string[] }): Promise<NormalizedMedia> {
+// Reads one picture: one the SDK made goes in as its bytes, anything else through the media normalizer (a local path must be inside `fileAccess.roots` when set; a URL is downloaded with the caller's `fetch` and signal); in: generateImage and generateVideo, out: the normalized media.
+export async function readImageInput(
+  input: ImageInput,
+  fileAccess?: { roots?: string[] },
+  download?: MediaDownload
+): Promise<NormalizedMedia> {
   if (input instanceof GeneratedImage)
     return { mimeType: input.mimeType, base64Data: input.base64, dataUrl: input.dataUrl };
   if (fileAccess?.roots && isLocalPathInput(input)) await assertPathAllowed(input, fileAccess.roots);
-  const media = await normalizeMediaInput(input);
+  const media = await normalizeMediaInput(input, undefined, download);
   if (!media.mimeType.startsWith("image/"))
     throw new ValidationError(
       `[Agent Accelerator] A reference image has the type "${media.mimeType}", which is not an image.`
@@ -45,8 +50,17 @@ export async function readImageInput(input: ImageInput, fileAccess?: { roots?: s
 // Reads every reference image; in: generateImage, out: the normalized media.
 async function readReferences(opts: ImageOptions): Promise<NormalizedMedia[]> {
   const out: NormalizedMedia[] = [];
-  for (const input of opts.images ?? []) out.push(await readImageInput(input, opts.fileAccess));
+  const download = { signal: opts.signal, fetch: opts.fetch };
+  for (const input of opts.images ?? []) out.push(await readImageInput(input, opts.fileAccess, download));
   return out;
+}
+
+// Where each result's price came from (kept off the public result); in: generateImage, out: imagePriceSource.
+const priceSources = new WeakMap<ImageResult, ImagePriceSource>();
+
+/** Where the price of a `generateImage` result came from (the provider's reported cost or the price table); undefined when its cost is unknown. Internal. */
+export function imagePriceSource(result: ImageResult): ImagePriceSource | undefined {
+  return priceSources.get(result);
 }
 
 /**
@@ -114,6 +128,7 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
 
   const started = Date.now();
   const spent = { usd: 0 };
+  const tablePriced = new WeakSet<object>(); // the requests whose price came from the table, not the provider
   const call = async (count: number): Promise<ProviderImageResult> => {
     const body: ProviderImageRequest = {
       prompt: request.prompt,
@@ -141,11 +156,13 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
         references: references.length,
         ...(request.resolution ? { resolution: request.resolution } : {}),
       });
-      if (priced)
+      if (priced) {
         res.usage = {
           ...res.usage,
           cost: { inputCost: priced.inputCost, outputCost: priced.outputCost, totalCost: priced.totalCost },
         };
+        tablePriced.add(res);
+      }
     }
     spent.usd += res.usage.cost?.totalCost ?? 0;
     if (maxCost !== undefined && spent.usd > maxCost)
@@ -224,7 +241,7 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
     .filter(Boolean)
     .join("\n");
   const finishReason = first.finishReason;
-  return new ImageResult({
+  const result = new ImageResult({
     images,
     ...(text ? { text } : {}),
     usage,
@@ -235,4 +252,7 @@ export async function generateImage(opts: ImageOptions): Promise<ImageResult> {
     durationMs: Date.now() - started,
     requests: done.length,
   });
+  // Any request priced by the table makes the call table-priced; a call whose cost stayed unknown has no source.
+  if (usage.cost) priceSources.set(result, done.some((r) => tablePriced.has(r)) ? "catalog" : "provider");
+  return result;
 }

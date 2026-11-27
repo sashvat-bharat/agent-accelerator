@@ -19,7 +19,7 @@ export interface ToolContent {
 /**
  * Wraps text and media for a tool's return value, e.g.
  * `return toolContent(["instrument.jpg", { type: "image", image: bytes, mimeType: "image/jpeg" }])`.
- * Media may be bytes, a data URL, a path or a URL (the tool's own code is trusted with these). Google passes the media
+ * Media may be bytes, a data URL, a path or a URL (a path must be inside the agent's `fileAccess.roots` when set). Google passes the media
  * to the model inside the function result; other providers get the text only, with one warning.
  */
 export function toolContent(parts: ToolContentPart[]): ToolContent {

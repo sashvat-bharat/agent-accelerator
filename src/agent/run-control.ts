@@ -13,6 +13,8 @@ import type { SteerEntry } from "./loop.ts";
 
 /** The run that is active right now. */
 interface ActiveRun {
+  /** The session the run is in (`options.sessionId`, else the agent's): a steer may only go into a run of its own session. */
+  sessionId: string;
   steerInbox: SteerEntry[];
   outerStream?: AssistantMessageEventStream;
   runPromise?: Promise<AgentResponse>;

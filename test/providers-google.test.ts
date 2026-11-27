@@ -568,6 +568,34 @@ describe("GoogleInteractionsProvider (REST, mocked)", () => {
     expect(final.toolCalls?.[0]?.arguments).toEqual({ location: "Paris" });
   });
 
+  it("a stream cut in the arguments after a `{}` start gives a cut-off call, not empty arguments", async () => {
+    const sse = [
+      "event: step.start",
+      'data: {"index":0,"step":{"id":"call_cut","type":"function_call","name":"send_email","arguments":{}},"event_type":"step.start"}',
+      "",
+      "event: step.delta",
+      'data: {"index":0,"delta":{"arguments":"{\\"to\\":\\"a@b.c\\"","type":"arguments_delta"},"event_type":"step.delta"}',
+      "",
+      "event: step.stop",
+      'data: {"index":0,"event_type":"step.stop"}',
+      "",
+      "event: interaction.completed",
+      'data: {"interaction":{"id":"v1_cut","status":"incomplete","usage":{"total_tokens":5,"total_input_tokens":4,"total_output_tokens":1}},"event_type":"interaction.completed"}',
+      "",
+      "event: done",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    (globalThis as any).fetch = async () => new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const stream = new GoogleInteractionsProvider().stream("m", { messages: [{ role: "user", content: "Mail it" }] }, { apiKey: "k", sessionId: "s-sse-cut" });
+    for await (const _ of stream) {
+      // drain
+    }
+    const final = await stream.result();
+    expect(final.toolCalls?.[0]?.arguments).toEqual({ __truncated_raw: '{}{"to":"a@b.c"' });
+    expect(final.toolCalls?.[0]?.rawArguments).toBe('{}{"to":"a@b.c"');
+  });
+
   it("stores canonical rawArguments for empty-start + full-delta streams (no {}{} artifact)", async () => {
     const sse = [
       "event: step.start",

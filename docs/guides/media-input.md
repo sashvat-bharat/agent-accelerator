@@ -29,7 +29,8 @@ A prompt is a string, or a list of parts.
 | `file` | `file` | The same, for documents such as PDF. Also takes `filename` and `mimeType`. |
 
 - The MIME type is found from the file extension or from the first bytes of the data.
-- A URL that the SDK has to download itself must point to a public host. `localhost`, `127.x`, `10.x`, `192.168.x`, `169.254.169.254` (cloud metadata), `.local` and `.internal` names, a name that DNS resolves to one of them and a redirect to one all throw `SecurityPolicyError`. For a file on your intranet, read it yourself and pass the bytes, a data URL or base64. A link that the provider fetches itself is sent as it is (see the notes per provider below). A browser is not checked.
+- A URL that the SDK has to download itself must point to a public host. `localhost`, `127.x`, `10.x`, `192.168.x`, `169.254.169.254` (cloud metadata), `.local` and `.internal` names, a name that DNS resolves to one of them, a name whose address cannot be looked up, and a redirect to one all throw `SecurityPolicyError`. For a file on your intranet, read it yourself and pass the bytes, a data URL or base64. A link that the provider fetches itself is sent as it is (see the notes per provider below). A browser is not checked.
+- The SDK downloads with the agent's or the call's `fetch` (so a proxy or a test mock sees the download too), and stops the download when the run is aborted or interrupted (your `signal`, for example `AbortSignal.timeout(...)`, or `agent.interrupt()`).
 - An input the model cannot take fails before the network with a one-line error. The catalog knows what each model accepts. Custom services reject video and files.
 - A model without native file input fails fast on every provider except OpenRouter, which reads files for any model. Everywhere else, turn the document into text yourself before you call `run`. The SDK has no converter.
 - Remote downloads re-check redirects and have a size cap.

@@ -71,7 +71,7 @@ const agent = new Agent({
 - A resume that fails is reported on the bus (`agent.resume_failed`). It does not throw from the constructor.
 - It needs `persist: { dir }`, not `{ file }`. If a saved session is over the load limits, the constructor throws `SessionLoadError` instead of overwriting it. Media in the session must still be allowed by `fileAccess.roots`, if you set it.
 
-To decide yourself, set `resume: "explicit"`. The state loads and nothing runs. `agent.interrupted()` lists the cut-off runs (`runId`, `startedAt`, `prompt`, `pendingToolCalls`), and `await agent.resume()` continues them. It resolves to the run's response, or `undefined` when nothing was cut off. A new `run()` closes the old one as `abandoned`.
+To decide yourself, set `resume: "explicit"`. The state loads and nothing runs. `agent.interrupted()` lists the cut-off runs (`runId`, `startedAt`, `prompt`, `pendingToolCalls`), and `await agent.resume()` continues them. It resolves to the run's response, or `undefined` when nothing was cut off. A new `run()` closes the old one as `abandoned`. The tool calls it left open are answered first: a call that finished gets its saved result, so the model knows it ran, and the others get an "interrupted" error. Nothing runs again.
 
 ## One process per session
 

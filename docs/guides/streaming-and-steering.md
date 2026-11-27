@@ -71,6 +71,7 @@ console.log((await next).text); // its own run and response
 
 `midSession: { whenBusy: "steer" | "queue" | "auto" }` can allow only one of the two. The other call then throws. `isBusy`, `pendingCount` and `steerPendingCount` show the state.
 
+- A steer joins only a run of its own session. A `run()` or `stream()` for another `sessionId` never goes into the running conversation: it waits for its own run, in every mode. `steer()` for another session throws a `ValidationError`. One agent can serve many users this way.
 - A steer that arrives after the run ended becomes a queued message. It goes to the front of the queue, because it was typed before anything queued later. Its promise resolves with the response of the run that picked it up.
 - With `persist: { dir }`, messages that are still waiting are saved with the session, so a crash does not lose something the user already typed.
 

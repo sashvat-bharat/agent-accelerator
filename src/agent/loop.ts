@@ -751,6 +751,8 @@ async function executeToolCallsWithRepeatGuard(options: {
   repeatCounts: Map<string, number>;
   prompts?: Prompts;
   hooks?: AgentHooks;
+  fileRoots?: readonly string[];
+  fetch?: typeof fetch;
   agentName?: string;
   signal?: AbortSignal;
   sessionId?: string;
@@ -806,6 +808,8 @@ async function executeToolCallsWithRepeatGuard(options: {
           openToolLog: options.openToolLog,
           prompts: options.prompts,
           hooks: options.hooks,
+          fileRoots: options.fileRoots,
+          fetch: options.fetch,
         })
       : [];
   const byId = new Map<string, ToolResultRecord[]>();
@@ -859,6 +863,27 @@ export function unfinishedToolCalls(messages: AgentContext["messages"]): ToolCal
     }
   }
   return open;
+}
+
+/** Answers every unfinished call of the last assistant turn: with its saved result when the call finished, otherwise with the "interrupted" error the pairing repair writes; in: Agent.markRunStart, before a new run replaces a cut-off one, out: tool messages at the end of the conversation (so the new run's mark points at its own prompt). */
+export function closeUnfinishedToolCalls(
+  context: AgentContext,
+  stored: Map<string, ToolResultRecord>,
+  prompts: Prompts = DEFAULT_PROMPTS
+): void {
+  const results = unfinishedToolCalls(context.messages).map((call): ToolResultRecord => {
+    const saved = stored.get(call.id);
+    if (saved) return saved;
+    const name = call.name || "tool";
+    traceToolEvent("call_interrupted", "warn", { id: call.id, name }, {});
+    return {
+      id: call.id,
+      name,
+      result: fillPrompt(prompts.toolInterrupted, { tool: name, id: call.id }),
+      isError: true,
+    };
+  });
+  context.addToolResults(results);
 }
 
 /** True when the conversation ends with tool results of a batch in which a tool called `ctx.stop` (the run was meant to end there). */
@@ -917,6 +942,8 @@ async function finishInterruptedTools(
         openToolLog: config.openToolLog,
         prompts: config.prompts,
         hooks: config.hooks,
+        fileRoots: config.fileAccess?.roots,
+        fetch: config.options?.fetch,
       })
     : [];
   const ran = new Map([...skipped, ...executed.map((r): [string, ToolResultRecord] => [r.id, r])]);
@@ -1107,6 +1134,8 @@ export async function runAgentLoop(config: AgentLoopConfig): Promise<AgentRespon
         openToolLog: config.openToolLog,
         prompts: config.prompts,
         hooks: config.hooks,
+        fileRoots: config.fileAccess?.roots,
+        fetch: config.options?.fetch,
       });
       const results = guarded.results;
       previousToolCallFingerprints = guarded.fingerprints;
@@ -1518,6 +1547,8 @@ export function streamAgentLoop(config: AgentLoopConfig): AssistantMessageEventS
           openToolLog: config.openToolLog,
           prompts: config.prompts,
           hooks: config.hooks,
+          fileRoots: config.fileAccess?.roots,
+          fetch: config.options?.fetch,
           onSubagentEvent: (ev) => {
             try {
               outerStream.push({
