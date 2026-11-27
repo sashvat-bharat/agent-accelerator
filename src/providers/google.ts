@@ -62,6 +62,10 @@ import {
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
+  incompleteStreamCheck,
+  hasUnfinishedToolCall,
+  hasTruncatedToolArguments,
+  toolTurnFinishReason,
   endWithPlainReply,
   isNotFoundChainError,
   combinedSignal,
@@ -1444,10 +1448,10 @@ export class GoogleInteractionsProvider implements Provider {
         const calls = new Map<number, { id: string; name: string; startArgs: string; deltaArgs: string }>();
         // Every step as the server would return it (start + deltas), for exact history replay.
         const steps = new Map<number, Record<string, unknown>>();
+        // Indexes of the steps whose `step.stop` arrived: a call without one was still being written.
+        const stopped = new Set<number>();
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
-        let sawFinishReason = false;
-        let sawUsage = false;
         let badFrames = 0;
         let framesSeen = 0;
         let responseId: string | undefined;
@@ -1470,11 +1474,8 @@ export class GoogleInteractionsProvider implements Provider {
         };
 
         const handleMessage = (event: string | undefined, data: string): void => {
-          if (!data) return;
-          if (data === "[DONE]") {
-            sawFinishReason = sawFinishReason || completedBody !== undefined || sawUsage;
-            return;
-          }
+          // Google ends a stream with `interaction.completed` and never sends `[DONE]`: it is not an end here.
+          if (!data || data === "[DONE]") return;
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
@@ -1557,12 +1558,10 @@ export class GoogleInteractionsProvider implements Provider {
               });
             }
           } else if (type === "step.stop" || type === "interaction.status_update") {
+            if (type === "step.stop" && typeof msg["index"] === "number") stopped.add(msg["index"] as number);
             // Cumulative usage so far: keeps usage when the stream is cut before `interaction.completed`.
             const stepUsage = msg["usage"] as InteractionObject["usage"] | undefined;
-            if (stepUsage) {
-              usage = mapUsage(stepUsage);
-              sawUsage = true;
-            }
+            if (stepUsage) usage = mapUsage(stepUsage);
           } else if (type === "interaction.completed") {
             const interaction = (msg["interaction"] as InteractionObject) ?? {};
             // Failed/cancelled interactions must surface loudly — never
@@ -1570,12 +1569,8 @@ export class GoogleInteractionsProvider implements Provider {
             throwIfFailedInteraction(interaction, clean);
             completedBody = msg["interaction"];
             if (interaction.id) responseId = interaction.id;
-            if (interaction.usage) {
-              usage = mapUsage(interaction.usage);
-              sawUsage = true;
-            }
+            if (interaction.usage) usage = mapUsage(interaction.usage);
             finishReason = mapFinishReason(interaction.status);
-            sawFinishReason = true;
             eventStream.push({ type: "usage", usage });
           }
         };
@@ -1639,7 +1634,8 @@ export class GoogleInteractionsProvider implements Provider {
         for (const [index, c] of calls) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const step = steps.get(index);
-          if (step) step["arguments"] = args;
+          // A call cut mid-JSON is replayed as `{}`: the internal truncation marker is never sent to Google.
+          if (step) step["arguments"] = hasTruncatedToolArguments(args) ? {} : args;
           const record: ToolCallRecord = {
             id: c.id,
             name: c.name,
@@ -1650,29 +1646,40 @@ export class GoogleInteractionsProvider implements Provider {
           eventStream.push({ type: "tool_call_complete", toolCall: record });
         }
 
-        if (sessionId) {
-          if (responseId && body.store !== false)
-            setChain(sessionId, { interactionId: responseId, model: clean, at: Date.now() });
-          else if (body.store === false) {
-            interactionChains.delete(sessionId);
-            lastTurnTotals.delete(sessionId);
-          }
-        }
+        if (toolCalls.length > 0) finishReason = toolTurnFinishReason(finishReason, toolCalls);
         noteProviderTurn(sessionId, "google");
         checkTurnTokens(sessionId, usage);
 
-        // Terminal-state guard — fail `incomplete_stream` (retryable)
-        // instead of resolving empty success, whatever the content type.
-        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
+        // Only `interaction.completed` ends a stream (the usage of `step.stop` is a running total, not an end). A stream
+        // that stopped before it with nothing, or with a tool call that was still being written, fails as
+        // `incomplete_stream` (retryable), whatever the content type.
+        const ended = completedBody !== undefined;
         // Trim provider trailing blank lines from finalized thinking (live
         // deltas already emitted raw). Stateful bodies unaffected.
-        const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
-        if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0) {
-          eventStream.fail(incompleteStreamError("google", clean));
+        const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const incomplete = incompleteStreamCheck({
+          provider: "google",
+          modelId: clean,
+          hasTerminal: ended,
+          empty: !text && !cleanThinking && toolCalls.length === 0,
+          // A call opened with `{}` looks complete; only its `step.stop` says it was.
+          unfinishedCall:
+            hasUnfinishedToolCall(calls.values(), toolCalls) || [...calls.keys()].some((index) => !stopped.has(index)),
+        });
+        if (incomplete) {
+          eventStream.fail(incomplete);
           return;
         }
 
-        const cleanThinking = cleanThinkingEarly;
+        // The chain continues only an interaction seen to its end; after a cut stream the next turn resends the history.
+        if (sessionId) {
+          if (body.store === false) {
+            interactionChains.delete(sessionId);
+            lastTurnTotals.delete(sessionId);
+          } else if (!ended) interactionChains.delete(sessionId);
+          else if (responseId) setChain(sessionId, { interactionId: responseId, model: clean, at: Date.now() });
+        }
+
         const finalResponse = new AgentResponse({
           text,
           thinking: cleanThinking || undefined,
