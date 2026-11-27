@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { z } from "zod";
 import { Agent, tool, ConfigError, telemetryBus } from "../src/index.ts";
 import { loadSessionDir, sessionDirFor, JOURNAL_FILE } from "../src/session/store.ts";
+import { finishedTurns } from "../src/agent/turns.ts";
 
 const roots: string[] = [];
 const children: Array<{ kill: (signal?: NodeJS.Signals | number) => void }> = [];
@@ -167,6 +168,32 @@ describe("resume after a cut-off run", () => {
     await settle();
     expect(agent.interrupted()).toEqual([]);
     expect(loadSessionDir(sessionDirFor(root, "s1"))!.session.runs!.map((r) => r.end)).toEqual(["abandoned", "done"]);
+  });
+
+  it("a new run() after a cut-off batch tells the model the real result of a tool that finished", async () => {
+    const root = tmp();
+    const runs = { a: 0, b: 0 };
+    const tools = {
+      tool_a: tool({ description: "a", input: z.object({}), execute: async () => `sent email #${++runs.a}` }),
+      tool_b: tool({ description: "b", input: z.object({}), execute: async () => (runs.b++, never()) }),
+    };
+    mk(root, async () => callsReply(["tool_a", "tool_b"]), { tools, resume: "explicit" }).run("do both"); // tool_b hangs: cut off
+    await settle(60);
+    const seen: any[] = [];
+    const agent = mk(root, async (body) => (seen.push(body), textReply("ok")), { tools, resume: "explicit" });
+    await agent.run("what happened?");
+    expect(runs).toEqual({ a: 1, b: 1 }); // nothing ran again
+    const results = seen[0].messages.filter((m: any) => m.role === "tool").map((m: any) => m.content);
+    expect(results[0]).toBe("sent email #1"); // the real result, not "interrupted"
+    expect(results[1]).toMatch(/^Error: tool_call 'tool_b' \(call_tool_b\) has no result because the run was interrupted/);
+    expect(lastUser(seen[0])).toBe("what happened?");
+    // The saved conversation keeps the real result too, and the cut-off run is closed.
+    const saved = loadSessionDir(sessionDirFor(root, "s1"))!.session;
+    const savedA = saved.messages.flatMap((m: any) => (m.role === "tool" ? m.content : [])).find((p: any) => p.id === "call_tool_a");
+    expect(savedA.result).toBe("sent email #1");
+    expect(saved.runs!.map((r) => r.end)).toEqual(["abandoned", "done"]);
+    // The new run starts after the recovered results: its turn begins with its own prompt.
+    expect(finishedTurns(agent.context.messages, agent.runMarks).map((t) => t.prompt)).toEqual(["what happened?"]);
   });
 
   it("a complete answer whose ending note was lost is closed without calling the model", async () => {

@@ -70,6 +70,7 @@ import {
   runAgentLoop,
   streamAgentLoop,
   unfinishedToolCalls,
+  closeUnfinishedToolCalls,
   endsWithStop,
   accumulateUsage,
   type SteerEntry,
@@ -1675,16 +1676,17 @@ export class Agent {
     } else if (ctx.systemPrompt !== fullInstructions) {
       ctx.systemPrompt = fullInstructions;
     }
-    const mark = ctx === this.context ? this.markRunStart(ctx.messages.length) : undefined;
+    const mark = ctx === this.context ? this.markRunStart(ctx) : undefined;
     ctx.addUserMessage(prompt);
     return mark;
   }
 
-  // Records where a run of the default session begins; in: prepareTurn, out: runMarks, saved by the session journal.
-  private markRunStart(index: number): SessionRunMark {
+  // Records where a run of the default session begins. A cut-off run it replaces is closed as abandoned, and the saved results of that run's finished tool calls go into the conversation first, so the model is told what really ran; a call with no saved result is answered "interrupted"; in: prepareTurn with the default session's context, out: runMarks and the conversation, saved by the session journal.
+  private markRunStart(ctx: AgentContext): SessionRunMark {
     for (const old of this.runMarks) if (!old.end) old.end = "abandoned"; // a newer run replaces a cut-off one
+    closeUnfinishedToolCalls(ctx, this.storedToolResults(), this.prompts);
     this.toolRecords.length = 0;
-    const mark: SessionRunMark = { id: newRunId(), i: index, at: Date.now() };
+    const mark: SessionRunMark = { id: newRunId(), i: ctx.messages.length, at: Date.now() };
     this.runMarks.push(mark);
     this.activeMark = mark;
     return mark;

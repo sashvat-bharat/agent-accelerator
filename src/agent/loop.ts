@@ -865,6 +865,27 @@ export function unfinishedToolCalls(messages: AgentContext["messages"]): ToolCal
   return open;
 }
 
+/** Answers every unfinished call of the last assistant turn: with its saved result when the call finished, otherwise with the "interrupted" error the pairing repair writes; in: Agent.markRunStart, before a new run replaces a cut-off one, out: tool messages at the end of the conversation (so the new run's mark points at its own prompt). */
+export function closeUnfinishedToolCalls(
+  context: AgentContext,
+  stored: Map<string, ToolResultRecord>,
+  prompts: Prompts = DEFAULT_PROMPTS
+): void {
+  const results = unfinishedToolCalls(context.messages).map((call): ToolResultRecord => {
+    const saved = stored.get(call.id);
+    if (saved) return saved;
+    const name = call.name || "tool";
+    traceToolEvent("call_interrupted", "warn", { id: call.id, name }, {});
+    return {
+      id: call.id,
+      name,
+      result: fillPrompt(prompts.toolInterrupted, { tool: name, id: call.id }),
+      isError: true,
+    };
+  });
+  context.addToolResults(results);
+}
+
 /** True when the conversation ends with tool results of a batch in which a tool called `ctx.stop` (the run was meant to end there). */
 export function endsWithStop(messages: AgentContext["messages"]): boolean {
   for (let i = messages.length - 1; i >= 0 && messages[i]!.role === "tool"; i--) {
