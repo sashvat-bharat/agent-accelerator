@@ -25,6 +25,7 @@ import { pollJob } from "../video/poll.ts";
 import {
   OPENROUTER_ROUTING_KEYS,
   combinedSignal,
+  isTimeoutError,
   headersToRecord,
   redactedHeaders,
   resolveProviderApiKey,
@@ -110,7 +111,7 @@ function connect(modelId: string, options: ProviderRequestOptions | undefined) {
     try {
       return await doFetch(target, { ...init, signal });
     } catch (err) {
-      if (isAbortError(err) && !options?.signal?.aborted && timeoutMs !== undefined)
+      if ((isAbortError(err) || isTimeoutError(err)) && !options?.signal?.aborted && timeoutMs !== undefined)
         throw new TimeoutError(`[Agent Accelerator] ${what} timed out after ${timeoutMs} ms.`);
       throw err;
     } finally {

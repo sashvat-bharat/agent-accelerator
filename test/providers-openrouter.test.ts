@@ -617,7 +617,7 @@ describe("every OpenRouter request can be cancelled: generate() is served over a
     (globalThis as any).fetch = async () => e.response;
     const started = Date.now();
     const err = await new OpenRouterChatCompletionsProvider().generate("m", ctx, { apiKey: "k", timeoutMs: 60 } as any).catch((x) => x);
-    expect(err).toMatchObject({ name: "AbortError" });
+    expect(err).toMatchObject({ name: "TimeoutError", retryable: true }); // a timeout, never the caller's abort
     expect(Date.now() - started).toBeLessThan(1500);
     await sleep(30);
     expect(e.state.cancelled).toBe(true);

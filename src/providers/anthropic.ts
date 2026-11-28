@@ -819,8 +819,8 @@ export class AnthropicMessagesProvider implements Provider {
 
         const opened = await openStreamResponse({
           fetchOnce: () =>
-            withAbortTimer(linked, timeoutFor(options), () =>
-              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, linked.signal))
+            withAbortTimer(linked, timeoutFor(options), (signal) =>
+              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, signal))
             ),
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
           noBodyError: () =>

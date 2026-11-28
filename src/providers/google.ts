@@ -1298,7 +1298,8 @@ export class GoogleInteractionsProvider implements Provider {
         }
         return reply;
       } catch (err) {
-        if (options?.signal?.aborted || isAbortError(err)) this.cancelInteraction(baseUrl, id, options, apiKey);
+        // Only the caller's abort cancels the job at Google: a status check that timed out is retried, never a reason to stop it.
+        if (options?.signal?.aborted) this.cancelInteraction(baseUrl, id, options, apiKey);
         throw err;
       }
     };
@@ -1394,10 +1395,10 @@ export class GoogleInteractionsProvider implements Provider {
         ): Promise<StreamingResponse | PlainReply<T>> =>
           openStreamResponse({
             fetchOnce: () =>
-              withAbortTimer(linked, streamTimeoutMs, () =>
+              withAbortTimer(linked, streamTimeoutMs, (signal) =>
                 (options?.fetch ?? fetch)(
                   target,
-                  this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, linked.signal)
+                  this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, signal)
                 )
               ),
             onHttpError: (r, text) => this.throwIfError(r.status, target, text, clean, headersToRecord(r.headers)),

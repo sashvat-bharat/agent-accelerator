@@ -18,7 +18,7 @@ import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
 import { AgentResponse } from "../types/response.ts";
-import { abortError } from "../types/errors.ts";
+import { TimeoutError, abortError } from "../types/errors.ts";
 import { DEFAULT_BASE_URLS } from "./base-urls.ts";
 
 /** The arguments of a tool call as an object: a JSON text is parsed and an object (some OpenAI-compatible servers send one) is taken as it is; anything else becomes the truncated-arguments marker, which always holds text. */
@@ -150,7 +150,17 @@ export function timeoutFor(options: { timeoutMs?: number } | undefined): number 
   return typeof t === "number" && Number.isFinite(t) && t > 0 ? Math.floor(t) : undefined;
 }
 
-/** Merges a parent signal with a timeout into one effective signal. Caller must call cleanup when the request settles so the timer never holds the loop open. */
+// The reason a request timer aborts with: a retryable TimeoutError, which `fetch` rejects with, so the retry layers see a timeout and never the caller's own abort; in: combinedSignal and withAbortTimer, out: the abort reason.
+function requestTimeout(ms: number): TimeoutError {
+  return new TimeoutError(`[Agent Accelerator] Provider request timed out after ${ms} ms.`);
+}
+
+/** True for a timeout (an SDK `TimeoutError`, or a platform one such as `AbortSignal.timeout`'s), as opposed to the caller's abort. */
+export function isTimeoutError(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === "TimeoutError";
+}
+
+/** Merges a parent signal with a timeout into one effective signal; the timer aborts it with a TimeoutError, the parent with its own reason. Caller must call cleanup when the request settles so the timer never holds the loop open. */
 export function combinedSignal(
   signal?: AbortSignal,
   timeoutMs?: number
@@ -159,7 +169,7 @@ export function combinedSignal(
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
     try {
-      ctrl.abort();
+      ctrl.abort(requestTimeout(timeoutMs));
     } catch {
       // why: cancelling or releasing something that is already closed is harmless.
     }
@@ -449,26 +459,25 @@ export function linkStreamAbort(
   };
 }
 
-// Runs one request attempt under a timer that aborts `controller` after `ms` (none when unset); in: an adapter's fetchOnce, out: its Response.
+// Runs one request attempt under its own timer: the attempt's signal follows `controller` (the caller's abort, the stream's cancel) and also aborts after `ms` with a TimeoutError, which ends only this attempt, so the opener's retry can run (no timer when unset); in: an adapter's fetchOnce, out: its Response.
 export async function withAbortTimer<T>(
   controller: AbortController,
   ms: number | undefined,
-  run: () => Promise<T>
+  run: (signal: AbortSignal) => Promise<T>
 ): Promise<T> {
-  const timer =
-    ms && ms > 0
-      ? setTimeout(() => {
-          try {
-            controller.abort();
-          } catch {
-            // why: cancelling or releasing something that is already closed is harmless.
-          }
-        }, ms)
-      : undefined;
+  if (!ms || ms <= 0) return run(controller.signal);
+  const attempt = new AbortController();
+  const timer = setTimeout(() => {
+    try {
+      attempt.abort(requestTimeout(ms));
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
+  }, ms);
   try {
-    return await run();
+    return await run(AbortSignal.any([controller.signal, attempt.signal]));
   } finally {
-    if (timer) clearTimeout(timer);
+    clearTimeout(timer);
   }
 }
 
@@ -518,9 +527,12 @@ export function incompleteStreamCheck(a: {
   return incompleteStreamError(a.provider, a.modelId);
 }
 
-// Fails a stream with the right error: an abort (the signal, the stream's cancel, or an AbortError) becomes the plain `AbortError`, anything else passes through; in: an adapter's catch block, out: the stream's result() rejection.
+// Fails a stream with the right error: a timeout stays a `TimeoutError`, an abort (the signal, the stream's cancel, or an AbortError) becomes the plain `AbortError`, anything else passes through; in: an adapter's catch block, out: the stream's result() rejection.
 export function failStream(eventStream: AssistantMessageEventStream, linked: AbortController, err: unknown): void {
   const raw = err instanceof Error ? err : new Error(String(err));
+  // A timeout stays a timeout: a request timer's error, or the reason a whole-call timer aborted the stream with.
+  const reason: unknown = linked.signal.reason;
+  if (linked.signal.aborted && isTimeoutError(reason) && reason instanceof Error) return eventStream.fail(reason);
   const isAbort =
     linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
   eventStream.fail(isAbort ? abortError("Stream aborted") : raw);

@@ -266,7 +266,7 @@ All extend `AgentAccelError`, which has `code`, `retryable` and `context`.
 |---|---|
 | `ConfigError` | A missing key or address, no model or a bad model string, a removed provider, Gemini 1.x or 2.x, invalid config, or a `steer`, `queue` or `enqueue` call that `midSession` forbids (before any network call). |
 | `ProviderError` | The API failed, or it answered HTTP 200 with something that is not a reply (an empty object, a list, no `choices`). That is treated like a 502 and is retryable. An `error` object sent with HTTP 200 is reported as the provider's own error, with its message and code. A reply over the size cap (64 MB for chat) is not retryable. `code` is `"provider"` (`"incomplete_stream"` for a cut stream). `retryable` says whether a retry can help. Also `statusCode`, `provider`, `model`, `providerCode` (the provider's own code) and `retryAfterMs`, which are not enumerable. |
-| `TimeoutError` | A request, first-byte or idle timeout. Retryable. |
+| `TimeoutError` | A request, first-byte or idle timeout, also inside a provider call or a generator (images, videos, embeddings, decisions). Retryable. Your own abort is an `AbortError`. |
 | `BudgetExceededError` | `budget`, or `limits.maxTotalTokens`, `deadlineMs` or `maxToolCallsPerRun`, was exceeded. Partial usage is attached. |
 | `ToolError` | A tool failed in a way that reaches the caller. |
 | `ValidationError` | Structured output or scheduled-action input did not validate. An input the model cannot take, before any network call. An empty prompt. A call made the wrong way: a streaming option on `steer`, `queue` or `interrupt(message)`, `steer` for a session other than the running one, `resume()` while busy, or a full queue. A bad session id, `registerModel` spec or media input. |

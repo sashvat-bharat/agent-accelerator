@@ -964,8 +964,8 @@ export class OpenAIResponsesProvider implements Provider {
         // first byte; once the stream is live it is never retried.
         const opened = await openStreamResponse({
           fetchOnce: () =>
-            withAbortTimer(linked, streamTimeoutMs, () =>
-              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))
+            withAbortTimer(linked, streamTimeoutMs, (signal) =>
+              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, signal))
             ),
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
           noBodyError: () =>
