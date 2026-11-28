@@ -74,6 +74,7 @@ console.log(groq.id, getProvider("groq") === groq);
 - The adapter is created once per prefix. A second `ensureCustomProvider` with another `baseUrl` throws a `ConfigError`.
 - It sends no `session_id` or `prompt_cache_key`, because strict services reject unknown fields. Affinity goes in headers only.
 - Thinking text is read from `reasoning_details` blocks (`text` or `summary`), else `reasoning_content` (DeepSeek, vLLM, Qwen), else `reasoning`, the same way on `run()` and `stream()`. It is shown only, never sent back.
+- Streamed tool calls are placed by their `index`. A piece without one continues the current call, unless it carries a new id: then it is the next call, so parallel calls from a server that sends no index stay apart.
 - An error sent with HTTP 200 or inside a stream is retried when its `code` is a status number (`429`) or names a temporary failure (`overloaded`, `rate_limit_exceeded` ...). `finish_reason: "error"` is a retryable 502, in a stream and in a whole reply.
 - Its price and abilities are unknown unless you describe the model with `registerModel`. See [Models and providers](models-and-providers.md#the-model-catalog).
 - `ensureCustomProvider` throws a `ConfigError` if you pass a `baseUrl` or `apiKey` for a first-class prefix (`google`, `openai`, `anthropic`, `openrouter`). Pass those to the `Agent` instead.

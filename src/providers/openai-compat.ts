@@ -77,6 +77,7 @@ import {
   readSseData,
   reasoningParts,
   argumentsText,
+  streamedCallIndex,
   incompleteStreamCheck,
   errorCodeStatus,
   finishReasonError,
@@ -1104,9 +1105,8 @@ export class OpenAICompatibleChatProvider implements Provider {
             thinking += thought;
             eventStream.push({ type: "thinking_delta", thinkingDelta: thought, partialThinking: thinking });
           }
-          // Tool-call deltas accumulate per choice index (unindexed chunks
-          // continue the last call; defaulting to calls.size would fork
-          // phantom calls).
+          // Tool-call deltas accumulate per choice index. A piece without one continues the last call (defaulting to
+          // calls.size would fork phantom calls), unless it carries a new id: then it starts the next call.
           const deltaCalls = delta["tool_calls"];
           if (Array.isArray(deltaCalls)) {
             for (const tc of deltaCalls) {
@@ -1117,7 +1117,7 @@ export class OpenAICompatibleChatProvider implements Provider {
                 function?: { name?: string; arguments?: string | Record<string, unknown> };
                 extra_content?: { google?: { thought_signature?: string } };
               };
-              const index = typeof entry.index === "number" ? (lastToolIndex = entry.index) : lastToolIndex;
+              const index = (lastToolIndex = streamedCallIndex(entry, calls, lastToolIndex));
               const sig = entry.extra_content?.google?.thought_signature;
               if (typeof sig === "string" && sig) signatures.set(index, sig);
               const existing = calls.get(index);

@@ -37,6 +37,20 @@ export function parseArguments(raw: unknown): Record<string, unknown> {
   }
 }
 
+/** Which streamed tool call a Chat Completions tool-call piece belongs to: its `index` when it has one; without one, a new call when it carries an id other than the current call's (some servers send parallel calls with ids but no index), else the current call `last` (an arguments piece). */
+export function streamedCallIndex(
+  piece: { index?: unknown; id?: unknown },
+  calls: ReadonlyMap<number, { id: string }>,
+  last: number
+): number {
+  if (typeof piece.index === "number") return piece.index;
+  const current = calls.get(last)?.id;
+  if (typeof piece.id === "string" && piece.id && current && current !== piece.id) {
+    return Math.max(-1, ...calls.keys()) + 1;
+  }
+  return last;
+}
+
 /** The JSON text of a tool call's `arguments` as the wire sent them: text as it is, an object or a list as its JSON; undefined for anything else (nothing to add). */
 export function argumentsText(value: unknown): string | undefined {
   if (typeof value === "string") return value;

@@ -68,6 +68,7 @@ import {
   readSseData,
   reasoningParts,
   argumentsText,
+  streamedCallIndex,
   incompleteStreamCheck,
   errorCodeStatus,
   finishReasonError,
@@ -967,8 +968,8 @@ export class OpenRouterChatCompletionsProvider implements Provider {
         let thinking = "";
         // Tool calls keyed by choice index: { id, name, startArgs, deltaArgs }.
         const calls = new Map<number, { id: string; name: string; startArgs: string; deltaArgs: string }>();
-        // Index of the most recent tool-call delta: unindexed chunks continue
-        // it (falling back to calls.size would fork a phantom call per chunk).
+        // Index of the most recent tool-call delta: unindexed chunks continue it (falling back to calls.size would fork
+        // a phantom call per chunk), unless they carry a new id, which starts the next call.
         let lastToolIndex = 0;
         // The turn's reasoning blocks exactly as returned, replayed on the next request (tool turns need them).
         const reasoningBlocks: Array<Record<string, unknown>> = [];
@@ -1039,7 +1040,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
                 type?: string;
                 function?: { name?: string; arguments?: string | Record<string, unknown> };
               };
-              const index = typeof entry.index === "number" ? (lastToolIndex = entry.index) : lastToolIndex;
+              const index = (lastToolIndex = streamedCallIndex(entry, calls, lastToolIndex));
               const existing = calls.get(index);
               if (existing) {
                 if (entry.id) existing.id = entry.id;
