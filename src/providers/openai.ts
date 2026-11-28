@@ -71,6 +71,7 @@ import {
   linkStreamAbort,
   withAbortTimer,
   readSseData,
+  argumentsText,
   incompleteStreamCheck,
   errorCodeStatus,
   endWithPlainReply,
@@ -359,6 +360,18 @@ function readWholeReply(
     request,
     response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: response },
   });
+}
+
+// The text of a Responses output, as parseResponse reads it: every `output_text` and `refusal` block of its messages, in order; in: the stream's completed event, out: the answer's text ("" when the output has none).
+function outputText(output: ResponsesOutputItem[] | undefined): string {
+  let text = "";
+  for (const item of output ?? []) {
+    if (item.type !== "message") continue;
+    for (const block of item.content ?? []) {
+      if ((block.type === "output_text" || block.type === "refusal") && block.text) text += block.text;
+    }
+  }
+  return text;
 }
 
 // The output items of a turn worth replaying (reasoning, function calls, messages), kept exactly as received, only for a turn that has reasoning and no cut-off tool call (a cut call is replayed as `{}`, never verbatim); in: parseResponse and the stream, out: providerSteps.
@@ -1130,8 +1143,10 @@ export class OpenAIResponsesProvider implements Provider {
               sawFinishReason = true;
             }
             // Merge any full tool items delivered at completion (authoritative
-            // when present) so nothing depends solely on delta assembly.
-            for (const item of response.output ?? []) {
+            // when present) so nothing depends solely on delta assembly. A call
+            // whose `output_item.added` never arrived is taken from here, at its
+            // place in the output.
+            for (const [position, item] of (response.output ?? []).entries()) {
               if (item.type !== "function_call") continue;
               const found = [...calls.values()].find(
                 (c) => (c.itemId && c.itemId === item.id) || (c.callId && c.callId === item.call_id)
@@ -1143,6 +1158,14 @@ export class OpenAIResponsesProvider implements Provider {
                 entry.name = item.name || entry.name;
                 entry.startArgs = "";
                 entry.deltaArgs = item.arguments;
+              } else if (!found) {
+                calls.set(calls.has(position) ? Math.max(-1, ...calls.keys()) + 1 : position, {
+                  itemId: item.id || "",
+                  callId: item.call_id || "",
+                  name: item.name || "unknown",
+                  startArgs: "",
+                  deltaArgs: argumentsText(item.arguments) ?? "",
+                });
               }
             }
             // Merge completed reasoning (summary often arrives only here, with
@@ -1177,6 +1200,15 @@ export class OpenAIResponsesProvider implements Provider {
                 }
               }
             }
+            // The completed reply's text is the answer: a delta frame that could not be read lost part of it. What
+            // streamed is usually its start, so the app gets the missing end; any other difference is fixed in the result.
+            const finalText = outputText(response.output);
+            if (finalText && finalText !== text) {
+              if (finalText.startsWith(text)) {
+                eventStream.push({ type: "text_delta", delta: finalText.slice(text.length), partialText: finalText });
+              }
+              text = finalText;
+            }
             eventStream.push({ type: "usage", usage });
           }
         };
@@ -1184,7 +1216,8 @@ export class OpenAIResponsesProvider implements Provider {
         await readSseData(res.body, linked, eventStream, handleMessage);
 
         const toolCalls: ToolCallRecord[] = [];
-        for (const c of calls.values()) {
+        // In output order: a call taken from the completed reply was added last but may come earlier.
+        for (const [, c] of [...calls.entries()].sort(([a], [b]) => a - b)) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const record: ToolCallRecord = {
             id: c.itemId || c.callId || newToolCallId(),
