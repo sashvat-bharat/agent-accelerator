@@ -26,6 +26,7 @@ import { ConfigError, TimeoutError, ValidationError, isAbortError } from "../typ
 import { pollJob } from "../video/poll.ts";
 import {
   combinedSignal,
+  isTimeoutError,
   headersToRecord,
   modalityTokens,
   redactedHeaders,
@@ -210,7 +211,7 @@ export async function googleGenerateVideo(
       const res = await doFetch(target, { ...init, signal });
       return { res, status: res.status, headers: headersToRecord(res.headers) };
     } catch (err) {
-      if (isAbortError(err) && !options?.signal?.aborted && timeoutMs !== undefined)
+      if ((isAbortError(err) || isTimeoutError(err)) && !options?.signal?.aborted && timeoutMs !== undefined)
         throw new TimeoutError(
           `[Agent Accelerator] ${what} timed out after ${timeoutMs} ms; the video may still be made at Google (interaction not known yet).`
         );

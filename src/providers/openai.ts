@@ -52,7 +52,7 @@ import { clampCacheKey } from "../utils/cache.ts";
 import { normalizeMediaInput } from "../utils/media.ts";
 import { toConciseProviderError } from "../utils/errors.ts";
 import { assertModalitiesSupported, assertNoVideoPartsOnResponses } from "./modalities.ts";
-import { badReplyError, responsesReplyProblem } from "./reply-guard.ts";
+import { badReplyError, carriesError, responsesReplyProblem } from "./reply-guard.ts";
 import { ConfigError } from "../types/errors.ts";
 import { withRetries } from "../utils/retry.ts";
 import { openaiGenerateImage } from "./openai-image.ts";
@@ -71,7 +71,10 @@ import {
   linkStreamAbort,
   withAbortTimer,
   readSseData,
+  argumentsText,
   incompleteStreamCheck,
+  errorCodeStatus,
+  endWithPlainReply,
   failStream,
   toolArgumentsJson,
   toolTurnFinishReason,
@@ -311,11 +314,64 @@ function summaryText(entry: unknown): string {
   return typeof text === "string" ? text : "";
 }
 
-// The HTTP status a response error code stands for, so the retry layers classify it: a server error and a rate limit are transient, every other code (invalid prompt, policy ...) is not; in: the failed-response and error-event paths, out: failure.statusCode.
-function errorCodeStatus(code: unknown): number | undefined {
-  if (code === "server_error") return 500;
-  if (code === "rate_limit_exceeded") return 429;
-  return undefined;
+// The error a failed or error-carrying reply stands for: the provider's message (or the error's own text), code and type, and the HTTP status the code maps to; in: parseResponse and the stream's final event, out: the thrown ProviderError.
+function responseFailure(error: unknown, modelId: string): Error {
+  const fields = (error !== null && typeof error === "object" ? error : {}) as Record<string, unknown>;
+  const own = typeof error === "string" ? error.trim() : fields["message"];
+  const failure: Record<string, unknown> & Error = new Error(
+    typeof own === "string" && own ? own : "OpenAI response failed"
+  ) as Record<string, unknown> & Error;
+  if (fields["code"] !== undefined) failure["code"] = fields["code"];
+  if (typeof fields["type"] === "string") failure["errorType"] = fields["type"];
+  const status = errorCodeStatus(fields["code"]);
+  if (status !== undefined) failure["statusCode"] = status;
+  return toConciseProviderError(failure, "openai", modelId);
+}
+
+// Reads a whole Responses reply: parses the JSON, checks it (an error or a reply that cannot be used throws), records the turn and maps it; in: generate, and a stream request answered in one piece, out: ProviderGenerateResult.
+function readWholeReply(
+  reply: { status: number; statusText: string; headers: Record<string, string>; text: string },
+  modelId: string,
+  sessionId: string | undefined,
+  startTime: number,
+  request: ProviderRawData["request"]
+): ProviderGenerateResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reply.text);
+  } catch {
+    throw toConciseProviderError(
+      Object.assign(new Error("Invalid JSON response from OpenAI Responses API"), {
+        statusCode: reply.status,
+        responseBody: reply.text.slice(0, 500),
+        url: request.url,
+      }),
+      "openai",
+      modelId
+    );
+  }
+  const problem = responsesReplyProblem(parsed);
+  if (problem) throw badReplyError("openai", modelId, request.url, problem, reply.text);
+  const response = parsed as ResponsesObject; // checked by responsesReplyProblem above
+  // Stateless turns never establish chains, but the session store still
+  // records the turn so other providers' switch detection keeps working.
+  noteProviderTurn(sessionId, "openai");
+  return parseResponse(response, modelId, Date.now() - startTime, {
+    request,
+    response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: response },
+  });
+}
+
+// The text of a Responses output, as parseResponse reads it: every `output_text` and `refusal` block of its messages, in order; in: the stream's completed event, out: the answer's text ("" when the output has none).
+function outputText(output: ResponsesOutputItem[] | undefined): string {
+  let text = "";
+  for (const item of output ?? []) {
+    if (item.type !== "message") continue;
+    for (const block of item.content ?? []) {
+      if ((block.type === "output_text" || block.type === "refusal") && block.text) text += block.text;
+    }
+  }
+  return text;
 }
 
 // The output items of a turn worth replaying (reasoning, function calls, messages), kept exactly as received, only for a turn that has reasoning and no cut-off tool call (a cut call is replayed as `{}`, never verbatim); in: parseResponse and the stream, out: providerSteps.
@@ -491,18 +547,7 @@ function parseResponse(
   durationMs: number,
   raw: ProviderRawData
 ): ProviderGenerateResult {
-  if (response.status === "failed") {
-    const message =
-      response.error && typeof response.error.message === "string" && response.error.message
-        ? response.error.message
-        : "OpenAI response failed";
-    const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
-    if (response.error?.code !== undefined) failure["code"] = response.error.code;
-    if (typeof response.error?.type === "string") failure["errorType"] = response.error.type;
-    const status = errorCodeStatus(response.error?.code);
-    if (status !== undefined) failure["statusCode"] = status;
-    throw toConciseProviderError(failure, "openai", modelId);
-  }
+  if (response.status === "failed" || carriesError(response.error)) throw responseFailure(response.error, modelId);
 
   let text = "";
   let refusalText = "";
@@ -865,30 +910,7 @@ export class OpenAIResponsesProvider implements Provider {
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, sessionId, options?.signal);
       this.throwIfError(res.status, url, res.text, clean, res.headers);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(res.text);
-      } catch {
-        throw toConciseProviderError(
-          Object.assign(new Error("Invalid JSON response from OpenAI Responses API"), {
-            statusCode: res.status,
-            responseBody: res.text.slice(0, 500),
-            url,
-          }),
-          "openai",
-          clean
-        );
-      }
-      const problem = responsesReplyProblem(parsed);
-      if (problem) throw badReplyError("openai", clean, url, problem, res.text);
-      const response = parsed as ResponsesObject; // checked by responsesReplyProblem above
-      // Stateless turns never establish chains, but the session store still
-      // records the turn so other providers' switch detection keeps working.
-      noteProviderTurn(sessionId, "openai");
-      return parseResponse(response, clean, Date.now() - startTime, {
-        request: rawRequest,
-        response: { status: res.status, statusText: res.statusText, headers: res.headers, body: response },
-      });
+      return readWholeReply(res, clean, sessionId, startTime, rawRequest);
     };
 
     try {
@@ -947,18 +969,32 @@ export class OpenAIResponsesProvider implements Provider {
         const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
-        const res = await openStreamResponse({
+        const opened = await openStreamResponse({
           fetchOnce: () =>
-            withAbortTimer(linked, streamTimeoutMs, () =>
-              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))
+            withAbortTimer(linked, streamTimeoutMs, (signal) =>
+              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, signal))
             ),
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
           noBodyError: () =>
             toConciseProviderError(new Error("OpenAI streaming response had no body"), "openai", clean),
+          readPlainReply: (r, text) =>
+            readWholeReply(
+              { status: r.status, statusText: r.statusText, headers: headersToRecord(r.headers), text },
+              clean,
+              sessionId,
+              startTime,
+              rawRequest
+            ),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
           label: { providerId: "openai", modelId: clean },
         });
+        if ("plain" in opened) {
+          eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
+          endWithPlainReply(eventStream, opened.plain);
+          return;
+        }
+        const res = opened;
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -983,7 +1019,6 @@ export class OpenAIResponsesProvider implements Provider {
         let sawUsage = false;
         let refusalSeen = false;
         let badFrames = 0;
-        let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
         let completedOutput: ResponsesOutputItem[] | undefined;
@@ -995,7 +1030,6 @@ export class OpenAIResponsesProvider implements Provider {
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
-            framesSeen += 1;
           } catch {
             badFrames += 1;
             return;
@@ -1096,16 +1130,8 @@ export class OpenAIResponsesProvider implements Provider {
               sawUsage = true;
             }
             sawFinishReason = true;
-            if (type === "response.failed" || response.status === "failed") {
-              const message =
-                (response.error && typeof response.error.message === "string" && response.error.message) ||
-                "OpenAI response failed";
-              const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
-              if (response.error?.code !== undefined) failure["code"] = response.error.code;
-              if (typeof response.error?.type === "string") failure["errorType"] = response.error.type;
-              const status = errorCodeStatus(response.error?.code);
-              if (status !== undefined) failure["statusCode"] = status;
-              throw toConciseProviderError(failure, "openai", clean);
+            if (type === "response.failed" || response.status === "failed" || carriesError(response.error)) {
+              throw responseFailure(response.error, clean);
             }
             // Non-streaming maps `incomplete` → `length` (max tokens). Streaming
             // must do the same — otherwise truncated turns misreport `stop`.
@@ -1117,8 +1143,10 @@ export class OpenAIResponsesProvider implements Provider {
               sawFinishReason = true;
             }
             // Merge any full tool items delivered at completion (authoritative
-            // when present) so nothing depends solely on delta assembly.
-            for (const item of response.output ?? []) {
+            // when present) so nothing depends solely on delta assembly. A call
+            // whose `output_item.added` never arrived is taken from here, at its
+            // place in the output.
+            for (const [position, item] of (response.output ?? []).entries()) {
               if (item.type !== "function_call") continue;
               const found = [...calls.values()].find(
                 (c) => (c.itemId && c.itemId === item.id) || (c.callId && c.callId === item.call_id)
@@ -1130,6 +1158,14 @@ export class OpenAIResponsesProvider implements Provider {
                 entry.name = item.name || entry.name;
                 entry.startArgs = "";
                 entry.deltaArgs = item.arguments;
+              } else if (!found) {
+                calls.set(calls.has(position) ? Math.max(-1, ...calls.keys()) + 1 : position, {
+                  itemId: item.id || "",
+                  callId: item.call_id || "",
+                  name: item.name || "unknown",
+                  startArgs: "",
+                  deltaArgs: argumentsText(item.arguments) ?? "",
+                });
               }
             }
             // Merge completed reasoning (summary often arrives only here, with
@@ -1164,6 +1200,15 @@ export class OpenAIResponsesProvider implements Provider {
                 }
               }
             }
+            // The completed reply's text is the answer: a delta frame that could not be read lost part of it. What
+            // streamed is usually its start, so the app gets the missing end; any other difference is fixed in the result.
+            const finalText = outputText(response.output);
+            if (finalText && finalText !== text) {
+              if (finalText.startsWith(text)) {
+                eventStream.push({ type: "text_delta", delta: finalText.slice(text.length), partialText: finalText });
+              }
+              text = finalText;
+            }
             eventStream.push({ type: "usage", usage });
           }
         };
@@ -1171,7 +1216,8 @@ export class OpenAIResponsesProvider implements Provider {
         await readSseData(res.body, linked, eventStream, handleMessage);
 
         const toolCalls: ToolCallRecord[] = [];
-        for (const c of calls.values()) {
+        // In output order: a call taken from the completed reply was added last but may come earlier.
+        for (const [, c] of [...calls.entries()].sort(([a], [b]) => a - b)) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const record: ToolCallRecord = {
             id: c.itemId || c.callId || newToolCallId(),
@@ -1197,10 +1243,8 @@ export class OpenAIResponsesProvider implements Provider {
 
         // Terminal-state guard. Loops ending with no completed body, no
         // finish_reason, and no usage while carrying no content must fail as
-        // `incomplete_stream` (retryable) instead of resolving empty success.
-        // Skipped for non-SSE payloads (e.g. JSON mocks in delegation tests)
-        // where no SSE frames were ever seen — those preserve legacy empty
-        // success rather than failing the caller on a mock artifact.
+        // `incomplete_stream` (retryable) instead of resolving empty success,
+        // whatever the content type (a JSON body was read whole at open).
         const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
         const incomplete = incompleteStreamCheck({
           provider: "openai",
@@ -1208,9 +1252,6 @@ export class OpenAIResponsesProvider implements Provider {
           hasTerminal,
           empty: !text && !cleanThinking && toolCalls.length === 0,
           unfinishedCall: hasUnfinishedToolCall(calls.values(), toolCalls),
-          responseHeaders,
-          framesSeen,
-          badFrames,
         });
         if (incomplete) {
           eventStream.fail(incomplete);

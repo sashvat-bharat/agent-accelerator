@@ -117,6 +117,16 @@ describe("OpenRouter video: how a job ends", () => {
     });
   }
 
+  it("a submit that outlives timeoutMs is a TimeoutError that names the request", async () => {
+    const hang = (async (_u: string, init: RequestInit) =>
+      await new Promise<Response>((_, reject) =>
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+      )) as unknown as typeof fetch;
+    const err = await generateVideo({ ...base, prompt: "p", duration: 4, fetch: hang, timeoutMs: 40 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toContain("The OpenRouter video request timed out after 40 ms");
+  });
+
   it("a job still running at the deadline is a TimeoutError that says it was left running and carries the id", async () => {
     const m = recordingFetch(accepted, job("in_progress", { progress: 10 }));
     const err = await generateVideo({ ...base, prompt: "p", duration: 4, fetch: m.fn, pollIntervalMs: 5, timeoutMs: 60 }).catch((e) => e);

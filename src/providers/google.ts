@@ -62,6 +62,12 @@ import {
   redactedHeaders,
   readErrorPayload,
   incompleteStreamError,
+  incompleteStreamCheck,
+  errorCodeStatus,
+  hasUnfinishedToolCall,
+  hasTruncatedToolArguments,
+  toolTurnFinishReason,
+  endWithPlainReply,
   isNotFoundChainError,
   combinedSignal,
   timeoutFor,
@@ -75,6 +81,7 @@ import {
   resolveProviderBaseUrl,
   stripModelScope,
   type StreamingResponse,
+  type PlainReply,
 } from "./shared.ts";
 import { telemetryBus } from "../telemetry.ts";
 import { googleGenerateImage } from "./google-image.ts";
@@ -471,6 +478,8 @@ function throwIfFailedInteraction(interaction: InteractionObject, modelId: strin
       : `Google interaction ${interaction.status}`;
   const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
   if (interaction.error?.code !== undefined) failure["code"] = interaction.error.code;
+  const status = errorCodeStatus(interaction.error?.code); // a failure for a temporary reason is retried
+  if (status !== undefined) failure["statusCode"] = status;
   throw toConciseProviderError(failure, "google", modelId);
 }
 
@@ -834,6 +843,62 @@ function mapFinishReason(status?: string): string {
   return "stop";
 }
 
+// A whole Interactions reply parsed and checked (a reply that cannot be used throws, like a 502); in: fetchInteraction, and a stream request answered in one piece, out: InteractionReply.
+function readWholeInteraction(
+  reply: { status: number; statusText: string; headers: Record<string, string>; text: string },
+  url: string,
+  modelId: string
+): InteractionReply {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reply.text);
+  } catch {
+    throw toConciseProviderError(
+      Object.assign(new Error("Invalid JSON response from Google Interactions API"), {
+        statusCode: reply.status,
+        responseBody: reply.text.slice(0, 500),
+        url,
+      }),
+      "google",
+      modelId
+    );
+  }
+  const problem = interactionReplyProblem(parsed);
+  if (problem) throw badReplyError("google", modelId, url, problem, reply.text);
+  // The cast is justified by interactionReplyProblem above.
+  return {
+    status: reply.status,
+    statusText: reply.statusText,
+    headers: reply.headers,
+    interaction: parsed as InteractionObject,
+  };
+}
+
+// Records a whole finished interaction and maps it: the chain pointer (dropped when nothing is stored), the provider turn and the token check, then the result (a failed one throws); in: generate, and a stream request answered in one piece, out: ProviderGenerateResult.
+function finishWholeInteraction(
+  reply: InteractionReply,
+  modelId: string,
+  sessionId: string | undefined,
+  store: boolean | undefined,
+  startTime: number,
+  request: ProviderRawData["request"]
+): ProviderGenerateResult {
+  const { interaction } = reply;
+  if (interaction.id && sessionId && store !== false) {
+    setChain(sessionId, { interactionId: interaction.id, model: modelId, at: Date.now() });
+  } else if (store === false && sessionId) {
+    interactionChains.delete(sessionId);
+    lastTurnTotals.delete(sessionId);
+  }
+  noteProviderTurn(sessionId, "google");
+  const parsed = parseInteraction(interaction, modelId, Date.now() - startTime, {
+    request,
+    response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: interaction },
+  });
+  checkTurnTokens(sessionId, parsed.usage);
+  return parsed;
+}
+
 // Turns a finished Interaction into text, thinking, tool calls, usage and replayable steps, throwing on failed or cancelled; in: generate, out: ProviderGenerateResult.
 function parseInteraction(
   interaction: InteractionObject,
@@ -1164,29 +1229,7 @@ export class GoogleInteractionsProvider implements Provider {
   ): Promise<InteractionReply> {
     const res = await this.doFetch(url, method, body, options, apiKey, options?.signal);
     this.throwIfError(res.status, url, res.text, modelId, res.headers);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(res.text);
-    } catch {
-      throw toConciseProviderError(
-        Object.assign(new Error("Invalid JSON response from Google Interactions API"), {
-          statusCode: res.status,
-          responseBody: res.text.slice(0, 500),
-          url,
-        }),
-        "google",
-        modelId
-      );
-    }
-    const problem = interactionReplyProblem(parsed);
-    if (problem) throw badReplyError("google", modelId, url, problem, res.text);
-    // The cast is justified by interactionReplyProblem above.
-    return {
-      status: res.status,
-      statusText: res.statusText,
-      headers: res.headers,
-      interaction: parsed as InteractionObject,
-    };
+    return readWholeInteraction(res, url, modelId);
   }
 
   // Fire-and-forget cancel so an aborted background run stops billing; in: an aborted generate/stream, out: POST {id}/cancel.
@@ -1258,7 +1301,8 @@ export class GoogleInteractionsProvider implements Provider {
         }
         return reply;
       } catch (err) {
-        if (options?.signal?.aborted || isAbortError(err)) this.cancelInteraction(baseUrl, id, options, apiKey);
+        // Only the caller's abort cancels the job at Google: a status check that timed out is retried, never a reason to stop it.
+        if (options?.signal?.aborted) this.cancelInteraction(baseUrl, id, options, apiKey);
         throw err;
       }
     };
@@ -1270,20 +1314,7 @@ export class GoogleInteractionsProvider implements Provider {
         retryOptions
       );
       if (body.background) reply = await waitForCompletion(reply);
-      const { interaction } = reply;
-      if (interaction.id && sessionId && body.store !== false) {
-        setChain(sessionId, { interactionId: interaction.id, model: clean, at: Date.now() });
-      } else if (body.store === false && sessionId) {
-        interactionChains.delete(sessionId);
-        lastTurnTotals.delete(sessionId);
-      }
-      noteProviderTurn(sessionId, "google");
-      const parsed = parseInteraction(interaction, clean, Date.now() - startTime, {
-        request: rawRequest,
-        response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: interaction },
-      });
-      checkTurnTokens(sessionId, parsed.usage);
-      return parsed;
+      return finishWholeInteraction(reply, clean, sessionId, body.store, startTime, rawRequest);
     };
 
     try {
@@ -1360,23 +1391,48 @@ export class GoogleInteractionsProvider implements Provider {
         const streamTimeoutMs = timeoutFor(options);
         // Opens one SSE connection (the create POST, or a background resume GET). Transient failures
         // (429/5xx/network) are retried before the first byte; a live stream is never retried.
-        const open = (target: string, method: "POST" | "GET"): Promise<StreamingResponse> =>
+        const open = <T>(
+          target: string,
+          method: "POST" | "GET",
+          readPlainReply: (r: Response, text: string) => T
+        ): Promise<StreamingResponse | PlainReply<T>> =>
           openStreamResponse({
             fetchOnce: () =>
-              withAbortTimer(linked, streamTimeoutMs, () =>
+              withAbortTimer(linked, streamTimeoutMs, (signal) =>
                 (options?.fetch ?? fetch)(
                   target,
-                  this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, linked.signal)
+                  this.requestInit(method, method === "POST" ? body : undefined, options, apiKey, signal)
                 )
               ),
             onHttpError: (r, text) => this.throwIfError(r.status, target, text, clean, headersToRecord(r.headers)),
             noBodyError: () =>
               toConciseProviderError(new Error("Google streaming response had no body"), "google", clean),
+            readPlainReply,
             retry: retryOptionsFrom(options),
             signal: linked.signal,
             label: { providerId: "google", modelId: clean },
           });
-        const res = await open(url, "POST");
+        // A stream request answered in one piece is read like generate's reply; one still running cannot be used.
+        const opened = await open(url, "POST", (r, text) => {
+          const whole = readWholeInteraction(
+            { status: r.status, statusText: r.statusText, headers: headersToRecord(r.headers), text },
+            rawRequest.url,
+            clean
+          );
+          if (isRunning(whole.interaction.status)) {
+            throw badReplyError("google", clean, rawRequest.url, "the interaction has not finished", text);
+          }
+          return whole;
+        });
+        if ("plain" in opened) {
+          eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
+          endWithPlainReply(
+            eventStream,
+            finishWholeInteraction(opened.plain, clean, sessionId, body.store, startTime, rawRequest)
+          );
+          return;
+        }
+        const res = opened;
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -1396,10 +1452,10 @@ export class GoogleInteractionsProvider implements Provider {
         const calls = new Map<number, { id: string; name: string; startArgs: string; deltaArgs: string }>();
         // Every step as the server would return it (start + deltas), for exact history replay.
         const steps = new Map<number, Record<string, unknown>>();
+        // Indexes of the steps whose `step.stop` arrived: a call without one was still being written.
+        const stopped = new Set<number>();
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         let finishReason = "stop";
-        let sawFinishReason = false;
-        let sawUsage = false;
         let badFrames = 0;
         let framesSeen = 0;
         let responseId: string | undefined;
@@ -1422,11 +1478,8 @@ export class GoogleInteractionsProvider implements Provider {
         };
 
         const handleMessage = (event: string | undefined, data: string): void => {
-          if (!data) return;
-          if (data === "[DONE]") {
-            sawFinishReason = sawFinishReason || completedBody !== undefined || sawUsage;
-            return;
-          }
+          // Google ends a stream with `interaction.completed` and never sends `[DONE]`: it is not an end here.
+          if (!data || data === "[DONE]") return;
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
@@ -1445,6 +1498,8 @@ export class GoogleInteractionsProvider implements Provider {
               typeof errObj.message === "string" && errObj.message ? errObj.message : "Google streaming error";
             const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
             if (errObj.code !== undefined) failure["code"] = errObj.code;
+            const status = errorCodeStatus(errObj.code); // e.g. `gateway_timeout`, `UNAVAILABLE`, `RESOURCE_EXHAUSTED`: retried
+            if (status !== undefined) failure["statusCode"] = status;
             failure["url"] = url.split("?")[0];
             throw toConciseProviderError(failure, "google", clean);
           }
@@ -1509,12 +1564,10 @@ export class GoogleInteractionsProvider implements Provider {
               });
             }
           } else if (type === "step.stop" || type === "interaction.status_update") {
+            if (type === "step.stop" && typeof msg["index"] === "number") stopped.add(msg["index"] as number);
             // Cumulative usage so far: keeps usage when the stream is cut before `interaction.completed`.
             const stepUsage = msg["usage"] as InteractionObject["usage"] | undefined;
-            if (stepUsage) {
-              usage = mapUsage(stepUsage);
-              sawUsage = true;
-            }
+            if (stepUsage) usage = mapUsage(stepUsage);
           } else if (type === "interaction.completed") {
             const interaction = (msg["interaction"] as InteractionObject) ?? {};
             // Failed/cancelled interactions must surface loudly — never
@@ -1522,12 +1575,8 @@ export class GoogleInteractionsProvider implements Provider {
             throwIfFailedInteraction(interaction, clean);
             completedBody = msg["interaction"];
             if (interaction.id) responseId = interaction.id;
-            if (interaction.usage) {
-              usage = mapUsage(interaction.usage);
-              sawUsage = true;
-            }
+            if (interaction.usage) usage = mapUsage(interaction.usage);
             finishReason = mapFinishReason(interaction.status);
-            sawFinishReason = true;
             eventStream.push({ type: "usage", usage });
           }
         };
@@ -1575,7 +1624,11 @@ export class GoogleInteractionsProvider implements Provider {
           if (!responseId || ++misses > BACKGROUND_MAX_RECONNECTS) throw incompleteStreamError("google", clean);
           const before = framesSeen;
           const resume = `${baseUrl}/interactions/${responseId}?stream=true${lastEventId ? `&last_event_id=${encodeURIComponent(lastEventId)}` : ""}`;
-          await readAll(await open(resume, "GET"));
+          // A resume answered in one piece is no stream to continue: it counts as a cut stream.
+          const again = await open(resume, "GET", () => {
+            throw incompleteStreamError("google", clean);
+          });
+          await readAll("plain" in again ? again.plain : again);
           if (framesSeen > before) misses = 0;
         }
 
@@ -1587,7 +1640,8 @@ export class GoogleInteractionsProvider implements Provider {
         for (const [index, c] of calls) {
           const args = parseStreamedToolArguments(c.startArgs, c.deltaArgs);
           const step = steps.get(index);
-          if (step) step["arguments"] = args;
+          // A call cut mid-JSON is replayed as `{}`: the internal truncation marker is never sent to Google.
+          if (step) step["arguments"] = hasTruncatedToolArguments(args) ? {} : args;
           const record: ToolCallRecord = {
             id: c.id,
             name: c.name,
@@ -1598,36 +1652,40 @@ export class GoogleInteractionsProvider implements Provider {
           eventStream.push({ type: "tool_call_complete", toolCall: record });
         }
 
-        if (sessionId) {
-          if (responseId && body.store !== false)
-            setChain(sessionId, { interactionId: responseId, model: clean, at: Date.now() });
-          else if (body.store === false) {
-            interactionChains.delete(sessionId);
-            lastTurnTotals.delete(sessionId);
-          }
-        }
+        if (toolCalls.length > 0) finishReason = toolTurnFinishReason(finishReason, toolCalls);
         noteProviderTurn(sessionId, "google");
         checkTurnTokens(sessionId, usage);
 
-        // Terminal-state guard — fail `incomplete_stream` (retryable)
-        // instead of resolving empty success. Skipped for non-SSE payloads
-        // (JSON mocks) where no SSE frames were ever seen.
-        const hasTerminal = completedBody !== undefined || sawFinishReason || sawUsage;
+        // Only `interaction.completed` ends a stream (the usage of `step.stop` is a running total, not an end). A stream
+        // that stopped before it with nothing, or with a tool call that was still being written, fails as
+        // `incomplete_stream` (retryable), whatever the content type.
+        const ended = completedBody !== undefined;
         // Trim provider trailing blank lines from finalized thinking (live
         // deltas already emitted raw). Stateful bodies unaffected.
-        const cleanThinkingEarly = thinking.replace(/\n{3,}/g, "\n\n").trim();
-        const ctEntry = Object.entries(responseHeaders).find(([k]) => k.toLowerCase() === "content-type");
-        const isSSEPayload =
-          (typeof ctEntry?.[1] === "string" &&
-            ((ctEntry[1] as string).includes("event-stream") || (ctEntry[1] as string).startsWith("text/"))) ||
-          framesSeen > 0 ||
-          badFrames > 0;
-        if (!hasTerminal && !text && !cleanThinkingEarly && toolCalls.length === 0 && isSSEPayload) {
-          eventStream.fail(incompleteStreamError("google", clean));
+        const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
+        const incomplete = incompleteStreamCheck({
+          provider: "google",
+          modelId: clean,
+          hasTerminal: ended,
+          empty: !text && !cleanThinking && toolCalls.length === 0,
+          // A call opened with `{}` looks complete; only its `step.stop` says it was.
+          unfinishedCall:
+            hasUnfinishedToolCall(calls.values(), toolCalls) || [...calls.keys()].some((index) => !stopped.has(index)),
+        });
+        if (incomplete) {
+          eventStream.fail(incomplete);
           return;
         }
 
-        const cleanThinking = cleanThinkingEarly;
+        // The chain continues only an interaction seen to its end; after a cut stream the next turn resends the history.
+        if (sessionId) {
+          if (body.store === false) {
+            interactionChains.delete(sessionId);
+            lastTurnTotals.delete(sessionId);
+          } else if (!ended) interactionChains.delete(sessionId);
+          else if (responseId) setChain(sessionId, { interactionId: responseId, model: clean, at: Date.now() });
+        }
+
         const finalResponse = new AgentResponse({
           text,
           thinking: cleanThinking || undefined,

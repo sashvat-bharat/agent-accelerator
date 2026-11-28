@@ -7,37 +7,86 @@
  */
 import { toConciseProviderError } from "../utils/errors.ts";
 import { noop } from "../utils/noop.ts";
-import { ERROR_BODY_LIMIT, readTextCapped } from "../utils/body.ts";
+import { CHAT_REPLY_LIMIT, ERROR_BODY_LIMIT, readTextCapped } from "../utils/body.ts";
 import { getApiKey } from "../utils/env.ts";
 import { baseUrlSetting } from "../config/settings.ts";
 import { safeStringify } from "../utils/serialization.ts";
-import type { ModelSpec, ProviderRequestOptions } from "../types/model.ts";
+import type { ModelSpec, ProviderGenerateResult, ProviderRequestOptions } from "../types/model.ts";
 import { withRetries } from "../utils/retry.ts";
 import { redactHeadersCentral } from "../utils/cache.ts";
 import { TRUNCATED_ARGS_KEY, isTruncatedArguments } from "../types/tool.ts";
 import { SSEParser } from "../streaming/sse-parser.ts";
 import type { AssistantMessageEventStream } from "../streaming/event-stream.ts";
-import { abortError } from "../types/errors.ts";
+import { AgentResponse } from "../types/response.ts";
+import { TimeoutError, abortError } from "../types/errors.ts";
 import { DEFAULT_BASE_URLS } from "./base-urls.ts";
 
-/** Parses a JSON tool-argument string; non-objects degrade to the truncated-arguments marker. */
-export function parseArguments(raw: string | undefined): Record<string, unknown> {
-  if (!raw) return {};
+/** The arguments of a tool call as an object: a JSON text is parsed and an object (some OpenAI-compatible servers send one) is taken as it is; anything else becomes the truncated-arguments marker, which always holds text. */
+export function parseArguments(raw: unknown): Record<string, unknown> {
+  if (raw === undefined || raw === null || raw === "") return {};
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  const text = argumentsText(raw) ?? String(raw);
   try {
-    const parsed: unknown = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(text);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
-    return { [TRUNCATED_ARGS_KEY]: raw };
+    return { [TRUNCATED_ARGS_KEY]: text };
   } catch {
-    return { [TRUNCATED_ARGS_KEY]: raw };
+    return { [TRUNCATED_ARGS_KEY]: text };
   }
+}
+
+/** Which streamed tool call a Chat Completions tool-call piece belongs to: its `index` when it has one; without one, a new call when it carries an id other than the current call's (some servers send parallel calls with ids but no index), else the current call `last` (an arguments piece). */
+export function streamedCallIndex(
+  piece: { index?: unknown; id?: unknown },
+  calls: ReadonlyMap<number, { id: string }>,
+  last: number
+): number {
+  if (typeof piece.index === "number") return piece.index;
+  const current = calls.get(last)?.id;
+  if (typeof piece.id === "string" && piece.id && current && current !== piece.id) {
+    return Math.max(-1, ...calls.keys()) + 1;
+  }
+  return last;
+}
+
+/** The JSON text of a tool call's `arguments` as the wire sent them: text as it is, an object or a list as its JSON; undefined for anything else (nothing to add). */
+export function argumentsText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  return value !== null && typeof value === "object" ? JSON.stringify(value) : undefined;
 }
 
 /** Trims/collapses assembled thinking parts (no edge-tripling). */
 export function normalizeThinkingParts(parts: string[]): string | undefined {
   const cleaned = parts.map((p) => p.replace(/\n{3,}/g, "\n\n").trim()).filter((p) => p.length > 0);
   return cleaned.length > 0 ? cleaned.join("\n") : undefined;
+}
+
+// The readable text of one `reasoning_details` block: its `text` (`reasoning.text`), or its `summary` (`reasoning.summary`, a text or a list of `{ text }`); an encrypted block has none; in: reasoningParts, out: one thinking part or "".
+function detailText(block: unknown): string {
+  if (!block || typeof block !== "object") return "";
+  const b = block as Record<string, unknown>;
+  if (typeof b["text"] === "string" && b["text"]) return b["text"];
+  const summary = b["summary"];
+  if (typeof summary === "string") return summary;
+  if (!Array.isArray(summary)) return "";
+  return summary
+    .map((entry) => (typeof (entry as { text?: unknown })?.text === "string" ? (entry as { text: string }).text : ""))
+    .join("");
+}
+
+/** The readable thinking of one Chat Completions message or stream delta: the text of each `reasoning_details` block, else `reasoning_content` (DeepSeek, vLLM, Qwen), else `reasoning`. Blocks with text win, so thinking sent in two fields is read once; blocks without text (encrypted, or an empty list) do not hide the plain fields. */
+export function reasoningParts(source: unknown): string[] {
+  if (!source || typeof source !== "object") return [];
+  const s = source as Record<string, unknown>;
+  const details = Array.isArray(s["reasoning_details"]) ? s["reasoning_details"].map(detailText).filter(Boolean) : [];
+  if (details.length > 0) return details;
+  for (const key of ["reasoning_content", "reasoning"]) {
+    const value = s[key];
+    if (typeof value === "string" && value) return [value];
+  }
+  return [];
 }
 
 /**
@@ -141,7 +190,58 @@ export function timeoutFor(options: { timeoutMs?: number } | undefined): number 
   return typeof t === "number" && Number.isFinite(t) && t > 0 ? Math.floor(t) : undefined;
 }
 
-/** Merges a parent signal with a timeout into one effective signal. Caller must call cleanup when the request settles so the timer never holds the loop open. */
+// The reason a request timer aborts with: a retryable TimeoutError, which `fetch` rejects with, so the retry layers see a timeout and never the caller's own abort; in: combinedSignal and withAbortTimer, out: the abort reason.
+function requestTimeout(ms: number): TimeoutError {
+  return new TimeoutError(`[Agent Accelerator] Provider request timed out after ${ms} ms.`);
+}
+
+// Error codes that name a temporary failure, by the HTTP status they stand for (Google's gRPC names, OpenAI's, and the usual names of OpenAI-compatible servers); in: errorCodeStatus.
+const TEMPORARY_CODE_STATUS: Record<string, number> = {
+  rate_limit_exceeded: 429,
+  rate_limit: 429,
+  too_many_requests: 429,
+  resource_exhausted: 429,
+  overloaded: 503,
+  overloaded_error: 503,
+  unavailable: 503,
+  service_unavailable: 503,
+  internal: 500,
+  internal_error: 500,
+  internal_server_error: 500,
+  server_error: 500,
+  bad_gateway: 502,
+  gateway_timeout: 504,
+  deadline_exceeded: 504,
+  timeout: 504,
+};
+
+/** The HTTP status an error code sent inside a reply or a stream stands for (the HTTP status itself was 200), so the retry layers classify it: a number from 100 to 599 (also as text) is that status, a known temporary name gives its 429 or 5xx (any case, `-` or a space read as `_`), anything else none, so the error stays final. */
+export function errorCodeStatus(code: unknown): number | undefined {
+  if (typeof code === "number") return Number.isInteger(code) && code >= 100 && code <= 599 ? code : undefined;
+  if (typeof code !== "string") return undefined;
+  const name = code.trim();
+  if (/^\d{3}$/.test(name)) return errorCodeStatus(Number(name));
+  return TEMPORARY_CODE_STATUS[name.toLowerCase().replace(/[\s-]+/g, "_")];
+}
+
+/** The retryable ProviderError of an answer the provider ended with `finish_reason: "error"` (its upstream model failed while answering), counted as a 502; `what` names the stream or the reply. */
+export function finishReasonError(provider: string, modelId: string, url: string, what: string): Error {
+  return toConciseProviderError(
+    Object.assign(new Error(`${what} ended with finish_reason "error" (the upstream model failed)`), {
+      statusCode: 502,
+      url: url.split("?")[0],
+    }),
+    provider,
+    modelId
+  );
+}
+
+/** True for a timeout (an SDK `TimeoutError`, or a platform one such as `AbortSignal.timeout`'s), as opposed to the caller's abort. */
+export function isTimeoutError(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === "TimeoutError";
+}
+
+/** Merges a parent signal with a timeout into one effective signal; the timer aborts it with a TimeoutError, the parent with its own reason. Caller must call cleanup when the request settles so the timer never holds the loop open. */
 export function combinedSignal(
   signal?: AbortSignal,
   timeoutMs?: number
@@ -150,7 +250,7 @@ export function combinedSignal(
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
     try {
-      ctrl.abort();
+      ctrl.abort(requestTimeout(timeoutMs));
     } catch {
       // why: cancelling or releasing something that is already closed is harmless.
     }
@@ -318,32 +418,60 @@ function hasBody(res: Response): res is StreamingResponse {
   return res.body !== null;
 }
 
+/** A stream request answered in one piece (a JSON body, not an event stream), as the adapter's `readPlainReply` read it. */
+export interface PlainReply<T> {
+  plain: T;
+}
+
+// True when a successful response is a JSON body rather than an event stream (a server or proxy that ignored `stream: true`, or answered with an error object); in: openStreamResponse, out: whether readPlainReply reads it.
+function isPlainJsonReply(res: Response): boolean {
+  const type = (res.headers.get("content-type") ?? "").toLowerCase();
+  return type.includes("json") && !type.includes("event-stream");
+}
+
 /**
  * Opens an SSE response, retrying transient failures (429/5xx/network) BEFORE
  * any byte is consumed, so a streaming caller gets the same resilience as
  * `generate()`. Once this resolves the stream is live and never retried.
  * `onHttpError` must throw (usually the adapter's concise `throwIfError`).
+ * A JSON body is read whole (with the chat reply cap) and handed to `readPlainReply`, which reads it the way the
+ * adapter's `generate()` does and throws for an error or a reply that cannot be used, so those are retried here too.
  */
-export function openStreamResponse(args: {
+export function openStreamResponse<T>(args: {
   fetchOnce: () => Promise<Response>;
   onHttpError: (res: Response, bodyText: string) => void;
   noBodyError: () => Error;
+  readPlainReply: (res: Response, bodyText: string) => T;
   retry: ReturnType<typeof retryOptionsFrom>;
   signal: AbortSignal;
   label: { providerId: string; modelId: string };
-}): Promise<StreamingResponse> {
+}): Promise<StreamingResponse | PlainReply<T>> {
   return withRetries(
-    async () => {
+    async (): Promise<StreamingResponse | PlainReply<T>> => {
       const res = await args.fetchOnce();
       if (!res.ok) {
         const text = await readTextCapped(res, ERROR_BODY_LIMIT).catch(() => "");
         args.onHttpError(res, text);
       }
       if (!hasBody(res)) throw args.noBodyError();
+      if (isPlainJsonReply(res))
+        return { plain: args.readPlainReply(res, await readTextCapped(res, CHAT_REPLY_LIMIT)) };
       return res;
     },
     { ...args.retry, signal: args.signal, label: args.label }
   );
+}
+
+/** Ends a stream with a reply that came in one piece: its thinking and text as one delta each, each tool call and the end event, then the response. */
+export function endWithPlainReply(eventStream: AssistantMessageEventStream, result: ProviderGenerateResult): void {
+  if (result.thinking) {
+    eventStream.push({ type: "thinking_delta", thinkingDelta: result.thinking, partialThinking: result.thinking });
+  }
+  if (result.text) eventStream.push({ type: "text_delta", delta: result.text, partialText: result.text });
+  for (const toolCall of result.toolCalls ?? []) eventStream.push({ type: "tool_call_complete", toolCall });
+  const { usage, finishReason, responseId } = result;
+  eventStream.push({ type: "done", delta: "", usage, finishReason, responseId });
+  eventStream.end(new AgentResponse(result));
 }
 
 /** Retry knobs from provider request options, in the shape `withRetries` expects. */
@@ -412,26 +540,25 @@ export function linkStreamAbort(
   };
 }
 
-// Runs one request attempt under a timer that aborts `controller` after `ms` (none when unset); in: an adapter's fetchOnce, out: its Response.
+// Runs one request attempt under its own timer: the attempt's signal follows `controller` (the caller's abort, the stream's cancel) and also aborts after `ms` with a TimeoutError, which ends only this attempt, so the opener's retry can run (no timer when unset); in: an adapter's fetchOnce, out: its Response.
 export async function withAbortTimer<T>(
   controller: AbortController,
   ms: number | undefined,
-  run: () => Promise<T>
+  run: (signal: AbortSignal) => Promise<T>
 ): Promise<T> {
-  const timer =
-    ms && ms > 0
-      ? setTimeout(() => {
-          try {
-            controller.abort();
-          } catch {
-            // why: cancelling or releasing something that is already closed is harmless.
-          }
-        }, ms)
-      : undefined;
+  if (!ms || ms <= 0) return run(controller.signal);
+  const attempt = new AbortController();
+  const timer = setTimeout(() => {
+    try {
+      attempt.abort(requestTimeout(ms));
+    } catch {
+      // why: cancelling or releasing something that is already closed is harmless.
+    }
+  }, ms);
   try {
-    return await run();
+    return await run(AbortSignal.any([controller.signal, attempt.signal]));
   } finally {
-    if (timer) clearTimeout(timer);
+    clearTimeout(timer);
   }
 }
 
@@ -469,29 +596,24 @@ export async function readSseData(
   if (linked.signal.aborted || eventStream.isCancelled()) throw abort();
 }
 
-// The error to fail with when an SSE stream ended without its final event while carrying no content or an unfinished tool call (checked only for real SSE payloads, not JSON mocks); in: the adapter's state after reading, out: `eventStream.fail`, else undefined.
+// The error to fail with when a stream ended without its final event while carrying no content or an unfinished tool call, whatever the body's content type (a JSON body never gets here: openStreamResponse reads it whole); in: the adapter's state after reading, out: `eventStream.fail`, else undefined.
 export function incompleteStreamCheck(a: {
   provider: string;
   modelId: string;
   hasTerminal: boolean;
   empty: boolean;
   unfinishedCall: boolean;
-  responseHeaders: Record<string, string>;
-  framesSeen: number;
-  badFrames: number;
 }): Error | undefined {
   if (a.hasTerminal || !(a.empty || a.unfinishedCall)) return undefined;
-  const contentType = Object.entries(a.responseHeaders).find(([k]) => k.toLowerCase() === "content-type")?.[1];
-  const isSSEPayload =
-    (typeof contentType === "string" && (contentType.includes("event-stream") || contentType.startsWith("text/"))) ||
-    a.framesSeen > 0 ||
-    a.badFrames > 0;
-  return isSSEPayload ? incompleteStreamError(a.provider, a.modelId) : undefined;
+  return incompleteStreamError(a.provider, a.modelId);
 }
 
-// Fails a stream with the right error: an abort (the signal, the stream's cancel, or an AbortError) becomes the plain `AbortError`, anything else passes through; in: an adapter's catch block, out: the stream's result() rejection.
+// Fails a stream with the right error: a timeout stays a `TimeoutError`, an abort (the signal, the stream's cancel, or an AbortError) becomes the plain `AbortError`, anything else passes through; in: an adapter's catch block, out: the stream's result() rejection.
 export function failStream(eventStream: AssistantMessageEventStream, linked: AbortController, err: unknown): void {
   const raw = err instanceof Error ? err : new Error(String(err));
+  // A timeout stays a timeout: a request timer's error, or the reason a whole-call timer aborted the stream with.
+  const reason: unknown = linked.signal.reason;
+  if (linked.signal.aborted && isTimeoutError(reason) && reason instanceof Error) return eventStream.fail(reason);
   const isAbort =
     linked.signal.aborted || eventStream.isCancelled() || (raw as { name?: string }).name === "AbortError";
   eventStream.fail(isAbort ? abortError("Stream aborted") : raw);

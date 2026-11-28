@@ -142,3 +142,33 @@ describe("Streaming & SSE Parser", () => {
     }
   });
 });
+
+describe("SSE frames without data (WHATWG SSE: a blank line resets the event name)", () => {
+  it("an `event:` frame with no data never names the next frame", () => {
+    const parser = new SSEParser();
+    expect(parser.feed("event: ping\n\ndata: x\n\n")).toEqual([{ id: undefined, event: undefined, data: "x" }]);
+  });
+
+  it("the same when the frames arrive in separate chunks", () => {
+    const parser = new SSEParser();
+    const seen = [...parser.feed("event: ping\n"), ...parser.feed("\n"), ...parser.feed("data: x\n\n")];
+    expect(seen).toEqual([{ id: undefined, event: undefined, data: "x" }]);
+  });
+
+  it("a named frame with data keeps its name, and an id resets the same way", () => {
+    const parser = new SSEParser();
+    expect(parser.feed("event: step.delta\nid: 7\ndata: a\n\nid: 8\n\ndata: b\n\n")).toEqual([
+      { id: "7", event: "step.delta", data: "a" },
+      { id: undefined, event: undefined, data: "b" },
+    ]);
+  });
+
+  it("flush sends a last frame with data and nothing for a frame without", () => {
+    const parser = new SSEParser();
+    expect(parser.feed("event: ping\n\nevent: done\ndata: z")).toEqual([]);
+    expect(parser.flush()).toEqual([{ id: undefined, event: "done", data: "z" }]);
+    const quiet = new SSEParser();
+    expect([...quiet.feed("event: ping\n"), ...quiet.flush()]).toEqual([]);
+    expect(quiet.feed("data: y\n\n")).toEqual([{ id: undefined, event: undefined, data: "y" }]); // nothing left over
+  });
+});

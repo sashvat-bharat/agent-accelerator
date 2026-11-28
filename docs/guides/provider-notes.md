@@ -10,6 +10,8 @@ The adapter uses the Interactions API (`POST {baseUrl}/interactions`, streaming 
 
 - **History** is chained on Google's side with `previous_interaction_id`. If the conversation switches to another provider or model, or the chain has expired, the SDK sends the full history again. Each assistant turn keeps Google's raw output steps, so a resent history is identical to what Google produced, thought signatures included. That keeps the reasoning and the cache prefix intact.
 - **Thinking** is sent as `thinking_level` (`minimal`, `low`, `medium` or `high`). `xhigh` and `max` become `high`, `none` and `dynamic` are left out. Reasoning summaries are switched on whenever thinking is on.
+- **Stream endings.** Only `interaction.completed` ends a stream. A stream that stops before it with nothing in it, or while a tool call is still being written (its `step.stop` never came), fails as a retryable `incomplete_stream`, and its tool calls never run. A cut text answer keeps its text, but the next turn sends the full history instead of continuing the unfinished interaction. A call cut off by the output limit never runs, and its saved step holds `{}`.
+- **Errors in a stream or a failed interaction** are retryable when their code names a temporary failure: `gateway_timeout`, `UNAVAILABLE`, `RESOURCE_EXHAUSTED`, `INTERNAL` or `DEADLINE_EXCEEDED`. Other codes, such as `INVALID_ARGUMENT`, fail for good.
 - **Caching** is implicit only. Another `cache` value warns and falls back.
 - **Tool schemas** are converted to the OpenAPI 3.0 subset that Google accepts.
 - **Long answers on Gemini 4.** Google allows 65,536 output tokens per request. A `gemini-4*` model with a higher `maxOutputTokens` runs as a background interaction, with no extra option. `run()` polls (after 2 seconds, then every 5 seconds). `stream()` reconnects with `last_event_id` after a dropped connection, and 15 minutes of silence counts as dropped. Cancelling cancels the interaction on Google's side, so billing stops. `limits.requestTimeoutMs` times each HTTP request, not the whole run. Any other Google model above 65,536 fails with a `ConfigError` before the network.
@@ -23,7 +25,7 @@ The adapter uses the Responses API (`POST {baseUrl}/responses`).
 - **Reasoning is kept across a tool loop.** A reasoning model returns encrypted reasoning items. The SDK asks for them (`reasoning.encrypted_content`), saves them with the turn and sends them back, unchanged, with the tool results of the same run. Reasoning of finished turns is not sent again.
 - **Cache.** `prompt_cache_key` (at most 64 characters) pins requests to one cache. Cache reads and, from GPT-5.6, cache writes are reported in `usage`. A write is priced at the catalog's `cache_write` price, which is the `30m` rate, so a `12h` write costs about twice as much and the estimate is low.
 - **Service tier** `flex` or `priority` is passed as `service_tier`.
-- **Stream endings** are read as they come: `response.incomplete` (finish reason `length`, or `refusal` when the content filter cut it), `response.failed` and `error`. The codes `server_error` and `rate_limit_exceeded` are retryable and the others are not. Reasoning summaries arrive as `thinking`.
+- **Stream endings** are read as they come: `response.incomplete` (finish reason `length`, or `refusal` when the content filter cut it), `response.failed` and `error`. The codes `server_error` and `rate_limit_exceeded` are retryable and the others are not. Reasoning summaries arrive as `thinking`. The final `response.completed` carries the whole reply: its text and its function calls fill what an unreadable stream event lost (the app gets a missing end of the text as one more `text_delta`), and a streamed call is never dropped.
 - **Tool call ids** from other providers are made valid (letters, digits, `_` and `-`, at most 64 characters, a hash when cut), the same way on the call and on its result.
 - **Not sent:** `temperature`, `top_p`, and anything that chains conversations. `max_output_tokens` is sent when you set it. A `video` part is rejected before the network.
 
@@ -47,9 +49,9 @@ The adapter uses Chat Completions (`POST {baseUrl}/chat/completions`).
 
 - **Every turn is stateless.** The whole `messages` list is sent.
 - **Session affinity** is the body field `session_id`, plus the `x-session-id` header. The body wins.
-- **Thinking** is sent as `reasoning.effort`, like OpenAI. `dynamic` is left out.
+- **Thinking** is sent as `reasoning.effort`, like OpenAI. `dynamic` is left out. The thinking text you get comes from the `reasoning_details` blocks (a block's `text`, or the `summary` of a summary block, which is how OpenAI models arrive), else from `reasoning`. Encrypted blocks have no text, so they never hide `reasoning`.
 - **Tool choice.** `auto` is left out. `none`, `required` and a pinned tool are sent. `validated` is Google only and is dropped with one warning.
-- **Errors inside a stream.** OpenRouter can send an error chunk in a stream that answered 200. The SDK reads it like an HTTP error. The status comes from the chunk's `code`, or from its `error_type`: `rate_limit_exceeded` is 429, `provider_overloaded` 503, `provider_unavailable` 502, `timeout` 504 and `server` 500. `runRetries` retries the retryable ones.
+- **Errors inside a stream.** OpenRouter can send an error chunk in a stream that answered 200. The SDK reads it like an HTTP error. The status comes from the chunk's numeric `code`, else from its `error_type` (`rate_limit_exceeded` is 429, `provider_overloaded` 503, `provider_unavailable` 502, `timeout` 504 and `server` 500), else from the name in `code` (as in [Retries](limits-and-retries.md#retries)). `finish_reason: "error"` is a retryable 502. `runRetries` retries the retryable ones.
 - **Reasoning and PDFs.** A turn's `reasoning_details` blocks and parsed-PDF annotations are saved and sent back exactly as OpenRouter returned them.
 - **Cost.** The provider's own `cost` is used when it is reported. A reported `0` (a free model, a cache hit) stays a known zero.
 - **Cache.** `anthropic/...` and `~anthropic/...` models accept the `5m` and `1h` settings.
@@ -71,6 +73,9 @@ console.log(groq.id, getProvider("groq") === groq);
 
 - The adapter is created once per prefix. A second `ensureCustomProvider` with another `baseUrl` throws a `ConfigError`.
 - It sends no `session_id` or `prompt_cache_key`, because strict services reject unknown fields. Affinity goes in headers only.
+- Thinking text is read from `reasoning_details` blocks (`text` or `summary`), else `reasoning_content` (DeepSeek, vLLM, Qwen), else `reasoning`, the same way on `run()` and `stream()`. It is shown only, never sent back.
+- Streamed tool calls are placed by their `index`. A piece without one continues the current call, unless it carries a new id: then it is the next call, so parallel calls from a server that sends no index stay apart.
+- An error sent with HTTP 200 or inside a stream is retried when its `code` is a status number (`429`) or names a temporary failure (`overloaded`, `rate_limit_exceeded` ...). `finish_reason: "error"` is a retryable 502, in a stream and in a whole reply.
 - Its price and abilities are unknown unless you describe the model with `registerModel`. See [Models and providers](models-and-providers.md#the-model-catalog).
 - `ensureCustomProvider` throws a `ConfigError` if you pass a `baseUrl` or `apiKey` for a first-class prefix (`google`, `openai`, `anthropic`, `openrouter`). Pass those to the `Agent` instead.
 

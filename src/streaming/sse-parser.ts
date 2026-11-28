@@ -42,16 +42,18 @@ export class SSEParser {
       start = newlineIdx + 1;
 
       if (line.length === 0) {
+        // A blank line ends a frame: it is sent when it has data, and its name and id are reset either way (WHATWG
+        // SSE), so an `event: ping` with no data never names the next frame.
         if (this.currentData.length > 0) {
           messages.push({
             id: this.currentId,
             event: this.currentEvent,
             data: this.currentData.join("\n"),
           });
-          this.currentEvent = undefined;
-          this.currentData = [];
-          this.currentId = undefined;
         }
+        this.currentEvent = undefined;
+        this.currentData = [];
+        this.currentId = undefined;
       } else if (line.charCodeAt(0) === 58) {
         // Comment / ping
         continue;
@@ -89,10 +91,10 @@ export class SSEParser {
         event: this.currentEvent,
         data: this.currentData.join("\n"),
       });
-      this.currentEvent = undefined;
-      this.currentData = [];
-      this.currentId = undefined;
     }
+    this.currentEvent = undefined;
+    this.currentData = [];
+    this.currentId = undefined;
     this.buffer = "";
     return messages;
   }

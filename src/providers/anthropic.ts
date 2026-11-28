@@ -56,6 +56,7 @@ import {
   withAbortTimer,
   readSseData,
   incompleteStreamCheck,
+  endWithPlainReply,
   failStream,
   toolArgumentsJson,
   toolTurnFinishReason,
@@ -489,6 +490,38 @@ function toolCallOf(block: ResponseBlock): ToolCallRecord {
   };
 }
 
+// Reads a whole Messages reply: parses the JSON, checks it (an error object or a reply that cannot be used throws), records the turn and maps it; in: generate, and a stream request answered in one piece, out: ProviderGenerateResult.
+function readWholeReply(
+  reply: { status: number; statusText: string; headers: Record<string, string>; text: string },
+  modelId: string,
+  sessionId: string | undefined,
+  startTime: number,
+  request: ProviderRawData["request"]
+): ProviderGenerateResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reply.text);
+  } catch {
+    throw toConciseProviderError(
+      Object.assign(new Error("Invalid JSON response from Anthropic Messages API"), {
+        statusCode: reply.status,
+        responseBody: reply.text.slice(0, 500),
+        url: request.url,
+      }),
+      "anthropic",
+      modelId
+    );
+  }
+  const problem = messageReplyProblem(parsed);
+  if (problem) throw badReplyError("anthropic", modelId, request.url, problem, reply.text);
+  const message = parsed as MessageObject; // checked by messageReplyProblem above
+  noteProviderTurn(sessionId, "anthropic");
+  return parseMessage(message, modelId, Date.now() - startTime, {
+    request,
+    response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: message },
+  });
+}
+
 // Turns a Messages object into text, thinking, tool calls and usage; in: generate, out: ProviderGenerateResult.
 function parseMessage(
   message: MessageObject,
@@ -740,28 +773,7 @@ export class AnthropicMessagesProvider implements Provider {
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, options?.signal);
       this.throwIfError(res.status, url, res.text, clean, res.headers);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(res.text);
-      } catch {
-        throw toConciseProviderError(
-          Object.assign(new Error("Invalid JSON response from Anthropic Messages API"), {
-            statusCode: res.status,
-            responseBody: res.text.slice(0, 500),
-            url,
-          }),
-          "anthropic",
-          clean
-        );
-      }
-      const problem = messageReplyProblem(parsed);
-      if (problem) throw badReplyError("anthropic", clean, url, problem, res.text);
-      const message = parsed as MessageObject; // checked by messageReplyProblem above
-      noteProviderTurn(sessionId, "anthropic");
-      return parseMessage(message, clean, Date.now() - startTime, {
-        request: rawRequest,
-        response: { status: res.status, statusText: res.statusText, headers: res.headers, body: message },
-      });
+      return readWholeReply(res, clean, sessionId, startTime, rawRequest);
     };
 
     return withRetries(doCall, {
@@ -805,18 +817,32 @@ export class AnthropicMessagesProvider implements Provider {
           body,
         };
 
-        const res = await openStreamResponse({
+        const opened = await openStreamResponse({
           fetchOnce: () =>
-            withAbortTimer(linked, timeoutFor(options), () =>
-              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, linked.signal))
+            withAbortTimer(linked, timeoutFor(options), (signal) =>
+              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, signal))
             ),
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
           noBodyError: () =>
             toConciseProviderError(new Error("Anthropic streaming response had no body"), "anthropic", clean),
+          readPlainReply: (r, text) =>
+            readWholeReply(
+              { status: r.status, statusText: r.statusText, headers: headersToRecord(r.headers), text },
+              clean,
+              sessionId,
+              startTime,
+              rawRequest
+            ),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
           label: { providerId: "anthropic", modelId: clean },
         });
+        if ("plain" in opened) {
+          eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
+          endWithPlainReply(eventStream, opened.plain);
+          return;
+        }
+        const res = opened;
         const responseHeaders = headersToRecord(res.headers);
         eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
 
@@ -840,7 +866,6 @@ export class AnthropicMessagesProvider implements Provider {
         let stopSequence: string | null | undefined;
         let responseId: string | undefined;
         let sawStop = false;
-        let framesSeen = 0;
         let badFrames = 0;
 
         const handleMessage = (data: string): void => {
@@ -848,7 +873,6 @@ export class AnthropicMessagesProvider implements Provider {
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
-            framesSeen += 1;
           } catch {
             badFrames += 1;
             return;
@@ -962,9 +986,6 @@ export class AnthropicMessagesProvider implements Provider {
           hasTerminal,
           empty: !hasTerminal,
           unfinishedCall: hasUnfinishedToolCall(calls, toolCalls),
-          responseHeaders,
-          framesSeen,
-          badFrames,
         });
         if (incomplete) {
           eventStream.fail(incomplete);

@@ -215,6 +215,16 @@ describe("Google video: a big clip is delivered as a link", () => {
     expect(err.jobId).toBe("v1_abc");
   });
 
+  it("a create request that outlives timeoutMs is a TimeoutError that says the video may still be made", async () => {
+    const hang = (async (_u: string, init: RequestInit) =>
+      await new Promise<Response>((_, reject) =>
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+      )) as unknown as typeof fetch;
+    const err = await generateVideo({ ...base, prompt: "x", fetch: hang, timeoutMs: 40 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toContain("may still be made at Google");
+  });
+
   it("a file still processing at the deadline is a TimeoutError that carries the id", async () => {
     const m = recordingFetch(jsonAnswer(link), state("PROCESSING"));
     const err = await generateVideo({ ...base, prompt: "x", resolution: "4K", duration: 3, fetch: m.fn, pollIntervalMs: 5, timeoutMs: 60 }).catch((e) => e);

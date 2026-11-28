@@ -75,7 +75,13 @@ import {
   linkStreamAbort,
   withAbortTimer,
   readSseData,
+  reasoningParts,
+  argumentsText,
+  streamedCallIndex,
   incompleteStreamCheck,
+  errorCodeStatus,
+  finishReasonError,
+  endWithPlainReply,
   failStream,
   toolArgumentsJson,
   toolTurnFinishReason,
@@ -156,7 +162,7 @@ interface ChatChoice {
       id?: string;
       type?: string;
       index?: number;
-      function?: { name?: string; arguments?: string };
+      function?: { name?: string; arguments?: string | Record<string, unknown> };
       extra_content?: { google?: { thought_signature?: string } };
     }>;
     reasoning?: string | null;
@@ -170,7 +176,7 @@ interface ChatChoice {
       index?: number;
       id?: string;
       type?: string;
-      function?: { name?: string; arguments?: string };
+      function?: { name?: string; arguments?: string | Record<string, unknown> };
     }>;
     reasoning_content?: string;
     reasoning?: string;
@@ -547,7 +553,44 @@ function throwResponseError(response: ChatResponse, prefix: string, modelId: str
       : "OpenAI-compatible response failed";
   const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
   if (response.error?.code !== undefined) failure["code"] = response.error.code;
+  const status = errorCodeStatus(response.error?.code); // a rate limit or an overload sent with HTTP 200 is retried
+  if (status !== undefined) failure["statusCode"] = status;
   throw toConciseProviderError(failure, prefix, modelId);
+}
+
+// Reads a whole Chat Completions reply: parses the JSON, checks it (an error or a reply that cannot be used throws), records the turn and maps it; in: generate, and a stream request answered in one piece, out: ProviderGenerateResult.
+function readWholeReply(
+  reply: { status: number; statusText: string; headers: Record<string, string>; text: string },
+  prefix: string,
+  modelId: string,
+  sessionId: string | undefined,
+  startTime: number,
+  request: ProviderRawData["request"]
+): ProviderGenerateResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reply.text);
+  } catch {
+    throw toConciseProviderError(
+      Object.assign(new Error("Invalid JSON response from OpenAI-compatible Chat Completions API"), {
+        statusCode: reply.status,
+        responseBody: reply.text.slice(0, 500),
+        url: request.url,
+      }),
+      prefix,
+      modelId
+    );
+  }
+  const problem = chatReplyProblem(parsed);
+  if (problem) throw badReplyError(prefix, modelId, request.url, problem, reply.text);
+  const response = parsed as ChatResponse; // checked by chatReplyProblem above
+  // Stateless turns never establish chains, but the session store still
+  // records the turn so other providers' switch detection keeps working.
+  noteProviderTurn(sessionId, prefix);
+  return parseResponse(response, prefix, modelId, Date.now() - startTime, {
+    request,
+    response: { status: reply.status, statusText: reply.statusText, headers: reply.headers, body: response },
+  });
 }
 
 // Turns a Chat Completions JSON reply into text, thinking, tool calls and usage; in: generate, out: ProviderGenerateResult.
@@ -567,19 +610,8 @@ function parseResponse(
   // Refusal content surfaces as text with a `refusal` finish reason.
   const refusal = typeof message?.refusal === "string" && message.refusal ? message.refusal : "";
   const text = typeof message?.content === "string" && message.content ? message.content : refusal;
-  // Thinking tolerance: plain `reasoning` plus per-block texts (deepseek-style
-  // `reasoning_details`). Details win when both ride along; both are
-  // display-only here — never resent.
-  const thinkingParts: string[] = [];
-  const detailTexts: string[] = [];
-  for (const block of message?.reasoning_details ?? []) {
-    if (block && typeof block.text === "string" && block.text) detailTexts.push(block.text);
-  }
-  if (detailTexts.length > 0) {
-    thinkingParts.push(...detailTexts);
-  } else if (typeof message?.reasoning === "string" && message.reasoning) {
-    thinkingParts.push(message.reasoning);
-  }
+  // Thinking, display-only here (never resent): `reasoning_details` blocks, else `reasoning_content`, else `reasoning`, as the stream reads it.
+  const thinkingParts = reasoningParts(message);
   const toolCalls: ToolCallRecord[] = [];
   for (const tc of message?.tool_calls ?? []) {
     const args = parseArguments(tc.function?.arguments);
@@ -597,6 +629,7 @@ function parseResponse(
   }
 
   const wireReason = choice?.finish_reason ?? undefined;
+  if (wireReason === "error") throw finishReasonError(prefix, modelId, raw.request.url, "The reply");
   const finishReason = toolCalls.length > 0 ? "tool_calls" : refusal ? "refusal" : wireReason || "stop";
   return {
     text,
@@ -914,30 +947,7 @@ export class OpenAICompatibleChatProvider implements Provider {
     const doCall = async (): Promise<ProviderGenerateResult> => {
       const res = await this.doFetch(url, body, options, apiKey, sessionId, options?.signal);
       this.throwIfError(res.status, url, res.text, clean, res.headers);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(res.text);
-      } catch {
-        throw toConciseProviderError(
-          Object.assign(new Error("Invalid JSON response from OpenAI-compatible Chat Completions API"), {
-            statusCode: res.status,
-            responseBody: res.text.slice(0, 500),
-            url,
-          }),
-          this.prefix,
-          clean
-        );
-      }
-      const problem = chatReplyProblem(parsed);
-      if (problem) throw badReplyError(this.prefix, clean, url, problem, res.text);
-      const response = parsed as ChatResponse; // checked by chatReplyProblem above
-      // Stateless turns never establish chains, but the session store still
-      // records the turn so other providers' switch detection keeps working.
-      noteProviderTurn(sessionId, this.prefix);
-      return parseResponse(response, this.prefix, clean, Date.now() - startTime, {
-        request: rawRequest,
-        response: { status: res.status, statusText: res.statusText, headers: res.headers, body: response },
-      });
+      return readWholeReply(res, this.prefix, clean, sessionId, startTime, rawRequest);
     };
 
     try {
@@ -991,18 +1001,33 @@ export class OpenAICompatibleChatProvider implements Provider {
         const streamTimeoutMs = timeoutFor(options);
         // Transient failures (429/5xx/network) are retried here, before the
         // first byte; once the stream is live it is never retried.
-        const res = await openStreamResponse({
+        const opened = await openStreamResponse({
           fetchOnce: () =>
-            withAbortTimer(linked, streamTimeoutMs, () =>
-              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, linked.signal))
+            withAbortTimer(linked, streamTimeoutMs, (signal) =>
+              (options?.fetch ?? fetch)(url, this.requestInit(body, options, apiKey, sessionId, signal))
             ),
           onHttpError: (r, text) => this.throwIfError(r.status, url, text, clean, headersToRecord(r.headers)),
           noBodyError: () =>
             toConciseProviderError(new Error("OpenAI-compatible streaming response had no body"), prefix, clean),
+          readPlainReply: (r, text) =>
+            readWholeReply(
+              { status: r.status, statusText: r.statusText, headers: headersToRecord(r.headers), text },
+              prefix,
+              clean,
+              sessionId,
+              startTime,
+              rawRequest
+            ),
           retry: retryOptionsFrom(options),
           signal: linked.signal,
           label: { providerId: prefix, modelId: clean },
         });
+        if ("plain" in opened) {
+          eventStream.push({ type: "start", raw: { request: rawRequest } } as never);
+          endWithPlainReply(eventStream, opened.plain);
+          return;
+        }
+        const res = opened;
         const responseHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
           responseHeaders[k] = v;
@@ -1026,7 +1051,6 @@ export class OpenAICompatibleChatProvider implements Provider {
         let sawUsage = false;
         let refusalSeen = false;
         let badFrames = 0;
-        let framesSeen = 0;
         let responseId: string | undefined;
         let completedBody: unknown = undefined;
         const handleMessage = (data: string): void => {
@@ -1038,7 +1062,6 @@ export class OpenAICompatibleChatProvider implements Provider {
           let msg: Record<string, unknown>;
           try {
             msg = JSON.parse(data) as Record<string, unknown>;
-            framesSeen += 1;
           } catch {
             badFrames += 1;
             return;
@@ -1053,6 +1076,8 @@ export class OpenAICompatibleChatProvider implements Provider {
                 : "OpenAI-compatible streaming error";
             const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
             if (topError.code !== undefined) failure["code"] = topError.code;
+            const status = errorCodeStatus(topError.code); // a rate limit or an overload in the stream is retried
+            if (status !== undefined) failure["statusCode"] = status;
             failure["url"] = url;
             throw toConciseProviderError(failure, prefix, clean);
           }
@@ -1075,33 +1100,13 @@ export class OpenAICompatibleChatProvider implements Provider {
             eventStream.push({ type: "text_delta", delta: delta["content"] as string, partialText: text });
           }
           // Tolerated reasoning deltas (deepseek-style): display-only, never resent.
-          const details = delta["reasoning_details"];
-          if (Array.isArray(details)) {
-            for (const block of details) {
-              const t = (block as { text?: string })?.text;
-              if (typeof t === "string" && t) {
-                thinking += t;
-                eventStream.push({ type: "thinking_delta", thinkingDelta: t, partialThinking: thinking });
-              }
-            }
-          } else if (typeof delta["reasoning_content"] === "string" && delta["reasoning_content"]) {
-            thinking += delta["reasoning_content"] as string;
-            eventStream.push({
-              type: "thinking_delta",
-              thinkingDelta: delta["reasoning_content"] as string,
-              partialThinking: thinking,
-            });
-          } else if (typeof delta["reasoning"] === "string" && delta["reasoning"]) {
-            thinking += delta["reasoning"] as string;
-            eventStream.push({
-              type: "thinking_delta",
-              thinkingDelta: delta["reasoning"] as string,
-              partialThinking: thinking,
-            });
+          const thought = reasoningParts(delta).join("");
+          if (thought) {
+            thinking += thought;
+            eventStream.push({ type: "thinking_delta", thinkingDelta: thought, partialThinking: thinking });
           }
-          // Tool-call deltas accumulate per choice index (unindexed chunks
-          // continue the last call; defaulting to calls.size would fork
-          // phantom calls).
+          // Tool-call deltas accumulate per choice index. A piece without one continues the last call (defaulting to
+          // calls.size would fork phantom calls), unless it carries a new id: then it starts the next call.
           const deltaCalls = delta["tool_calls"];
           if (Array.isArray(deltaCalls)) {
             for (const tc of deltaCalls) {
@@ -1109,25 +1114,24 @@ export class OpenAICompatibleChatProvider implements Provider {
                 index?: number;
                 id?: string;
                 type?: string;
-                function?: { name?: string; arguments?: string };
+                function?: { name?: string; arguments?: string | Record<string, unknown> };
                 extra_content?: { google?: { thought_signature?: string } };
               };
-              const index = typeof entry.index === "number" ? (lastToolIndex = entry.index) : lastToolIndex;
+              const index = (lastToolIndex = streamedCallIndex(entry, calls, lastToolIndex));
               const sig = entry.extra_content?.google?.thought_signature;
               if (typeof sig === "string" && sig) signatures.set(index, sig);
               const existing = calls.get(index);
               if (existing) {
                 if (entry.id) existing.id = entry.id;
                 if (entry.function?.name) existing.name = entry.function.name;
-                if (typeof entry.function?.arguments === "string") {
-                  existing.deltaArgs += entry.function.arguments;
-                }
+                const text = argumentsText(entry.function?.arguments); // some servers send an object, not text
+                if (text !== undefined) existing.deltaArgs += text;
               } else {
                 calls.set(index, {
                   id: entry.id || "",
                   name: entry.function?.name || "unknown",
                   startArgs: "",
-                  deltaArgs: typeof entry.function?.arguments === "string" ? entry.function.arguments : "",
+                  deltaArgs: argumentsText(entry.function?.arguments) ?? "",
                 });
               }
             }
@@ -1135,13 +1139,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           // Terminal accounting: finish_reason repeats on the usage chunk.
           if (typeof choice["finish_reason"] === "string" && choice["finish_reason"]) {
             const fr = choice["finish_reason"] as string;
-            if (fr === "error") {
-              const failure: Record<string, unknown> & Error = new Error(
-                "OpenAI-compatible stream terminated with finish_reason error"
-              ) as Record<string, unknown> & Error;
-              failure["url"] = url;
-              throw toConciseProviderError(failure, prefix, clean);
-            }
+            if (fr === "error") throw finishReasonError(prefix, clean, url, "The stream");
             finishReason = fr;
             sawFinishReason = true;
           }
@@ -1183,8 +1181,7 @@ export class OpenAICompatibleChatProvider implements Provider {
         }
 
         // Terminal-state guard — fail `incomplete_stream` (retryable)
-        // instead of resolving empty success. Skipped for non-SSE payloads
-        // (JSON mocks) where no SSE frames were ever seen.
+        // instead of resolving empty success, whatever the content type.
         const cleanThinking = thinking.replace(/\n{3,}/g, "\n\n").trim();
         const incomplete = incompleteStreamCheck({
           provider: prefix,
@@ -1192,9 +1189,6 @@ export class OpenAICompatibleChatProvider implements Provider {
           hasTerminal,
           empty: !text && !cleanThinking && toolCalls.length === 0,
           unfinishedCall: hasUnfinishedToolCall(calls.values(), toolCalls),
-          responseHeaders,
-          framesSeen,
-          badFrames,
         });
         if (incomplete) {
           eventStream.fail(incomplete);

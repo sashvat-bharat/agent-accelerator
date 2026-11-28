@@ -28,12 +28,18 @@ export function chatReplyProblem(raw: unknown): string | undefined {
   return undefined;
 }
 
-/** Why a Responses API reply is unusable, or undefined: an object with an `output` list, or one that failed (the parser reports it). */
+/** Whether a reply's `error` field says something: a non-empty text, or an object with at least one field (`null`, `""` and `{}` say nothing). */
+export function carriesError(error: unknown): boolean {
+  if (typeof error === "string") return error.trim() !== "";
+  return error !== null && typeof error === "object" && Object.keys(error).length > 0;
+}
+
+/** Why a Responses API reply is unusable, or undefined: an object with an `output` list, or one that failed or carries an error (the parser reports it). */
 export function responsesReplyProblem(raw: unknown): string | undefined {
   const bad = notAnObject(raw);
   if (bad) return bad;
   const reply = raw as Record<string, unknown>;
-  if (reply["status"] === "failed" || reply["error"]) return undefined;
+  if (reply["status"] === "failed" || carriesError(reply["error"])) return undefined;
   return Array.isArray(reply["output"]) ? undefined : "the reply has no `output` list";
 }
 

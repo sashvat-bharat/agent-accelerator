@@ -1634,3 +1634,118 @@ describe("Google inline size checks (implemented, not wired in yet)", () => {
     ).not.toThrow();
   });
 });
+
+describe("a Google stream cut before interaction.completed", () => {
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    clearInteractionChains();
+    clearSessionRouting();
+  });
+
+  // An SSE body from [event, data] pairs.
+  const sse = (events: Array<[string, Record<string, unknown>]>) =>
+    events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify({ ...data, event_type: event })}\n\n`).join("");
+  const USAGE = { total_tokens: 5, total_input_tokens: 3, total_output_tokens: 2 };
+  // A text step that ended (its step.stop carries the running usage), then a call that opens with `{}`.
+  const textThenCall: Array<[string, Record<string, unknown>]> = [
+    ["interaction.created", { interaction: { id: "v1_cut" } }],
+    ["step.start", { index: 0, step: { type: "model_output", content: [{ type: "text", text: "Let me check" }] } }],
+    ["step.stop", { index: 0, usage: USAGE }],
+    ["step.start", { index: 1, step: { type: "function_call", id: "call_w", name: "get_weather", arguments: {} } }],
+  ];
+  const cutArgs: [string, Record<string, unknown>] = [
+    "step.delta",
+    { index: 1, delta: { type: "arguments_delta", arguments: '{"city":"Par' } },
+  ];
+  const fullArgs: [string, Record<string, unknown>] = [
+    "step.delta",
+    { index: 1, delta: { type: "arguments_delta", arguments: '{"city":"Paris"}' } },
+  ];
+  const completed = (status: string): [string, Record<string, unknown>] => [
+    "interaction.completed",
+    { interaction: { id: "v1_cut", status, usage: USAGE } },
+  ];
+  const answer = (body: string) =>
+    new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  // The final response of one provider-level stream turn over `body`, or the error it failed with.
+  const streamTurn = async (body: string): Promise<any> => {
+    (globalThis as any).fetch = async () => answer(body);
+    return new GoogleInteractionsProvider()
+      .stream("m", { messages: [{ role: "user", content: "Q" }] }, { apiKey: "k" })
+      .result()
+      .catch((e: unknown) => e);
+  };
+
+  it("fails a call cut mid-JSON as a retryable incomplete_stream, even after a step that sent usage", async () => {
+    const err = await streamTurn(sse([...textThenCall, cutArgs]));
+    expect(err).toBeInstanceOf(Error);
+    expect([err.code, err.retryable]).toEqual(["incomplete_stream", true]);
+  });
+
+  it("fails a call that opened with {} and never stopped; with its step.stop the call is complete", async () => {
+    const cut = await streamTurn(sse(textThenCall));
+    expect([cut.code, cut.retryable]).toEqual(["incomplete_stream", true]);
+    const whole = await streamTurn(sse([...textThenCall, fullArgs, ["step.stop", { index: 1 }]]));
+    expect(whole.toolCalls.map((c: any) => [c.name, c.arguments])).toEqual([["get_weather", { city: "Paris" }]]);
+    expect(whole.finishReason).toBe("tool_calls");
+  });
+
+  it("an output limit that cut a call says `length`, never runs it, and replays its step as {}", async () => {
+    const final = await streamTurn(sse([...textThenCall, cutArgs, ["step.stop", { index: 1 }], completed("incomplete")]));
+    expect(final.finishReason).toBe("length");
+    expect(final.toolCalls[0].arguments).toHaveProperty("__truncated_raw");
+    const step = final.providerSteps.steps.find((s: any) => s.type === "function_call");
+    expect(step.arguments).toEqual({});
+  });
+
+  it("an agent stream fails with a retryable error after one request, and the cut call never runs", async () => {
+    const { Agent, tool } = await import("../src/index.ts");
+    const { z } = await import("zod");
+    const seen: unknown[] = [];
+    const getWeather = tool({
+      name: "get_weather",
+      description: "d",
+      input: z.object({ city: z.string() }),
+      execute: (args) => {
+        seen.push(args);
+        return "21C";
+      },
+    });
+    let n = 0;
+    const fetch = (async () => {
+      n++;
+      return answer(sse([...textThenCall, cutArgs]));
+    }) as unknown as typeof globalThis.fetch;
+    const agent = new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", fetch, tools: [getWeather], maxTurns: 2 });
+    const err = (await agent
+      .stream("Weather in Paris?")
+      .result()
+      .catch((e: unknown) => e)) as any;
+    expect([err.code, err.retryable]).toEqual(["incomplete_stream", true]);
+    expect([n, seen.length]).toEqual([1, 0]); // the model was never told a cut call ran
+  });
+
+  it("a cut text answer is kept but saves no chain, so the next turn resends the history", async () => {
+    const { Agent } = await import("../src/index.ts");
+    const turn = (id: string, words: string, end: boolean): string =>
+      sse([
+        ["interaction.created", { interaction: { id } }],
+        ["step.start", { index: 0, step: { type: "model_output", content: [{ type: "text", text: words }] } }],
+        ["step.stop", { index: 0, usage: USAGE }],
+        ...(end ? [["interaction.completed", { interaction: { id, status: "completed", usage: USAGE } }] as [string, Record<string, unknown>]] : []),
+      ]);
+    const bodies = [turn("v1_a", "one", true), turn("v1_cut", "two, cut", false), turn("v1_c", "three", true)];
+    const sent: any[] = [];
+    const fetch = (async (_u: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)));
+      return answer(bodies[sent.length - 1]!);
+    }) as unknown as typeof globalThis.fetch;
+    const agent = new Agent({ model: "google/gemini-3.5-flash-lite", apiKey: "k", fetch, runRetries: 0 });
+    await agent.stream("first").result();
+    expect((await agent.stream("second").result()).text).toBe("two, cut");
+    await agent.stream("third").result();
+    expect(sent[1].previous_interaction_id).toBe("v1_a"); // a finished turn is continued
+    expect(sent[2].previous_interaction_id).toBeUndefined(); // the cut one is not
+    expect(JSON.stringify(sent[2].input)).toContain("two, cut"); // the whole history is sent instead
+  });
+});

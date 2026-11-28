@@ -32,13 +32,13 @@ const MAX_BUFFERED_EVENTS = 1000;
 /** Default max approx bytes per delta event. */
 const MAX_EVENT_BYTES = 1_048_576;
 
-// Approximate size of an event's text fields; in: push's oversize guard, out: a character count.
+// Approximate size of an event's new text (`delta` and `thinkingDelta`): `partialText` and `partialThinking` are the
+// answer so far and grow with it, so counting them would drop every delta once an answer passed the limit; in: push's
+// oversize guard, out: a character count.
 function approxEventBytes(event: StreamEvent): number {
   let n = 0;
   if (typeof event.delta === "string") n += event.delta.length;
   if (typeof event.thinkingDelta === "string") n += event.thinkingDelta.length;
-  if (typeof event.partialText === "string") n += event.partialText.length;
-  if (typeof event.partialThinking === "string") n += event.partialThinking.length;
   return n;
 }
 
@@ -113,7 +113,7 @@ export class AssistantMessageEventStream implements AsyncIterable<StreamEvent> {
   push(event: StreamEvent): void {
     if (this.finished) return;
 
-    // 1MB oversize guard — drop oversized deltas (no console).
+    // 1MB oversize guard — drop a delta whose new text is oversized (no console); the answer so far is not counted.
     if (approxEventBytes(event) > this.maxEventBytes) {
       this.droppedEvents++;
       reportStreamAnomaly({ type: "stream_event_oversize", eventType: event.type });

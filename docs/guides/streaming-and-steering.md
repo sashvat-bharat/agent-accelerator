@@ -34,9 +34,10 @@ A stream also has `on(type, fn)`, `off`, `result()`, `cancel()`, `onCancel()` an
 
 The main event types are `text_delta`, `thinking_delta`, `tool_start`, `tool_call_complete`, `tool_result`, `tool_end`, `subagent_delta`, `subagent_complete`, `steer_injected`, `queued`, `usage`, `done` and `error`. The full table is in the [Reference](../reference.md#stream-events).
 
-- Buffers are bounded: 1,000 events and about 1 MB per delta. An overflow is reported on the telemetry bus.
+- Buffers are bounded: 1,000 events and about 1 MB per delta (the new text of one event; the answer so far is not counted, so a long answer streams to the end). An overflow is reported on the telemetry bus.
 - Streams have two timeouts: `limits.firstByteTimeoutMs` and `limits.streamIdleTimeoutMs`.
 - A transient failure is retried only before the first byte arrives.
+- A server that answers a stream request with one whole JSON reply (some proxies do) is read as `run()` reads it: its text arrives as one `text_delta`, and an error in it fails the stream. A stream that ends with no answer and no end event fails as a retryable `incomplete_stream`, whatever its content type.
 - Always pass a `signal` for streams that a user watches. To show a stream in a browser, forward the events as Server-Sent Events.
 
 ## Steer, queue or interrupt
