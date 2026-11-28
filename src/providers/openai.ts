@@ -72,6 +72,7 @@ import {
   withAbortTimer,
   readSseData,
   incompleteStreamCheck,
+  errorCodeStatus,
   endWithPlainReply,
   failStream,
   toolArgumentsJson,
@@ -310,13 +311,6 @@ function summaryText(entry: unknown): string {
   if (typeof entry === "string") return entry;
   const text = (entry as { text?: unknown } | null)?.text;
   return typeof text === "string" ? text : "";
-}
-
-// The HTTP status a response error code stands for, so the retry layers classify it: a server error and a rate limit are transient, every other code (invalid prompt, policy ...) is not; in: the failed-response and error-event paths, out: failure.statusCode.
-function errorCodeStatus(code: unknown): number | undefined {
-  if (code === "server_error") return 500;
-  if (code === "rate_limit_exceeded") return 429;
-  return undefined;
 }
 
 // The error a failed or error-carrying reply stands for: the provider's message (or the error's own text), code and type, and the HTTP status the code maps to; in: parseResponse and the stream's final event, out: the thrown ProviderError.

@@ -124,7 +124,7 @@ There are two layers.
 
 **`retry`** retries one provider call.
 
-- It retries transient failures: HTTP 408, 425, 429, 500, 502, 503 and 504, network error codes, a request that outlived `limits.requestTimeoutMs` (a `TimeoutError`; the provider may still bill the attempt that timed out), a reply that cannot be used (HTTP 200 with an empty object, a list or no `choices`), and `transient` or `retryable` flags. It never looks at message text. Your own abort is never retried.
+- It retries transient failures: HTTP 408, 425, 429, 500, 502, 503 and 504, network error codes, a request that outlived `limits.requestTimeoutMs` (a `TimeoutError`; the provider may still bill the attempt that timed out), a reply that cannot be used (HTTP 200 with an empty object, a list or no `choices`), an error sent inside a reply or a stream whose code is a status number or names a temporary failure (`rate_limit_exceeded`, `resource_exhausted`, `unavailable`, `overloaded`, `internal`, `server_error`, `gateway_timeout`, `deadline_exceeded`, in any case), `finish_reason: "error"` (counted as a 502), and `transient` or `retryable` flags. It never looks at message text. Your own abort is never retried.
 - `Retry-After` is honored within `budgetMs`. Streams are retried only before the first byte.
 - On Anthropic, 529 (overloaded) is retried too. The monthly spend-cap 429 (`enforced_spend_limit_reached`, no `Retry-After`) never is.
 - On OpenRouter, a 402 from the in-flight spending budget (`limit_source: openrouter_in_flight_budget`) is retried. A 402 for missing credits is not.

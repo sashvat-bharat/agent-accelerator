@@ -155,6 +155,47 @@ function requestTimeout(ms: number): TimeoutError {
   return new TimeoutError(`[Agent Accelerator] Provider request timed out after ${ms} ms.`);
 }
 
+// Error codes that name a temporary failure, by the HTTP status they stand for (Google's gRPC names, OpenAI's, and the usual names of OpenAI-compatible servers); in: errorCodeStatus.
+const TEMPORARY_CODE_STATUS: Record<string, number> = {
+  rate_limit_exceeded: 429,
+  rate_limit: 429,
+  too_many_requests: 429,
+  resource_exhausted: 429,
+  overloaded: 503,
+  overloaded_error: 503,
+  unavailable: 503,
+  service_unavailable: 503,
+  internal: 500,
+  internal_error: 500,
+  internal_server_error: 500,
+  server_error: 500,
+  bad_gateway: 502,
+  gateway_timeout: 504,
+  deadline_exceeded: 504,
+  timeout: 504,
+};
+
+/** The HTTP status an error code sent inside a reply or a stream stands for (the HTTP status itself was 200), so the retry layers classify it: a number from 100 to 599 (also as text) is that status, a known temporary name gives its 429 or 5xx (any case, `-` or a space read as `_`), anything else none, so the error stays final. */
+export function errorCodeStatus(code: unknown): number | undefined {
+  if (typeof code === "number") return Number.isInteger(code) && code >= 100 && code <= 599 ? code : undefined;
+  if (typeof code !== "string") return undefined;
+  const name = code.trim();
+  if (/^\d{3}$/.test(name)) return errorCodeStatus(Number(name));
+  return TEMPORARY_CODE_STATUS[name.toLowerCase().replace(/[\s-]+/g, "_")];
+}
+
+/** The retryable ProviderError of an answer the provider ended with `finish_reason: "error"` (its upstream model failed while answering), counted as a 502; `what` names the stream or the reply. */
+export function finishReasonError(provider: string, modelId: string, url: string, what: string): Error {
+  return toConciseProviderError(
+    Object.assign(new Error(`${what} ended with finish_reason "error" (the upstream model failed)`), {
+      statusCode: 502,
+      url: url.split("?")[0],
+    }),
+    provider,
+    modelId
+  );
+}
+
 /** True for a timeout (an SDK `TimeoutError`, or a platform one such as `AbortSignal.timeout`'s), as opposed to the caller's abort. */
 export function isTimeoutError(error: unknown): boolean {
   return (error as { name?: unknown } | null)?.name === "TimeoutError";

@@ -63,6 +63,7 @@ import {
   readErrorPayload,
   incompleteStreamError,
   incompleteStreamCheck,
+  errorCodeStatus,
   hasUnfinishedToolCall,
   hasTruncatedToolArguments,
   toolTurnFinishReason,
@@ -477,6 +478,8 @@ function throwIfFailedInteraction(interaction: InteractionObject, modelId: strin
       : `Google interaction ${interaction.status}`;
   const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
   if (interaction.error?.code !== undefined) failure["code"] = interaction.error.code;
+  const status = errorCodeStatus(interaction.error?.code); // a failure for a temporary reason is retried
+  if (status !== undefined) failure["statusCode"] = status;
   throw toConciseProviderError(failure, "google", modelId);
 }
 
@@ -1495,6 +1498,8 @@ export class GoogleInteractionsProvider implements Provider {
               typeof errObj.message === "string" && errObj.message ? errObj.message : "Google streaming error";
             const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
             if (errObj.code !== undefined) failure["code"] = errObj.code;
+            const status = errorCodeStatus(errObj.code); // e.g. `gateway_timeout`, `UNAVAILABLE`, `RESOURCE_EXHAUSTED`: retried
+            if (status !== undefined) failure["statusCode"] = status;
             failure["url"] = url.split("?")[0];
             throw toConciseProviderError(failure, "google", clean);
           }

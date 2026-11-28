@@ -77,6 +77,8 @@ import {
   readSseData,
   argumentsText,
   incompleteStreamCheck,
+  errorCodeStatus,
+  finishReasonError,
   endWithPlainReply,
   failStream,
   toolArgumentsJson,
@@ -549,6 +551,8 @@ function throwResponseError(response: ChatResponse, prefix: string, modelId: str
       : "OpenAI-compatible response failed";
   const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
   if (response.error?.code !== undefined) failure["code"] = response.error.code;
+  const status = errorCodeStatus(response.error?.code); // a rate limit or an overload sent with HTTP 200 is retried
+  if (status !== undefined) failure["statusCode"] = status;
   throw toConciseProviderError(failure, prefix, modelId);
 }
 
@@ -634,6 +638,7 @@ function parseResponse(
   }
 
   const wireReason = choice?.finish_reason ?? undefined;
+  if (wireReason === "error") throw finishReasonError(prefix, modelId, raw.request.url, "The reply");
   const finishReason = toolCalls.length > 0 ? "tool_calls" : refusal ? "refusal" : wireReason || "stop";
   return {
     text,
@@ -1080,6 +1085,8 @@ export class OpenAICompatibleChatProvider implements Provider {
                 : "OpenAI-compatible streaming error";
             const failure: Record<string, unknown> & Error = new Error(message) as Record<string, unknown> & Error;
             if (topError.code !== undefined) failure["code"] = topError.code;
+            const status = errorCodeStatus(topError.code); // a rate limit or an overload in the stream is retried
+            if (status !== undefined) failure["statusCode"] = status;
             failure["url"] = url;
             throw toConciseProviderError(failure, prefix, clean);
           }
@@ -1161,13 +1168,7 @@ export class OpenAICompatibleChatProvider implements Provider {
           // Terminal accounting: finish_reason repeats on the usage chunk.
           if (typeof choice["finish_reason"] === "string" && choice["finish_reason"]) {
             const fr = choice["finish_reason"] as string;
-            if (fr === "error") {
-              const failure: Record<string, unknown> & Error = new Error(
-                "OpenAI-compatible stream terminated with finish_reason error"
-              ) as Record<string, unknown> & Error;
-              failure["url"] = url;
-              throw toConciseProviderError(failure, prefix, clean);
-            }
+            if (fr === "error") throw finishReasonError(prefix, clean, url, "The stream");
             finishReason = fr;
             sawFinishReason = true;
           }

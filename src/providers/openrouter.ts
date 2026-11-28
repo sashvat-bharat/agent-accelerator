@@ -68,6 +68,8 @@ import {
   readSseData,
   argumentsText,
   incompleteStreamCheck,
+  errorCodeStatus,
+  finishReasonError,
   failStream,
   toolArgumentsJson,
   toolTurnFinishReason,
@@ -202,10 +204,12 @@ const RETRYABLE_ERROR_TYPE_STATUS: Record<string, number> = {
   timeout: 504,
   server: 500,
 };
-// HTTP-like status of an error chunk inside a stream, or undefined when unknown; in: streamInto's error branch, out: the status that makes the error retryable.
+// HTTP-like status of an error chunk inside a stream or a whole reply (a numeric code, else the `error_type`, else the code's name through errorCodeStatus), or undefined when unknown; in: chunkError, out: the status that makes the error retryable.
 function midStreamStatus(code: unknown, errorType: unknown): number | undefined {
-  if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) return code;
-  return typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
+  // A numeric code is the HTTP status; else OpenRouter's canonical `error_type` decides, then the code's own name.
+  const numeric = typeof code === "number" ? errorCodeStatus(code) : undefined;
+  const byType = typeof errorType === "string" ? RETRYABLE_ERROR_TYPE_STATUS[errorType] : undefined;
+  return numeric ?? byType ?? errorCodeStatus(code);
 }
 
 // The ProviderError a top-level `error` of a stream chunk or a whole reply stands for (the HTTP status stays 200): its message (or its own text), code and error type, and the status that makes it retryable; in: the stream's chunks and plainReplyAsStream, out: the error to throw, or undefined when the field holds none.
@@ -1071,13 +1075,7 @@ export class OpenRouterChatCompletionsProvider implements Provider {
           // Terminal accounting: finish_reason repeats on the usage chunk.
           if (typeof choice["finish_reason"] === "string" && choice["finish_reason"]) {
             const fr = choice["finish_reason"] as string;
-            if (fr === "error") {
-              const failure: Record<string, unknown> & Error = new Error(
-                "OpenRouter stream terminated with finish_reason error"
-              ) as Record<string, unknown> & Error;
-              failure["url"] = url;
-              throw toConciseProviderError(failure, "openrouter", clean);
-            }
+            if (fr === "error") throw finishReasonError("openrouter", clean, url, "The stream");
             finishReason = fr;
             sawFinishReason = true;
           }
