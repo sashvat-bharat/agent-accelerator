@@ -18,6 +18,7 @@
 - More thinking text arrives as `thinking` and `thinking_delta`: OpenRouter summary blocks (`reasoning.summary`, how OpenAI models send it), a `reasoning` field next to an empty or encrypted-only `reasoning_details` list, and `reasoning_content` on `run()` with OpenAI-compatible services (DeepSeek, vLLM, Qwen). Before, all three were dropped. A stream now sends one `thinking_delta` per chunk rather than one per block.
 - On OpenAI-compatible services and OpenRouter, parallel streamed tool calls whose pieces carry no `index` now stay separate calls when their ids differ. Before, they were merged into one call with joined arguments, which never ran.
 - On OpenAI streams, the final `response.completed` now fills what the stream lost: text from an unreadable delta frame (the missing end arrives as one more `text_delta`), and a function call whose `output_item.added` never arrived (it runs like the others). Before, that text was missing from the answer and that call was dropped.
+- A long answer keeps streaming after its first million characters. The 1 MB limit per event now measures only the event's new text; before, it also counted the answer so far (`partialText`, `partialThinking`), so every later delta was dropped (`stream_event_oversize`) once an answer passed it. The final result was always complete.
 
 ## Upgrading to 0.9.4
 
