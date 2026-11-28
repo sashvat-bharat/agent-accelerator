@@ -4,7 +4,7 @@
 
 ## Upgrading to 0.9.5
 
-0.9.5 reports provider failures that used to come back as an empty answer. Nothing was removed. If you use a model behind a proxy, read the list below.
+0.9.5 makes every provider failure visible. A reply or a stream that failed no longer comes back as an empty answer: it throws, with the provider's own message, and a temporary failure (a timeout, or a rate limit or overload reported inside a reply) is retried. Streams also keep what they used to drop: tool-call arguments sent as an object, parallel calls without an index, thinking summaries, text that only OpenAI's final event still had, and deltas after the first megabyte. Nothing was removed. Four changes make code see an error where it used to get an answer, or another error than before: an OpenAI reply that carries an error, a whole JSON reply to a stream request, a Google stream cut inside a tool call, and a request timeout, which is now a `TimeoutError` instead of an `AbortError`. If you use a model behind a proxy, catch errors from Google streams, or catch timeouts, read the list below.
 
 **Behavior that changed**
 
@@ -19,6 +19,7 @@
 - On OpenAI-compatible services and OpenRouter, parallel streamed tool calls whose pieces carry no `index` now stay separate calls when their ids differ. Before, they were merged into one call with joined arguments, which never ran.
 - On OpenAI streams, the final `response.completed` now fills what the stream lost: text from an unreadable delta frame (the missing end arrives as one more `text_delta`), and a function call whose `output_item.added` never arrived (it runs like the others). Before, that text was missing from the answer and that call was dropped.
 - A long answer keeps streaming after its first million characters. The 1 MB limit per event now measures only the event's new text; before, it also counted the answer so far (`partialText`, `partialThinking`), so every later delta was dropped (`stream_event_oversize`) once an answer passed it. The final result was always complete.
+- A Server-Sent Events frame that has an `event:` name but no data no longer gives its name to the next frame: every blank line resets the name and the id, as the SSE standard says. Only the Google adapter reads that name, and Google's frames also name themselves in `event_type`, so no Google reply was read wrongly.
 
 ## Upgrading to 0.9.4
 
