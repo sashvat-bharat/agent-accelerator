@@ -75,6 +75,7 @@ import {
   linkStreamAbort,
   withAbortTimer,
   readSseData,
+  argumentsText,
   incompleteStreamCheck,
   endWithPlainReply,
   failStream,
@@ -157,7 +158,7 @@ interface ChatChoice {
       id?: string;
       type?: string;
       index?: number;
-      function?: { name?: string; arguments?: string };
+      function?: { name?: string; arguments?: string | Record<string, unknown> };
       extra_content?: { google?: { thought_signature?: string } };
     }>;
     reasoning?: string | null;
@@ -171,7 +172,7 @@ interface ChatChoice {
       index?: number;
       id?: string;
       type?: string;
-      function?: { name?: string; arguments?: string };
+      function?: { name?: string; arguments?: string | Record<string, unknown> };
     }>;
     reasoning_content?: string;
     reasoning?: string;
@@ -1135,7 +1136,7 @@ export class OpenAICompatibleChatProvider implements Provider {
                 index?: number;
                 id?: string;
                 type?: string;
-                function?: { name?: string; arguments?: string };
+                function?: { name?: string; arguments?: string | Record<string, unknown> };
                 extra_content?: { google?: { thought_signature?: string } };
               };
               const index = typeof entry.index === "number" ? (lastToolIndex = entry.index) : lastToolIndex;
@@ -1145,15 +1146,14 @@ export class OpenAICompatibleChatProvider implements Provider {
               if (existing) {
                 if (entry.id) existing.id = entry.id;
                 if (entry.function?.name) existing.name = entry.function.name;
-                if (typeof entry.function?.arguments === "string") {
-                  existing.deltaArgs += entry.function.arguments;
-                }
+                const text = argumentsText(entry.function?.arguments); // some servers send an object, not text
+                if (text !== undefined) existing.deltaArgs += text;
               } else {
                 calls.set(index, {
                   id: entry.id || "",
                   name: entry.function?.name || "unknown",
                   startArgs: "",
-                  deltaArgs: typeof entry.function?.arguments === "string" ? entry.function.arguments : "",
+                  deltaArgs: argumentsText(entry.function?.arguments) ?? "",
                 });
               }
             }

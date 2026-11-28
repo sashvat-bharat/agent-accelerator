@@ -66,6 +66,7 @@ import {
   linkStreamAbort,
   withAbortTimer,
   readSseData,
+  argumentsText,
   incompleteStreamCheck,
   failStream,
   toolArgumentsJson,
@@ -1048,22 +1049,21 @@ export class OpenRouterChatCompletionsProvider implements Provider {
                 index?: number;
                 id?: string;
                 type?: string;
-                function?: { name?: string; arguments?: string };
+                function?: { name?: string; arguments?: string | Record<string, unknown> };
               };
               const index = typeof entry.index === "number" ? (lastToolIndex = entry.index) : lastToolIndex;
               const existing = calls.get(index);
               if (existing) {
                 if (entry.id) existing.id = entry.id;
                 if (entry.function?.name) existing.name = entry.function.name;
-                if (typeof entry.function?.arguments === "string") {
-                  existing.deltaArgs += entry.function.arguments;
-                }
+                const text = argumentsText(entry.function?.arguments); // some servers send an object, not text
+                if (text !== undefined) existing.deltaArgs += text;
               } else {
                 calls.set(index, {
                   id: entry.id || "",
                   name: entry.function?.name || "unknown",
                   startArgs: "",
-                  deltaArgs: typeof entry.function?.arguments === "string" ? entry.function.arguments : "",
+                  deltaArgs: argumentsText(entry.function?.arguments) ?? "",
                 });
               }
             }

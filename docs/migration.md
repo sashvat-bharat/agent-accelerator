@@ -12,6 +12,7 @@
 - A stream request answered with one whole JSON reply instead of a stream is now read as `run()` reads it, on every provider. An error in it fails the stream with the same `ProviderError` as `run()`, and a temporary one is retried before the stream starts. A real answer gives its text, thinking and tool calls (the text arrives as one `text_delta`). Before, the stream ended with an empty answer. On OpenRouter this also covers `run()`, which streams.
 - A stream that ends with no answer and no end event now fails as a retryable `incomplete_stream` whatever its content type. Before, it passed as an empty answer when the body was not labelled as a stream or as text.
 - On Google, a stream that stops before `interaction.completed` while a tool call is still being written now fails as a retryable `incomplete_stream`. Before, it returned the cut call as a success (Google checked only for an empty stream, and took the usage sent after each step for the end). A cut stream no longer saves the chain: the next turn sends the full history. A call cut off by the output limit is saved with `{}` as its arguments, so the SDK's internal marker is never sent back to Google.
+- On OpenAI-compatible services and OpenRouter, a tool call whose arguments come as an object instead of JSON text now runs with those arguments, on `run()` and `stream()`. Before, it ran with none (`{}`), so a tool with only optional fields did nothing useful; with a required field, the model got a validation error.
 
 ## Upgrading to 0.9.4
 

@@ -21,18 +21,26 @@ import { AgentResponse } from "../types/response.ts";
 import { abortError } from "../types/errors.ts";
 import { DEFAULT_BASE_URLS } from "./base-urls.ts";
 
-/** Parses a JSON tool-argument string; non-objects degrade to the truncated-arguments marker. */
-export function parseArguments(raw: string | undefined): Record<string, unknown> {
-  if (!raw) return {};
+/** The arguments of a tool call as an object: a JSON text is parsed and an object (some OpenAI-compatible servers send one) is taken as it is; anything else becomes the truncated-arguments marker, which always holds text. */
+export function parseArguments(raw: unknown): Record<string, unknown> {
+  if (raw === undefined || raw === null || raw === "") return {};
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  const text = argumentsText(raw) ?? String(raw);
   try {
-    const parsed: unknown = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(text);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
-    return { [TRUNCATED_ARGS_KEY]: raw };
+    return { [TRUNCATED_ARGS_KEY]: text };
   } catch {
-    return { [TRUNCATED_ARGS_KEY]: raw };
+    return { [TRUNCATED_ARGS_KEY]: text };
   }
+}
+
+/** The JSON text of a tool call's `arguments` as the wire sent them: text as it is, an object or a list as its JSON; undefined for anything else (nothing to add). */
+export function argumentsText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  return value !== null && typeof value === "object" ? JSON.stringify(value) : undefined;
 }
 
 /** Trims/collapses assembled thinking parts (no edge-tripling). */

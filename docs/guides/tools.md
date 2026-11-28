@@ -56,7 +56,7 @@ Every option is in the [Reference](../reference.md#tool-definition). Your functi
 ## What happens when a tool is called
 
 1. **The name** is matched exactly, then ignoring case and format. A near miss tells the model "Did you mean…?".
-2. **The arguments** are checked against your schema. A failure goes back to the model so it can fix the call. A call whose streamed JSON was cut off never runs, also when the provider opened it with empty arguments (`{}`).
+2. **The arguments** are checked against your schema. A failure goes back to the model so it can fix the call. A call whose streamed JSON was cut off never runs, also when the provider opened it with empty arguments (`{}`). Arguments that a server sends as an object instead of JSON text (some OpenAI-compatible servers do) are taken as they are; any other value (a list, a number) is unusable and the call never runs.
 3. **Concurrency.** Up to 8 tools run at once, plus your `maxConcurrency` per tool.
 4. **Attempts.** One attempt by default. `idempotent: true` allows up to 3 for transient failures, and an explicit `maxAttempts` wins. Timeouts are not retried unless you set `maxAttempts`.
 5. **The result** is made JSON-safe and capped. Secrets and file paths are removed from errors. A failure becomes `Error executing <name>: …` plus a short JSON block (error code, attempts, the last progress, a "do not repeat" hint), so the model fixes only what is left. Every result has a `durationMs`, and every call emits `tool.*` events on the telemetry bus.
