@@ -49,6 +49,32 @@ export function normalizeThinkingParts(parts: string[]): string | undefined {
   return cleaned.length > 0 ? cleaned.join("\n") : undefined;
 }
 
+// The readable text of one `reasoning_details` block: its `text` (`reasoning.text`), or its `summary` (`reasoning.summary`, a text or a list of `{ text }`); an encrypted block has none; in: reasoningParts, out: one thinking part or "".
+function detailText(block: unknown): string {
+  if (!block || typeof block !== "object") return "";
+  const b = block as Record<string, unknown>;
+  if (typeof b["text"] === "string" && b["text"]) return b["text"];
+  const summary = b["summary"];
+  if (typeof summary === "string") return summary;
+  if (!Array.isArray(summary)) return "";
+  return summary
+    .map((entry) => (typeof (entry as { text?: unknown })?.text === "string" ? (entry as { text: string }).text : ""))
+    .join("");
+}
+
+/** The readable thinking of one Chat Completions message or stream delta: the text of each `reasoning_details` block, else `reasoning_content` (DeepSeek, vLLM, Qwen), else `reasoning`. Blocks with text win, so thinking sent in two fields is read once; blocks without text (encrypted, or an empty list) do not hide the plain fields. */
+export function reasoningParts(source: unknown): string[] {
+  if (!source || typeof source !== "object") return [];
+  const s = source as Record<string, unknown>;
+  const details = Array.isArray(s["reasoning_details"]) ? s["reasoning_details"].map(detailText).filter(Boolean) : [];
+  if (details.length > 0) return details;
+  for (const key of ["reasoning_content", "reasoning"]) {
+    const value = s[key];
+    if (typeof value === "string" && value) return [value];
+  }
+  return [];
+}
+
 /**
  * Redacts secret-bearing headers for the raw audit trail via the central
  * deny-list: any header whose NAME contains key / token / secret / cookie /

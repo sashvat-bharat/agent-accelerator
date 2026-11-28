@@ -49,7 +49,7 @@ The adapter uses Chat Completions (`POST {baseUrl}/chat/completions`).
 
 - **Every turn is stateless.** The whole `messages` list is sent.
 - **Session affinity** is the body field `session_id`, plus the `x-session-id` header. The body wins.
-- **Thinking** is sent as `reasoning.effort`, like OpenAI. `dynamic` is left out.
+- **Thinking** is sent as `reasoning.effort`, like OpenAI. `dynamic` is left out. The thinking text you get comes from the `reasoning_details` blocks (a block's `text`, or the `summary` of a summary block, which is how OpenAI models arrive), else from `reasoning`. Encrypted blocks have no text, so they never hide `reasoning`.
 - **Tool choice.** `auto` is left out. `none`, `required` and a pinned tool are sent. `validated` is Google only and is dropped with one warning.
 - **Errors inside a stream.** OpenRouter can send an error chunk in a stream that answered 200. The SDK reads it like an HTTP error. The status comes from the chunk's numeric `code`, else from its `error_type` (`rate_limit_exceeded` is 429, `provider_overloaded` 503, `provider_unavailable` 502, `timeout` 504 and `server` 500), else from the name in `code` (as in [Retries](limits-and-retries.md#retries)). `finish_reason: "error"` is a retryable 502. `runRetries` retries the retryable ones.
 - **Reasoning and PDFs.** A turn's `reasoning_details` blocks and parsed-PDF annotations are saved and sent back exactly as OpenRouter returned them.
@@ -73,6 +73,7 @@ console.log(groq.id, getProvider("groq") === groq);
 
 - The adapter is created once per prefix. A second `ensureCustomProvider` with another `baseUrl` throws a `ConfigError`.
 - It sends no `session_id` or `prompt_cache_key`, because strict services reject unknown fields. Affinity goes in headers only.
+- Thinking text is read from `reasoning_details` blocks (`text` or `summary`), else `reasoning_content` (DeepSeek, vLLM, Qwen), else `reasoning`, the same way on `run()` and `stream()`. It is shown only, never sent back.
 - An error sent with HTTP 200 or inside a stream is retried when its `code` is a status number (`429`) or names a temporary failure (`overloaded`, `rate_limit_exceeded` ...). `finish_reason: "error"` is a retryable 502, in a stream and in a whole reply.
 - Its price and abilities are unknown unless you describe the model with `registerModel`. See [Models and providers](models-and-providers.md#the-model-catalog).
 - `ensureCustomProvider` throws a `ConfigError` if you pass a `baseUrl` or `apiKey` for a first-class prefix (`google`, `openai`, `anthropic`, `openrouter`). Pass those to the `Agent` instead.

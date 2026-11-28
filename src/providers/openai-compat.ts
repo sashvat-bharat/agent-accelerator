@@ -75,6 +75,7 @@ import {
   linkStreamAbort,
   withAbortTimer,
   readSseData,
+  reasoningParts,
   argumentsText,
   incompleteStreamCheck,
   errorCodeStatus,
@@ -608,19 +609,8 @@ function parseResponse(
   // Refusal content surfaces as text with a `refusal` finish reason.
   const refusal = typeof message?.refusal === "string" && message.refusal ? message.refusal : "";
   const text = typeof message?.content === "string" && message.content ? message.content : refusal;
-  // Thinking tolerance: plain `reasoning` plus per-block texts (deepseek-style
-  // `reasoning_details`). Details win when both ride along; both are
-  // display-only here — never resent.
-  const thinkingParts: string[] = [];
-  const detailTexts: string[] = [];
-  for (const block of message?.reasoning_details ?? []) {
-    if (block && typeof block.text === "string" && block.text) detailTexts.push(block.text);
-  }
-  if (detailTexts.length > 0) {
-    thinkingParts.push(...detailTexts);
-  } else if (typeof message?.reasoning === "string" && message.reasoning) {
-    thinkingParts.push(message.reasoning);
-  }
+  // Thinking, display-only here (never resent): `reasoning_details` blocks, else `reasoning_content`, else `reasoning`, as the stream reads it.
+  const thinkingParts = reasoningParts(message);
   const toolCalls: ToolCallRecord[] = [];
   for (const tc of message?.tool_calls ?? []) {
     const args = parseArguments(tc.function?.arguments);
@@ -1109,29 +1099,10 @@ export class OpenAICompatibleChatProvider implements Provider {
             eventStream.push({ type: "text_delta", delta: delta["content"] as string, partialText: text });
           }
           // Tolerated reasoning deltas (deepseek-style): display-only, never resent.
-          const details = delta["reasoning_details"];
-          if (Array.isArray(details)) {
-            for (const block of details) {
-              const t = (block as { text?: string })?.text;
-              if (typeof t === "string" && t) {
-                thinking += t;
-                eventStream.push({ type: "thinking_delta", thinkingDelta: t, partialThinking: thinking });
-              }
-            }
-          } else if (typeof delta["reasoning_content"] === "string" && delta["reasoning_content"]) {
-            thinking += delta["reasoning_content"] as string;
-            eventStream.push({
-              type: "thinking_delta",
-              thinkingDelta: delta["reasoning_content"] as string,
-              partialThinking: thinking,
-            });
-          } else if (typeof delta["reasoning"] === "string" && delta["reasoning"]) {
-            thinking += delta["reasoning"] as string;
-            eventStream.push({
-              type: "thinking_delta",
-              thinkingDelta: delta["reasoning"] as string,
-              partialThinking: thinking,
-            });
+          const thought = reasoningParts(delta).join("");
+          if (thought) {
+            thinking += thought;
+            eventStream.push({ type: "thinking_delta", thinkingDelta: thought, partialThinking: thinking });
           }
           // Tool-call deltas accumulate per choice index (unindexed chunks
           // continue the last call; defaulting to calls.size would fork

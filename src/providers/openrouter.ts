@@ -66,6 +66,7 @@ import {
   linkStreamAbort,
   withAbortTimer,
   readSseData,
+  reasoningParts,
   argumentsText,
   incompleteStreamCheck,
   errorCodeStatus,
@@ -1016,32 +1017,15 @@ export class OpenRouterChatCompletionsProvider implements Provider {
             text += delta["content"] as string;
             eventStream.push({ type: "text_delta", delta: delta["content"] as string, partialText: text });
           }
-          // Thinking deltas: `reasoning_details[].text` duplicates `reasoning`
-          // when both ride along — prefer details, else the plain field.
+          // The blocks are kept as sent, for replay on the next request.
           const details = delta["reasoning_details"];
-          if (Array.isArray(details)) {
-            for (const block of details) {
-              mergeReasoningDetails(reasoningBlocks, block);
-              const t = (block as { text?: string })?.text;
-              if (typeof t === "string" && t) {
-                thinking += t;
-                eventStream.push({ type: "thinking_delta", thinkingDelta: t, partialThinking: thinking });
-              }
-            }
-          } else if (typeof delta["reasoning_content"] === "string" && delta["reasoning_content"]) {
-            thinking += delta["reasoning_content"] as string;
-            eventStream.push({
-              type: "thinking_delta",
-              thinkingDelta: delta["reasoning_content"] as string,
-              partialThinking: thinking,
-            });
-          } else if (typeof delta["reasoning"] === "string" && delta["reasoning"]) {
-            thinking += delta["reasoning"] as string;
-            eventStream.push({
-              type: "thinking_delta",
-              thinkingDelta: delta["reasoning"] as string,
-              partialThinking: thinking,
-            });
+          if (Array.isArray(details)) for (const block of details) mergeReasoningDetails(reasoningBlocks, block);
+          // Thinking deltas: the blocks' text or summary duplicates `reasoning` when both ride along, so the blocks win;
+          // blocks without text (encrypted ones) leave the plain fields to be read.
+          const thought = reasoningParts(delta).join("");
+          if (thought) {
+            thinking += thought;
+            eventStream.push({ type: "thinking_delta", thinkingDelta: thought, partialThinking: thinking });
           }
           if (Array.isArray(delta["annotations"]))
             for (const a of delta["annotations"]) mergeAnnotation(annotationBlocks, a);
